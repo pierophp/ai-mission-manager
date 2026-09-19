@@ -1,5 +1,6 @@
 pub mod domain;
 pub mod persistence;
+mod provider;
 
 mod app;
 
@@ -28,6 +29,8 @@ pub fn run() {
             app::set_item_notes,
             app::set_item_reminder,
             app::set_item_relation,
+            app::link_external_object,
+            app::refresh_external_object,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Mission Manager");

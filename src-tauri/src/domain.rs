@@ -40,6 +40,78 @@ pub struct Item {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExternalProvider {
+    #[serde(rename = "github")]
+    GitHub,
+    #[serde(rename = "generic")]
+    Generic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExternalObjectKind {
+    #[serde(rename = "issue")]
+    Issue,
+    #[serde(rename = "pull_request")]
+    PullRequest,
+    #[serde(rename = "generic")]
+    Generic,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalObjectInput {
+    pub provider: ExternalProvider,
+    pub kind: ExternalObjectKind,
+    pub external_key: String,
+    pub canonical_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalObject {
+    pub id: i64,
+    pub provider: ExternalProvider,
+    pub kind: ExternalObjectKind,
+    pub external_key: String,
+    pub canonical_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalMetadata {
+    pub key: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalSnapshotData {
+    pub title: String,
+    pub state: String,
+    pub metadata: Vec<ExternalMetadata>,
+    pub fetched_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalSnapshot {
+    pub external_object_id: i64,
+    pub title: String,
+    pub state: String,
+    pub metadata: Vec<ExternalMetadata>,
+    pub fetched_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Link {
+    pub id: i64,
+    pub item_id: i64,
+    pub external_object_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalLinkView {
+    pub link: Link,
+    pub object: ExternalObject,
+    pub snapshot: Option<ExternalSnapshot>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ItemStatus {
     Inbox,
     Active,
@@ -67,6 +139,7 @@ pub struct ItemView {
     pub context_name: String,
     pub project_name: String,
     pub relationships: Vec<ItemRelation>,
+    pub links: Vec<ExternalLinkView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,10 +157,15 @@ pub struct DomainState {
     pub next_project_id: i64,
     pub next_item_id: i64,
     pub next_item_number: i64,
+    pub next_external_object_id: i64,
+    pub next_link_id: i64,
     pub contexts: Vec<Context>,
     pub projects: Vec<Project>,
     pub items: Vec<Item>,
     pub relationships: Vec<ItemRelation>,
+    pub external_objects: Vec<ExternalObject>,
+    pub links: Vec<Link>,
+    pub snapshots: Vec<ExternalSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -122,6 +200,15 @@ pub enum Event {
         item_id: i64,
         reminder_at: Option<String>,
     },
+    LinkExternalObject {
+        item_id: i64,
+        object: ExternalObjectInput,
+        snapshot: Option<ExternalSnapshotData>,
+    },
+    RefreshExternalObject {
+        external_object_id: i64,
+        snapshot: ExternalSnapshotData,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +231,17 @@ pub enum Effect {
     },
     PersistItemRelation {
         relation: ItemRelation,
+    },
+    PersistExternalObject {
+        object: ExternalObject,
+        next_external_object_id: i64,
+    },
+    PersistLink {
+        link: Link,
+        next_link_id: i64,
+    },
+    PersistExternalSnapshot {
+        snapshot: ExternalSnapshot,
     },
 }
 
@@ -181,6 +279,14 @@ pub enum DomainError {
     RelationAlreadyExists,
     #[error("the Item identifier sequence is exhausted")]
     SequenceExhausted,
+    #[error("an external URL cannot be blank")]
+    EmptyExternalUrl,
+    #[error("an external object key cannot be blank")]
+    EmptyExternalObjectKey,
+    #[error("External Object {external_object_id} does not exist")]
+    ExternalObjectNotFound { external_object_id: i64 },
+    #[error("the Link already exists")]
+    LinkAlreadyExists,
 }
 
 pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainError> {
@@ -388,6 +494,111 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::PersistItemUpdate { item }],
             })
         }
+        Event::LinkExternalObject {
+            item_id,
+            object,
+            snapshot,
+        } => {
+            ensure_item(&state, item_id)?;
+            if object.canonical_url.trim().is_empty() {
+                return Err(DomainError::EmptyExternalUrl);
+            }
+            if object.external_key.trim().is_empty() {
+                return Err(DomainError::EmptyExternalObjectKey);
+            }
+
+            let existing_object = state
+                .external_objects
+                .iter()
+                .find(|candidate| {
+                    candidate.provider == object.provider
+                        && candidate.external_key == object.external_key
+                })
+                .cloned();
+            let (external_object, is_new_object) = match existing_object {
+                Some(object) => (object, false),
+                None => {
+                    let id = state.next_external_object_id;
+                    let next_external_object_id =
+                        id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+                    let object = ExternalObject {
+                        id,
+                        provider: object.provider,
+                        kind: object.kind,
+                        external_key: object.external_key,
+                        canonical_url: object.canonical_url.trim().to_owned(),
+                    };
+                    state.next_external_object_id = next_external_object_id;
+                    state.external_objects.push(object.clone());
+                    (object, true)
+                }
+            };
+
+            if state.links.iter().any(|link| {
+                link.item_id == item_id && link.external_object_id == external_object.id
+            }) {
+                return Err(DomainError::LinkAlreadyExists);
+            }
+
+            let link_id = state.next_link_id;
+            let next_link_id = link_id
+                .checked_add(1)
+                .ok_or(DomainError::SequenceExhausted)?;
+            let link = Link {
+                id: link_id,
+                item_id,
+                external_object_id: external_object.id,
+            };
+            state.next_link_id = next_link_id;
+            state.links.push(link.clone());
+
+            let mut effects = Vec::new();
+            if is_new_object {
+                effects.push(Effect::PersistExternalObject {
+                    object: external_object.clone(),
+                    next_external_object_id: state.next_external_object_id,
+                });
+            }
+            effects.push(Effect::PersistLink { link, next_link_id });
+            if let Some(snapshot_data) = snapshot {
+                let snapshot = ExternalSnapshot {
+                    external_object_id: external_object.id,
+                    title: snapshot_data.title,
+                    state: snapshot_data.state,
+                    metadata: snapshot_data.metadata,
+                    fetched_at: snapshot_data.fetched_at,
+                };
+                upsert_snapshot(&mut state, snapshot.clone());
+                effects.push(Effect::PersistExternalSnapshot { snapshot });
+            }
+
+            Ok(Decision { state, effects })
+        }
+        Event::RefreshExternalObject {
+            external_object_id,
+            snapshot: snapshot_data,
+        } => {
+            if !state
+                .external_objects
+                .iter()
+                .any(|object| object.id == external_object_id)
+            {
+                return Err(DomainError::ExternalObjectNotFound { external_object_id });
+            }
+            let snapshot = ExternalSnapshot {
+                external_object_id,
+                title: snapshot_data.title,
+                state: snapshot_data.state,
+                metadata: snapshot_data.metadata,
+                fetched_at: snapshot_data.fetched_at,
+            };
+            upsert_snapshot(&mut state, snapshot.clone());
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistExternalSnapshot { snapshot }],
+            })
+        }
     }
 }
 
@@ -441,6 +652,23 @@ pub fn search_items(state: &DomainState, query: &str, context_id: Option<i64>) -
         .collect()
 }
 
+pub fn external_link_view(state: &DomainState, link: &Link) -> Option<ExternalLinkView> {
+    let object = state
+        .external_objects
+        .iter()
+        .find(|object| object.id == link.external_object_id)?;
+    let snapshot = state
+        .snapshots
+        .iter()
+        .find(|snapshot| snapshot.external_object_id == object.id)
+        .cloned();
+    Some(ExternalLinkView {
+        link: link.clone(),
+        object: object.clone(),
+        snapshot,
+    })
+}
+
 fn item_views(state: &DomainState, context_id: Option<i64>) -> Vec<ItemView> {
     state
         .items
@@ -465,11 +693,18 @@ fn item_views(state: &DomainState, context_id: Option<i64>) -> Vec<ItemView> {
                 })
                 .cloned()
                 .collect();
+            let links = state
+                .links
+                .iter()
+                .filter(|link| link.item_id == item.id)
+                .filter_map(|link| external_link_view(state, link))
+                .collect();
             Some(ItemView {
                 item: item.clone(),
                 context_name: context.name.clone(),
                 project_name: project.name.clone(),
                 relationships,
+                links,
             })
         })
         .collect()
@@ -509,6 +744,26 @@ fn item_context_id(state: &DomainState, item_id: i64) -> Result<i64, DomainError
         .ok_or(DomainError::ProjectNotFound {
             project_id: item.project_id,
         })
+}
+
+fn ensure_item(state: &DomainState, item_id: i64) -> Result<(), DomainError> {
+    if state.items.iter().any(|item| item.id == item_id) {
+        Ok(())
+    } else {
+        Err(DomainError::ItemNotFound { item_id })
+    }
+}
+
+fn upsert_snapshot(state: &mut DomainState, snapshot: ExternalSnapshot) {
+    if let Some(existing) = state
+        .snapshots
+        .iter_mut()
+        .find(|existing| existing.external_object_id == snapshot.external_object_id)
+    {
+        *existing = snapshot;
+    } else {
+        state.snapshots.push(snapshot);
+    }
 }
 
 #[cfg(test)]
@@ -984,8 +1239,222 @@ mod tests {
             .all(|result| result.context_name == "Personal"));
     }
 
+    #[test]
+    fn linking_a_github_object_creates_one_object_and_one_link_with_a_snapshot() {
+        let state = state_with_item(7, "Work");
+        let decision = decide(
+            state,
+            Event::LinkExternalObject {
+                item_id: 1,
+                object: ExternalObjectInput {
+                    provider: ExternalProvider::GitHub,
+                    kind: ExternalObjectKind::PullRequest,
+                    external_key: "pull:acme/app#42".into(),
+                    canonical_url: "https://github.com/acme/app/pull/42".into(),
+                },
+                snapshot: Some(ExternalSnapshotData {
+                    title: "Ship the parser".into(),
+                    state: "OPEN".into(),
+                    metadata: vec![ExternalMetadata {
+                        key: "author".into(),
+                        value: "octocat".into(),
+                    }],
+                    fetched_at: 100,
+                }),
+            },
+        )
+        .expect("a GitHub object should link to an Item");
+
+        assert_eq!(decision.state.external_objects.len(), 1);
+        assert_eq!(decision.state.links.len(), 1);
+        assert_eq!(decision.state.snapshots.len(), 1);
+        assert_eq!(decision.state.links[0].item_id, 1);
+        assert_eq!(decision.state.links[0].external_object_id, 1);
+        assert_eq!(decision.state.snapshots[0].title, "Ship the parser");
+        let view = search_items(&decision.state, "", None);
+        assert_eq!(view[0].links.len(), 1);
+        assert_eq!(
+            view[0].links[0].snapshot.as_ref().unwrap().title,
+            "Ship the parser"
+        );
+        assert_eq!(
+            decision.effects,
+            vec![
+                Effect::PersistExternalObject {
+                    object: decision.state.external_objects[0].clone(),
+                    next_external_object_id: 2,
+                },
+                Effect::PersistLink {
+                    link: decision.state.links[0].clone(),
+                    next_link_id: 2,
+                },
+                Effect::PersistExternalSnapshot {
+                    snapshot: decision.state.snapshots[0].clone(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn two_items_share_one_external_object_but_keep_two_links_and_fetch_once() {
+        let mut state = state_with_context(7, "Work");
+        state.items = vec![
+            Item {
+                id: 1,
+                human_identifier: "MC-1".into(),
+                title: "First commitment".into(),
+                project_id: 1,
+                status: ItemStatus::Inbox,
+                notes: String::new(),
+                reminder_at: None,
+            },
+            Item {
+                id: 2,
+                human_identifier: "MC-2".into(),
+                title: "Second commitment".into(),
+                project_id: 1,
+                status: ItemStatus::Inbox,
+                notes: String::new(),
+                reminder_at: None,
+            },
+        ];
+        state.next_item_id = 3;
+        state.next_item_number = 3;
+        let object = ExternalObjectInput {
+            provider: ExternalProvider::GitHub,
+            kind: ExternalObjectKind::Issue,
+            external_key: "issue:acme/app#7".into(),
+            canonical_url: "https://github.com/acme/app/issues/7".into(),
+        };
+
+        let first = decide(
+            state,
+            Event::LinkExternalObject {
+                item_id: 1,
+                object: object.clone(),
+                snapshot: Some(snapshot_data("Shared issue", 100)),
+            },
+        )
+        .expect("the first Link should succeed");
+        let second = decide(
+            first.state,
+            Event::LinkExternalObject {
+                item_id: 2,
+                object,
+                snapshot: None,
+            },
+        )
+        .expect("the second Link should reuse the object");
+
+        assert_eq!(second.state.external_objects.len(), 1);
+        assert_eq!(second.state.links.len(), 2);
+        assert_eq!(second.state.snapshots.len(), 1);
+        assert_eq!(second.effects.len(), 1);
+        assert!(matches!(second.effects[0], Effect::PersistLink { .. }));
+    }
+
+    #[test]
+    fn an_unrecognised_url_is_stored_as_a_generic_link_and_an_item_can_have_many_links() {
+        let state = state_with_item(7, "Work");
+        let first = decide(
+            state,
+            Event::LinkExternalObject {
+                item_id: 1,
+                object: ExternalObjectInput {
+                    provider: ExternalProvider::Generic,
+                    kind: ExternalObjectKind::Generic,
+                    external_key: "https://example.com/design".into(),
+                    canonical_url: "https://example.com/design".into(),
+                },
+                snapshot: None,
+            },
+        )
+        .expect("an unrecognised URL should still link");
+        let second = decide(
+            first.state,
+            Event::LinkExternalObject {
+                item_id: 1,
+                object: ExternalObjectInput {
+                    provider: ExternalProvider::Generic,
+                    kind: ExternalObjectKind::Generic,
+                    external_key: "https://example.com/spec".into(),
+                    canonical_url: "https://example.com/spec".into(),
+                },
+                snapshot: None,
+            },
+        )
+        .expect("one Item should accept several Links");
+
+        assert_eq!(second.state.external_objects.len(), 2);
+        assert_eq!(second.state.links.len(), 2);
+        assert!(second.state.snapshots.is_empty());
+        assert_eq!(second.state.links[0].item_id, 1);
+        assert_eq!(second.state.links[1].item_id, 1);
+    }
+
+    #[test]
+    fn refreshing_an_external_object_replaces_its_snapshot_without_touching_the_link() {
+        let linked = decide(
+            state_with_item(7, "Work"),
+            Event::LinkExternalObject {
+                item_id: 1,
+                object: ExternalObjectInput {
+                    provider: ExternalProvider::GitHub,
+                    kind: ExternalObjectKind::Issue,
+                    external_key: "issue:acme/app#7".into(),
+                    canonical_url: "https://github.com/acme/app/issues/7".into(),
+                },
+                snapshot: Some(snapshot_data("Old title", 100)),
+            },
+        )
+        .expect("the Link should exist");
+        let refreshed = decide(
+            linked.state,
+            Event::RefreshExternalObject {
+                external_object_id: 1,
+                snapshot: snapshot_data("New title", 200),
+            },
+        )
+        .expect("a fresh snapshot should replace the old one");
+
+        assert_eq!(refreshed.state.links.len(), 1);
+        assert_eq!(refreshed.state.snapshots[0].title, "New title");
+        assert_eq!(refreshed.state.snapshots[0].fetched_at, 200);
+        assert_eq!(
+            refreshed.effects,
+            vec![Effect::PersistExternalSnapshot {
+                snapshot: refreshed.state.snapshots[0].clone(),
+            }]
+        );
+    }
+
+    fn snapshot_data(title: &str, fetched_at: i64) -> ExternalSnapshotData {
+        ExternalSnapshotData {
+            title: title.into(),
+            state: "OPEN".into(),
+            metadata: Vec::new(),
+            fetched_at,
+        }
+    }
+
     fn state_with_context(id: i64, name: &str) -> DomainState {
         state_with_contexts(&[(id, name)])
+    }
+
+    fn state_with_item(id: i64, name: &str) -> DomainState {
+        let mut state = state_with_context(id, name);
+        state.items.push(Item {
+            id: 1,
+            human_identifier: "MC-1".into(),
+            title: "Existing Item".into(),
+            project_id: 1,
+            status: ItemStatus::Inbox,
+            notes: String::new(),
+            reminder_at: None,
+        });
+        state.next_item_id = 2;
+        state.next_item_number = 2;
+        state
     }
 
     fn state_with_contexts(contexts: &[(i64, &str)]) -> DomainState {
@@ -994,6 +1463,8 @@ mod tests {
             next_project_id: contexts.len() as i64 + 1,
             next_item_id: 1,
             next_item_number: 1,
+            next_external_object_id: 1,
+            next_link_id: 1,
             contexts: contexts
                 .iter()
                 .map(|(id, name)| Context {
@@ -1015,6 +1486,9 @@ mod tests {
                 .collect(),
             items: Vec::new(),
             relationships: Vec::new(),
+            external_objects: Vec::new(),
+            links: Vec::new(),
+            snapshots: Vec::new(),
         }
     }
 
@@ -1024,10 +1498,15 @@ mod tests {
             next_project_id: 1,
             next_item_id: 1,
             next_item_number: 1,
+            next_external_object_id: 1,
+            next_link_id: 1,
             contexts: Vec::new(),
             projects: Vec::new(),
             items: Vec::new(),
             relationships: Vec::new(),
+            external_objects: Vec::new(),
+            links: Vec::new(),
+            snapshots: Vec::new(),
         }
     }
 }

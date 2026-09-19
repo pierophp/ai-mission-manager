@@ -1,11 +1,12 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 
 use crate::domain::{
-    Context, DomainState, Effect, Item, ItemRelation, ItemRelationKind, ItemStatus, Project,
-    ProjectDefaults,
+    Context, DomainState, Effect, ExternalMetadata, ExternalObject, ExternalObjectKind,
+    ExternalProvider, ExternalSnapshot, Item, ItemRelation, ItemRelationKind, ItemStatus, Link,
+    Project, ProjectDefaults,
 };
 
 #[derive(Debug, Error)]
@@ -18,6 +19,12 @@ pub enum StoreError {
     InvalidProjectDefaultStatus(String),
     #[error("invalid Item relationship kind in database: {0}")]
     InvalidItemRelationKind(String),
+    #[error("invalid External Object provider in database: {0}")]
+    InvalidExternalProvider(String),
+    #[error("invalid External Object kind in database: {0}")]
+    InvalidExternalObjectKind(String),
+    #[error("invalid External Object metadata in database: {0}")]
+    InvalidExternalMetadata(String),
     #[error("invalid {key} value in database: {value}")]
     InvalidSequence { key: String, value: String },
     #[error("a database sequence is exhausted")]
@@ -52,6 +59,8 @@ impl SqliteStore {
         let next_project_id = self.sequence("next_project_id")?;
         let next_item_id = self.sequence("next_item_id")?;
         let next_item_number = self.sequence("next_item_number")?;
+        let next_external_object_id = self.sequence("next_external_object_id")?;
+        let next_link_id = self.sequence("next_link_id")?;
         let contexts = {
             let mut statement = self
                 .connection
@@ -137,16 +146,92 @@ impl SqliteStore {
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
+        let external_objects = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, provider, kind, external_key, canonical_url
+                 FROM external_objects
+                 ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let provider: String = row.get(1)?;
+                let kind: String = row.get(2)?;
+                Ok(ExternalObject {
+                    id: row.get(0)?,
+                    provider: parse_external_provider(&provider).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    kind: parse_external_object_kind(&kind).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    external_key: row.get(3)?,
+                    canonical_url: row.get(4)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let links = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, item_id, external_object_id
+                 FROM external_links
+                 ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(Link {
+                    id: row.get(0)?,
+                    item_id: row.get(1)?,
+                    external_object_id: row.get(2)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let snapshots = {
+            let mut statement = self.connection.prepare(
+                "SELECT external_object_id, title, state, metadata_json, fetched_at
+                 FROM external_snapshots
+                 ORDER BY external_object_id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let metadata_json: String = row.get(3)?;
+                Ok(ExternalSnapshot {
+                    external_object_id: row.get(0)?,
+                    title: row.get(1)?,
+                    state: row.get(2)?,
+                    metadata: serde_json::from_str::<Vec<ExternalMetadata>>(&metadata_json)
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                3,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                    fetched_at: row.get(4)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
 
         Ok(DomainState {
             next_context_id,
             next_project_id,
             next_item_id,
             next_item_number,
+            next_external_object_id,
+            next_link_id,
             contexts,
             projects,
             items,
             relationships,
+            external_objects,
+            links,
+            snapshots,
         })
     }
 
@@ -239,6 +324,61 @@ impl SqliteStore {
                         ],
                     )?;
                 }
+                Effect::PersistExternalObject {
+                    object,
+                    next_external_object_id,
+                } => {
+                    transaction.execute(
+                        "INSERT INTO external_objects
+                            (id, provider, kind, external_key, canonical_url)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            object.id,
+                            external_provider_as_str(object.provider),
+                            external_object_kind_as_str(object.kind),
+                            object.external_key,
+                            object.canonical_url,
+                        ],
+                    )?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_external_object_id'",
+                        params![next_external_object_id],
+                    )?;
+                }
+                Effect::PersistLink { link, next_link_id } => {
+                    transaction.execute(
+                        "INSERT INTO external_links (id, item_id, external_object_id)
+                         VALUES (?1, ?2, ?3)",
+                        params![link.id, link.item_id, link.external_object_id],
+                    )?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_link_id'",
+                        params![next_link_id],
+                    )?;
+                }
+                Effect::PersistExternalSnapshot { snapshot } => {
+                    let metadata_json =
+                        serde_json::to_string(&snapshot.metadata).map_err(|error| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                        })?;
+                    transaction.execute(
+                        "INSERT INTO external_snapshots
+                            (external_object_id, title, state, metadata_json, fetched_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(external_object_id) DO UPDATE SET
+                            title = excluded.title,
+                            state = excluded.state,
+                            metadata_json = excluded.metadata_json,
+                            fetched_at = excluded.fetched_at",
+                        params![
+                            snapshot.external_object_id,
+                            snapshot.title,
+                            snapshot.state,
+                            metadata_json,
+                            snapshot.fetched_at,
+                        ],
+                    )?;
+                }
             }
         }
         transaction.commit()?;
@@ -259,6 +399,27 @@ impl SqliteStore {
         }
         Ok(value)
     }
+
+    pub fn gh_executable_path(&self) -> Result<Option<PathBuf>, StoreError> {
+        self.connection
+            .query_row(
+                "SELECT value FROM settings WHERE key = 'gh_executable_path'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map(|path| path.map(PathBuf::from))
+            .map_err(StoreError::from)
+    }
+
+    pub fn set_gh_executable_path(&mut self, path: &Path) -> Result<(), StoreError> {
+        self.connection.execute(
+            "INSERT INTO settings (key, value) VALUES ('gh_executable_path', ?1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![path.to_string_lossy().into_owned()],
+        )?;
+        Ok(())
+    }
 }
 
 fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
@@ -266,6 +427,10 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
         "CREATE TABLE IF NOT EXISTS metadata (
              key TEXT PRIMARY KEY NOT NULL,
              value INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS settings (
+             key TEXT PRIMARY KEY NOT NULL,
+             value TEXT NOT NULL
          );
          CREATE TABLE IF NOT EXISTS contexts (
              id INTEGER PRIMARY KEY NOT NULL,
@@ -283,6 +448,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_project_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_item_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_item_number', 1);
+         INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_external_object_id', 1);
+         INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_link_id', 1);
          INSERT OR IGNORE INTO contexts (id, name) VALUES (1, 'Personal');",
     )?;
 
@@ -304,11 +471,43 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              PRIMARY KEY (from_item_id, to_item_id, kind)
          );
          CREATE INDEX IF NOT EXISTS relationships_by_target
-             ON item_relationships (to_item_id);",
+             ON item_relationships (to_item_id);
+         CREATE TABLE IF NOT EXISTS external_objects (
+             id INTEGER PRIMARY KEY NOT NULL,
+             provider TEXT NOT NULL CHECK (provider IN ('github', 'generic')),
+             kind TEXT NOT NULL CHECK (kind IN ('issue', 'pull_request', 'generic')),
+             external_key TEXT NOT NULL,
+             canonical_url TEXT NOT NULL,
+             UNIQUE (provider, external_key)
+         );
+         CREATE TABLE IF NOT EXISTS external_links (
+             id INTEGER PRIMARY KEY NOT NULL,
+             item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+             external_object_id INTEGER NOT NULL REFERENCES external_objects(id) ON DELETE CASCADE,
+             UNIQUE (item_id, external_object_id)
+         );
+         CREATE TABLE IF NOT EXISTS external_snapshots (
+             external_object_id INTEGER PRIMARY KEY NOT NULL REFERENCES external_objects(id) ON DELETE CASCADE,
+             title TEXT NOT NULL,
+             state TEXT NOT NULL,
+             metadata_json TEXT NOT NULL,
+             fetched_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS external_links_by_item
+             ON external_links (item_id);
+         CREATE INDEX IF NOT EXISTS external_links_by_object
+             ON external_links (external_object_id);",
     )?;
     ensure_sequence_at_least(connection, "next_context_id", "contexts", "id")?;
     ensure_sequence_at_least(connection, "next_project_id", "projects", "id")?;
     ensure_sequence_at_least(connection, "next_item_id", "items", "id")?;
+    ensure_sequence_at_least(
+        connection,
+        "next_external_object_id",
+        "external_objects",
+        "id",
+    )?;
+    ensure_sequence_at_least(connection, "next_link_id", "external_links", "id")?;
 
     Ok(())
 }
@@ -428,6 +627,38 @@ fn parse_item_relation_kind(kind: &str) -> Result<ItemRelationKind, StoreError> 
     }
 }
 
+fn external_provider_as_str(provider: ExternalProvider) -> &'static str {
+    match provider {
+        ExternalProvider::GitHub => "github",
+        ExternalProvider::Generic => "generic",
+    }
+}
+
+fn parse_external_provider(provider: &str) -> Result<ExternalProvider, StoreError> {
+    match provider {
+        "github" => Ok(ExternalProvider::GitHub),
+        "generic" => Ok(ExternalProvider::Generic),
+        other => Err(StoreError::InvalidExternalProvider(other.into())),
+    }
+}
+
+fn external_object_kind_as_str(kind: ExternalObjectKind) -> &'static str {
+    match kind {
+        ExternalObjectKind::Issue => "issue",
+        ExternalObjectKind::PullRequest => "pull_request",
+        ExternalObjectKind::Generic => "generic",
+    }
+}
+
+fn parse_external_object_kind(kind: &str) -> Result<ExternalObjectKind, StoreError> {
+    match kind {
+        "issue" => Ok(ExternalObjectKind::Issue),
+        "pull_request" => Ok(ExternalObjectKind::PullRequest),
+        "generic" => Ok(ExternalObjectKind::Generic),
+        other => Err(StoreError::InvalidExternalObjectKind(other.into())),
+    }
+}
+
 fn parse_status(status: &str) -> Result<ItemStatus, &str> {
     match status {
         "Inbox" => Ok(ItemStatus::Inbox),
@@ -443,7 +674,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::domain::{decide, Event};
+    use crate::domain::{
+        decide, Event, ExternalMetadata, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
+        ExternalSnapshotData,
+    };
 
     #[test]
     fn contexts_projects_and_items_are_available_after_reopening_the_database() {
@@ -569,5 +803,71 @@ mod tests {
         assert_eq!(state.next_project_id, 4);
         assert_eq!(state.next_item_number, 3);
         assert_eq!(state.next_item_id, 3);
+    }
+
+    #[test]
+    fn external_objects_links_snapshots_and_cli_path_survive_reopening() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+        let gh_path = directory.path().join("gh");
+
+        {
+            let mut store = SqliteStore::open(&path).expect("database should open");
+            let item = decide(
+                store.load_state().expect("state should load"),
+                Event::CreateItem {
+                    title: "Track the external work".into(),
+                    context_id: 1,
+                    project_id: 1,
+                },
+            )
+            .expect("Item should be created");
+            store.apply(&item.effects).expect("Item should persist");
+
+            let linked = decide(
+                item.state,
+                Event::LinkExternalObject {
+                    item_id: 1,
+                    object: ExternalObjectInput {
+                        provider: ExternalProvider::GitHub,
+                        kind: ExternalObjectKind::Issue,
+                        external_key: "issue:acme/app#7".into(),
+                        canonical_url: "https://github.com/acme/app/issues/7".into(),
+                    },
+                    snapshot: Some(ExternalSnapshotData {
+                        title: "Track the issue".into(),
+                        state: "OPEN".into(),
+                        metadata: vec![ExternalMetadata {
+                            key: "author".into(),
+                            value: "octocat".into(),
+                        }],
+                        fetched_at: 123,
+                    }),
+                },
+            )
+            .expect("Link should be created");
+            store
+                .apply(&linked.effects)
+                .expect("External Object should persist");
+            store
+                .set_gh_executable_path(&gh_path)
+                .expect("the resolved CLI path should persist");
+        }
+
+        let reopened = SqliteStore::open(&path).expect("database should reopen");
+        let state = reopened.load_state().expect("persisted state should load");
+
+        assert_eq!(state.external_objects.len(), 1);
+        assert_eq!(state.external_objects[0].external_key, "issue:acme/app#7");
+        assert_eq!(state.links.len(), 1);
+        assert_eq!(state.snapshots.len(), 1);
+        assert_eq!(state.snapshots[0].title, "Track the issue");
+        assert_eq!(state.snapshots[0].metadata[0].value, "octocat");
+        assert_eq!(
+            reopened.gh_executable_path().expect("setting should load"),
+            Some(gh_path)
+        );
+        assert_eq!(state.next_external_object_id, 2);
+        assert_eq!(state.next_link_id, 2);
     }
 }

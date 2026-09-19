@@ -11,6 +11,8 @@ npm run tauri -- dev
 
 The app creates a local `Personal` Context with a `Default` Project on first launch. Create additional Contexts and Projects as needed; each Project can provide the default state for new Items. Capture an Item with a title, Context, and Project; it receives a stable `MC-*` identifier and is stored in the app data directory.
 
+Paste a GitHub Issue or pull request URL into an Item to create a Link. GitHub data is fetched through the authenticated `gh` CLI and cached once per External Object, so multiple Items share one snapshot while keeping separate Links. Other URLs are kept as generic Links, and every snapshot shows its age.
+
 The home view separates Items needing attention, running, waiting, due for a reminder, and completed. Statuses can move in any order. Each Item can carry notes and a reminder, and can be linked to other Items as `blocks`, `blocked_by`, or `related_to`. Use the Context filter to focus the home view; search always spans every Context and labels each result with its Context.
 
 ## Verify

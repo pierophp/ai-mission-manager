@@ -40,11 +40,50 @@ type ItemRelation = {
   kind: ItemRelationKind;
 };
 
+type ExternalObject = {
+  id: number;
+  provider: "github" | "generic";
+  kind: "issue" | "pull_request" | "generic";
+  external_key: string;
+  canonical_url: string;
+};
+
+type ExternalMetadata = {
+  key: string;
+  value: string;
+};
+
+type ExternalSnapshot = {
+  external_object_id: number;
+  title: string;
+  state: string;
+  metadata: ExternalMetadata[];
+  fetched_at: number;
+};
+
+type ExternalLink = {
+  id: number;
+  item_id: number;
+  external_object_id: number;
+};
+
+type ExternalLinkView = {
+  link: ExternalLink;
+  object: ExternalObject;
+  snapshot: ExternalSnapshot | null;
+};
+
+type ExternalLinkAction = {
+  link: ExternalLinkView;
+  warning: string | null;
+};
+
 type ItemView = {
   item: Item;
   context_name: string;
   project_name: string;
   relationships: ItemRelation[];
+  links: ExternalLinkView[];
 };
 
 type HomeView = {
@@ -590,6 +629,7 @@ function ItemCard({
   const [reminderAt, setReminderAt] = useState(view.item.reminder_at ?? "");
   const [relationKind, setRelationKind] = useState<ItemRelationKind>("Blocks");
   const [targetItemId, setTargetItemId] = useState<number>();
+  const [externalUrl, setExternalUrl] = useState("");
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
@@ -620,6 +660,39 @@ function ItemCard({
       }),
     );
     setTargetItemId(undefined);
+  }
+
+  async function handleExternalLink(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!externalUrl.trim()) return;
+    setIsSaving(true);
+    try {
+      const result = await invoke<ExternalLinkAction>("link_external_object", {
+        itemId: view.item.id,
+        url: externalUrl,
+      });
+      setExternalUrl("");
+      await onChanged();
+      if (result.warning) {
+        window.alert(result.warning);
+      }
+    } catch (linkError) {
+      window.alert(errorMessage(linkError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function refreshExternalObject(externalObjectId: number) {
+    setIsSaving(true);
+    try {
+      await invoke("refresh_external_object", { externalObjectId });
+      await onChanged();
+    } catch (refreshError) {
+      window.alert(errorMessage(refreshError));
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   const visibleTargets = allItems.filter(
@@ -704,6 +777,33 @@ function ItemCard({
           Set reminder
         </button>
       </div>
+      <div className="external-links">
+        <span className="relationship-label">External Links</span>
+        {view.links.map((externalLink) => (
+          <ExternalLinkCard
+            key={externalLink.link.id}
+            externalLink={externalLink}
+            isSaving={isSaving}
+            onRefresh={() => refreshExternalObject(externalLink.object.id)}
+          />
+        ))}
+        <form className="external-link-form" onSubmit={handleExternalLink}>
+          <input
+            aria-label={`External URL for ${view.item.human_identifier}`}
+            value={externalUrl}
+            onChange={(event) => setExternalUrl(event.target.value)}
+            placeholder="Paste a GitHub issue, pull request, or URL"
+            disabled={isSaving}
+          />
+          <button
+            type="submit"
+            className="secondary-button"
+            disabled={isSaving || !externalUrl.trim()}
+          >
+            Add link
+          </button>
+        </form>
+      </div>
       <div className="relationship-list">
         <span className="relationship-label">Relationships</span>
         {view.relationships.length === 0 ? (
@@ -767,6 +867,57 @@ function ItemCard({
   );
 }
 
+function ExternalLinkCard({
+  externalLink,
+  isSaving,
+  onRefresh,
+}: {
+  externalLink: ExternalLinkView;
+  isSaving: boolean;
+  onRefresh: () => Promise<void>;
+}) {
+  const { object, snapshot } = externalLink;
+  return (
+    <article className="external-link-card">
+      <div className="external-link-heading">
+        <div>
+          <strong>{snapshot?.title ?? object.canonical_url}</strong>
+          <span className="external-link-kind">
+            {externalObjectKindLabel(object.kind)} · {snapshot?.state ?? "Not fetched"}
+          </span>
+        </div>
+        {object.provider === "github" && (
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={isSaving}
+            onClick={() => void onRefresh()}
+          >
+            Refresh
+          </button>
+        )}
+      </div>
+      <a href={object.canonical_url} target="_blank" rel="noreferrer">
+        {object.canonical_url}
+      </a>
+      {snapshot ? (
+        <>
+          <div className="external-metadata">
+            {snapshot.metadata.map((metadata) => (
+              <span key={`${metadata.key}-${metadata.value}`}>
+                {metadata.key}: {metadata.value}
+              </span>
+            ))}
+          </div>
+          <p className="external-age">Fetched {formatSnapshotAge(snapshot.fetched_at)}</p>
+        </>
+      ) : (
+        <p className="external-age">No snapshot yet</p>
+      )}
+    </article>
+  );
+}
+
 function SearchResult({ view }: { view: ItemView }) {
   return (
     <article className="search-result">
@@ -780,6 +931,20 @@ function SearchResult({ view }: { view: ItemView }) {
       </div>
     </article>
   );
+}
+
+function externalObjectKindLabel(kind: ExternalObject["kind"]): string {
+  if (kind === "pull_request") return "Pull request";
+  if (kind === "issue") return "Issue";
+  return "Link";
+}
+
+function formatSnapshotAge(fetchedAt: number): string {
+  const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000) - fetchedAt);
+  if (ageSeconds < 60) return "just now";
+  if (ageSeconds < 3600) return `${Math.floor(ageSeconds / 60)}m ago`;
+  if (ageSeconds < 86400) return `${Math.floor(ageSeconds / 3600)}h ago`;
+  return `${Math.floor(ageSeconds / 86400)}d ago`;
 }
 
 function relationshipLabel(relation: ItemRelation, currentItemId: number): string {
