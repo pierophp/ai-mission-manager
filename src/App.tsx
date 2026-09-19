@@ -22,6 +22,33 @@ type Project = {
   };
 };
 
+type Repository = {
+  id: number;
+  project_id: number;
+  name: string;
+  remote_url: string;
+};
+
+type WorksetRepository = {
+  repository_id: number;
+  branch_override: string | null;
+  base_branch_override: string | null;
+};
+
+type Workset = {
+  id: number;
+  item_id: number;
+  root_directory: string;
+  branch: string;
+  repositories: WorksetRepository[];
+};
+
+type WorksetRepositoryInput = {
+  repositoryId: number;
+  branchOverride: string | null;
+  baseBranchOverride: string | null;
+};
+
 type Item = {
   id: number;
   human_identifier: string;
@@ -125,6 +152,7 @@ type ItemView = {
   context_name: string;
   project_name: string;
   relationships: ItemRelation[];
+  worksets: Workset[];
   links: ExternalLinkView[];
 };
 
@@ -158,6 +186,7 @@ const relationKinds: ItemRelationKind[] = [
 export function App() {
   const [contexts, setContexts] = useState<Context[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [repositories, setRepositories] = useState<Repository[]>([]);
   const [attentionDefaults, setAttentionDefaults] = useState<
     ContextAttentionDefault[]
   >([]);
@@ -171,6 +200,8 @@ export function App() {
   const [projectName, setProjectName] = useState("");
   const [projectDefaultStatus, setProjectDefaultStatus] =
     useState<ItemStatus>("Inbox");
+  const [repositoryName, setRepositoryName] = useState("");
+  const [repositoryRemoteUrl, setRepositoryRemoteUrl] = useState("");
   const [attentionObjectKind, setAttentionObjectKind] =
     useState<ExternalObjectKind>("pull_request");
   const [attentionDefaultPolicy, setAttentionDefaultPolicy] =
@@ -215,6 +246,7 @@ export function App() {
         invoke<Project[]>("list_projects"),
         invoke<ContextAttentionDefault[]>("list_context_attention_defaults"),
       ]);
+      const loadedRepositories = await invoke<Repository[]>("list_repositories");
       const nextCaptureContextId =
         loadedContexts.find((context) => context.id === captureContextId)?.id ??
         loadedContexts[0]?.id;
@@ -235,6 +267,7 @@ export function App() {
 
       setContexts(loadedContexts);
       setProjects(loadedProjects);
+      setRepositories(loadedRepositories);
       setAttentionDefaults(loadedAttentionDefaults);
       setCaptureContextId(nextCaptureContextId);
       setCaptureProjectId(nextCaptureProjectId);
@@ -346,6 +379,31 @@ export function App() {
       setCaptureProjectId(project.id);
       setProjectName("");
       setProjectDefaultStatus("Inbox");
+      setError(undefined);
+    } catch (saveError) {
+      setError(errorMessage(saveError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleRegisterRepository(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!captureProjectId) {
+      setError("Choose a Project before registering a Repository.");
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const repository = await invoke<Repository>("register_repository", {
+        projectId: captureProjectId,
+        name: repositoryName,
+        remoteUrl: repositoryRemoteUrl,
+      });
+      setRepositories((current) => [...current, repository]);
+      setRepositoryName("");
+      setRepositoryRemoteUrl("");
       setError(undefined);
     } catch (saveError) {
       setError(errorMessage(saveError));
@@ -547,6 +605,7 @@ export function App() {
               hint="Unstarted or due"
               items={home.needs_attention}
               allItems={allItems}
+              repositories={repositories}
               onChanged={updateHomeAfterEdit}
             />
             <HomeColumn
@@ -554,6 +613,7 @@ export function App() {
               hint="Active"
               items={home.running}
               allItems={allItems}
+              repositories={repositories}
               onChanged={updateHomeAfterEdit}
             />
             <HomeColumn
@@ -561,6 +621,7 @@ export function App() {
               hint="Waiting"
               items={home.waiting}
               allItems={allItems}
+              repositories={repositories}
               onChanged={updateHomeAfterEdit}
             />
             <HomeColumn
@@ -568,6 +629,7 @@ export function App() {
               hint="Reminder reached"
               items={home.due}
               allItems={allItems}
+              repositories={repositories}
               onChanged={updateHomeAfterEdit}
             />
             <HomeColumn
@@ -575,6 +637,7 @@ export function App() {
               hint="Done"
               items={home.completed}
               allItems={allItems}
+              repositories={repositories}
               onChanged={updateHomeAfterEdit}
             />
             </div>
@@ -679,8 +742,8 @@ export function App() {
               ))}
             </ul>
           </div>
-          <div>
-            <h3>Projects</h3>
+            <div>
+              <h3>Projects</h3>
             <form className="compact-form" onSubmit={handleCreateProject}>
               <label>
                 <span>Context</span>
@@ -729,9 +792,67 @@ export function App() {
               >
                 Add Project
               </button>
-            </form>
+              </form>
+            </div>
+            <div>
+              <h3>Repositories</h3>
+              <form className="compact-form" onSubmit={handleRegisterRepository}>
+                <label>
+                  <span>Project</span>
+                  <select
+                    value={captureProjectId ?? ""}
+                    onChange={(event) => setCaptureProjectId(Number(event.target.value))}
+                    disabled={isSaving || captureProjects.length === 0}
+                  >
+                    {captureProjects.map((project) => (
+                      <option value={project.id} key={project.id}>
+                        {project.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Directory name</span>
+                  <input
+                    value={repositoryName}
+                    onChange={(event) => setRepositoryName(event.target.value)}
+                    placeholder="service-a"
+                    disabled={isSaving}
+                  />
+                </label>
+                <label>
+                  <span>Remote URL</span>
+                  <input
+                    value={repositoryRemoteUrl}
+                    onChange={(event) => setRepositoryRemoteUrl(event.target.value)}
+                    placeholder="git@github.com:acme/service-a.git"
+                    disabled={isSaving}
+                  />
+                </label>
+                <button
+                  type="submit"
+                  disabled={
+                    isSaving ||
+                    !captureProjectId ||
+                    !repositoryName.trim() ||
+                    !repositoryRemoteUrl.trim()
+                  }
+                >
+                  Register Repository
+                </button>
+              </form>
+              <ul className="entity-list">
+                {repositories
+                  .filter((repository) => repository.project_id === captureProjectId)
+                  .map((repository) => (
+                    <li className="entity-row" key={repository.id}>
+                      <span>{repository.name}</span>
+                      <span className="entity-meta">{repository.remote_url}</span>
+                    </li>
+                  ))}
+              </ul>
+            </div>
           </div>
-        </div>
         <form className="attention-default-form" onSubmit={saveAttentionDefault}>
           <div>
             <h3>Attention defaults</h3>
@@ -801,12 +922,14 @@ function HomeColumn({
   hint,
   items,
   allItems,
+  repositories,
   onChanged,
 }: {
   title: string;
   hint: string;
   items: ItemView[];
   allItems: ItemView[];
+  repositories: Repository[];
   onChanged: () => Promise<void>;
 }) {
   return (
@@ -827,6 +950,7 @@ function HomeColumn({
               key={view.item.id}
               view={view}
               allItems={allItems}
+              repositories={repositories}
               onChanged={onChanged}
             />
           ))}
@@ -839,10 +963,12 @@ function HomeColumn({
 function ItemCard({
   view,
   allItems,
+  repositories,
   onChanged,
 }: {
   view: ItemView;
   allItems: ItemView[];
+  repositories: Repository[];
   onChanged: () => Promise<void>;
 }) {
   const [notes, setNotes] = useState(view.item.notes);
@@ -854,7 +980,24 @@ function ItemCard({
   const [issueRepository, setIssueRepository] = useState("");
   const [issueTitle, setIssueTitle] = useState(view.item.title);
   const [issueBody, setIssueBody] = useState(view.item.notes);
+  const [worksetRoot, setWorksetRoot] = useState("");
+  const [worksetBranch, setWorksetBranch] = useState("");
+  const [selectedRepositoryIds, setSelectedRepositoryIds] = useState<number[]>([]);
+  const [worksetBranchOverrides, setWorksetBranchOverrides] = useState<
+    Record<number, string>
+  >({});
+  const [worksetBaseBranchOverrides, setWorksetBaseBranchOverrides] = useState<
+    Record<number, string>
+  >({});
+  const [additionalRepositoryId, setAdditionalRepositoryId] = useState<number>();
+  const [additionalBranchOverride, setAdditionalBranchOverride] = useState("");
+  const [additionalBaseBranchOverride, setAdditionalBaseBranchOverride] =
+    useState("");
   const [isSaving, setIsSaving] = useState(false);
+
+  const itemRepositories = repositories.filter(
+    (repository) => repository.project_id === view.item.project_id,
+  );
 
   useEffect(() => {
     setNotes(view.item.notes);
@@ -904,6 +1047,49 @@ function ItemCard({
     } finally {
       setIsSaving(false);
     }
+  }
+
+  async function handleCreateWorkset(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!worksetRoot.trim() || !worksetBranch.trim() || selectedRepositoryIds.length === 0) {
+      return;
+    }
+    await saveItem(async () => {
+      const selected: WorksetRepositoryInput[] = selectedRepositoryIds.map(
+        (repositoryId) => ({
+          repositoryId,
+          branchOverride: worksetBranchOverrides[repositoryId]?.trim() || null,
+          baseBranchOverride:
+            worksetBaseBranchOverrides[repositoryId]?.trim() || null,
+        }),
+      );
+      await invoke<Workset>("create_workset", {
+        itemId: view.item.id,
+        rootDirectory: worksetRoot,
+        branch: worksetBranch,
+        repositories: selected,
+      });
+      setWorksetRoot("");
+      setWorksetBranch("");
+      setSelectedRepositoryIds([]);
+      setWorksetBranchOverrides({});
+      setWorksetBaseBranchOverrides({});
+    });
+  }
+
+  async function handleAddRepositoryToWorkset(worksetId: number) {
+    if (!additionalRepositoryId) return;
+    await saveItem(async () => {
+      await invoke<Workset>("add_repository_to_workset", {
+        worksetId,
+        repositoryId: additionalRepositoryId,
+        branchOverride: additionalBranchOverride.trim() || null,
+        baseBranchOverride: additionalBaseBranchOverride.trim() || null,
+      });
+      setAdditionalRepositoryId(undefined);
+      setAdditionalBranchOverride("");
+      setAdditionalBaseBranchOverride("");
+    });
   }
 
   async function refreshExternalObject(externalObjectId: number) {
@@ -1055,6 +1241,169 @@ function ItemCard({
           ))}
         </div>
       )}
+      <div className="worksets">
+        <span className="relationship-label">Worksets</span>
+        {view.worksets.map((workset) => {
+          const selectedIds = new Set(
+            workset.repositories.map((selected) => selected.repository_id),
+          );
+          const availableRepositories = itemRepositories.filter(
+            (repository) => !selectedIds.has(repository.id),
+          );
+          return (
+            <article className="workset-card" key={workset.id}>
+              <div className="workset-heading">
+                <strong>{workset.branch}</strong>
+                <span>{workset.root_directory}</span>
+              </div>
+              <div className="workset-repositories">
+                {workset.repositories.map((selected) => (
+                  <span className="relationship-chip" key={selected.repository_id}>
+                    {repositoryName(repositories, selected.repository_id)}
+                    {selected.branch_override
+                      ? ` · ${selected.branch_override}`
+                      : ""}
+                  </span>
+                ))}
+              </div>
+              {availableRepositories.length > 0 && (
+                <div className="workset-add-repository">
+                  <select
+                    aria-label={`Repository to add to Workset ${workset.id}`}
+                    value={additionalRepositoryId ?? ""}
+                    onChange={(event) =>
+                      setAdditionalRepositoryId(Number(event.target.value) || undefined)
+                    }
+                    disabled={isSaving}
+                  >
+                    <option value="">Add a Repository</option>
+                    {availableRepositories.map((repository) => (
+                      <option value={repository.id} key={repository.id}>
+                        {repository.name}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    aria-label="Added Repository branch override"
+                    value={additionalBranchOverride}
+                    onChange={(event) => setAdditionalBranchOverride(event.target.value)}
+                    placeholder="Branch override (optional)"
+                    disabled={isSaving}
+                  />
+                  <input
+                    aria-label="Added Repository base branch override"
+                    value={additionalBaseBranchOverride}
+                    onChange={(event) =>
+                      setAdditionalBaseBranchOverride(event.target.value)
+                    }
+                    placeholder="Base branch override (optional)"
+                    disabled={isSaving}
+                  />
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={isSaving || !additionalRepositoryId}
+                    onClick={() => void handleAddRepositoryToWorkset(workset.id)}
+                  >
+                    Add
+                  </button>
+                </div>
+              )}
+            </article>
+          );
+        })}
+        <form className="workset-form" onSubmit={handleCreateWorkset}>
+          <strong>Create a Workset</strong>
+          <label>
+            <span>Root directory</span>
+            <input
+              value={worksetRoot}
+              onChange={(event) => setWorksetRoot(event.target.value)}
+              placeholder="/Users/me/worksets/PLAT-847"
+              disabled={isSaving}
+            />
+          </label>
+          <label>
+            <span>Logical branch</span>
+            <input
+              value={worksetBranch}
+              onChange={(event) => setWorksetBranch(event.target.value)}
+              placeholder="feature/PLAT-847"
+              disabled={isSaving}
+            />
+          </label>
+          <span className="relationship-label">Select repositories</span>
+          {itemRepositories.length === 0 ? (
+            <span className="relationship-empty">
+              Register a Repository under this Project first.
+            </span>
+          ) : (
+            <div className="workset-selection-list">
+              {itemRepositories.map((repository) => {
+                const selected = selectedRepositoryIds.includes(repository.id);
+                return (
+                  <div className="workset-selection" key={repository.id}>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={selected}
+                        onChange={(event) =>
+                          setSelectedRepositoryIds((current) =>
+                            event.target.checked
+                              ? [...current, repository.id]
+                              : current.filter((id) => id !== repository.id),
+                          )
+                        }
+                        disabled={isSaving}
+                      />
+                      {repository.name}
+                    </label>
+                    {selected && (
+                      <div className="workset-overrides">
+                        <input
+                          aria-label={`${repository.name} branch override`}
+                          value={worksetBranchOverrides[repository.id] ?? ""}
+                          onChange={(event) =>
+                            setWorksetBranchOverrides((current) => ({
+                              ...current,
+                              [repository.id]: event.target.value,
+                            }))
+                          }
+                          placeholder="Branch override (optional)"
+                          disabled={isSaving}
+                        />
+                        <input
+                          aria-label={`${repository.name} base branch override`}
+                          value={worksetBaseBranchOverrides[repository.id] ?? ""}
+                          onChange={(event) =>
+                            setWorksetBaseBranchOverrides((current) => ({
+                              ...current,
+                              [repository.id]: event.target.value,
+                            }))
+                          }
+                          placeholder="Base branch override (optional)"
+                          disabled={isSaving}
+                        />
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+          <button
+            type="submit"
+            disabled={
+              isSaving ||
+              !worksetRoot.trim() ||
+              !worksetBranch.trim() ||
+              selectedRepositoryIds.length === 0
+            }
+          >
+            {isSaving ? "Checking out…" : "Create Workset"}
+          </button>
+        </form>
+      </div>
       <div className="external-links">
         <span className="relationship-label">External Links</span>
         {view.links.map((externalLink) => (
@@ -1643,6 +1992,13 @@ function relationKindLabel(kind: ItemRelationKind): string {
   if (kind === "BlockedBy") return "blocked by";
   if (kind === "RelatedTo") return "related to";
   return "blocks";
+}
+
+function repositoryName(repositories: Repository[], repositoryId: number): string {
+  return (
+    repositories.find((repository) => repository.id === repositoryId)?.name ??
+    `Repository ${repositoryId}`
+  );
 }
 
 function flattenHome(view: HomeView): ItemView[] {

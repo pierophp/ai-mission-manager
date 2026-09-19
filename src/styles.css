@@ -645,6 +645,109 @@ button:disabled {
   font-weight: 750;
 }
 
+.worksets {
+  display: grid;
+  gap: 8px;
+  margin-top: 13px;
+  padding-top: 10px;
+  border-top: 1px solid #eee8df;
+}
+
+.workset-card,
+.workset-form {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border: 1px solid #eee8df;
+  border-radius: 8px;
+  background: #fcf8f2;
+}
+
+.workset-heading {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 5px 10px;
+}
+
+.workset-heading strong,
+.workset-form strong {
+  color: #4a4139;
+  font-size: 0.75rem;
+}
+
+.workset-heading span {
+  overflow: hidden;
+  color: #8b837a;
+  font-size: 0.66rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workset-repositories,
+.workset-add-repository,
+.workset-overrides {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.workset-add-repository input,
+.workset-add-repository select,
+.workset-overrides input {
+  min-width: 0;
+  padding: 7px 8px;
+  color: #765343;
+  font-size: 0.68rem;
+}
+
+.workset-add-repository select {
+  flex: 1 1 120px;
+}
+
+.workset-add-repository input {
+  flex: 1 1 130px;
+}
+
+.workset-selection-list {
+  display: grid;
+  gap: 7px;
+}
+
+.workset-selection {
+  display: grid;
+  gap: 6px;
+  padding: 7px;
+  border: 1px solid #eee8df;
+  border-radius: 7px;
+  background: #fffdf9;
+}
+
+.workset-selection > label {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: #765343;
+  font-size: 0.7rem;
+}
+
+.workset-selection input[type="checkbox"] {
+  width: auto;
+  accent-color: #b05c39;
+}
+
+.workset-form > label {
+  gap: 4px;
+  color: #8b837a;
+  font-size: 0.66rem;
+}
+
+.workset-form > label input {
+  padding: 7px 8px;
+  font-size: 0.7rem;
+}
+
 .relationship-empty,
 .relationship-chip {
   color: #8b837a;

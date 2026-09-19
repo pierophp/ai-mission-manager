@@ -1,4 +1,5 @@
 use std::{
+    fs,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
@@ -11,8 +12,10 @@ use crate::{
         decide, external_link_view, home_view, search_items, Context, ContextAttentionDefault,
         DomainState, Event, ExternalChangePolicy, ExternalLinkView, ExternalObjectInput,
         ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView, Item, ItemRelation,
-        ItemRelationKind, ItemStatus, ItemView, Project, ProjectDefaults,
+        ItemRelationKind, ItemStatus, ItemView, Project, ProjectDefaults, Repository, Workset,
+        WorksetRepositoryInput,
     },
+    git::GitCli,
     persistence::SqliteStore,
     provider::{classify_url, resolve_gh_executable, GithubCli},
 };
@@ -81,6 +84,195 @@ impl Runtime {
             .ok_or_else(|| "Project creation produced no Project".to_owned())?;
         self.commit(decision)?;
         Ok(project)
+    }
+
+    fn register_repository(
+        &mut self,
+        project_id: i64,
+        name: String,
+        remote_url: String,
+    ) -> Result<Repository, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::RegisterRepository {
+                project_id,
+                name,
+                remote_url,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let repository = decision
+            .state
+            .repositories
+            .last()
+            .cloned()
+            .ok_or_else(|| "Repository registration produced no Repository".to_owned())?;
+        self.commit(decision)?;
+        Ok(repository)
+    }
+
+    fn create_workset(
+        &mut self,
+        item_id: i64,
+        root_directory: String,
+        branch: String,
+        repositories: Vec<WorksetRepositoryInput>,
+    ) -> Result<Workset, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::CreateWorkset {
+                item_id,
+                root_directory,
+                branch,
+                repositories,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let workset = decision
+            .state
+            .worksets
+            .last()
+            .cloned()
+            .ok_or_else(|| "Workset creation produced no Workset".to_owned())?;
+        self.checkout_new_workset(&workset)?;
+        self.commit(decision)?;
+        Ok(workset)
+    }
+
+    fn add_repository_to_workset(
+        &mut self,
+        workset_id: i64,
+        repository_id: i64,
+        branch_override: Option<String>,
+        base_branch_override: Option<String>,
+    ) -> Result<Workset, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::AddRepositoryToWorkset {
+                workset_id,
+                repository_id,
+                branch_override,
+                base_branch_override,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let workset = decision
+            .state
+            .worksets
+            .iter()
+            .find(|workset| workset.id == workset_id)
+            .cloned()
+            .ok_or_else(|| "Workset update produced no Workset".to_owned())?;
+        let selected = workset
+            .repositories
+            .iter()
+            .find(|selected| selected.repository_id == repository_id)
+            .ok_or_else(|| "Workset update produced no Repository selection".to_owned())?;
+        let repository = self
+            .state
+            .repositories
+            .iter()
+            .find(|repository| repository.id == repository_id)
+            .cloned()
+            .ok_or_else(|| "Workset update produced no Repository".to_owned())?;
+        self.checkout_repository(
+            &workset,
+            &repository,
+            selected.branch_override.as_deref(),
+            selected.base_branch_override.as_deref(),
+        )?;
+        self.commit(decision)?;
+        Ok(workset)
+    }
+
+    fn checkout_new_workset(&self, workset: &Workset) -> Result<(), String> {
+        let root = Path::new(&workset.root_directory);
+        let root_was_created = if root.exists() {
+            if !root.is_dir() {
+                return Err(format!(
+                    "Workset root is not a directory: {}",
+                    root.display()
+                ));
+            }
+            if fs::read_dir(root)
+                .map_err(|error| format!("Could not inspect Workset root: {error}"))?
+                .next()
+                .is_some()
+            {
+                return Err(format!("Workset root is not empty: {}", root.display()));
+            }
+            false
+        } else {
+            fs::create_dir_all(root)
+                .map_err(|error| format!("Could not create Workset root: {error}"))?;
+            true
+        };
+
+        let mut destinations = Vec::new();
+        for selected in &workset.repositories {
+            let repository = self.repository(selected.repository_id)?;
+            let destination = root.join(&repository.name);
+            if destination.exists() {
+                if root_was_created {
+                    let _ = fs::remove_dir(root);
+                }
+                return Err(format!(
+                    "Repository checkout destination already exists: {}",
+                    destination.display()
+                ));
+            }
+            destinations.push((repository, selected.clone(), destination));
+        }
+
+        let mut attempted = Vec::new();
+        for (repository, selected, destination) in destinations {
+            attempted.push(destination.clone());
+            if let Err(error) = self.checkout_repository(
+                workset,
+                &repository,
+                selected.branch_override.as_deref(),
+                selected.base_branch_override.as_deref(),
+            ) {
+                for attempted_destination in attempted.iter().rev() {
+                    if attempted_destination.exists() {
+                        let _ = fs::remove_dir_all(attempted_destination);
+                    }
+                }
+                if root_was_created && root.exists() {
+                    let is_empty = fs::read_dir(root)
+                        .map(|mut entries| entries.next().is_none())
+                        .unwrap_or(false);
+                    if is_empty {
+                        let _ = fs::remove_dir(root);
+                    }
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn checkout_repository(
+        &self,
+        workset: &Workset,
+        repository: &Repository,
+        branch_override: Option<&str>,
+        base_branch_override: Option<&str>,
+    ) -> Result<(), String> {
+        let branch = branch_override.unwrap_or(&workset.branch);
+        let destination = Path::new(&workset.root_directory).join(&repository.name);
+        GitCli::system()
+            .checkout_repository(repository, &destination, branch, base_branch_override)
+            .map_err(|error| error.to_string())
+    }
+
+    fn repository(&self, repository_id: i64) -> Result<Repository, String> {
+        self.state
+            .repositories
+            .iter()
+            .find(|repository| repository.id == repository_id)
+            .cloned()
+            .ok_or_else(|| format!("Repository {repository_id} does not exist"))
     }
 
     fn create_item(
@@ -519,6 +711,22 @@ pub fn list_projects(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Project>, S
 }
 
 #[tauri::command]
+pub fn list_repositories(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Repository>, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())
+        .map(|runtime| runtime.state.repositories.clone())
+}
+
+#[tauri::command]
+pub fn list_worksets(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Workset>, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())
+        .map(|runtime| runtime.state.worksets.clone())
+}
+
+#[tauri::command]
 pub fn list_context_attention_defaults(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Vec<ContextAttentionDefault>, String> {
@@ -576,6 +784,52 @@ pub fn create_project(
             ProjectDefaults {
                 item_status: default_item_status,
             },
+        )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn register_repository(
+    project_id: i64,
+    name: String,
+    remote_url: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Repository, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .register_repository(project_id, name, remote_url)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn create_workset(
+    item_id: i64,
+    root_directory: String,
+    branch: String,
+    repositories: Vec<WorksetRepositoryInput>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Workset, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .create_workset(item_id, root_directory, branch, repositories)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn add_repository_to_workset(
+    workset_id: i64,
+    repository_id: i64,
+    branch_override: Option<String>,
+    base_branch_override: Option<String>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Workset, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .add_repository_to_workset(
+            workset_id,
+            repository_id,
+            branch_override,
+            base_branch_override,
         )
 }
 
@@ -820,7 +1074,7 @@ pub fn mark_link_reviewed(
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, path::Path, process::Command};
 
     use tempfile::tempdir;
 
@@ -893,5 +1147,77 @@ fi
             runtime.state.snapshots[0].title,
             "Created from Mission Manager"
         );
+    }
+
+    #[test]
+    fn creating_a_workset_checks_out_a_repository_and_persists_the_execution_root() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let seed = directory.path().join("seed");
+        run_git(directory.path(), &["init", "--initial-branch=main", "seed"]);
+        run_git(&seed, &["config", "user.email", "test@example.com"]);
+        run_git(&seed, &["config", "user.name", "Test User"]);
+        fs::write(seed.join("README.md"), "service-a\n").expect("seed file should be written");
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-m", "initial"]);
+        let origin = directory.path().join("service-a.git");
+        run_git(directory.path(), &["init", "--bare", "service-a.git"]);
+        let origin_url = origin.to_string_lossy().into_owned();
+        run_git(&seed, &["remote", "add", "origin", &origin_url]);
+        run_git(&seed, &["push", "origin", "main"]);
+
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .register_repository(1, "service-a".into(), origin.to_string_lossy().into_owned())
+            .expect("Repository should register");
+        runtime
+            .create_item("Implement the platform change".into(), 1, 1)
+            .expect("Item should be created");
+
+        let root = directory.path().join("workset-root");
+        let workset = runtime
+            .create_workset(
+                1,
+                root.to_string_lossy().into_owned(),
+                "feature/platform-change".into(),
+                vec![WorksetRepositoryInput {
+                    repository_id: 1,
+                    branch_override: None,
+                    base_branch_override: Some("main".into()),
+                }],
+            )
+            .expect("Workset should be created");
+
+        assert_eq!(workset.branch, "feature/platform-change");
+        assert!(root.join("service-a/README.md").is_file());
+        assert_eq!(
+            run_git_output(&root.join("service-a"), &["branch", "--show-current"]),
+            "feature/platform-change"
+        );
+        let reopened = Runtime::open(&database).expect("runtime should reopen");
+        assert_eq!(reopened.state.worksets, vec![workset]);
+    }
+
+    fn run_git(directory: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .current_dir(directory)
+            .args(args)
+            .output()
+            .expect("Git should start");
+        assert!(
+            output.status.success(),
+            "Git failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn run_git_output(directory: &Path, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .current_dir(directory)
+            .args(args)
+            .output()
+            .expect("Git should start");
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 }

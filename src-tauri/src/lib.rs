@@ -1,4 +1,5 @@
 pub mod domain;
+mod git;
 pub mod persistence;
 mod provider;
 
@@ -19,11 +20,16 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app::list_contexts,
             app::list_projects,
+            app::list_repositories,
+            app::list_worksets,
             app::list_context_attention_defaults,
             app::get_home,
             app::search_items_command,
             app::create_context,
             app::create_project,
+            app::register_repository,
+            app::create_workset,
+            app::add_repository_to_workset,
             app::list_inbox_items,
             app::create_item,
             app::set_item_status,

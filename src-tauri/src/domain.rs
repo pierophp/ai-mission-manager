@@ -29,6 +29,38 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Repository {
+    pub id: i64,
+    pub project_id: i64,
+    pub name: String,
+    pub remote_url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorksetRepositoryInput {
+    pub repository_id: i64,
+    pub branch_override: Option<String>,
+    pub base_branch_override: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorksetRepository {
+    pub repository_id: i64,
+    pub branch_override: Option<String>,
+    pub base_branch_override: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Workset {
+    pub id: i64,
+    pub item_id: i64,
+    pub root_directory: String,
+    pub branch: String,
+    pub repositories: Vec<WorksetRepository>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reminder {
     pub id: i64,
     pub remind_at: String,
@@ -232,6 +264,7 @@ pub struct ItemView {
     pub context_name: String,
     pub project_name: String,
     pub relationships: Vec<ItemRelation>,
+    pub worksets: Vec<Workset>,
     pub links: Vec<ExternalLinkView>,
 }
 
@@ -251,13 +284,17 @@ pub struct DomainState {
     pub next_project_id: i64,
     pub next_item_id: i64,
     pub next_item_number: i64,
+    pub next_repository_id: i64,
+    pub next_workset_id: i64,
     pub next_external_object_id: i64,
     pub next_link_id: i64,
     pub next_activity_id: i64,
     pub next_reminder_id: i64,
     pub contexts: Vec<Context>,
     pub projects: Vec<Project>,
+    pub repositories: Vec<Repository>,
     pub items: Vec<Item>,
+    pub worksets: Vec<Workset>,
     pub relationships: Vec<ItemRelation>,
     pub external_objects: Vec<ExternalObject>,
     pub links: Vec<Link>,
@@ -276,10 +313,27 @@ pub enum Event {
         name: String,
         defaults: ProjectDefaults,
     },
+    RegisterRepository {
+        project_id: i64,
+        name: String,
+        remote_url: String,
+    },
     CreateItem {
         title: String,
         context_id: i64,
         project_id: i64,
+    },
+    CreateWorkset {
+        item_id: i64,
+        root_directory: String,
+        branch: String,
+        repositories: Vec<WorksetRepositoryInput>,
+    },
+    AddRepositoryToWorkset {
+        workset_id: i64,
+        repository_id: i64,
+        branch_override: Option<String>,
+        base_branch_override: Option<String>,
     },
     SetItemStatus {
         item_id: i64,
@@ -346,10 +400,21 @@ pub enum Effect {
         project: Project,
         next_project_id: i64,
     },
+    PersistRepository {
+        repository: Repository,
+        next_repository_id: i64,
+    },
     PersistItem {
         item: Item,
         next_item_number: i64,
         next_item_id: i64,
+    },
+    PersistWorkset {
+        workset: Workset,
+        next_workset_id: i64,
+    },
+    PersistWorksetUpdate {
+        workset: Workset,
     },
     PersistItemUpdate {
         item: Item,
@@ -410,6 +475,30 @@ pub enum DomainError {
     ProjectNotFound { project_id: i64 },
     #[error("Project {project_id} belongs to another Context")]
     ProjectContextMismatch { project_id: i64, context_id: i64 },
+    #[error("a Repository name cannot be blank")]
+    EmptyRepositoryName,
+    #[error("a Repository name must be a single directory name")]
+    InvalidRepositoryName,
+    #[error("a Repository remote URL cannot be blank")]
+    EmptyRepositoryRemoteUrl,
+    #[error("Repository name already exists in Project {project_id}: {name}")]
+    RepositoryNameTaken { project_id: i64, name: String },
+    #[error("Repository {repository_id} does not exist")]
+    RepositoryNotFound { repository_id: i64 },
+    #[error("Repository {repository_id} belongs to another Project than {project_id}")]
+    RepositoryProjectMismatch { repository_id: i64, project_id: i64 },
+    #[error("a Workset root directory cannot be blank")]
+    EmptyWorksetRoot,
+    #[error("a Workset branch cannot be blank")]
+    EmptyWorksetBranch,
+    #[error("a Workset must include at least one Repository")]
+    EmptyWorksetRepositories,
+    #[error("Workset {workset_id} does not exist")]
+    WorksetNotFound { workset_id: i64 },
+    #[error("Repository {repository_id} is already in Workset {workset_id}")]
+    RepositoryAlreadyInWorkset { repository_id: i64, workset_id: i64 },
+    #[error("Repository {repository_id} was selected more than once")]
+    DuplicateRepositorySelection { repository_id: i64 },
     #[error("Item {item_id} does not exist")]
     ItemNotFound { item_id: i64 },
     #[error("Items {from_item_id} and {to_item_id} belong to different Contexts")]
@@ -510,6 +599,48 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 }],
             })
         }
+        Event::RegisterRepository {
+            project_id,
+            name,
+            remote_url,
+        } => {
+            let name = clean_name(name, DomainError::EmptyRepositoryName)?;
+            if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+                return Err(DomainError::InvalidRepositoryName);
+            }
+            let remote_url = clean_name(remote_url, DomainError::EmptyRepositoryRemoteUrl)?;
+            let project = state
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .ok_or(DomainError::ProjectNotFound { project_id })?;
+            if state
+                .repositories
+                .iter()
+                .any(|repository| repository.project_id == project.id && repository.name == name)
+            {
+                return Err(DomainError::RepositoryNameTaken { project_id, name });
+            }
+
+            let id = state.next_repository_id;
+            let next_repository_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let repository = Repository {
+                id,
+                project_id,
+                name,
+                remote_url,
+            };
+            state.next_repository_id = next_repository_id;
+            state.repositories.push(repository.clone());
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRepository {
+                    repository,
+                    next_repository_id,
+                }],
+            })
+        }
         Event::CreateItem {
             title,
             context_id,
@@ -558,6 +689,91 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     next_item_number,
                     next_item_id,
                 }],
+            })
+        }
+        Event::CreateWorkset {
+            item_id,
+            root_directory,
+            branch,
+            repositories,
+        } => {
+            let root_directory = clean_name(root_directory, DomainError::EmptyWorksetRoot)?;
+            let branch = clean_name(branch, DomainError::EmptyWorksetBranch)?;
+            let project_id = item_project_id(&state, item_id)?;
+            if repositories.is_empty() {
+                return Err(DomainError::EmptyWorksetRepositories);
+            }
+            let repositories = normalize_workset_repositories(&state, project_id, repositories)?;
+            let id = state.next_workset_id;
+            let next_workset_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let workset = Workset {
+                id,
+                item_id,
+                root_directory,
+                branch,
+                repositories,
+            };
+            state.next_workset_id = next_workset_id;
+            state.worksets.push(workset.clone());
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistWorkset {
+                    workset,
+                    next_workset_id,
+                }],
+            })
+        }
+        Event::AddRepositoryToWorkset {
+            workset_id,
+            repository_id,
+            branch_override,
+            base_branch_override,
+        } => {
+            let workset = state
+                .worksets
+                .iter()
+                .find(|workset| workset.id == workset_id)
+                .cloned()
+                .ok_or(DomainError::WorksetNotFound { workset_id })?;
+            let project_id = item_project_id(&state, workset.item_id)?;
+            let repository = state
+                .repositories
+                .iter()
+                .find(|repository| repository.id == repository_id)
+                .ok_or(DomainError::RepositoryNotFound { repository_id })?;
+            if repository.project_id != project_id {
+                return Err(DomainError::RepositoryProjectMismatch {
+                    repository_id,
+                    project_id,
+                });
+            }
+            if workset
+                .repositories
+                .iter()
+                .any(|selected| selected.repository_id == repository_id)
+            {
+                return Err(DomainError::RepositoryAlreadyInWorkset {
+                    repository_id,
+                    workset_id,
+                });
+            }
+            let selected = WorksetRepository {
+                repository_id,
+                branch_override: clean_optional_branch(branch_override)?,
+                base_branch_override: clean_optional_branch(base_branch_override)?,
+            };
+            let workset = state
+                .worksets
+                .iter_mut()
+                .find(|candidate| candidate.id == workset_id)
+                .expect("the Workset was checked above");
+            workset.repositories.push(selected);
+            let workset = workset.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistWorksetUpdate { workset }],
             })
         }
         Event::SetItemStatus { item_id, status } => {
@@ -1131,11 +1347,18 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 .filter(|link| link.item_id == item.id)
                 .filter_map(|link| external_link_view_at(state, link, now))
                 .collect();
+            let worksets = state
+                .worksets
+                .iter()
+                .filter(|workset| workset.item_id == item.id)
+                .cloned()
+                .collect();
             Some(ItemView {
                 item: item.clone(),
                 context_name: context.name.clone(),
                 project_name: project.name.clone(),
                 relationships,
+                worksets,
                 links,
             })
         })
@@ -1160,6 +1383,65 @@ fn ensure_context(state: &DomainState, context_id: i64) -> Result<(), DomainErro
     } else {
         Err(DomainError::ContextNotFound { context_id })
     }
+}
+
+fn item_project_id(state: &DomainState, item_id: i64) -> Result<i64, DomainError> {
+    let item = state
+        .items
+        .iter()
+        .find(|item| item.id == item_id)
+        .ok_or(DomainError::ItemNotFound { item_id })?;
+    state
+        .projects
+        .iter()
+        .find(|project| project.id == item.project_id)
+        .map(|project| project.id)
+        .ok_or(DomainError::ProjectNotFound {
+            project_id: item.project_id,
+        })
+}
+
+fn normalize_workset_repositories(
+    state: &DomainState,
+    project_id: i64,
+    repositories: Vec<WorksetRepositoryInput>,
+) -> Result<Vec<WorksetRepository>, DomainError> {
+    let mut normalized = Vec::with_capacity(repositories.len());
+    for input in repositories {
+        let repository = state
+            .repositories
+            .iter()
+            .find(|repository| repository.id == input.repository_id)
+            .ok_or(DomainError::RepositoryNotFound {
+                repository_id: input.repository_id,
+            })?;
+        if repository.project_id != project_id {
+            return Err(DomainError::RepositoryProjectMismatch {
+                repository_id: input.repository_id,
+                project_id,
+            });
+        }
+        if normalized
+            .iter()
+            .any(|selected: &WorksetRepository| selected.repository_id == input.repository_id)
+        {
+            return Err(DomainError::DuplicateRepositorySelection {
+                repository_id: input.repository_id,
+            });
+        }
+        normalized.push(WorksetRepository {
+            repository_id: input.repository_id,
+            branch_override: clean_optional_branch(input.branch_override)?,
+            base_branch_override: clean_optional_branch(input.base_branch_override)?,
+        });
+    }
+    Ok(normalized)
+}
+
+fn clean_optional_branch(branch: Option<String>) -> Result<Option<String>, DomainError> {
+    branch
+        .map(|branch| clean_name(branch, DomainError::EmptyWorksetBranch))
+        .transpose()
 }
 
 fn item_context_id(state: &DomainState, item_id: i64) -> Result<i64, DomainError> {
@@ -2389,6 +2671,223 @@ mod tests {
         assert_eq!(cleared.state.items[0].status, ItemStatus::Inbox);
     }
 
+    #[test]
+    fn registering_a_repository_keeps_it_under_its_project() {
+        let decision = decide(
+            state_with_item(7, "Work"),
+            Event::RegisterRepository {
+                project_id: 1,
+                name: "service-a".into(),
+                remote_url: "git@github.com:acme/service-a.git".into(),
+            },
+        )
+        .expect("repository registration should succeed");
+
+        assert_eq!(
+            decision.state.repositories,
+            vec![Repository {
+                id: 1,
+                project_id: 1,
+                name: "service-a".into(),
+                remote_url: "git@github.com:acme/service-a.git".into(),
+            }]
+        );
+        assert_eq!(
+            decision.effects,
+            vec![Effect::PersistRepository {
+                repository: decision.state.repositories[0].clone(),
+                next_repository_id: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn creating_a_workset_selects_repositories_with_independent_branch_overrides() {
+        let mut state = state_with_item(7, "Work");
+        state.repositories = vec![
+            Repository {
+                id: 1,
+                project_id: 1,
+                name: "service-a".into(),
+                remote_url: "https://example.com/service-a.git".into(),
+            },
+            Repository {
+                id: 2,
+                project_id: 1,
+                name: "service-b".into(),
+                remote_url: "https://example.com/service-b.git".into(),
+            },
+        ];
+        state.next_repository_id = 3;
+
+        let decision = decide(
+            state,
+            Event::CreateWorkset {
+                item_id: 1,
+                root_directory: "/tmp/worksets/PLAT-847".into(),
+                branch: "feature/PLAT-847".into(),
+                repositories: vec![
+                    WorksetRepositoryInput {
+                        repository_id: 1,
+                        branch_override: None,
+                        base_branch_override: Some("main".into()),
+                    },
+                    WorksetRepositoryInput {
+                        repository_id: 2,
+                        branch_override: Some("feature/PLAT-847-worker".into()),
+                        base_branch_override: Some("develop".into()),
+                    },
+                ],
+            },
+        )
+        .expect("Workset creation should succeed");
+
+        assert_eq!(decision.state.worksets.len(), 1);
+        assert_eq!(
+            decision.state.worksets[0],
+            Workset {
+                id: 1,
+                item_id: 1,
+                root_directory: "/tmp/worksets/PLAT-847".into(),
+                branch: "feature/PLAT-847".into(),
+                repositories: vec![
+                    WorksetRepository {
+                        repository_id: 1,
+                        branch_override: None,
+                        base_branch_override: Some("main".into()),
+                    },
+                    WorksetRepository {
+                        repository_id: 2,
+                        branch_override: Some("feature/PLAT-847-worker".into()),
+                        base_branch_override: Some("develop".into()),
+                    },
+                ],
+            }
+        );
+        assert_eq!(decision.state.next_workset_id, 2);
+        assert!(matches!(
+            decision.effects.as_slice(),
+            [Effect::PersistWorkset {
+                next_workset_id: 2,
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn an_item_can_have_multiple_worksets_and_add_a_repository_later() {
+        let mut state = state_with_item(7, "Work");
+        state.repositories = vec![
+            Repository {
+                id: 1,
+                project_id: 1,
+                name: "service-a".into(),
+                remote_url: "https://example.com/service-a.git".into(),
+            },
+            Repository {
+                id: 2,
+                project_id: 1,
+                name: "service-b".into(),
+                remote_url: "https://example.com/service-b.git".into(),
+            },
+        ];
+        state.next_repository_id = 3;
+
+        let first = decide(
+            state,
+            Event::CreateWorkset {
+                item_id: 1,
+                root_directory: "/tmp/worksets/first".into(),
+                branch: "feature/first".into(),
+                repositories: vec![WorksetRepositoryInput {
+                    repository_id: 1,
+                    branch_override: None,
+                    base_branch_override: None,
+                }],
+            },
+        )
+        .expect("first Workset should succeed");
+        let second = decide(
+            first.state,
+            Event::CreateWorkset {
+                item_id: 1,
+                root_directory: "/tmp/worksets/second".into(),
+                branch: "feature/second".into(),
+                repositories: vec![WorksetRepositoryInput {
+                    repository_id: 2,
+                    branch_override: None,
+                    base_branch_override: None,
+                }],
+            },
+        )
+        .expect("the same Item should accept another Workset");
+        let extended = decide(
+            second.state,
+            Event::AddRepositoryToWorkset {
+                workset_id: 1,
+                repository_id: 2,
+                branch_override: Some("feature/first-worker".into()),
+                base_branch_override: Some("develop".into()),
+            },
+        )
+        .expect("a Repository should be addable to an existing Workset");
+
+        assert_eq!(extended.state.worksets.len(), 2);
+        assert_eq!(extended.state.worksets[0].repositories.len(), 2);
+        assert_eq!(
+            extended.state.worksets[0].repositories[1],
+            WorksetRepository {
+                repository_id: 2,
+                branch_override: Some("feature/first-worker".into()),
+                base_branch_override: Some("develop".into()),
+            }
+        );
+        assert!(matches!(
+            extended.effects.as_slice(),
+            [Effect::PersistWorksetUpdate { .. }]
+        ));
+    }
+
+    #[test]
+    fn worksets_reject_repositories_from_another_project() {
+        let mut state = state_with_contexts(&[(7, "Work"), (8, "Personal")]);
+        state.items.push(Item {
+            id: 1,
+            human_identifier: "MC-1".into(),
+            title: "Work item".into(),
+            project_id: 1,
+            status: ItemStatus::Inbox,
+            notes: String::new(),
+            reminders: Vec::new(),
+        });
+        state.repositories.push(Repository {
+            id: 1,
+            project_id: 2,
+            name: "personal-repo".into(),
+            remote_url: "https://example.com/personal.git".into(),
+        });
+
+        assert_eq!(
+            decide(
+                state,
+                Event::CreateWorkset {
+                    item_id: 1,
+                    root_directory: "/tmp/worksets/wrong".into(),
+                    branch: "feature/wrong".into(),
+                    repositories: vec![WorksetRepositoryInput {
+                        repository_id: 1,
+                        branch_override: None,
+                        base_branch_override: None,
+                    }],
+                },
+            ),
+            Err(DomainError::RepositoryProjectMismatch {
+                repository_id: 1,
+                project_id: 1,
+            })
+        );
+    }
+
     fn snapshot_data(title: &str, fetched_at: i64) -> ExternalSnapshotData {
         ExternalSnapshotData {
             title: title.into(),
@@ -2424,6 +2923,8 @@ mod tests {
             next_project_id: contexts.len() as i64 + 1,
             next_item_id: 1,
             next_item_number: 1,
+            next_repository_id: 1,
+            next_workset_id: 1,
             next_external_object_id: 1,
             next_link_id: 1,
             next_activity_id: 1,
@@ -2447,7 +2948,9 @@ mod tests {
                     },
                 })
                 .collect(),
+            repositories: Vec::new(),
             items: Vec::new(),
+            worksets: Vec::new(),
             relationships: Vec::new(),
             external_objects: Vec::new(),
             links: Vec::new(),
@@ -2463,13 +2966,17 @@ mod tests {
             next_project_id: 1,
             next_item_id: 1,
             next_item_number: 1,
+            next_repository_id: 1,
+            next_workset_id: 1,
             next_external_object_id: 1,
             next_link_id: 1,
             next_activity_id: 1,
             next_reminder_id: 1,
             contexts: Vec::new(),
             projects: Vec::new(),
+            repositories: Vec::new(),
             items: Vec::new(),
+            worksets: Vec::new(),
             relationships: Vec::new(),
             external_objects: Vec::new(),
             links: Vec::new(),

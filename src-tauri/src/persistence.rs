@@ -7,6 +7,7 @@ use crate::domain::{
     Activity, Context, ContextAttentionDefault, DomainState, Effect, ExternalChangePolicy,
     ExternalMetadata, ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, Item,
     ItemRelation, ItemRelationKind, ItemStatus, Link, Project, ProjectDefaults, Reminder,
+    Repository, Workset, WorksetRepository,
 };
 
 #[derive(Debug, Error)]
@@ -71,6 +72,8 @@ impl SqliteStore {
         let next_project_id = self.sequence("next_project_id")?;
         let next_item_id = self.sequence("next_item_id")?;
         let next_item_number = self.sequence("next_item_number")?;
+        let next_repository_id = self.sequence("next_repository_id")?;
+        let next_workset_id = self.sequence("next_workset_id")?;
         let next_external_object_id = self.sequence("next_external_object_id")?;
         let next_link_id = self.sequence("next_link_id")?;
         let next_activity_id = self.sequence("next_activity_id")?;
@@ -108,6 +111,22 @@ impl SqliteStore {
                             )
                         })?,
                     },
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let repositories = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, project_id, name, remote_url
+                 FROM repositories
+                 ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(Repository {
+                    id: row.get(0)?,
+                    project_id: row.get(1)?,
+                    name: row.get(2)?,
+                    remote_url: row.get(3)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -158,6 +177,46 @@ impl SqliteStore {
         for (item_id, reminder) in reminders {
             if let Some(item) = items.iter_mut().find(|item| item.id == item_id) {
                 item.reminders.push(reminder);
+            }
+        }
+        let mut worksets = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, item_id, root_directory, branch
+                 FROM worksets
+                 ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(Workset {
+                    id: row.get(0)?,
+                    item_id: row.get(1)?,
+                    root_directory: row.get(2)?,
+                    branch: row.get(3)?,
+                    repositories: Vec::new(),
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let workset_repositories = {
+            let mut statement = self.connection.prepare(
+                "SELECT workset_id, repository_id, branch_override, base_branch_override
+                 FROM workset_repositories
+                 ORDER BY workset_id, repository_id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    WorksetRepository {
+                        repository_id: row.get(1)?,
+                        branch_override: row.get(2)?,
+                        base_branch_override: row.get(3)?,
+                    },
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for (workset_id, repository) in workset_repositories {
+            if let Some(workset) = worksets.iter_mut().find(|workset| workset.id == workset_id) {
+                workset.repositories.push(repository);
             }
         }
         let relationships = {
@@ -333,13 +392,17 @@ impl SqliteStore {
             next_project_id,
             next_item_id,
             next_item_number,
+            next_repository_id,
+            next_workset_id,
             next_external_object_id,
             next_link_id,
             next_activity_id,
             next_reminder_id,
             contexts,
             projects,
+            repositories,
             items,
+            worksets,
             relationships,
             external_objects,
             links,
@@ -384,6 +447,25 @@ impl SqliteStore {
                     transaction.execute(
                         "UPDATE metadata SET value = ?1 WHERE key = 'next_project_id'",
                         params![next_project_id],
+                    )?;
+                }
+                Effect::PersistRepository {
+                    repository,
+                    next_repository_id,
+                } => {
+                    transaction.execute(
+                        "INSERT INTO repositories (id, project_id, name, remote_url)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            repository.id,
+                            repository.project_id,
+                            repository.name,
+                            repository.remote_url,
+                        ],
+                    )?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_repository_id'",
+                        params![next_repository_id],
                     )?;
                 }
                 Effect::PersistItem {
@@ -436,6 +518,35 @@ impl SqliteStore {
                         "UPDATE metadata SET value = ?1 WHERE key = 'next_reminder_id'",
                         params![next_reminder_id],
                     )?;
+                }
+                Effect::PersistWorkset {
+                    workset,
+                    next_workset_id,
+                } => {
+                    transaction.execute(
+                        "INSERT INTO worksets (id, item_id, root_directory, branch)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            workset.id,
+                            workset.item_id,
+                            workset.root_directory,
+                            workset.branch,
+                        ],
+                    )?;
+                    persist_workset_repositories(&transaction, workset)?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_workset_id'",
+                        params![next_workset_id],
+                    )?;
+                }
+                Effect::PersistWorksetUpdate { workset } => {
+                    transaction.execute(
+                        "UPDATE worksets
+                         SET root_directory = ?1, branch = ?2
+                         WHERE id = ?3",
+                        params![workset.root_directory, workset.branch, workset.id],
+                    )?;
+                    persist_workset_repositories(&transaction, workset)?;
                 }
                 Effect::PersistItemRelation { relation } => {
                     transaction.execute(
@@ -619,6 +730,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_project_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_item_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_item_number', 1);
+         INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_repository_id', 1);
+         INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_workset_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_external_object_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_link_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_activity_id', 1);
@@ -637,6 +750,32 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              ON projects (context_id);
          CREATE INDEX IF NOT EXISTS items_by_project_and_status
              ON items (project_id, status);
+         CREATE TABLE IF NOT EXISTS repositories (
+             id INTEGER PRIMARY KEY NOT NULL,
+             project_id INTEGER NOT NULL REFERENCES projects(id),
+             name TEXT NOT NULL,
+             remote_url TEXT NOT NULL,
+             UNIQUE (project_id, name)
+         );
+         CREATE INDEX IF NOT EXISTS repositories_by_project
+             ON repositories (project_id, id);
+         CREATE TABLE IF NOT EXISTS worksets (
+             id INTEGER PRIMARY KEY NOT NULL,
+             item_id INTEGER NOT NULL REFERENCES items(id),
+             root_directory TEXT NOT NULL,
+             branch TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS worksets_by_item
+             ON worksets (item_id, id);
+         CREATE TABLE IF NOT EXISTS workset_repositories (
+             workset_id INTEGER NOT NULL REFERENCES worksets(id) ON DELETE CASCADE,
+             repository_id INTEGER NOT NULL REFERENCES repositories(id),
+             branch_override TEXT,
+             base_branch_override TEXT,
+             PRIMARY KEY (workset_id, repository_id)
+         );
+         CREATE INDEX IF NOT EXISTS workset_repositories_by_repository
+             ON workset_repositories (repository_id);
          CREATE TABLE IF NOT EXISTS reminders (
              id INTEGER PRIMARY KEY NOT NULL,
              item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
@@ -706,6 +845,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     ensure_sequence_at_least(connection, "next_context_id", "contexts", "id")?;
     ensure_sequence_at_least(connection, "next_project_id", "projects", "id")?;
     ensure_sequence_at_least(connection, "next_item_id", "items", "id")?;
+    ensure_sequence_at_least(connection, "next_repository_id", "repositories", "id")?;
+    ensure_sequence_at_least(connection, "next_workset_id", "worksets", "id")?;
     ensure_sequence_at_least(
         connection,
         "next_external_object_id",
@@ -852,6 +993,30 @@ fn persist_item_reminders(
     Ok(())
 }
 
+fn persist_workset_repositories(
+    transaction: &rusqlite::Transaction<'_>,
+    workset: &Workset,
+) -> Result<(), rusqlite::Error> {
+    transaction.execute(
+        "DELETE FROM workset_repositories WHERE workset_id = ?1",
+        params![workset.id],
+    )?;
+    for repository in &workset.repositories {
+        transaction.execute(
+            "INSERT INTO workset_repositories
+                (workset_id, repository_id, branch_override, base_branch_override)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                workset.id,
+                repository.repository_id,
+                repository.branch_override,
+                repository.base_branch_override,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn bool_as_i64(value: bool) -> i64 {
     i64::from(value)
 }
@@ -939,7 +1104,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         decide, Event, ExternalChangePolicy, ExternalMetadata, ExternalObjectInput,
-        ExternalObjectKind, ExternalProvider, ExternalSnapshotData,
+        ExternalObjectKind, ExternalProvider, ExternalSnapshotData, WorksetRepositoryInput,
     };
 
     #[test]
@@ -1077,6 +1242,80 @@ mod tests {
         assert_eq!(state.next_item_number, 3);
         assert_eq!(state.next_item_id, 3);
         assert_eq!(state.next_reminder_id, 3);
+    }
+
+    #[test]
+    fn repositories_and_worksets_survive_reopening_the_database() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+
+        {
+            let mut store = SqliteStore::open(&path).expect("database should open");
+            let registered = decide(
+                store.load_state().expect("state should load"),
+                Event::RegisterRepository {
+                    project_id: 1,
+                    name: "service-a".into(),
+                    remote_url: "https://example.com/service-a.git".into(),
+                },
+            )
+            .expect("Repository should register");
+            store
+                .apply(&registered.effects)
+                .expect("Repository should persist");
+            let item = decide(
+                registered.state,
+                Event::CreateItem {
+                    title: "Build the platform change".into(),
+                    context_id: 1,
+                    project_id: 1,
+                },
+            )
+            .expect("Item should be created");
+            store.apply(&item.effects).expect("Item should persist");
+            let workset = decide(
+                item.state,
+                Event::CreateWorkset {
+                    item_id: 1,
+                    root_directory: "/tmp/worksets/platform-change".into(),
+                    branch: "feature/platform-change".into(),
+                    repositories: vec![WorksetRepositoryInput {
+                        repository_id: 1,
+                        branch_override: Some("feature/service-a".into()),
+                        base_branch_override: Some("develop".into()),
+                    }],
+                },
+            )
+            .expect("Workset should be created");
+            store
+                .apply(&workset.effects)
+                .expect("Workset should persist");
+        }
+
+        let reopened = SqliteStore::open(&path).expect("database should reopen");
+        let state = reopened.load_state().expect("persisted state should load");
+
+        assert_eq!(state.repositories.len(), 1);
+        assert_eq!(state.repositories[0].name, "service-a");
+        assert_eq!(state.repositories[0].project_id, 1);
+        assert_eq!(state.worksets.len(), 1);
+        assert_eq!(state.worksets[0].item_id, 1);
+        assert_eq!(
+            state.worksets[0].root_directory,
+            "/tmp/worksets/platform-change"
+        );
+        assert_eq!(state.worksets[0].branch, "feature/platform-change");
+        assert_eq!(state.worksets[0].repositories.len(), 1);
+        assert_eq!(
+            state.worksets[0].repositories[0],
+            WorksetRepository {
+                repository_id: 1,
+                branch_override: Some("feature/service-a".into()),
+                base_branch_override: Some("develop".into()),
+            }
+        );
+        assert_eq!(state.next_repository_id, 2);
+        assert_eq!(state.next_workset_id, 2);
     }
 
     #[test]
