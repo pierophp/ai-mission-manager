@@ -15,7 +15,7 @@ Paste a GitHub Issue or pull request URL into an Item to create a Link. GitHub d
 
 Linked GitHub Objects are polled when the app opens and while it remains open. Changed titles, states, and metadata are recorded as Activity; each Link has its own review watermark, so shared Objects produce separate Attention Entries. Use the refresh action for an immediate poll, configure attention defaults per Context and object type, and override them on an individual Link.
 
-The home view separates Items needing attention, running, waiting, due for a reminder, and completed. Statuses can move in any order. Each Item can carry notes and a reminder, and can be linked to other Items as `blocks`, `blocked_by`, or `related_to`. Use the Context filter to focus the home view; search always spans every Context and labels each result with its Context.
+The home view separates Items needing attention, running, waiting, due for a reminder, and completed. Statuses can move in any order. Each Item can carry notes and several independent Reminders, and can be linked to other Items as `blocks`, `blocked_by`, or `related_to`. A Link can also be watched until a chosen date and given an independent review date; either a due Reminder or reached review date creates Attention without changing Item status. Use the Context filter to focus the home view; search always spans every Context and labels each result with its Context.
 
 ## Verify
 
@@ -26,4 +26,4 @@ cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
-The domain tests exercise Context and Project ownership, Project defaults, Item creation, status transitions, notes, reminders, relationships, search, home projections, isolation rejection, and requested persistence effects in memory. The persistence test closes and reopens a real SQLite database to verify the organisation hierarchy, inherited Item defaults, notes, reminders, relationships, and global identifier sequence survive restart.
+The domain tests exercise Context and Project ownership, Project defaults, Item creation, status transitions, notes, multiple Reminders, independent Link watch/review dates, relationships, search, home projections, isolation rejection, and requested persistence effects in memory. The persistence test closes and reopens a real SQLite database to verify the organisation hierarchy, inherited Item defaults, notes, Reminders, Link schedules, relationships, and global identifier sequences survive restart.

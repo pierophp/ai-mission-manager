@@ -29,6 +29,12 @@ pub struct Project {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Reminder {
+    pub id: i64,
+    pub remind_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Item {
     pub id: i64,
     pub human_identifier: String,
@@ -36,7 +42,7 @@ pub struct Item {
     pub project_id: i64,
     pub status: ItemStatus,
     pub notes: String,
-    pub reminder_at: Option<String>,
+    pub reminders: Vec<Reminder>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,11 +168,25 @@ pub struct Link {
     pub external_object_id: i64,
     pub reviewed_activity_id: i64,
     pub attention_policy: Option<ExternalChangePolicy>,
+    pub watch_until: Option<String>,
+    pub review_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AttentionEntryKind {
+    #[serde(rename = "external_change")]
+    ExternalChange,
+    #[serde(rename = "review")]
+    Review,
+    #[serde(rename = "reminder")]
+    Reminder,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttentionEntry {
+    pub kind: AttentionEntryKind,
     pub link_id: i64,
+    pub reminder_id: Option<i64>,
     pub item_id: i64,
     pub external_object_id: i64,
     pub source_title: String,
@@ -234,6 +254,7 @@ pub struct DomainState {
     pub next_external_object_id: i64,
     pub next_link_id: i64,
     pub next_activity_id: i64,
+    pub next_reminder_id: i64,
     pub contexts: Vec<Context>,
     pub projects: Vec<Project>,
     pub items: Vec<Item>,
@@ -273,9 +294,24 @@ pub enum Event {
         to_item_id: i64,
         kind: ItemRelationKind,
     },
-    SetItemReminder {
+    AddItemReminder {
         item_id: i64,
-        reminder_at: Option<String>,
+        remind_at: String,
+    },
+    RemoveItemReminder {
+        item_id: i64,
+        reminder_id: i64,
+    },
+    SetLinkWatchUntil {
+        link_id: i64,
+        watch_until: Option<String>,
+    },
+    SetLinkReviewAt {
+        link_id: i64,
+        review_at: Option<String>,
+    },
+    ClearLinkReviewAt {
+        link_id: i64,
     },
     LinkExternalObject {
         item_id: i64,
@@ -318,6 +354,10 @@ pub enum Effect {
     PersistItemUpdate {
         item: Item,
     },
+    PersistItemReminders {
+        item: Item,
+        next_reminder_id: i64,
+    },
     PersistItemRelation {
         relation: ItemRelation,
     },
@@ -358,6 +398,8 @@ pub enum DomainError {
     EmptyProjectName,
     #[error("an Item title cannot be blank")]
     EmptyTitle,
+    #[error("a Reminder date cannot be blank")]
+    EmptyReminderAt,
     #[error("Context name already exists: {name}")]
     ContextNameTaken { name: String },
     #[error("Project name already exists in Context {context_id}: {name}")]
@@ -388,6 +430,8 @@ pub enum DomainError {
     LinkAlreadyExists,
     #[error("Link {link_id} does not exist")]
     LinkNotFound { link_id: i64 },
+    #[error("Reminder {reminder_id} does not exist on Item {item_id}")]
+    ReminderNotFound { item_id: i64, reminder_id: i64 },
 }
 
 pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainError> {
@@ -500,7 +544,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 project_id,
                 status: project.defaults.item_status,
                 notes: String::new(),
-                reminder_at: None,
+                reminders: Vec::new(),
             };
 
             state.next_item_id = next_item_id;
@@ -578,21 +622,99 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::PersistItemRelation { relation }],
             })
         }
-        Event::SetItemReminder {
+        Event::AddItemReminder { item_id, remind_at } => {
+            let remind_at = clean_name(remind_at, DomainError::EmptyReminderAt)?;
+            let item = state
+                .items
+                .iter_mut()
+                .find(|item| item.id == item_id)
+                .ok_or(DomainError::ItemNotFound { item_id })?;
+            let id = state.next_reminder_id;
+            let next_reminder_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            item.reminders.push(Reminder { id, remind_at });
+            state.next_reminder_id = next_reminder_id;
+            let item = item.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistItemReminders {
+                    item,
+                    next_reminder_id,
+                }],
+            })
+        }
+        Event::RemoveItemReminder {
             item_id,
-            reminder_at,
+            reminder_id,
         } => {
             let item = state
                 .items
                 .iter_mut()
                 .find(|item| item.id == item_id)
                 .ok_or(DomainError::ItemNotFound { item_id })?;
-            item.reminder_at = reminder_at;
+            let position = item
+                .reminders
+                .iter()
+                .position(|reminder| reminder.id == reminder_id)
+                .ok_or(DomainError::ReminderNotFound {
+                    item_id,
+                    reminder_id,
+                })?;
+            item.reminders.remove(position);
             let item = item.clone();
+            let next_reminder_id = state.next_reminder_id;
 
             Ok(Decision {
                 state,
-                effects: vec![Effect::PersistItemUpdate { item }],
+                effects: vec![Effect::PersistItemReminders {
+                    item,
+                    next_reminder_id,
+                }],
+            })
+        }
+        Event::SetLinkWatchUntil {
+            link_id,
+            watch_until,
+        } => {
+            let link = state
+                .links
+                .iter_mut()
+                .find(|link| link.id == link_id)
+                .ok_or(DomainError::LinkNotFound { link_id })?;
+            link.watch_until = watch_until;
+            let link = link.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistLinkState { link }],
+            })
+        }
+        Event::SetLinkReviewAt { link_id, review_at } => {
+            let link = state
+                .links
+                .iter_mut()
+                .find(|link| link.id == link_id)
+                .ok_or(DomainError::LinkNotFound { link_id })?;
+            link.review_at = review_at;
+            let link = link.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistLinkState { link }],
+            })
+        }
+        Event::ClearLinkReviewAt { link_id } => {
+            let link = state
+                .links
+                .iter_mut()
+                .find(|link| link.id == link_id)
+                .ok_or(DomainError::LinkNotFound { link_id })?;
+            link.review_at = None;
+            let link = link.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistLinkState { link }],
             })
         }
         Event::LinkExternalObject {
@@ -658,6 +780,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 external_object_id: external_object.id,
                 reviewed_activity_id,
                 attention_policy: None,
+                watch_until: None,
+                review_at: None,
             };
             state.next_link_id = next_link_id;
             state.links.push(link.clone());
@@ -802,24 +926,25 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
 pub fn home_view(state: &DomainState, context_id: Option<i64>, now: &str) -> HomeView {
     let mut view = HomeView {
         needs_attention: Vec::new(),
-        attention_entries: attention_entries(state, context_id),
+        attention_entries: attention_entries(state, context_id, now),
         running: Vec::new(),
         waiting: Vec::new(),
         due: Vec::new(),
         completed: Vec::new(),
     };
 
-    for item in item_views(state, context_id) {
-        let is_due =
-            item.item.reminder_at.as_deref().is_some_and(|reminder_at| {
-                reminder_at <= now && item.item.status != ItemStatus::Done
-            });
+    for item in item_views_at(state, context_id, Some(now)) {
+        let is_due = item_has_due_reminder(&item.item, now) && item.item.status != ItemStatus::Done;
         if is_due {
             view.due.push(item.clone());
         }
         if is_due
             || item.item.status == ItemStatus::Inbox
-            || item.links.iter().any(|link| link.attention_entry.is_some())
+            || (item.item.status != ItemStatus::Done
+                && view
+                    .attention_entries
+                    .iter()
+                    .any(|entry| entry.item_id == item.item.id))
         {
             view.needs_attention.push(item.clone());
         }
@@ -854,6 +979,14 @@ pub fn search_items(state: &DomainState, query: &str, context_id: Option<i64>) -
 }
 
 pub fn external_link_view(state: &DomainState, link: &Link) -> Option<ExternalLinkView> {
+    external_link_view_at(state, link, None)
+}
+
+fn external_link_view_at(
+    state: &DomainState,
+    link: &Link,
+    now: Option<&str>,
+) -> Option<ExternalLinkView> {
     let object = state
         .external_objects
         .iter()
@@ -868,32 +1001,107 @@ pub fn external_link_view(state: &DomainState, link: &Link) -> Option<ExternalLi
         object: object.clone(),
         snapshot,
         attention_policy: effective_attention_policy(state, link, object),
-        attention_entry: attention_entry_for_link(state, link, object),
+        attention_entry: attention_entry_for_link_at(state, link, object, now),
     })
 }
 
-pub fn attention_entries(state: &DomainState, context_id: Option<i64>) -> Vec<AttentionEntry> {
-    state
-        .links
-        .iter()
-        .filter(|link| {
-            context_id.is_none_or(|context_id| {
-                item_context_id(state, link.item_id)
-                    .map(|link_context_id| link_context_id == context_id)
-                    .unwrap_or(false)
-            })
+pub fn attention_entries(
+    state: &DomainState,
+    context_id: Option<i64>,
+    now: &str,
+) -> Vec<AttentionEntry> {
+    attention_entries_at(state, context_id, Some(now))
+}
+
+fn attention_entries_at(
+    state: &DomainState,
+    context_id: Option<i64>,
+    now: Option<&str>,
+) -> Vec<AttentionEntry> {
+    let mut entries = Vec::new();
+    for link in state.links.iter().filter(|link| {
+        context_id.is_none_or(|context_id| {
+            item_context_id(state, link.item_id)
+                .map(|link_context_id| link_context_id == context_id)
+                .unwrap_or(false)
         })
-        .filter_map(|link| {
-            let object = state
-                .external_objects
+    }) {
+        let object = state
+            .external_objects
+            .iter()
+            .find(|object| object.id == link.external_object_id);
+        let Some(object) = object else {
+            continue;
+        };
+        if let Some(entry) = attention_entry_for_link_at(state, link, object, now) {
+            entries.push(entry);
+        }
+        if link
+            .review_at
+            .as_deref()
+            .is_some_and(|review_at| now.is_some_and(|now| review_at <= now))
+        {
+            entries.push(AttentionEntry {
+                kind: AttentionEntryKind::Review,
+                link_id: link.id,
+                reminder_id: None,
+                item_id: link.item_id,
+                external_object_id: object.id,
+                source_title: state
+                    .snapshots
+                    .iter()
+                    .find(|snapshot| snapshot.external_object_id == object.id)
+                    .map(|snapshot| snapshot.title.clone())
+                    .unwrap_or_else(|| object.canonical_url.clone()),
+                source_url: object.canonical_url.clone(),
+                activities: Vec::new(),
+                summary: format!(
+                    "Review scheduled for {}",
+                    link.review_at.as_deref().unwrap_or_default()
+                ),
+            });
+        }
+    }
+
+    for item in state.items.iter().filter(|item| {
+        context_id.is_none_or(|context_id| {
+            item_context_id(state, item.id)
+                .map(|item_context_id| item_context_id == context_id)
+                .unwrap_or(false)
+        })
+    }) {
+        entries.extend(
+            item.reminders
                 .iter()
-                .find(|object| object.id == link.external_object_id)?;
-            attention_entry_for_link(state, link, object)
-        })
-        .collect()
+                .filter(|reminder| reminder.remind_at.as_str() <= now.unwrap_or_default())
+                .map(|reminder| AttentionEntry {
+                    kind: AttentionEntryKind::Reminder,
+                    link_id: 0,
+                    reminder_id: Some(reminder.id),
+                    item_id: item.id,
+                    external_object_id: 0,
+                    source_title: item.title.clone(),
+                    source_url: String::new(),
+                    activities: Vec::new(),
+                    summary: format!("Reminder due at {}", reminder.remind_at),
+                }),
+        );
+    }
+
+    entries
+}
+
+fn item_has_due_reminder(item: &Item, now: &str) -> bool {
+    item.reminders
+        .iter()
+        .any(|reminder| reminder.remind_at.as_str() <= now)
 }
 
 fn item_views(state: &DomainState, context_id: Option<i64>) -> Vec<ItemView> {
+    item_views_at(state, context_id, None)
+}
+
+fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>) -> Vec<ItemView> {
     state
         .items
         .iter()
@@ -921,7 +1129,7 @@ fn item_views(state: &DomainState, context_id: Option<i64>) -> Vec<ItemView> {
                 .links
                 .iter()
                 .filter(|link| link.item_id == item.id)
-                .filter_map(|link| external_link_view(state, link))
+                .filter_map(|link| external_link_view_at(state, link, now))
                 .collect();
             Some(ItemView {
                 item: item.clone(),
@@ -1010,17 +1218,25 @@ fn effective_attention_policy(
         .unwrap_or_else(ExternalChangePolicy::all)
 }
 
-fn attention_entry_for_link(
+fn attention_entry_for_link_at(
     state: &DomainState,
     link: &Link,
     object: &ExternalObject,
+    now: Option<&str>,
 ) -> Option<AttentionEntry> {
     let policy = effective_attention_policy(state, link, object);
+    let watch_active = now.is_none_or(|now| {
+        link.watch_until
+            .as_deref()
+            .is_none_or(|watch_until| watch_until > now)
+    });
     let activities = state
         .activities
         .iter()
         .filter(|activity| {
-            activity.external_object_id == object.id && activity.id > link.reviewed_activity_id
+            watch_active
+                && activity.external_object_id == object.id
+                && activity.id > link.reviewed_activity_id
         })
         .filter_map(|activity| {
             let changes = activity
@@ -1055,7 +1271,9 @@ fn attention_entry_for_link(
         .join("; ");
 
     Some(AttentionEntry {
+        kind: AttentionEntryKind::ExternalChange,
         link_id: link.id,
+        reminder_id: None,
         item_id: link.item_id,
         external_object_id: object.id,
         source_title,
@@ -1241,7 +1459,7 @@ mod tests {
                 project_id: 2,
                 status: ItemStatus::Active,
                 notes: String::new(),
-                reminder_at: None,
+                reminders: Vec::new(),
             }
         );
         assert_eq!(decision.state.next_item_number, 2);
@@ -1369,7 +1587,7 @@ mod tests {
             project_id: 1,
             status: ItemStatus::Inbox,
             notes: String::new(),
-            reminder_at: None,
+            reminders: Vec::new(),
         });
         state.next_item_id = 2;
         state.next_item_number = 2;
@@ -1430,7 +1648,7 @@ mod tests {
                 project_id: 1,
                 status: ItemStatus::Active,
                 notes: String::new(),
-                reminder_at: None,
+                reminders: Vec::new(),
             },
             Item {
                 id: 2,
@@ -1439,7 +1657,7 @@ mod tests {
                 project_id: 1,
                 status: ItemStatus::Waiting,
                 notes: String::new(),
-                reminder_at: None,
+                reminders: Vec::new(),
             },
         ];
         state.next_item_id = 3;
@@ -1500,7 +1718,7 @@ mod tests {
                 project_id: 1,
                 status: ItemStatus::Inbox,
                 notes: String::new(),
-                reminder_at: None,
+                reminders: Vec::new(),
             },
             Item {
                 id: 2,
@@ -1509,7 +1727,7 @@ mod tests {
                 project_id: 2,
                 status: ItemStatus::Inbox,
                 notes: String::new(),
-                reminder_at: None,
+                reminders: Vec::new(),
             },
         ];
 
@@ -1551,7 +1769,7 @@ mod tests {
                 project_id: 1,
                 status: ItemStatus::Inbox,
                 notes: "Needs a decision".into(),
-                reminder_at: None,
+                reminders: Vec::new(),
             },
             Item {
                 id: 2,
@@ -1560,7 +1778,10 @@ mod tests {
                 project_id: 1,
                 status: ItemStatus::Active,
                 notes: String::new(),
-                reminder_at: Some("2026-09-18T09:00".into()),
+                reminders: vec![Reminder {
+                    id: 1,
+                    remind_at: "2026-09-18T09:00".into(),
+                }],
             },
             Item {
                 id: 3,
@@ -1569,7 +1790,7 @@ mod tests {
                 project_id: 2,
                 status: ItemStatus::Waiting,
                 notes: String::new(),
-                reminder_at: None,
+                reminders: Vec::new(),
             },
             Item {
                 id: 4,
@@ -1578,7 +1799,10 @@ mod tests {
                 project_id: 2,
                 status: ItemStatus::Done,
                 notes: String::new(),
-                reminder_at: Some("2026-09-17T09:00".into()),
+                reminders: vec![Reminder {
+                    id: 2,
+                    remind_at: "2026-09-17T09:00".into(),
+                }],
             },
         ];
 
@@ -1589,10 +1813,16 @@ mod tests {
         assert_eq!(view.waiting[0].item.id, 3);
         assert_eq!(view.due[0].item.id, 2);
         assert_eq!(view.completed[0].item.id, 4);
+        assert_eq!(view.attention_entries.len(), 2);
+        assert!(view
+            .attention_entries
+            .iter()
+            .all(|entry| entry.kind == AttentionEntryKind::Reminder));
         assert_eq!(view.running[0].context_name, "Work");
 
         let personal = home_view(&state, Some(8), "2026-09-19T09:00");
         assert!(personal.needs_attention.is_empty());
+        assert_eq!(personal.attention_entries.len(), 1);
         assert_eq!(personal.waiting[0].context_name, "Personal");
 
         let results = search_items(&state, "design", None);
@@ -1674,7 +1904,7 @@ mod tests {
                 project_id: 1,
                 status: ItemStatus::Inbox,
                 notes: String::new(),
-                reminder_at: None,
+                reminders: Vec::new(),
             },
             Item {
                 id: 2,
@@ -1683,7 +1913,7 @@ mod tests {
                 project_id: 1,
                 status: ItemStatus::Inbox,
                 notes: String::new(),
-                reminder_at: None,
+                reminders: Vec::new(),
             },
         ];
         state.next_item_id = 3;
@@ -1957,7 +2187,7 @@ mod tests {
             project_id: 1,
             status: ItemStatus::Waiting,
             notes: String::new(),
-            reminder_at: None,
+            reminders: Vec::new(),
         });
         state.next_item_id = 3;
         state.next_item_number = 3;
@@ -2009,6 +2239,156 @@ mod tests {
         assert_eq!(reviewed.state.links[1].reviewed_activity_id, 0);
     }
 
+    #[test]
+    fn an_item_can_carry_multiple_reminders_and_due_reminders_need_attention() {
+        let first = decide(
+            state_with_item(7, "Work"),
+            Event::AddItemReminder {
+                item_id: 1,
+                remind_at: "2026-09-18T09:00".into(),
+            },
+        )
+        .expect("the first Reminder should be added");
+        let second = decide(
+            first.state,
+            Event::AddItemReminder {
+                item_id: 1,
+                remind_at: "2026-09-25T09:00".into(),
+            },
+        )
+        .expect("the second Reminder should be added");
+
+        let view = home_view(&second.state, None, "2026-09-19T09:00");
+        assert_eq!(second.state.items[0].reminders.len(), 2);
+        assert_eq!(view.attention_entries.len(), 1);
+        assert_eq!(view.attention_entries[0].kind, AttentionEntryKind::Reminder);
+        assert_eq!(
+            view.attention_entries[0].reminder_id,
+            Some(second.state.items[0].reminders[0].id)
+        );
+        assert_eq!(view.needs_attention[0].item.id, 1);
+        assert_eq!(second.state.items[0].status, ItemStatus::Inbox);
+
+        let removed = decide(
+            second.state,
+            Event::RemoveItemReminder {
+                item_id: 1,
+                reminder_id: 1,
+            },
+        )
+        .expect("removing one Reminder should leave the other one intact");
+        assert_eq!(removed.state.items[0].reminders.len(), 1);
+        assert_eq!(
+            removed.state.items[0].reminders[0].remind_at,
+            "2026-09-25T09:00"
+        );
+    }
+
+    #[test]
+    fn watch_until_and_review_at_are_independent_and_review_date_needs_attention() {
+        let linked = decide(
+            state_with_item(7, "Work"),
+            Event::LinkExternalObject {
+                item_id: 1,
+                object: ExternalObjectInput {
+                    provider: ExternalProvider::Generic,
+                    kind: ExternalObjectKind::Generic,
+                    external_key: "https://example.com/spec".into(),
+                    canonical_url: "https://example.com/spec".into(),
+                },
+                snapshot: Some(snapshot_data("Spec", 100)),
+            },
+        )
+        .expect("the External Object should be linkable without execution");
+        let watched = decide(
+            linked.state,
+            Event::SetLinkWatchUntil {
+                link_id: 1,
+                watch_until: Some("2026-09-20T09:00".into()),
+            },
+        )
+        .expect("watch_until should be configurable");
+        let scheduled = decide(
+            watched.state,
+            Event::SetLinkReviewAt {
+                link_id: 1,
+                review_at: Some("2026-09-25T09:00".into()),
+            },
+        )
+        .expect("review_at should be configurable independently");
+
+        assert_eq!(
+            scheduled.state.links[0].watch_until.as_deref(),
+            Some("2026-09-20T09:00")
+        );
+        assert_eq!(
+            scheduled.state.links[0].review_at.as_deref(),
+            Some("2026-09-25T09:00")
+        );
+
+        let refreshed = decide(
+            scheduled.state,
+            Event::RefreshExternalObject {
+                external_object_id: 1,
+                snapshot: snapshot_data("Changed spec", 200),
+            },
+        )
+        .expect("the watched External Object should still record Activity");
+        let after_watch = home_view(&refreshed.state, None, "2026-09-21T09:00");
+        assert_eq!(refreshed.state.activities.len(), 1);
+        assert_eq!(after_watch.attention_entries.len(), 0);
+
+        let at_review = home_view(&refreshed.state, None, "2026-09-25T09:00");
+        assert_eq!(at_review.attention_entries.len(), 1);
+        assert_eq!(
+            at_review.attention_entries[0].kind,
+            AttentionEntryKind::Review
+        );
+        assert_eq!(at_review.attention_entries[0].link_id, 1);
+        assert_eq!(refreshed.state.items[0].status, ItemStatus::Inbox);
+
+        let watch_extended = decide(
+            refreshed.state.clone(),
+            Event::SetLinkWatchUntil {
+                link_id: 1,
+                watch_until: Some("2026-09-30T09:00".into()),
+            },
+        )
+        .expect("the watch period should remain independent");
+        let both_due = home_view(&watch_extended.state, None, "2026-09-25T09:00");
+        assert_eq!(both_due.attention_entries.len(), 2);
+        assert!(both_due
+            .attention_entries
+            .iter()
+            .any(|entry| entry.kind == AttentionEntryKind::ExternalChange));
+        assert!(both_due
+            .attention_entries
+            .iter()
+            .any(|entry| entry.kind == AttentionEntryKind::Review));
+        let changes_only = decide(
+            watch_extended.state,
+            Event::ClearLinkReviewAt { link_id: 1 },
+        )
+        .expect("clearing the review date should leave change attention alone");
+        let changes_only_view = home_view(&changes_only.state, None, "2026-09-25T09:00");
+        assert_eq!(changes_only_view.attention_entries.len(), 1);
+        assert_eq!(
+            changes_only_view.attention_entries[0].kind,
+            AttentionEntryKind::ExternalChange
+        );
+
+        let cleared = decide(refreshed.state, Event::ClearLinkReviewAt { link_id: 1 })
+            .expect("the reached review date should be dismissible explicitly");
+        assert!(home_view(&cleared.state, None, "2026-09-25T00:00")
+            .attention_entries
+            .is_empty());
+        assert_eq!(
+            cleared.state.links[0].watch_until.as_deref(),
+            Some("2026-09-20T09:00")
+        );
+        assert_eq!(cleared.state.items[0].status, ItemStatus::Inbox);
+    }
+
     fn snapshot_data(title: &str, fetched_at: i64) -> ExternalSnapshotData {
         ExternalSnapshotData {
             title: title.into(),
@@ -2031,7 +2411,7 @@ mod tests {
             project_id: 1,
             status: ItemStatus::Inbox,
             notes: String::new(),
-            reminder_at: None,
+            reminders: Vec::new(),
         });
         state.next_item_id = 2;
         state.next_item_number = 2;
@@ -2047,6 +2427,7 @@ mod tests {
             next_external_object_id: 1,
             next_link_id: 1,
             next_activity_id: 1,
+            next_reminder_id: 1,
             contexts: contexts
                 .iter()
                 .map(|(id, name)| Context {
@@ -2085,6 +2466,7 @@ mod tests {
             next_external_object_id: 1,
             next_link_id: 1,
             next_activity_id: 1,
+            next_reminder_id: 1,
             contexts: Vec::new(),
             projects: Vec::new(),
             items: Vec::new(),

@@ -29,7 +29,7 @@ type Item = {
   project_id: number;
   status: ItemStatus;
   notes: string;
-  reminder_at: string | null;
+  reminders: { id: number; remind_at: string }[];
 };
 
 type ItemRelationKind = "Blocks" | "BlockedBy" | "RelatedTo";
@@ -86,7 +86,9 @@ type ExternalChangePolicy = {
 };
 
 type AttentionEntry = {
+  kind: "external_change" | "review" | "reminder";
   link_id: number;
+  reminder_id: number | null;
   item_id: number;
   external_object_id: number;
   source_title: string;
@@ -101,6 +103,8 @@ type ExternalLink = {
   external_object_id: number;
   reviewed_activity_id: number;
   attention_policy: ExternalChangePolicy | null;
+  watch_until: string | null;
+  review_at: string | null;
 };
 
 type ExternalLinkView = {
@@ -528,7 +532,7 @@ export function App() {
                 <div className="attention-entry-list">
                   {home.attention_entries.map((entry) => (
                     <AttentionEntryCard
-                      key={entry.link_id}
+                      key={`${entry.kind}-${entry.link_id}-${entry.reminder_id ?? ""}`}
                       entry={entry}
                       item={allItems.find((candidate) => candidate.item.id === entry.item_id)}
                       onMarkedReviewed={updateHomeAfterEdit}
@@ -842,7 +846,7 @@ function ItemCard({
   onChanged: () => Promise<void>;
 }) {
   const [notes, setNotes] = useState(view.item.notes);
-  const [reminderAt, setReminderAt] = useState(view.item.reminder_at ?? "");
+  const [reminderAt, setReminderAt] = useState("");
   const [relationKind, setRelationKind] = useState<ItemRelationKind>("Blocks");
   const [targetItemId, setTargetItemId] = useState<number>();
   const [externalUrl, setExternalUrl] = useState("");
@@ -850,8 +854,7 @@ function ItemCard({
 
   useEffect(() => {
     setNotes(view.item.notes);
-    setReminderAt(view.item.reminder_at ?? "");
-  }, [view.item.notes, view.item.reminder_at]);
+  }, [view.item.notes]);
 
   async function saveItem(update: () => Promise<unknown>) {
     setIsSaving(true);
@@ -969,7 +972,7 @@ function ItemCard({
           Save notes
         </button>
         <label className="reminder-field">
-          <span>Reminder</span>
+          <span>New reminder</span>
           <input
             type="datetime-local"
             value={reminderAt}
@@ -980,19 +983,44 @@ function ItemCard({
         <button
           type="button"
           className="secondary-button"
-          disabled={isSaving || reminderAt === (view.item.reminder_at ?? "")}
+          disabled={isSaving || !reminderAt}
           onClick={() =>
             void saveItem(() =>
-              invoke("set_item_reminder", {
+              invoke("add_item_reminder", {
                 itemId: view.item.id,
-                reminderAt: reminderAt || null,
+                remindAt: reminderAt,
               }),
             )
           }
         >
-          Set reminder
+          Add reminder
         </button>
       </div>
+      {view.item.reminders.length > 0 && (
+        <div className="reminder-list">
+          <span className="relationship-label">Reminders</span>
+          {view.item.reminders.map((reminder) => (
+            <span className="reminder-chip" key={reminder.id}>
+              {reminder.remind_at}
+              <button
+                type="button"
+                className="text-button"
+                disabled={isSaving}
+                onClick={() =>
+                  void saveItem(() =>
+                    invoke("remove_item_reminder", {
+                      itemId: view.item.id,
+                      reminderId: reminder.id,
+                    }),
+                  )
+                }
+              >
+                Remove
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       <div className="external-links">
         <span className="relationship-label">External Links</span>
         {view.links.map((externalLink) => (
@@ -1012,6 +1040,29 @@ function ItemCard({
             onMarkReviewed={() =>
               saveItem(() =>
                 invoke("mark_link_reviewed", {
+                  linkId: externalLink.link.id,
+                }),
+              )
+            }
+            onSaveWatchUntil={(watchUntil) =>
+              saveItem(() =>
+                invoke("set_link_watch_until", {
+                  linkId: externalLink.link.id,
+                  watchUntil,
+                }),
+              )
+            }
+            onSaveReviewAt={(reviewAt) =>
+              saveItem(() =>
+                invoke("set_link_review_at", {
+                  linkId: externalLink.link.id,
+                  reviewAt,
+                }),
+              )
+            }
+            onClearReviewAt={() =>
+              saveItem(() =>
+                invoke("clear_link_review_at", {
                   linkId: externalLink.link.id,
                 }),
               )
@@ -1104,19 +1155,36 @@ function ExternalLinkCard({
   onRefresh,
   onSavePolicy,
   onMarkReviewed,
+  onSaveWatchUntil,
+  onSaveReviewAt,
+  onClearReviewAt,
 }: {
   externalLink: ExternalLinkView;
   isSaving: boolean;
   onRefresh: () => Promise<void>;
   onSavePolicy: (policy: ExternalChangePolicy | null) => Promise<void>;
   onMarkReviewed: () => Promise<void>;
+  onSaveWatchUntil: (watchUntil: string | null) => Promise<void>;
+  onSaveReviewAt: (reviewAt: string | null) => Promise<void>;
+  onClearReviewAt: () => Promise<void>;
 }) {
   const { object, snapshot } = externalLink;
   const [policy, setPolicy] = useState(externalLink.attention_policy);
+  const [watchUntil, setWatchUntil] = useState(externalLink.link.watch_until ?? "");
+  const [reviewAt, setReviewAt] = useState(externalLink.link.review_at ?? "");
+  const reviewDateReached =
+    externalLink.link.review_at !== null &&
+    externalLink.link.review_at <= currentMinute();
 
   useEffect(() => {
     setPolicy(externalLink.attention_policy);
-  }, [externalLink.attention_policy]);
+    setWatchUntil(externalLink.link.watch_until ?? "");
+    setReviewAt(externalLink.link.review_at ?? "");
+  }, [
+    externalLink.attention_policy,
+    externalLink.link.review_at,
+    externalLink.link.watch_until,
+  ]);
 
   return (
     <article className="external-link-card">
@@ -1155,20 +1223,86 @@ function ExternalLinkCard({
       ) : (
         <p className="external-age">No snapshot yet</p>
       )}
-      {externalLink.attention_entry && (
+      {reviewDateReached && (
         <div className="link-attention">
-          <strong>Needs review</strong>
-          <p>{externalLink.attention_entry.summary}</p>
+          <strong>Review date reached</strong>
+          <p>Review scheduled for {externalLink.link.review_at}</p>
           <button
             type="button"
             className="secondary-button"
             disabled={isSaving}
-            onClick={() => void onMarkReviewed()}
+            onClick={() => void onClearReviewAt()}
           >
-            Mark reviewed
+            Clear review date
           </button>
         </div>
       )}
+      {externalLink.attention_entry && (
+        <div className="link-attention">
+          <strong>
+            {externalLink.attention_entry.kind === "review"
+              ? "Review date reached"
+              : "Needs review"}
+          </strong>
+          <p>{externalLink.attention_entry.summary}</p>
+          {externalLink.attention_entry.kind === "review" ? (
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={isSaving}
+              onClick={() => void onClearReviewAt()}
+            >
+              Clear review date
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={isSaving}
+              onClick={() => void onMarkReviewed()}
+            >
+              Mark changes reviewed
+            </button>
+          )}
+        </div>
+      )}
+      <div className="watch-schedule">
+        <span className="relationship-label">Watch schedule</span>
+        <label>
+          <span>Watch until</span>
+          <input
+            type="datetime-local"
+            value={watchUntil}
+            onChange={(event) => setWatchUntil(event.target.value)}
+            disabled={isSaving}
+          />
+        </label>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={isSaving}
+          onClick={() => void onSaveWatchUntil(watchUntil || null)}
+        >
+          Save watch period
+        </button>
+        <label>
+          <span>Review at</span>
+          <input
+            type="datetime-local"
+            value={reviewAt}
+            onChange={(event) => setReviewAt(event.target.value)}
+            disabled={isSaving}
+          />
+        </label>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={isSaving}
+          onClick={() => void onSaveReviewAt(reviewAt || null)}
+        >
+          Save review date
+        </button>
+      </div>
       <div className="attention-policy">
         <span className="relationship-label">Attention for this Link</span>
         <label>
@@ -1255,21 +1389,72 @@ function AttentionEntryCard({
       <div>
         <strong>{entry.source_title}</strong>
         <span className="external-link-kind">
-          {item?.item.human_identifier ?? "Item"} · {entry.activities.length} change
-          {entry.activities.length === 1 ? "" : "s"}
+          {item?.item.human_identifier ?? "Item"} · {attentionEntryLabel(entry)}
         </span>
       </div>
       <p>{entry.summary}</p>
-      <button
-        type="button"
-        className="secondary-button"
-        disabled={isSaving}
-        onClick={() => void markReviewed()}
-      >
-        Mark reviewed
-      </button>
+      {entry.kind === "reminder" && item && entry.reminder_id !== null ? (
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={isSaving}
+          onClick={() =>
+            void saveReminder(item.item.id, entry.reminder_id as number)
+          }
+        >
+          Dismiss reminder
+        </button>
+      ) : entry.kind === "review" ? (
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={isSaving}
+          onClick={() => void clearReviewDate()}
+        >
+          Clear review date
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={isSaving}
+          onClick={() => void markReviewed()}
+        >
+          Mark reviewed
+        </button>
+      )}
     </article>
   );
+
+  async function saveReminder(itemId: number, reminderId: number) {
+    setIsSaving(true);
+    try {
+      await invoke("remove_item_reminder", { itemId, reminderId });
+      await onMarkedReviewed();
+    } catch (dismissError) {
+      window.alert(errorMessage(dismissError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function clearReviewDate() {
+    setIsSaving(true);
+    try {
+      await invoke("clear_link_review_at", { linkId: entry.link_id });
+      await onMarkedReviewed();
+    } catch (clearError) {
+      window.alert(errorMessage(clearError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+}
+
+function attentionEntryLabel(entry: AttentionEntry): string {
+  if (entry.kind === "reminder") return "Reminder due";
+  if (entry.kind === "review") return "Review date reached";
+  return `${entry.activities.length} change${entry.activities.length === 1 ? "" : "s"}`;
 }
 
 function SearchResult({ view }: { view: ItemView }) {

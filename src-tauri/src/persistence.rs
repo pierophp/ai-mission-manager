@@ -6,7 +6,7 @@ use thiserror::Error;
 use crate::domain::{
     Activity, Context, ContextAttentionDefault, DomainState, Effect, ExternalChangePolicy,
     ExternalMetadata, ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, Item,
-    ItemRelation, ItemRelationKind, ItemStatus, Link, Project, ProjectDefaults,
+    ItemRelation, ItemRelationKind, ItemStatus, Link, Project, ProjectDefaults, Reminder,
 };
 
 #[derive(Debug, Error)]
@@ -46,8 +46,18 @@ impl SqliteStore {
         let item_columns = table_columns(&connection, "items")?;
         if !item_columns.is_empty()
             && (!item_columns.iter().any(|column| column == "project_id")
-                || !item_columns.iter().any(|column| column == "notes")
-                || !item_columns.iter().any(|column| column == "reminder_at"))
+                || !item_columns.iter().any(|column| column == "notes"))
+        {
+            return Err(StoreError::IncompatibleSchema);
+        }
+        let link_attention_columns = table_columns(&connection, "link_attention_state")?;
+        if !link_attention_columns.is_empty()
+            && (!link_attention_columns
+                .iter()
+                .any(|column| column == "watch_until")
+                || !link_attention_columns
+                    .iter()
+                    .any(|column| column == "review_at"))
         {
             return Err(StoreError::IncompatibleSchema);
         }
@@ -64,6 +74,7 @@ impl SqliteStore {
         let next_external_object_id = self.sequence("next_external_object_id")?;
         let next_link_id = self.sequence("next_link_id")?;
         let next_activity_id = self.sequence("next_activity_id")?;
+        let next_reminder_id = self.sequence("next_reminder_id")?;
         let contexts = {
             let mut statement = self
                 .connection
@@ -101,9 +112,9 @@ impl SqliteStore {
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
-        let items = {
+        let mut items = {
             let mut statement = self.connection.prepare(
-                "SELECT id, human_identifier, title, project_id, status, notes, reminder_at
+                "SELECT id, human_identifier, title, project_id, status, notes
                  FROM items
                  ORDER BY id",
             )?;
@@ -122,11 +133,33 @@ impl SqliteStore {
                         )
                     })?,
                     notes: row.get(5)?,
-                    reminder_at: row.get(6)?,
+                    reminders: Vec::new(),
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
+        let reminders = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, item_id, remind_at
+                 FROM reminders
+                 ORDER BY item_id, id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(1)?,
+                    Reminder {
+                        id: row.get(0)?,
+                        remind_at: row.get(2)?,
+                    },
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for (item_id, reminder) in reminders {
+            if let Some(item) = items.iter_mut().find(|item| item.id == item_id) {
+                item.reminders.push(reminder);
+            }
+        }
         let relationships = {
             let mut statement = self.connection.prepare(
                 "SELECT from_item_id, to_item_id, kind
@@ -186,7 +219,9 @@ impl SqliteStore {
                         COALESCE(link_attention_state.reviewed_activity_id, 0),
                         link_attention_state.title_attention,
                         link_attention_state.state_attention,
-                        link_attention_state.metadata_attention
+                        link_attention_state.metadata_attention,
+                        link_attention_state.watch_until,
+                        link_attention_state.review_at
                  FROM external_links
                  LEFT JOIN link_attention_state
                    ON link_attention_state.link_id = external_links.id
@@ -211,6 +246,8 @@ impl SqliteStore {
                     external_object_id: row.get(2)?,
                     reviewed_activity_id: row.get(3)?,
                     attention_policy,
+                    watch_until: row.get(7)?,
+                    review_at: row.get(8)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -299,6 +336,7 @@ impl SqliteStore {
             next_external_object_id,
             next_link_id,
             next_activity_id,
+            next_reminder_id,
             contexts,
             projects,
             items,
@@ -355,8 +393,8 @@ impl SqliteStore {
                 } => {
                     transaction.execute(
                         "INSERT INTO items
-                            (id, human_identifier, title, project_id, status, notes, reminder_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            (id, human_identifier, title, project_id, status, notes)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         params![
                             item.id,
                             item.human_identifier,
@@ -364,7 +402,6 @@ impl SqliteStore {
                             item.project_id,
                             item_status_as_str(item.status),
                             item.notes,
-                            item.reminder_at,
                         ],
                     )?;
                     transaction.execute(
@@ -379,14 +416,25 @@ impl SqliteStore {
                 Effect::PersistItemUpdate { item } => {
                     transaction.execute(
                         "UPDATE items
-                         SET status = ?1, notes = ?2, reminder_at = ?3
-                         WHERE id = ?4",
-                        params![
-                            item_status_as_str(item.status),
-                            item.notes,
-                            item.reminder_at,
-                            item.id,
-                        ],
+                         SET status = ?1, notes = ?2
+                         WHERE id = ?3",
+                        params![item_status_as_str(item.status), item.notes, item.id,],
+                    )?;
+                }
+                Effect::PersistItemReminders {
+                    item,
+                    next_reminder_id,
+                } => {
+                    transaction.execute(
+                        "UPDATE items
+                         SET status = ?1, notes = ?2
+                         WHERE id = ?3",
+                        params![item_status_as_str(item.status), item.notes, item.id],
+                    )?;
+                    persist_item_reminders(&transaction, item)?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_reminder_id'",
+                        params![next_reminder_id],
                     )?;
                 }
                 Effect::PersistItemRelation { relation } => {
@@ -574,6 +622,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_external_object_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_link_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_activity_id', 1);
+         INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_reminder_id', 1);
          INSERT OR IGNORE INTO contexts (id, name) VALUES (1, 'Personal');",
     )?;
 
@@ -588,6 +637,13 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              ON projects (context_id);
          CREATE INDEX IF NOT EXISTS items_by_project_and_status
              ON items (project_id, status);
+         CREATE TABLE IF NOT EXISTS reminders (
+             id INTEGER PRIMARY KEY NOT NULL,
+             item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+             remind_at TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS reminders_by_item
+             ON reminders (item_id, id);
          CREATE TABLE IF NOT EXISTS item_relationships (
              from_item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
              to_item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
@@ -622,7 +678,9 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              reviewed_activity_id INTEGER NOT NULL DEFAULT 0,
              title_attention INTEGER,
              state_attention INTEGER,
-             metadata_attention INTEGER
+             metadata_attention INTEGER,
+             watch_until TEXT,
+             review_at TEXT
          );
          CREATE TABLE IF NOT EXISTS activities (
              id INTEGER PRIMARY KEY NOT NULL,
@@ -656,6 +714,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     )?;
     ensure_sequence_at_least(connection, "next_link_id", "external_links", "id")?;
     ensure_sequence_at_least(connection, "next_activity_id", "activities", "id")?;
+    ensure_sequence_at_least(connection, "next_reminder_id", "reminders", "id")?;
 
     Ok(())
 }
@@ -709,8 +768,7 @@ fn create_items_table(connection: &Connection) -> Result<(), StoreError> {
              title TEXT NOT NULL,
              project_id INTEGER NOT NULL REFERENCES projects(id),
              status TEXT NOT NULL CHECK (status IN ('Inbox', 'Active', 'Waiting', 'Done')),
-             notes TEXT NOT NULL DEFAULT '',
-             reminder_at TEXT
+             notes TEXT NOT NULL DEFAULT ''
          );",
     )?;
     Ok(())
@@ -757,21 +815,40 @@ fn persist_link_state(
         .unwrap_or((None, None, None));
     transaction.execute(
         "INSERT INTO link_attention_state
-            (link_id, reviewed_activity_id, title_attention, state_attention, metadata_attention)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+            (link_id, reviewed_activity_id, title_attention, state_attention, metadata_attention,
+             watch_until, review_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(link_id) DO UPDATE SET
             reviewed_activity_id = excluded.reviewed_activity_id,
             title_attention = excluded.title_attention,
             state_attention = excluded.state_attention,
-            metadata_attention = excluded.metadata_attention",
+            metadata_attention = excluded.metadata_attention,
+            watch_until = excluded.watch_until,
+            review_at = excluded.review_at",
         params![
             link.id,
             link.reviewed_activity_id,
             title_attention,
             state_attention,
             metadata_attention,
+            link.watch_until,
+            link.review_at,
         ],
     )?;
+    Ok(())
+}
+
+fn persist_item_reminders(
+    transaction: &rusqlite::Transaction<'_>,
+    item: &Item,
+) -> Result<(), rusqlite::Error> {
+    transaction.execute("DELETE FROM reminders WHERE item_id = ?1", params![item.id])?;
+    for reminder in &item.reminders {
+        transaction.execute(
+            "INSERT INTO reminders (id, item_id, remind_at) VALUES (?1, ?2, ?3)",
+            params![reminder.id, item.id, reminder.remind_at],
+        )?;
+    }
     Ok(())
 }
 
@@ -926,18 +1003,29 @@ mod tests {
 
             let reminded = decide(
                 noted.state,
-                Event::SetItemReminder {
+                Event::AddItemReminder {
                     item_id: 1,
-                    reminder_at: Some("2026-09-20T09:00".into()),
+                    remind_at: "2026-09-20T09:00".into(),
                 },
             )
-            .expect("Item reminder should update");
+            .expect("first Item reminder should update");
             store
                 .apply(&reminded.effects)
-                .expect("Item reminder should be persisted");
+                .expect("first Item reminder should be persisted");
+            let second_reminder = decide(
+                reminded.state,
+                Event::AddItemReminder {
+                    item_id: 1,
+                    remind_at: "2026-09-21T09:00".into(),
+                },
+            )
+            .expect("second Item reminder should update");
+            store
+                .apply(&second_reminder.effects)
+                .expect("second Item reminder should be persisted");
 
             let second_item = decide(
-                reminded.state,
+                second_reminder.state,
                 Event::CreateItem {
                     title: "Review the migration".into(),
                     context_id: 2,
@@ -976,10 +1064,9 @@ mod tests {
         assert_eq!(state.items[0].project_id, 3);
         assert_eq!(state.items[0].status, ItemStatus::Active);
         assert_eq!(state.items[0].notes, "Keep the migration checklist nearby");
-        assert_eq!(
-            state.items[0].reminder_at.as_deref(),
-            Some("2026-09-20T09:00")
-        );
+        assert_eq!(state.items[0].reminders.len(), 2);
+        assert_eq!(state.items[0].reminders[0].remind_at, "2026-09-20T09:00");
+        assert_eq!(state.items[0].reminders[1].remind_at, "2026-09-21T09:00");
         assert_eq!(state.items[1].human_identifier, "MC-2");
         assert_eq!(state.relationships.len(), 1);
         assert_eq!(state.relationships[0].from_item_id, 1);
@@ -989,6 +1076,7 @@ mod tests {
         assert_eq!(state.next_project_id, 4);
         assert_eq!(state.next_item_number, 3);
         assert_eq!(state.next_item_id, 3);
+        assert_eq!(state.next_reminder_id, 3);
     }
 
     #[test]
@@ -1090,6 +1178,28 @@ mod tests {
             store
                 .apply(&overridden.effects)
                 .expect("the Link attention policy should persist");
+            let watched = decide(
+                overridden.state,
+                Event::SetLinkWatchUntil {
+                    link_id: 1,
+                    watch_until: Some("2026-09-20T09:00".into()),
+                },
+            )
+            .expect("the watch period should persist");
+            store
+                .apply(&watched.effects)
+                .expect("the watch period should persist");
+            let scheduled = decide(
+                watched.state,
+                Event::SetLinkReviewAt {
+                    link_id: 1,
+                    review_at: Some("2026-09-25T09:00".into()),
+                },
+            )
+            .expect("the review date should persist");
+            store
+                .apply(&scheduled.effects)
+                .expect("the review date should persist");
             store
                 .set_gh_executable_path(&gh_path)
                 .expect("the resolved CLI path should persist");
@@ -1107,6 +1217,14 @@ mod tests {
         assert_eq!(state.activities.len(), 1);
         assert_eq!(state.activities[0].changes.len(), 3);
         assert_eq!(state.links[0].reviewed_activity_id, 1);
+        assert_eq!(
+            state.links[0].watch_until.as_deref(),
+            Some("2026-09-20T09:00")
+        );
+        assert_eq!(
+            state.links[0].review_at.as_deref(),
+            Some("2026-09-25T09:00")
+        );
         assert_eq!(
             state.links[0].attention_policy,
             Some(ExternalChangePolicy {

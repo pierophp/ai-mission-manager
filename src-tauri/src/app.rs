@@ -288,6 +288,25 @@ impl Runtime {
             .ok_or_else(|| "Link policy update produced no External Object".to_owned())
     }
 
+    fn set_link_schedule(
+        &mut self,
+        event: Event,
+        link_id: i64,
+        error_prefix: &str,
+    ) -> Result<ExternalLinkView, String> {
+        let decision = decide(self.state.clone(), event).map_err(|error| error.to_string())?;
+        let link = decision
+            .state
+            .links
+            .iter()
+            .find(|link| link.id == link_id)
+            .cloned()
+            .ok_or_else(|| format!("{error_prefix} produced no Link"))?;
+        self.commit(decision)?;
+        external_link_view(&self.state, &link)
+            .ok_or_else(|| format!("{error_prefix} produced no External Object"))
+    }
+
     fn set_context_attention_default(
         &mut self,
         context_id: i64,
@@ -519,18 +538,30 @@ pub fn set_item_notes(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_item_reminder(
+pub fn add_item_reminder(
     item_id: i64,
-    reminder_at: Option<String>,
+    remind_at: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Item, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .update_item(Event::AddItemReminder { item_id, remind_at }, item_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn remove_item_reminder(
+    item_id: i64,
+    reminder_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Item, String> {
     state
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .update_item(
-            Event::SetItemReminder {
+            Event::RemoveItemReminder {
                 item_id,
-                reminder_at,
+                reminder_id,
             },
             item_id,
         )
@@ -590,6 +621,56 @@ pub fn set_link_attention_policy(
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .set_link_attention_policy(link_id, policy)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_link_watch_until(
+    link_id: i64,
+    watch_until: Option<String>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ExternalLinkView, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .set_link_schedule(
+            Event::SetLinkWatchUntil {
+                link_id,
+                watch_until,
+            },
+            link_id,
+            "Setting watch period",
+        )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_link_review_at(
+    link_id: i64,
+    review_at: Option<String>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ExternalLinkView, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .set_link_schedule(
+            Event::SetLinkReviewAt { link_id, review_at },
+            link_id,
+            "Setting review date",
+        )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn clear_link_review_at(
+    link_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ExternalLinkView, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .set_link_schedule(
+            Event::ClearLinkReviewAt { link_id },
+            link_id,
+            "Clearing review date",
+        )
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -406,6 +406,25 @@ button:disabled {
   font-size: 0.7rem;
 }
 
+.reminder-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 9px;
+}
+
+.reminder-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 7px;
+  border-radius: 999px;
+  background: #f2e8db;
+  color: #765343;
+  font-size: 0.68rem;
+}
+
 .relationship-list {
   display: flex;
   flex-wrap: wrap;
@@ -494,6 +513,32 @@ button:disabled {
   color: #765343;
   font-size: 0.7rem;
   line-height: 1.4;
+}
+
+.watch-schedule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 7px;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid #eee8df;
+}
+
+.watch-schedule .relationship-label {
+  width: 100%;
+}
+
+.watch-schedule label {
+  display: grid;
+  gap: 3px;
+  color: #8b837a;
+  font-size: 0.66rem;
+}
+
+.watch-schedule input {
+  padding: 6px 7px;
+  font-size: 0.68rem;
 }
 
 .attention-policy {
