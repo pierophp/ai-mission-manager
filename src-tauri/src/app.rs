@@ -9,11 +9,11 @@ use tauri::State;
 
 use crate::{
     domain::{
-        decide, external_link_view, home_view, search_items, Context, ContextAttentionDefault,
-        DomainState, Event, ExternalChangePolicy, ExternalLinkView, ExternalObjectInput,
-        ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView, Item, ItemRelation,
-        ItemRelationKind, ItemStatus, ItemView, Project, ProjectDefaults, Repository, Workset,
-        WorksetRepositoryInput,
+        decide, external_link_view, home_view, search_items, AttachedRepositoryInput, Context,
+        ContextAttentionDefault, DomainState, Event, ExternalChangePolicy, ExternalLinkView,
+        ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView,
+        Item, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Project, ProjectDefaults,
+        Repository, Workset, WorksetRepositoryInput,
     },
     git::GitCli,
     persistence::SqliteStore,
@@ -139,6 +139,38 @@ impl Runtime {
             let cleanup_error = checkout.cleanup().err();
             return Err(format_commit_error(error, cleanup_error));
         }
+        Ok(workset)
+    }
+
+    fn attach_workset(&mut self, item_id: i64, root_directory: String) -> Result<Workset, String> {
+        let root = Path::new(&root_directory);
+        let repositories = GitCli::system()
+            .inspect_workset(root)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|repository| AttachedRepositoryInput {
+                name: repository.name,
+                remote_url: repository.remote_url,
+                current_branch: repository.current_branch,
+                is_dirty: repository.is_dirty,
+            })
+            .collect();
+        let decision = decide(
+            self.state.clone(),
+            Event::AttachWorkset {
+                item_id,
+                root_directory,
+                repositories,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let workset = decision
+            .state
+            .worksets
+            .last()
+            .cloned()
+            .ok_or_else(|| "Workset attachment produced no Workset".to_owned())?;
+        self.commit(decision)?;
         Ok(workset)
     }
 
@@ -877,6 +909,18 @@ pub fn create_workset(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn attach_workset(
+    item_id: i64,
+    root_directory: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Workset, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .attach_workset(item_id, root_directory)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn add_repository_to_workset(
     workset_id: i64,
     repository_id: i64,
@@ -1258,6 +1302,59 @@ fi
         );
         let reopened = Runtime::open(&database).expect("runtime should reopen");
         assert_eq!(reopened.state.worksets, vec![workset]);
+    }
+
+    #[test]
+    fn attaching_a_workset_does_not_change_its_branch_configuration_or_files() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let root = directory.path().join("workset-root");
+        fs::create_dir(&root).expect("Workset root should exist");
+        let repository = root.join("service-a");
+        run_git(&root, &["init", "--initial-branch=main", "service-a"]);
+        run_git(&repository, &["config", "user.email", "test@example.com"]);
+        run_git(&repository, &["config", "user.name", "Test User"]);
+        fs::write(repository.join("README.md"), "service-a\n")
+            .expect("repository file should be written");
+        run_git(&repository, &["add", "README.md"]);
+        run_git(&repository, &["commit", "-m", "initial"]);
+        let origin = directory.path().join("service-a.git");
+        run_git(directory.path(), &["init", "--bare", "service-a.git"]);
+        let origin_url = origin.to_string_lossy().into_owned();
+        run_git(&repository, &["remote", "add", "origin", &origin_url]);
+        fs::write(repository.join("notes.txt"), "keep this work\n")
+            .expect("uncommitted file should be written");
+
+        let branch_before = run_git_output(&repository, &["branch", "--show-current"]);
+        let config_before = run_git_output(&repository, &["config", "--local", "--list"]);
+        let status_before = run_git_output(&repository, &["status", "--porcelain"]);
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .create_item("Adopt the platform change".into(), 1, 1)
+            .expect("Item should be created");
+
+        let workset = runtime
+            .attach_workset(1, root.to_string_lossy().into_owned())
+            .expect("Workset should attach");
+
+        assert_eq!(workset.branch, "main");
+        assert_eq!(workset.repositories[0].current_branch, "main");
+        assert!(workset.repositories[0].is_dirty);
+        assert_eq!(
+            run_git_output(&repository, &["branch", "--show-current"]),
+            branch_before
+        );
+        assert_eq!(
+            run_git_output(&repository, &["config", "--local", "--list"]),
+            config_before
+        );
+        assert_eq!(
+            run_git_output(&repository, &["status", "--porcelain"]),
+            status_before
+        );
+        let reopened = Runtime::open(&database).expect("runtime should reopen");
+        assert_eq!(reopened.state.worksets, vec![workset]);
+        assert_eq!(reopened.state.repositories[0].remote_url, origin_url);
     }
 
     fn run_git(directory: &Path, args: &[&str]) {

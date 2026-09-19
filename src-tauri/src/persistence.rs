@@ -62,6 +62,17 @@ impl SqliteStore {
         {
             return Err(StoreError::IncompatibleSchema);
         }
+        let workset_repository_columns = table_columns(&connection, "workset_repositories")?;
+        if !workset_repository_columns.is_empty()
+            && (!workset_repository_columns
+                .iter()
+                .any(|column| column == "current_branch")
+                || !workset_repository_columns
+                    .iter()
+                    .any(|column| column == "is_dirty"))
+        {
+            return Err(StoreError::IncompatibleSchema);
+        }
         initialize_schema(&mut connection)?;
 
         Ok(Self { connection })
@@ -198,7 +209,8 @@ impl SqliteStore {
         };
         let workset_repositories = {
             let mut statement = self.connection.prepare(
-                "SELECT workset_id, repository_id, branch_override, base_branch_override
+                "SELECT workset_id, repository_id, branch_override, base_branch_override,
+                        current_branch, is_dirty
                  FROM workset_repositories
                  ORDER BY workset_id, repository_id",
             )?;
@@ -209,6 +221,8 @@ impl SqliteStore {
                         repository_id: row.get(1)?,
                         branch_override: row.get(2)?,
                         base_branch_override: row.get(3)?,
+                        current_branch: row.get(4)?,
+                        is_dirty: row.get::<_, i64>(5)? != 0,
                     },
                 ))
             })?;
@@ -772,6 +786,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              repository_id INTEGER NOT NULL REFERENCES repositories(id),
              branch_override TEXT,
              base_branch_override TEXT,
+             current_branch TEXT NOT NULL,
+             is_dirty INTEGER NOT NULL DEFAULT 0,
              PRIMARY KEY (workset_id, repository_id)
          );
          CREATE INDEX IF NOT EXISTS workset_repositories_by_repository
@@ -1004,13 +1020,16 @@ fn persist_workset_repositories(
     for repository in &workset.repositories {
         transaction.execute(
             "INSERT INTO workset_repositories
-                (workset_id, repository_id, branch_override, base_branch_override)
-             VALUES (?1, ?2, ?3, ?4)",
+                (workset_id, repository_id, branch_override, base_branch_override,
+                 current_branch, is_dirty)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 workset.id,
                 repository.repository_id,
                 repository.branch_override,
                 repository.base_branch_override,
+                repository.current_branch,
+                bool_as_i64(repository.is_dirty),
             ],
         )?;
     }
@@ -1312,6 +1331,8 @@ mod tests {
                 repository_id: 1,
                 branch_override: Some("feature/service-a".into()),
                 base_branch_override: Some("develop".into()),
+                current_branch: "feature/service-a".into(),
+                is_dirty: false,
             }
         );
         assert_eq!(state.next_repository_id, 2);

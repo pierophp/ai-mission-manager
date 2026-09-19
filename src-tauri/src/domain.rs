@@ -45,10 +45,21 @@ pub struct WorksetRepositoryInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachedRepositoryInput {
+    pub name: String,
+    pub remote_url: String,
+    pub current_branch: String,
+    pub is_dirty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorksetRepository {
     pub repository_id: i64,
     pub branch_override: Option<String>,
     pub base_branch_override: Option<String>,
+    pub current_branch: String,
+    pub is_dirty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -329,6 +340,11 @@ pub enum Event {
         branch: String,
         repositories: Vec<WorksetRepositoryInput>,
     },
+    AttachWorkset {
+        item_id: i64,
+        root_directory: String,
+        repositories: Vec<AttachedRepositoryInput>,
+    },
     AddRepositoryToWorkset {
         workset_id: i64,
         repository_id: i64,
@@ -483,6 +499,8 @@ pub enum DomainError {
     EmptyRepositoryRemoteUrl,
     #[error("Repository name already exists in Project {project_id}: {name}")]
     RepositoryNameTaken { project_id: i64, name: String },
+    #[error("Repository {name} in Project {project_id} has a different remote URL")]
+    RepositoryRemoteMismatch { project_id: i64, name: String },
     #[error("Repository {repository_id} does not exist")]
     RepositoryNotFound { repository_id: i64 },
     #[error("Repository {repository_id} belongs to another Project than {project_id}")]
@@ -703,7 +721,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             if repositories.is_empty() {
                 return Err(DomainError::EmptyWorksetRepositories);
             }
-            let repositories = normalize_workset_repositories(&state, project_id, repositories)?;
+            let repositories =
+                normalize_workset_repositories(&state, project_id, &branch, repositories)?;
             let id = state.next_workset_id;
             let next_workset_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
             let workset = Workset {
@@ -723,6 +742,115 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     next_workset_id,
                 }],
             })
+        }
+        Event::AttachWorkset {
+            item_id,
+            root_directory,
+            repositories,
+        } => {
+            let root_directory = clean_name(root_directory, DomainError::EmptyWorksetRoot)?;
+            let project_id = item_project_id(&state, item_id)?;
+            if repositories.is_empty() {
+                return Err(DomainError::EmptyWorksetRepositories);
+            }
+
+            let mut attached_repositories = Vec::with_capacity(repositories.len());
+            let mut new_repositories = Vec::new();
+            let mut next_repository_id = state.next_repository_id;
+            let mut branch = None;
+            for input in repositories {
+                let name = clean_name(input.name, DomainError::EmptyRepositoryName)?;
+                if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+                    return Err(DomainError::InvalidRepositoryName);
+                }
+                if attached_repositories
+                    .iter()
+                    .any(|repository: &WorksetRepository| {
+                        state
+                            .repositories
+                            .iter()
+                            .find(|candidate| candidate.id == repository.repository_id)
+                            .is_some_and(|candidate| candidate.name == name)
+                    })
+                {
+                    return Err(DomainError::RepositoryNameTaken { project_id, name });
+                }
+                let remote_url =
+                    clean_name(input.remote_url, DomainError::EmptyRepositoryRemoteUrl)?;
+                let current_branch =
+                    clean_name(input.current_branch, DomainError::EmptyWorksetBranch)?;
+                let repository = state
+                    .repositories
+                    .iter()
+                    .find(|repository| {
+                        repository.project_id == project_id && repository.name == name
+                    })
+                    .cloned();
+                let repository = match repository {
+                    Some(repository) if repository.remote_url != remote_url => {
+                        return Err(DomainError::RepositoryRemoteMismatch { project_id, name });
+                    }
+                    Some(repository) => repository,
+                    None => {
+                        let id = next_repository_id;
+                        next_repository_id =
+                            id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+                        let repository = Repository {
+                            id,
+                            project_id,
+                            name,
+                            remote_url,
+                        };
+                        state.repositories.push(repository.clone());
+                        new_repositories.push((repository.clone(), next_repository_id));
+                        repository
+                    }
+                };
+                branch.get_or_insert_with(|| current_branch.clone());
+                attached_repositories.push(WorksetRepository {
+                    repository_id: repository.id,
+                    branch_override: None,
+                    base_branch_override: None,
+                    current_branch,
+                    is_dirty: input.is_dirty,
+                });
+            }
+
+            let id = state.next_workset_id;
+            let next_workset_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let branch = branch.expect("a non-empty attachment has a branch");
+            for repository in &mut attached_repositories {
+                if repository.current_branch != branch
+                    && !repository.current_branch.starts_with("HEAD (detached at ")
+                {
+                    repository.branch_override = Some(repository.current_branch.clone());
+                }
+            }
+            let workset = Workset {
+                id,
+                item_id,
+                root_directory,
+                branch,
+                repositories: attached_repositories,
+            };
+            state.next_repository_id = next_repository_id;
+            state.next_workset_id = next_workset_id;
+            state.worksets.push(workset.clone());
+
+            let mut effects = new_repositories
+                .into_iter()
+                .map(
+                    |(repository, next_repository_id)| Effect::PersistRepository {
+                        repository,
+                        next_repository_id,
+                    },
+                )
+                .collect::<Vec<_>>();
+            effects.push(Effect::PersistWorkset {
+                workset,
+                next_workset_id,
+            });
+            Ok(Decision { state, effects })
         }
         Event::AddRepositoryToWorkset {
             workset_id,
@@ -758,10 +886,17 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     workset_id,
                 });
             }
+            let branch_override = clean_optional_branch(branch_override)?;
+            let current_branch = branch_override
+                .as_deref()
+                .unwrap_or(&workset.branch)
+                .to_owned();
             let selected = WorksetRepository {
                 repository_id,
-                branch_override: clean_optional_branch(branch_override)?,
+                branch_override,
                 base_branch_override: clean_optional_branch(base_branch_override)?,
+                current_branch,
+                is_dirty: false,
             };
             let workset = state
                 .worksets
@@ -1404,6 +1539,7 @@ fn item_project_id(state: &DomainState, item_id: i64) -> Result<i64, DomainError
 fn normalize_workset_repositories(
     state: &DomainState,
     project_id: i64,
+    branch: &str,
     repositories: Vec<WorksetRepositoryInput>,
 ) -> Result<Vec<WorksetRepository>, DomainError> {
     let mut normalized = Vec::with_capacity(repositories.len());
@@ -1431,8 +1567,14 @@ fn normalize_workset_repositories(
         }
         normalized.push(WorksetRepository {
             repository_id: input.repository_id,
+            current_branch: input
+                .branch_override
+                .as_deref()
+                .unwrap_or(branch)
+                .to_owned(),
             branch_override: clean_optional_branch(input.branch_override)?,
             base_branch_override: clean_optional_branch(input.base_branch_override)?,
+            is_dirty: false,
         });
     }
     Ok(normalized)
@@ -2702,6 +2844,101 @@ mod tests {
     }
 
     #[test]
+    fn attaching_a_workset_registers_detected_repositories_and_keeps_their_state() {
+        let decision = decide(
+            state_with_item(7, "Work"),
+            Event::AttachWorkset {
+                item_id: 1,
+                root_directory: "/Users/me/worksets/PLAT-847".into(),
+                repositories: vec![AttachedRepositoryInput {
+                    name: "service-a".into(),
+                    remote_url: "git@github.com:acme/service-a.git".into(),
+                    current_branch: "feature/PLAT-847".into(),
+                    is_dirty: true,
+                }],
+            },
+        )
+        .expect("an existing Workset should attach");
+
+        assert_eq!(
+            decision.state.repositories,
+            vec![Repository {
+                id: 1,
+                project_id: 1,
+                name: "service-a".into(),
+                remote_url: "git@github.com:acme/service-a.git".into(),
+            }]
+        );
+        assert_eq!(
+            decision.state.worksets,
+            vec![Workset {
+                id: 1,
+                item_id: 1,
+                root_directory: "/Users/me/worksets/PLAT-847".into(),
+                branch: "feature/PLAT-847".into(),
+                repositories: vec![WorksetRepository {
+                    repository_id: 1,
+                    branch_override: None,
+                    base_branch_override: None,
+                    current_branch: "feature/PLAT-847".into(),
+                    is_dirty: true,
+                }],
+            }]
+        );
+        assert!(matches!(
+            decision.effects.as_slice(),
+            [
+                Effect::PersistRepository {
+                    next_repository_id: 2,
+                    ..
+                },
+                Effect::PersistWorkset {
+                    next_workset_id: 2,
+                    ..
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn attaching_a_workset_preserves_different_repository_branches_as_overrides() {
+        let decision = decide(
+            state_with_item(7, "Work"),
+            Event::AttachWorkset {
+                item_id: 1,
+                root_directory: "/Users/me/worksets/PLAT-847".into(),
+                repositories: vec![
+                    AttachedRepositoryInput {
+                        name: "service-a".into(),
+                        remote_url: "/Users/me/service-a".into(),
+                        current_branch: "main".into(),
+                        is_dirty: false,
+                    },
+                    AttachedRepositoryInput {
+                        name: "service-b".into(),
+                        remote_url: "/Users/me/service-b".into(),
+                        current_branch: "develop".into(),
+                        is_dirty: true,
+                    },
+                ],
+            },
+        )
+        .expect("an existing Workset should attach");
+
+        assert_eq!(decision.state.worksets[0].branch, "main");
+        assert_eq!(
+            decision.state.worksets[0].repositories[1],
+            WorksetRepository {
+                repository_id: 2,
+                branch_override: Some("develop".into()),
+                base_branch_override: None,
+                current_branch: "develop".into(),
+                is_dirty: true,
+            }
+        );
+    }
+
+    #[test]
     fn creating_a_workset_selects_repositories_with_independent_branch_overrides() {
         let mut state = state_with_item(7, "Work");
         state.repositories = vec![
@@ -2755,11 +2992,15 @@ mod tests {
                         repository_id: 1,
                         branch_override: None,
                         base_branch_override: Some("main".into()),
+                        current_branch: "feature/PLAT-847".into(),
+                        is_dirty: false,
                     },
                     WorksetRepository {
                         repository_id: 2,
                         branch_override: Some("feature/PLAT-847-worker".into()),
                         base_branch_override: Some("develop".into()),
+                        current_branch: "feature/PLAT-847-worker".into(),
+                        is_dirty: false,
                     },
                 ],
             }
@@ -2840,6 +3081,8 @@ mod tests {
                 repository_id: 2,
                 branch_override: Some("feature/first-worker".into()),
                 base_branch_override: Some("develop".into()),
+                current_branch: "feature/first-worker".into(),
+                is_dirty: false,
             }
         );
         assert!(matches!(

@@ -755,10 +755,28 @@ button:disabled {
 }
 
 .relationship-chip {
+  display: inline-grid;
+  gap: 2px;
   padding: 4px 6px;
   border-radius: 5px;
   background: #f6efe7;
   color: #765343;
+}
+
+.relationship-chip strong {
+  color: #765343;
+  font-size: 0.7rem;
+}
+
+.relationship-chip span,
+.workset-help {
+  color: #8b837a;
+  font-size: 0.66rem;
+}
+
+.workset-help {
+  margin: 0;
+  line-height: 1.4;
 }
 
 .relationship-form {

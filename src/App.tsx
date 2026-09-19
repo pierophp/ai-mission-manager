@@ -33,6 +33,8 @@ type WorksetRepository = {
   repository_id: number;
   branch_override: string | null;
   base_branch_override: string | null;
+  current_branch: string;
+  is_dirty: boolean;
 };
 
 type Workset = {
@@ -485,8 +487,12 @@ export function App() {
   }
 
   async function updateHomeAfterEdit() {
-    await refreshHome();
-    await refreshSearch();
+    const [loadedRepositories] = await Promise.all([
+      invoke<Repository[]>("list_repositories"),
+      refreshHome(),
+      refreshSearch(),
+    ]);
+    setRepositories(loadedRepositories);
   }
 
   return (
@@ -982,6 +988,7 @@ function ItemCard({
   const [issueBody, setIssueBody] = useState(view.item.notes);
   const [worksetRoot, setWorksetRoot] = useState("");
   const [worksetBranch, setWorksetBranch] = useState("");
+  const [attachWorksetRoot, setAttachWorksetRoot] = useState("");
   const [selectedRepositoryIds, setSelectedRepositoryIds] = useState<number[]>([]);
   const [worksetBranchOverrides, setWorksetBranchOverrides] = useState<
     Record<number, string>
@@ -1074,6 +1081,18 @@ function ItemCard({
       setSelectedRepositoryIds([]);
       setWorksetBranchOverrides({});
       setWorksetBaseBranchOverrides({});
+    });
+  }
+
+  async function handleAttachWorkset(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!attachWorksetRoot.trim()) return;
+    await saveItem(async () => {
+      await invoke<Workset>("attach_workset", {
+        itemId: view.item.id,
+        rootDirectory: attachWorksetRoot,
+      });
+      setAttachWorksetRoot("");
     });
   }
 
@@ -1259,10 +1278,10 @@ function ItemCard({
               <div className="workset-repositories">
                 {workset.repositories.map((selected) => (
                   <span className="relationship-chip" key={selected.repository_id}>
-                    {repositoryName(repositories, selected.repository_id)}
-                    {selected.branch_override
-                      ? ` · ${selected.branch_override}`
-                      : ""}
+                    <strong>{repositoryName(repositories, selected.repository_id)}</strong>
+                    <span>
+                      {selected.current_branch} · {selected.is_dirty ? "uncommitted changes" : "clean"}
+                    </span>
                   </span>
                 ))}
               </div>
@@ -1401,6 +1420,24 @@ function ItemCard({
             }
           >
             {isSaving ? "Checking out…" : "Create Workset"}
+          </button>
+        </form>
+        <form className="workset-form" onSubmit={handleAttachWorkset}>
+          <strong>Attach an Existing Workset</strong>
+          <label>
+            <span>Existing root directory</span>
+            <input
+              value={attachWorksetRoot}
+              onChange={(event) => setAttachWorksetRoot(event.target.value)}
+              placeholder="/Users/me/worksets/PLAT-847"
+              disabled={isSaving}
+            />
+          </label>
+          <p className="workset-help">
+            Inspects direct child repositories, branches, and uncommitted changes without modifying Git.
+          </p>
+          <button type="submit" disabled={isSaving || !attachWorksetRoot.trim()}>
+            {isSaving ? "Inspecting…" : "Attach Workset"}
           </button>
         </form>
       </div>

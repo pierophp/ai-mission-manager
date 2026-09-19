@@ -28,6 +28,7 @@ pub fn run() {
             app::create_project,
             app::register_repository,
             app::create_workset,
+            app::attach_workset,
             app::add_repository_to_workset,
             app::list_inbox_items,
             app::create_item,
