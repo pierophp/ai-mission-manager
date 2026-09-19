@@ -17,6 +17,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app::list_contexts,
+            app::list_projects,
+            app::create_context,
+            app::create_project,
             app::list_inbox_items,
             app::create_item,
         ])

@@ -117,6 +117,61 @@ h2 {
   box-shadow: 0 18px 50px rgba(91, 72, 50, 0.07);
 }
 
+.organise-card {
+  margin-top: 40px;
+  padding: 28px;
+  border: 1px solid #e4ddd2;
+  border-radius: 18px;
+  background: rgba(255, 253, 249, 0.7);
+}
+
+.organisation-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  gap: 32px;
+  margin-top: 28px;
+}
+
+h3 {
+  margin: 0 0 16px;
+  color: #766f67;
+  font-size: 0.78rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.compact-form {
+  display: grid;
+  gap: 12px;
+}
+
+.compact-form button {
+  justify-self: start;
+}
+
+.entity-list {
+  list-style: none;
+  margin: 20px 0 0;
+  padding: 0;
+}
+
+.entity-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 0;
+  border-bottom: 1px solid #e7e0d6;
+  font-size: 0.88rem;
+}
+
+.entity-meta {
+  color: #8b837a;
+  font-size: 0.74rem;
+  text-align: right;
+}
+
 .capture-form {
   align-items: end;
   gap: 14px;
@@ -229,6 +284,11 @@ button:disabled {
   .capture-form {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .organisation-grid {
+    grid-template-columns: 1fr;
+    gap: 30px;
   }
 
   button {
