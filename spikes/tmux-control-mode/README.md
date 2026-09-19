@@ -54,10 +54,18 @@ The control-mode client uses one `-C` flag because the app owns pipes rather tha
 
 The browser bridge uses Server-Sent Events for output and small HTTP POSTs for input and resize. It is only a visual harness; the production Tauri shell should call the same adapter directly. `snapshot()` uses `capture-pane -p -e` to seed an xterm.js view with the current screen because `%output` only reports bytes produced after the control-mode client attaches.
 
+## Remote result (issue #3)
+
+Result: **transport path passed in this environment**. The same adapter now starts `ssh -T` with a remote `tmux -C attach-session` command. The live proof confirms that a remote Pane streams output, accepts ordinary input and Ctrl-C, resizes through `refresh-client -C`, and keeps the same Pane ID and process PID. It then kills the remote control-mode client, verifies that the remote session and Pane remain, reconnects over SSH, and receives input again. The remote tmux server reports one session throughout, so attaching does not create a second remote session.
+
+The automated proof starts a real, temporary `sshd` on loopback with an ephemeral keypair. This proves the SSH transport and reconnect seam in this environment, but it is not a test against a separate physical Machine. Set `TMUX_REMOTE_PATH` when the remote tmux binary is not at the same absolute path as the local binary. The test requires `sshd`, `ssh-keygen`, and `tmux`.
+
+The browser bridge remains transport-agnostic: it consumes the same `TmuxControlPane` output/input/resize interface that the local proof exercises. The remote-specific work is isolated to the process-launch adapter, so the terminal view does not need a local-versus-remote branch.
+
 ## Important edges
 
 - `%output` payloads escape control bytes and backslashes as octal sequences; the adapter decodes them into bytes before handing them to xterm.js.
 - A control-mode client attached to a session receives notifications for every Pane in that session, so the adapter filters notifications by stable Pane ID.
 - `refresh-client -C` is the resize operation; ordinary window-size settings do not resize a control-mode client.
 - In a split tmux window, tmux allocates the resized client dimensions across the existing layout; the selected Pane therefore receives its layout share rather than the full browser width. The proof uses a one-Pane session. A production multi-Pane view should expose the actual Pane geometry or choose a layout policy before presenting a full-width xterm.
-- The spike proves only the local path. SSH transport, reconnect behavior and remote failure semantics belong to issue #3.
+- The spike does not validate latency, firewall behavior, or a remote Machine with a different operating system; those remain deployment checks for a real Machine.

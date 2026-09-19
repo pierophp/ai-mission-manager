@@ -16,7 +16,21 @@ export interface TmuxControlPaneOptions {
   socketName: string;
   sessionName: string;
   paneId: string;
+  transport?: TmuxTransport;
 }
+
+export interface SshTransportOptions {
+  kind: "ssh";
+  host: string;
+  user?: string;
+  port?: number;
+  identityFile?: string;
+  knownHostsFile?: string;
+  strictHostKeyChecking?: "yes" | "accept-new" | "no";
+  sshPath?: string;
+}
+
+export type TmuxTransport = { kind: "local" } | SshTransportOptions;
 
 interface PendingCommand {
   command: string;
@@ -76,6 +90,10 @@ function validateTmuxTarget(value: string): string {
     throw new Error(`tmux target contains unsupported characters: ${value}`);
   }
   return value;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
 function parsePaneInfo(line: string): PaneInfo | undefined {
@@ -147,20 +165,10 @@ export class TmuxControlPane extends EventEmitter {
       return;
     }
 
-    const child = spawn(
-      this.options.tmuxPath,
-      [
-        "-C",
-        "-f",
-        "/dev/null",
-        "-L",
-        this.options.socketName,
-        "attach-session",
-        "-t",
-        validateTmuxTarget(this.options.sessionName),
-      ],
-      { stdio: ["pipe", "pipe", "pipe"] },
-    );
+    const controlProcess = this.controlProcess();
+    const child = spawn(controlProcess.file, controlProcess.args, {
+      stdio: ["pipe", "pipe", "pipe"],
+    });
     this.child = child;
     this.sessionReady = new Promise<void>((resolve, reject) => {
       this.resolveSessionReady = resolve;
@@ -252,6 +260,51 @@ export class TmuxControlPane extends EventEmitter {
       this.queuedCommands.push({ command, resolve, reject, lines: [] });
       this.flushCommandQueue();
     });
+  }
+
+  private controlProcess(): { file: string; args: string[] } {
+    const tmuxArgs = [
+      "-C",
+      "-f",
+      "/dev/null",
+      "-L",
+      this.options.socketName,
+      "attach-session",
+      "-t",
+      validateTmuxTarget(this.options.sessionName),
+    ];
+    const transport = this.options.transport ?? { kind: "local" as const };
+    if (transport.kind === "local") {
+      return { file: this.options.tmuxPath, args: tmuxArgs };
+    }
+
+    if (transport.port !== undefined) {
+      assertPositiveInteger(transport.port, "SSH port");
+    }
+    if (!/^[\w.@:-]+$/.test(transport.host)) {
+      throw new Error(`SSH host contains unsupported characters: ${transport.host}`);
+    }
+    if (transport.user && !/^[\w.-]+$/.test(transport.user)) {
+      throw new Error(`SSH user contains unsupported characters: ${transport.user}`);
+    }
+
+    const target = transport.user ? `${transport.user}@${transport.host}` : transport.host;
+    const remoteCommand = [this.options.tmuxPath, ...tmuxArgs].map(shellQuote).join(" ");
+    const args = ["-T", "-o", "BatchMode=yes"];
+    if (transport.port !== undefined) {
+      args.push("-p", String(transport.port));
+    }
+    if (transport.identityFile) {
+      args.push("-i", transport.identityFile);
+    }
+    if (transport.knownHostsFile) {
+      args.push("-o", `UserKnownHostsFile=${transport.knownHostsFile}`);
+    }
+    if (transport.strictHostKeyChecking) {
+      args.push("-o", `StrictHostKeyChecking=${transport.strictHostKeyChecking}`);
+    }
+    args.push(target, remoteCommand);
+    return { file: transport.sshPath ?? "ssh", args };
   }
 
   private async waitForSessionReady(): Promise<void> {
