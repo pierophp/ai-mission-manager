@@ -42,9 +42,28 @@ interface PendingCommand {
 const paneIdPattern = /^%\d+$/;
 const sessionTargetPattern = /^[\w$@%+.,:=~-]+$/;
 
+export function validatePaneId(value: string): string {
+  if (!paneIdPattern.test(value)) {
+    throw new Error("invalid tmux pane ID: " + value);
+  }
+  return value;
+}
+
 function assertPositiveInteger(value: number, label: string): void {
   if (!Number.isInteger(value) || value < 1) {
     throw new RangeError(`${label} must be a positive integer`);
+  }
+}
+
+export function validateSshTransport(transport: SshTransportOptions): void {
+  if (transport.port !== undefined) {
+    assertPositiveInteger(transport.port, "SSH port");
+  }
+  if (!/^[\w.@:-]+$/.test(transport.host)) {
+    throw new Error("SSH host contains unsupported characters: " + transport.host);
+  }
+  if (transport.user && !/^[\w.-]+$/.test(transport.user)) {
+    throw new Error("SSH user contains unsupported characters: " + transport.user);
   }
 }
 
@@ -85,14 +104,14 @@ function decodePaneOutput(encoded: Buffer): Buffer {
   return Buffer.from(decoded);
 }
 
-function validateTmuxTarget(value: string): string {
+export function validateTmuxTarget(value: string): string {
   if (!sessionTargetPattern.test(value)) {
     throw new Error(`tmux target contains unsupported characters: ${value}`);
   }
   return value;
 }
 
-function shellQuote(value: string): string {
+export function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
@@ -278,15 +297,7 @@ export class TmuxControlPane extends EventEmitter {
       return { file: this.options.tmuxPath, args: tmuxArgs };
     }
 
-    if (transport.port !== undefined) {
-      assertPositiveInteger(transport.port, "SSH port");
-    }
-    if (!/^[\w.@:-]+$/.test(transport.host)) {
-      throw new Error(`SSH host contains unsupported characters: ${transport.host}`);
-    }
-    if (transport.user && !/^[\w.-]+$/.test(transport.user)) {
-      throw new Error(`SSH user contains unsupported characters: ${transport.user}`);
-    }
+    validateSshTransport(transport);
 
     const target = transport.user ? `${transport.user}@${transport.host}` : transport.host;
     const remoteCommand = [this.options.tmuxPath, ...tmuxArgs].map(shellQuote).join(" ");

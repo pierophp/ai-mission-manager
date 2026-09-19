@@ -62,6 +62,26 @@ The automated proof starts a real, temporary `sshd` on loopback with an ephemera
 
 The browser bridge remains transport-agnostic: it consumes the same `TmuxControlPane` output/input/resize interface that the local proof exercises. The remote-specific work is isolated to the process-launch adapter, so the terminal view does not need a local-versus-remote branch.
 
+## External terminal focus proof (issue #4)
+
+Result: **yes**. A stored `TmuxControlPaneOptions` identity can be opened in a real terminal client without starting a new session or choosing the session's current Pane.
+
+The external-terminal seam is:
+
+```text
+buildPaneAttachCommand(Machine/session/Pane identity)
+  -> guarded shell command
+
+openPaneInTerminal(identity)
+  -> macOS Terminal.app window
+```
+
+The generated command first runs `display-message` against the stored Pane ID and checks that the Pane still belongs to the stored session. Only then does it run `attach-session -t <pane-id>`. A missing Pane or a Pane found in another session prints an error and exits before any terminal client is attached.
+
+Local identities run tmux directly. Remote identities run the same guarded command through `ssh -tt`, which gives the remote tmux client the real terminal required for interactive use. The automated proof uses macOS `script` to allocate a PTY, then verifies that tmux reports a non-control-mode client focused on the exact stored Pane ID. It covers both local and SSH-backed loopback Machines, plus the missing-Pane refusal path.
+
+The AppleScript wrapper is intentionally thin: it opens Terminal.app and asks it to execute the same guarded command. The live test does not open a GUI window, but it exercises the command in a real PTY-backed terminal client, which is the part that determines Pane resolution and focus. GUI permission and Terminal.app window management remain macOS shell concerns.
+
 ## Important edges
 
 - `%output` payloads escape control bytes and backslashes as octal sequences; the adapter decodes them into bytes before handing them to xterm.js.

@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 
 import { TmuxControlPane } from "../src/control-mode.js";
+import { buildPaneAttachCommand } from "../src/external-terminal.js";
 import { createEmbeddedTerminalServer } from "../src/server.js";
 
 const remoteTmuxPath =
@@ -242,6 +243,46 @@ function waitForOutput(pane: TmuxControlPane, text: string): Promise<Buffer> {
   });
 }
 
+function startRealTerminal(command: string): ChildProcess {
+  return spawn("script", ["-q", "/dev/null", "sh", "-c", command], {
+    env: { ...process.env, TERM: "xterm-256color" },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+}
+
+function waitForRemoteTerminalClient(
+  remoteMachine: LoopbackSshd,
+  paneId: string,
+): Promise<{ tty: string; paneId: string }> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      clearInterval(interval);
+      reject(new Error("timed out waiting for an external remote terminal client"));
+    }, 5_000);
+    const interval = setInterval(() => {
+      try {
+        const line = remoteMachine
+          .runTmux(["list-clients", "-F", "#{client_tty}|#{client_control_mode}|#{pane_id}"])
+          .trim();
+        const [tty, controlMode, currentPaneId] = line.split("|");
+        if (tty && controlMode === "0" && currentPaneId === paneId) {
+          clearTimeout(timeout);
+          clearInterval(interval);
+          resolve({ tty, paneId: currentPaneId });
+        }
+      } catch {
+        // The SSH-backed tmux client may not be visible for a query yet.
+      }
+    }, 50);
+  });
+}
+
+function waitForTerminalExit(child: ChildProcess): Promise<void> {
+  return new Promise((resolve) => {
+    child.once("close", () => resolve());
+  });
+}
+
 function remotePaneSnapshot(machine: LoopbackSshd): { paneId: string; pid: number; columns: number; rows: number } {
   const line = machine
     .runTmux(["list-panes", "-t", sessionName, "-F", "#{pane_id}|#{pane_pid}|#{pane_width}|#{pane_height}"])
@@ -393,5 +434,44 @@ test(
       await pane.close();
       await reconnectedPane?.close();
     }
+  },
+);
+
+test(
+  "opens a real terminal client focused on the stored remote Pane",
+  { skip: !sshdAvailable },
+  async () => {
+    assert.ok(machine);
+    assert.ok(remotePaneId);
+    const identity = {
+      tmuxPath: remoteTmuxPath,
+      socketName,
+      sessionName,
+      paneId: remotePaneId,
+      transport: {
+        kind: "ssh" as const,
+        host: "127.0.0.1",
+        port: machine.port,
+        user: username,
+        identityFile: machine.clientKeyPath,
+        strictHostKeyChecking: "no" as const,
+        knownHostsFile: "/dev/null",
+        sshPath,
+      },
+    };
+    const child = startRealTerminal(buildPaneAttachCommand(identity));
+    const client = await waitForRemoteTerminalClient(machine, remotePaneId);
+
+    assert.equal(client.paneId, remotePaneId);
+    assert.equal(
+      machine
+        .runTmux(["display-message", "-p", "-t", client.paneId, "#{session_name}"])
+        .trim(),
+      sessionName,
+    );
+
+    machine.runTmux(["detach-client", "-t", client.tty]);
+    child.kill("SIGTERM");
+    await waitForTerminalExit(child);
   },
 );
