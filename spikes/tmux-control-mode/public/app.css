@@ -1,0 +1,67 @@
+:root {
+  color: #e4e7ec;
+  background: #111318;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  display: grid;
+  gap: 16px;
+  height: 100vh;
+  box-sizing: border-box;
+  padding: 24px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+}
+
+h1,
+p {
+  margin: 0;
+}
+
+h1 {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.eyebrow,
+.hint,
+.status {
+  color: #8d96a8;
+  font-size: 12px;
+}
+
+.eyebrow {
+  margin-bottom: 6px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.status {
+  color: #8ce0a4;
+}
+
+#terminal {
+  min-height: 0;
+  padding: 12px;
+  border: 1px solid #2e3542;
+  border-radius: 10px;
+  background: #0b0d11;
+}
+
+.xterm {
+  height: 100%;
+}
+
+.hint {
+  text-align: right;
+}

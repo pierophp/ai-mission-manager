@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>tmux control-mode spike</title>
+    <link rel="stylesheet" href="/vendor/xterm.css" />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">AI Mission Manager · Spike #2</p>
+          <h1>Existing tmux Pane</h1>
+        </div>
+        <p id="status" class="status">connecting…</p>
+      </header>
+      <section id="terminal" aria-label="Embedded terminal"></section>
+      <p class="hint">This view attaches to the Pane supplied at launch. It does not create a session or process.</p>
+    </main>
+    <script src="/vendor/xterm.js"></script>
+    <script src="/vendor/addon-fit.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

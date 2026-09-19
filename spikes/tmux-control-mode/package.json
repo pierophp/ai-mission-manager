@@ -1,0 +1,19 @@
+{
+  "name": "tmux-control-mode-spike",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --check public/app.js && node --test dist/test/control-mode.test.js",
+    "start": "npm run build && node dist/src/server.js"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "latest",
+    "@xterm/xterm": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "typescript": "latest"
+  }
+}
