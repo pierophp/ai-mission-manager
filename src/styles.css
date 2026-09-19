@@ -247,6 +247,44 @@ button:disabled {
   align-items: start;
 }
 
+.attention-entries {
+  margin-top: 18px;
+  padding: 15px;
+  border: 1px solid #e2cbbb;
+  border-radius: 14px;
+  background: #fff8f2;
+}
+
+.attention-entry-list {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+}
+
+.attention-entry-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 11px;
+  border: 1px solid #eedbcf;
+  border-radius: 9px;
+  background: #fffdf9;
+}
+
+.attention-entry-card strong {
+  display: block;
+  color: #4a4139;
+  font-size: 0.76rem;
+}
+
+.attention-entry-card p {
+  margin: 0;
+  color: #765343;
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+
 .home-column {
   min-width: 0;
   padding: 15px;
@@ -440,6 +478,65 @@ button:disabled {
   margin: 7px 0 0;
 }
 
+.link-attention {
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid #eedbcf;
+}
+
+.link-attention strong {
+  color: #9a5a3d;
+  font-size: 0.7rem;
+}
+
+.link-attention p {
+  margin: 4px 0 7px;
+  color: #765343;
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.attention-policy {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px 10px;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid #eee8df;
+}
+
+.attention-policy .relationship-label {
+  width: 100%;
+}
+
+.attention-policy label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: #8b837a;
+  font-size: 0.66rem;
+  font-weight: 600;
+}
+
+.attention-policy input[type="checkbox"] {
+  width: auto;
+  accent-color: #b05c39;
+}
+
+.text-button {
+  padding: 7px 0;
+  background: transparent;
+  color: #9a5a3d;
+  font-size: 0.68rem;
+}
+
+.text-button:hover:not(:disabled) {
+  background: transparent;
+  color: #984a2b;
+  text-decoration: underline;
+}
+
 .external-link-form {
   display: flex;
   gap: 6px;
@@ -555,6 +652,39 @@ button:disabled {
   margin-top: 28px;
 }
 
+.attention-default-form {
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) minmax(150px, 0.7fr) minmax(220px, 1.2fr) auto;
+  align-items: end;
+  gap: 14px;
+  margin-top: 30px;
+  padding-top: 22px;
+  border-top: 1px solid #e7e0d6;
+}
+
+.attention-default-form h3 {
+  color: #24221f;
+}
+
+.attention-default-options {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.attention-default-options label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.68rem;
+}
+
+.attention-default-options input[type="checkbox"] {
+  width: auto;
+  accent-color: #b05c39;
+}
+
 .compact-form {
   display: grid;
   gap: 12px;
@@ -613,9 +743,17 @@ button:disabled {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .attention-entry-card {
+    grid-template-columns: 1fr;
+  }
+
   .organisation-grid {
     grid-template-columns: 1fr;
     gap: 30px;
+  }
+
+  .attention-default-form {
+    grid-template-columns: 1fr;
   }
 
   .capture-form button,

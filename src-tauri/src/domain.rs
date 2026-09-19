@@ -97,11 +97,82 @@ pub struct ExternalSnapshot {
     pub fetched_at: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExternalChangeKind {
+    #[serde(rename = "title")]
+    Title,
+    #[serde(rename = "state")]
+    State,
+    #[serde(rename = "metadata")]
+    Metadata,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalChange {
+    pub kind: ExternalChangeKind,
+    pub key: Option<String>,
+    pub previous: Option<String>,
+    pub current: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Activity {
+    pub id: i64,
+    pub external_object_id: i64,
+    pub observed_at: i64,
+    pub changes: Vec<ExternalChange>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExternalChangePolicy {
+    pub title: bool,
+    pub state: bool,
+    pub metadata: bool,
+}
+
+impl ExternalChangePolicy {
+    pub const fn all() -> Self {
+        Self {
+            title: true,
+            state: true,
+            metadata: true,
+        }
+    }
+
+    fn allows(self, kind: ExternalChangeKind) -> bool {
+        match kind {
+            ExternalChangeKind::Title => self.title,
+            ExternalChangeKind::State => self.state,
+            ExternalChangeKind::Metadata => self.metadata,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextAttentionDefault {
+    pub context_id: i64,
+    pub object_kind: ExternalObjectKind,
+    pub policy: ExternalChangePolicy,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
     pub id: i64,
     pub item_id: i64,
     pub external_object_id: i64,
+    pub reviewed_activity_id: i64,
+    pub attention_policy: Option<ExternalChangePolicy>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionEntry {
+    pub link_id: i64,
+    pub item_id: i64,
+    pub external_object_id: i64,
+    pub source_title: String,
+    pub source_url: String,
+    pub activities: Vec<Activity>,
+    pub summary: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,6 +180,8 @@ pub struct ExternalLinkView {
     pub link: Link,
     pub object: ExternalObject,
     pub snapshot: Option<ExternalSnapshot>,
+    pub attention_policy: ExternalChangePolicy,
+    pub attention_entry: Option<AttentionEntry>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +218,7 @@ pub struct ItemView {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HomeView {
     pub needs_attention: Vec<ItemView>,
+    pub attention_entries: Vec<AttentionEntry>,
     pub running: Vec<ItemView>,
     pub waiting: Vec<ItemView>,
     pub due: Vec<ItemView>,
@@ -159,6 +233,7 @@ pub struct DomainState {
     pub next_item_number: i64,
     pub next_external_object_id: i64,
     pub next_link_id: i64,
+    pub next_activity_id: i64,
     pub contexts: Vec<Context>,
     pub projects: Vec<Project>,
     pub items: Vec<Item>,
@@ -166,6 +241,8 @@ pub struct DomainState {
     pub external_objects: Vec<ExternalObject>,
     pub links: Vec<Link>,
     pub snapshots: Vec<ExternalSnapshot>,
+    pub activities: Vec<Activity>,
+    pub attention_defaults: Vec<ContextAttentionDefault>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +286,18 @@ pub enum Event {
         external_object_id: i64,
         snapshot: ExternalSnapshotData,
     },
+    SetLinkAttentionPolicy {
+        link_id: i64,
+        policy: Option<ExternalChangePolicy>,
+    },
+    SetContextAttentionDefault {
+        context_id: i64,
+        object_kind: ExternalObjectKind,
+        policy: ExternalChangePolicy,
+    },
+    MarkLinkReviewed {
+        link_id: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -240,8 +329,18 @@ pub enum Effect {
         link: Link,
         next_link_id: i64,
     },
+    PersistLinkState {
+        link: Link,
+    },
     PersistExternalSnapshot {
         snapshot: ExternalSnapshot,
+    },
+    PersistActivity {
+        activity: Activity,
+        next_activity_id: i64,
+    },
+    PersistContextAttentionDefault {
+        attention_default: ContextAttentionDefault,
     },
 }
 
@@ -287,6 +386,8 @@ pub enum DomainError {
     ExternalObjectNotFound { external_object_id: i64 },
     #[error("the Link already exists")]
     LinkAlreadyExists,
+    #[error("Link {link_id} does not exist")]
+    LinkNotFound { link_id: i64 },
 }
 
 pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainError> {
@@ -544,10 +645,19 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let next_link_id = link_id
                 .checked_add(1)
                 .ok_or(DomainError::SequenceExhausted)?;
+            let reviewed_activity_id = state
+                .activities
+                .iter()
+                .filter(|activity| activity.external_object_id == external_object.id)
+                .map(|activity| activity.id)
+                .max()
+                .unwrap_or_default();
             let link = Link {
                 id: link_id,
                 item_id,
                 external_object_id: external_object.id,
+                reviewed_activity_id,
+                attention_policy: None,
             };
             state.next_link_id = next_link_id;
             state.links.push(link.clone());
@@ -592,11 +702,98 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 metadata: snapshot_data.metadata,
                 fetched_at: snapshot_data.fetched_at,
             };
+            let changes = state
+                .snapshots
+                .iter()
+                .find(|existing| existing.external_object_id == external_object_id)
+                .map(|previous| snapshot_changes(previous, &snapshot))
+                .unwrap_or_default();
             upsert_snapshot(&mut state, snapshot.clone());
+
+            let mut effects = Vec::new();
+            if !changes.is_empty() {
+                let id = state.next_activity_id;
+                let next_activity_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+                let activity = Activity {
+                    id,
+                    external_object_id,
+                    observed_at: snapshot.fetched_at,
+                    changes,
+                };
+                state.next_activity_id = next_activity_id;
+                state.activities.push(activity.clone());
+                effects.push(Effect::PersistActivity {
+                    activity,
+                    next_activity_id,
+                });
+            }
+            effects.push(Effect::PersistExternalSnapshot { snapshot });
+
+            Ok(Decision { state, effects })
+        }
+        Event::SetLinkAttentionPolicy { link_id, policy } => {
+            let link = state
+                .links
+                .iter_mut()
+                .find(|link| link.id == link_id)
+                .ok_or(DomainError::LinkNotFound { link_id })?;
+            link.attention_policy = policy;
+            let link = link.clone();
 
             Ok(Decision {
                 state,
-                effects: vec![Effect::PersistExternalSnapshot { snapshot }],
+                effects: vec![Effect::PersistLinkState { link }],
+            })
+        }
+        Event::SetContextAttentionDefault {
+            context_id,
+            object_kind,
+            policy,
+        } => {
+            ensure_context(&state, context_id)?;
+            let attention_default = ContextAttentionDefault {
+                context_id,
+                object_kind,
+                policy,
+            };
+            if let Some(existing) = state.attention_defaults.iter_mut().find(|existing| {
+                existing.context_id == context_id && existing.object_kind == object_kind
+            }) {
+                *existing = attention_default.clone();
+            } else {
+                state.attention_defaults.push(attention_default.clone());
+            }
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistContextAttentionDefault { attention_default }],
+            })
+        }
+        Event::MarkLinkReviewed { link_id } => {
+            let external_object_id = state
+                .links
+                .iter()
+                .find(|link| link.id == link_id)
+                .ok_or(DomainError::LinkNotFound { link_id })?
+                .external_object_id;
+            let reviewed_activity_id = state
+                .activities
+                .iter()
+                .filter(|activity| activity.external_object_id == external_object_id)
+                .map(|activity| activity.id)
+                .max()
+                .unwrap_or_default();
+            let link = state
+                .links
+                .iter_mut()
+                .find(|link| link.id == link_id)
+                .expect("the Link was checked above");
+            link.reviewed_activity_id = reviewed_activity_id;
+            let link = link.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistLinkState { link }],
             })
         }
     }
@@ -605,6 +802,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
 pub fn home_view(state: &DomainState, context_id: Option<i64>, now: &str) -> HomeView {
     let mut view = HomeView {
         needs_attention: Vec::new(),
+        attention_entries: attention_entries(state, context_id),
         running: Vec::new(),
         waiting: Vec::new(),
         due: Vec::new(),
@@ -619,7 +817,10 @@ pub fn home_view(state: &DomainState, context_id: Option<i64>, now: &str) -> Hom
         if is_due {
             view.due.push(item.clone());
         }
-        if is_due || item.item.status == ItemStatus::Inbox {
+        if is_due
+            || item.item.status == ItemStatus::Inbox
+            || item.links.iter().any(|link| link.attention_entry.is_some())
+        {
             view.needs_attention.push(item.clone());
         }
         match item.item.status {
@@ -666,7 +867,30 @@ pub fn external_link_view(state: &DomainState, link: &Link) -> Option<ExternalLi
         link: link.clone(),
         object: object.clone(),
         snapshot,
+        attention_policy: effective_attention_policy(state, link, object),
+        attention_entry: attention_entry_for_link(state, link, object),
     })
+}
+
+pub fn attention_entries(state: &DomainState, context_id: Option<i64>) -> Vec<AttentionEntry> {
+    state
+        .links
+        .iter()
+        .filter(|link| {
+            context_id.is_none_or(|context_id| {
+                item_context_id(state, link.item_id)
+                    .map(|link_context_id| link_context_id == context_id)
+                    .unwrap_or(false)
+            })
+        })
+        .filter_map(|link| {
+            let object = state
+                .external_objects
+                .iter()
+                .find(|object| object.id == link.external_object_id)?;
+            attention_entry_for_link(state, link, object)
+        })
+        .collect()
 }
 
 fn item_views(state: &DomainState, context_id: Option<i64>) -> Vec<ItemView> {
@@ -763,6 +987,150 @@ fn upsert_snapshot(state: &mut DomainState, snapshot: ExternalSnapshot) {
         *existing = snapshot;
     } else {
         state.snapshots.push(snapshot);
+    }
+}
+
+fn effective_attention_policy(
+    state: &DomainState,
+    link: &Link,
+    object: &ExternalObject,
+) -> ExternalChangePolicy {
+    if let Some(policy) = link.attention_policy {
+        return policy;
+    }
+    let context_id = item_context_id(state, link.item_id).ok();
+    context_id
+        .and_then(|context_id| {
+            state.attention_defaults.iter().find(|attention_default| {
+                attention_default.context_id == context_id
+                    && attention_default.object_kind == object.kind
+            })
+        })
+        .map(|attention_default| attention_default.policy)
+        .unwrap_or_else(ExternalChangePolicy::all)
+}
+
+fn attention_entry_for_link(
+    state: &DomainState,
+    link: &Link,
+    object: &ExternalObject,
+) -> Option<AttentionEntry> {
+    let policy = effective_attention_policy(state, link, object);
+    let activities = state
+        .activities
+        .iter()
+        .filter(|activity| {
+            activity.external_object_id == object.id && activity.id > link.reviewed_activity_id
+        })
+        .filter_map(|activity| {
+            let changes = activity
+                .changes
+                .iter()
+                .filter(|change| policy.allows(change.kind))
+                .cloned()
+                .collect::<Vec<_>>();
+            (!changes.is_empty()).then_some(Activity {
+                id: activity.id,
+                external_object_id: activity.external_object_id,
+                observed_at: activity.observed_at,
+                changes,
+            })
+        })
+        .collect::<Vec<_>>();
+    if activities.is_empty() {
+        return None;
+    }
+
+    let source_title = state
+        .snapshots
+        .iter()
+        .find(|snapshot| snapshot.external_object_id == object.id)
+        .map(|snapshot| snapshot.title.clone())
+        .unwrap_or_else(|| object.canonical_url.clone());
+    let summary = activities
+        .iter()
+        .flat_map(|activity| activity.changes.iter())
+        .map(format_change)
+        .collect::<Vec<_>>()
+        .join("; ");
+
+    Some(AttentionEntry {
+        link_id: link.id,
+        item_id: link.item_id,
+        external_object_id: object.id,
+        source_title,
+        source_url: object.canonical_url.clone(),
+        activities,
+        summary,
+    })
+}
+
+fn snapshot_changes(
+    previous: &ExternalSnapshot,
+    current: &ExternalSnapshot,
+) -> Vec<ExternalChange> {
+    let mut changes = Vec::new();
+    if previous.title != current.title {
+        changes.push(ExternalChange {
+            kind: ExternalChangeKind::Title,
+            key: None,
+            previous: Some(previous.title.clone()),
+            current: Some(current.title.clone()),
+        });
+    }
+    if previous.state != current.state {
+        changes.push(ExternalChange {
+            kind: ExternalChangeKind::State,
+            key: None,
+            previous: Some(previous.state.clone()),
+            current: Some(current.state.clone()),
+        });
+    }
+
+    let mut keys = previous
+        .metadata
+        .iter()
+        .map(|metadata| metadata.key.clone())
+        .chain(current.metadata.iter().map(|metadata| metadata.key.clone()))
+        .collect::<Vec<_>>();
+    keys.sort();
+    keys.dedup();
+    for key in keys {
+        let previous_value = previous
+            .metadata
+            .iter()
+            .find(|metadata| metadata.key == key)
+            .map(|metadata| metadata.value.clone());
+        let current_value = current
+            .metadata
+            .iter()
+            .find(|metadata| metadata.key == key)
+            .map(|metadata| metadata.value.clone());
+        if previous_value != current_value {
+            changes.push(ExternalChange {
+                kind: ExternalChangeKind::Metadata,
+                key: Some(key),
+                previous: previous_value,
+                current: current_value,
+            });
+        }
+    }
+    changes
+}
+
+fn format_change(change: &ExternalChange) -> String {
+    let label = match change.kind {
+        ExternalChangeKind::Title => "Title".to_owned(),
+        ExternalChangeKind::State => "State".to_owned(),
+        ExternalChangeKind::Metadata => {
+            format!("Metadata {}", change.key.as_deref().unwrap_or("value"))
+        }
+    };
+    match (&change.previous, &change.current) {
+        (Some(previous), Some(current)) => format!("{label} changed from {previous} to {current}"),
+        (None, Some(current)) => format!("{label} added as {current}"),
+        (Some(previous), None) => format!("{label} removed (was {previous})"),
+        (None, None) => format!("{label} changed"),
     }
 }
 
@@ -1422,10 +1790,223 @@ mod tests {
         assert_eq!(refreshed.state.snapshots[0].fetched_at, 200);
         assert_eq!(
             refreshed.effects,
-            vec![Effect::PersistExternalSnapshot {
-                snapshot: refreshed.state.snapshots[0].clone(),
-            }]
+            vec![
+                Effect::PersistActivity {
+                    activity: refreshed.state.activities[0].clone(),
+                    next_activity_id: 2,
+                },
+                Effect::PersistExternalSnapshot {
+                    snapshot: refreshed.state.snapshots[0].clone(),
+                },
+            ]
         );
+    }
+
+    #[test]
+    fn refreshing_a_changed_object_records_activity_and_one_attention_entry_per_link() {
+        let linked = decide(
+            state_with_item(7, "Work"),
+            Event::LinkExternalObject {
+                item_id: 1,
+                object: ExternalObjectInput {
+                    provider: ExternalProvider::GitHub,
+                    kind: ExternalObjectKind::Issue,
+                    external_key: "issue:acme/app#7".into(),
+                    canonical_url: "https://github.com/acme/app/issues/7".into(),
+                },
+                snapshot: Some(ExternalSnapshotData {
+                    title: "Old title".into(),
+                    state: "OPEN".into(),
+                    metadata: vec![ExternalMetadata {
+                        key: "author".into(),
+                        value: "octocat".into(),
+                    }],
+                    fetched_at: 100,
+                }),
+            },
+        )
+        .expect("the object should link to the Item");
+
+        let refreshed = decide(
+            linked.state,
+            Event::RefreshExternalObject {
+                external_object_id: 1,
+                snapshot: ExternalSnapshotData {
+                    title: "New title".into(),
+                    state: "CLOSED".into(),
+                    metadata: vec![ExternalMetadata {
+                        key: "author".into(),
+                        value: "octocat".into(),
+                    }],
+                    fetched_at: 200,
+                },
+            },
+        )
+        .expect("the changed snapshot should be recorded");
+
+        assert_eq!(refreshed.state.activities.len(), 1);
+        assert_eq!(refreshed.state.activities[0].changes.len(), 2);
+        assert_eq!(
+            refreshed.state.activities[0].changes[0].kind,
+            ExternalChangeKind::Title
+        );
+        assert_eq!(
+            refreshed.state.activities[0].changes[1].kind,
+            ExternalChangeKind::State
+        );
+        let view = home_view(&refreshed.state, None, "2026-09-20T00:00");
+        assert_eq!(view.attention_entries.len(), 1);
+        assert_eq!(view.attention_entries[0].activities.len(), 1);
+        assert!(view.attention_entries[0].summary.contains("State changed"));
+        assert_eq!(
+            refreshed.state.links[0].reviewed_activity_id, 0,
+            "refreshing must not review the Link"
+        );
+    }
+
+    #[test]
+    fn attention_defaults_and_link_overrides_filter_activity_without_losing_history() {
+        let configured = decide(
+            state_with_item(7, "Work"),
+            Event::SetContextAttentionDefault {
+                context_id: 7,
+                object_kind: ExternalObjectKind::Issue,
+                policy: ExternalChangePolicy {
+                    title: false,
+                    state: true,
+                    metadata: false,
+                },
+            },
+        )
+        .expect("the Context default should be configurable");
+        let linked = decide(
+            configured.state,
+            Event::LinkExternalObject {
+                item_id: 1,
+                object: ExternalObjectInput {
+                    provider: ExternalProvider::GitHub,
+                    kind: ExternalObjectKind::Issue,
+                    external_key: "issue:acme/app#7".into(),
+                    canonical_url: "https://github.com/acme/app/issues/7".into(),
+                },
+                snapshot: Some(ExternalSnapshotData {
+                    title: "Old title".into(),
+                    state: "OPEN".into(),
+                    metadata: vec![ExternalMetadata {
+                        key: "author".into(),
+                        value: "octocat".into(),
+                    }],
+                    fetched_at: 100,
+                }),
+            },
+        )
+        .expect("the object should link to the Item");
+        let refreshed = decide(
+            linked.state,
+            Event::RefreshExternalObject {
+                external_object_id: 1,
+                snapshot: ExternalSnapshotData {
+                    title: "New title".into(),
+                    state: "CLOSED".into(),
+                    metadata: vec![ExternalMetadata {
+                        key: "author".into(),
+                        value: "someone-else".into(),
+                    }],
+                    fetched_at: 200,
+                },
+            },
+        )
+        .expect("the changed snapshot should be recorded");
+
+        let view = home_view(&refreshed.state, None, "2026-09-20T00:00");
+        assert_eq!(view.attention_entries.len(), 1);
+        assert_eq!(view.attention_entries[0].activities[0].changes.len(), 1);
+        assert_eq!(
+            view.attention_entries[0].activities[0].changes[0].kind,
+            ExternalChangeKind::State
+        );
+        assert_eq!(refreshed.state.activities[0].changes.len(), 3);
+
+        let overridden = decide(
+            refreshed.state,
+            Event::SetLinkAttentionPolicy {
+                link_id: 1,
+                policy: Some(ExternalChangePolicy {
+                    title: true,
+                    state: false,
+                    metadata: false,
+                }),
+            },
+        )
+        .expect("the Link policy should be configurable");
+        let overridden_view = home_view(&overridden.state, None, "2026-09-20T00:00");
+        assert_eq!(overridden_view.attention_entries.len(), 1);
+        assert_eq!(
+            overridden_view.attention_entries[0].activities[0].changes[0].kind,
+            ExternalChangeKind::Title
+        );
+    }
+
+    #[test]
+    fn marking_one_link_reviewed_leaves_the_other_link_for_the_same_object_unreviewed() {
+        let mut state = state_with_item(7, "Work");
+        state.items.push(Item {
+            id: 2,
+            human_identifier: "MC-2".into(),
+            title: "Second Item".into(),
+            project_id: 1,
+            status: ItemStatus::Waiting,
+            notes: String::new(),
+            reminder_at: None,
+        });
+        state.next_item_id = 3;
+        state.next_item_number = 3;
+        let object = ExternalObjectInput {
+            provider: ExternalProvider::GitHub,
+            kind: ExternalObjectKind::PullRequest,
+            external_key: "pull_request:acme/app#7".into(),
+            canonical_url: "https://github.com/acme/app/pull/7".into(),
+        };
+        let first = decide(
+            state,
+            Event::LinkExternalObject {
+                item_id: 1,
+                object: object.clone(),
+                snapshot: Some(snapshot_data("Old title", 100)),
+            },
+        )
+        .expect("the first Link should be created");
+        let second = decide(
+            first.state,
+            Event::LinkExternalObject {
+                item_id: 2,
+                object,
+                snapshot: None,
+            },
+        )
+        .expect("the second Link should be created");
+        let refreshed = decide(
+            second.state,
+            Event::RefreshExternalObject {
+                external_object_id: 1,
+                snapshot: snapshot_data("New title", 200),
+            },
+        )
+        .expect("the shared object should refresh once");
+        assert_eq!(
+            home_view(&refreshed.state, None, "now")
+                .attention_entries
+                .len(),
+            2
+        );
+
+        let reviewed = decide(refreshed.state, Event::MarkLinkReviewed { link_id: 1 })
+            .expect("mark reviewed should be explicit");
+        let entries = home_view(&reviewed.state, None, "now").attention_entries;
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].link_id, 2);
+        assert_eq!(reviewed.state.links[0].reviewed_activity_id, 1);
+        assert_eq!(reviewed.state.links[1].reviewed_activity_id, 0);
     }
 
     fn snapshot_data(title: &str, fetched_at: i64) -> ExternalSnapshotData {
@@ -1465,6 +2046,7 @@ mod tests {
             next_item_number: 1,
             next_external_object_id: 1,
             next_link_id: 1,
+            next_activity_id: 1,
             contexts: contexts
                 .iter()
                 .map(|(id, name)| Context {
@@ -1489,6 +2071,8 @@ mod tests {
             external_objects: Vec::new(),
             links: Vec::new(),
             snapshots: Vec::new(),
+            activities: Vec::new(),
+            attention_defaults: Vec::new(),
         }
     }
 
@@ -1500,6 +2084,7 @@ mod tests {
             next_item_number: 1,
             next_external_object_id: 1,
             next_link_id: 1,
+            next_activity_id: 1,
             contexts: Vec::new(),
             projects: Vec::new(),
             items: Vec::new(),
@@ -1507,6 +2092,8 @@ mod tests {
             external_objects: Vec::new(),
             links: Vec::new(),
             snapshots: Vec::new(),
+            activities: Vec::new(),
+            attention_defaults: Vec::new(),
         }
     }
 }

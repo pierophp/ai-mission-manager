@@ -19,6 +19,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app::list_contexts,
             app::list_projects,
+            app::list_context_attention_defaults,
             app::get_home,
             app::search_items_command,
             app::create_context,
@@ -31,6 +32,10 @@ pub fn run() {
             app::set_item_relation,
             app::link_external_object,
             app::refresh_external_object,
+            app::poll_external_objects,
+            app::set_link_attention_policy,
+            app::set_context_attention_default,
+            app::mark_link_reviewed,
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Mission Manager");

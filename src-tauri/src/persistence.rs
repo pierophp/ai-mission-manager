@@ -4,9 +4,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 
 use crate::domain::{
-    Context, DomainState, Effect, ExternalMetadata, ExternalObject, ExternalObjectKind,
-    ExternalProvider, ExternalSnapshot, Item, ItemRelation, ItemRelationKind, ItemStatus, Link,
-    Project, ProjectDefaults,
+    Activity, Context, ContextAttentionDefault, DomainState, Effect, ExternalChangePolicy,
+    ExternalMetadata, ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, Item,
+    ItemRelation, ItemRelationKind, ItemStatus, Link, Project, ProjectDefaults,
 };
 
 #[derive(Debug, Error)]
@@ -25,6 +25,8 @@ pub enum StoreError {
     InvalidExternalObjectKind(String),
     #[error("invalid External Object metadata in database: {0}")]
     InvalidExternalMetadata(String),
+    #[error("invalid Activity changes in database: {0}")]
+    InvalidActivityChanges(String),
     #[error("invalid {key} value in database: {value}")]
     InvalidSequence { key: String, value: String },
     #[error("a database sequence is exhausted")]
@@ -61,6 +63,7 @@ impl SqliteStore {
         let next_item_number = self.sequence("next_item_number")?;
         let next_external_object_id = self.sequence("next_external_object_id")?;
         let next_link_id = self.sequence("next_link_id")?;
+        let next_activity_id = self.sequence("next_activity_id")?;
         let contexts = {
             let mut statement = self
                 .connection
@@ -179,15 +182,35 @@ impl SqliteStore {
         };
         let links = {
             let mut statement = self.connection.prepare(
-                "SELECT id, item_id, external_object_id
+                "SELECT external_links.id, external_links.item_id, external_links.external_object_id,
+                        COALESCE(link_attention_state.reviewed_activity_id, 0),
+                        link_attention_state.title_attention,
+                        link_attention_state.state_attention,
+                        link_attention_state.metadata_attention
                  FROM external_links
+                 LEFT JOIN link_attention_state
+                   ON link_attention_state.link_id = external_links.id
                  ORDER BY id",
             )?;
             let rows = statement.query_map([], |row| {
+                let title_attention: Option<i64> = row.get(4)?;
+                let state_attention: Option<i64> = row.get(5)?;
+                let metadata_attention: Option<i64> = row.get(6)?;
+                let attention_policy = match (title_attention, state_attention, metadata_attention)
+                {
+                    (Some(title), Some(state), Some(metadata)) => Some(ExternalChangePolicy {
+                        title: title != 0,
+                        state: state != 0,
+                        metadata: metadata != 0,
+                    }),
+                    _ => None,
+                };
                 Ok(Link {
                     id: row.get(0)?,
                     item_id: row.get(1)?,
                     external_object_id: row.get(2)?,
+                    reviewed_activity_id: row.get(3)?,
+                    attention_policy,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -217,6 +240,56 @@ impl SqliteStore {
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
+        let activities = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, external_object_id, observed_at, changes_json
+                 FROM activities
+                 ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let changes_json: String = row.get(3)?;
+                Ok(Activity {
+                    id: row.get(0)?,
+                    external_object_id: row.get(1)?,
+                    observed_at: row.get(2)?,
+                    changes: serde_json::from_str(&changes_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            3,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let attention_defaults = {
+            let mut statement = self.connection.prepare(
+                "SELECT context_id, object_kind, title_attention, state_attention,
+                        metadata_attention
+                 FROM context_attention_defaults
+                 ORDER BY context_id, object_kind",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let object_kind: String = row.get(1)?;
+                Ok(ContextAttentionDefault {
+                    context_id: row.get(0)?,
+                    object_kind: parse_external_object_kind(&object_kind).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            1,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    policy: ExternalChangePolicy {
+                        title: row.get::<_, i64>(2)? != 0,
+                        state: row.get::<_, i64>(3)? != 0,
+                        metadata: row.get::<_, i64>(4)? != 0,
+                    },
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
 
         Ok(DomainState {
             next_context_id,
@@ -225,6 +298,7 @@ impl SqliteStore {
             next_item_number,
             next_external_object_id,
             next_link_id,
+            next_activity_id,
             contexts,
             projects,
             items,
@@ -232,6 +306,8 @@ impl SqliteStore {
             external_objects,
             links,
             snapshots,
+            activities,
+            attention_defaults,
         })
     }
 
@@ -351,10 +427,14 @@ impl SqliteStore {
                          VALUES (?1, ?2, ?3)",
                         params![link.id, link.item_id, link.external_object_id],
                     )?;
+                    persist_link_state(&transaction, link)?;
                     transaction.execute(
                         "UPDATE metadata SET value = ?1 WHERE key = 'next_link_id'",
                         params![next_link_id],
                     )?;
+                }
+                Effect::PersistLinkState { link } => {
+                    persist_link_state(&transaction, link)?;
                 }
                 Effect::PersistExternalSnapshot { snapshot } => {
                     let metadata_json =
@@ -376,6 +456,49 @@ impl SqliteStore {
                             snapshot.state,
                             metadata_json,
                             snapshot.fetched_at,
+                        ],
+                    )?;
+                }
+                Effect::PersistActivity {
+                    activity,
+                    next_activity_id,
+                } => {
+                    let changes_json =
+                        serde_json::to_string(&activity.changes).map_err(|error| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                        })?;
+                    transaction.execute(
+                        "INSERT INTO activities
+                            (id, external_object_id, observed_at, changes_json)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            activity.id,
+                            activity.external_object_id,
+                            activity.observed_at,
+                            changes_json,
+                        ],
+                    )?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_activity_id'",
+                        params![next_activity_id],
+                    )?;
+                }
+                Effect::PersistContextAttentionDefault { attention_default } => {
+                    transaction.execute(
+                        "INSERT INTO context_attention_defaults
+                            (context_id, object_kind, title_attention, state_attention,
+                             metadata_attention)
+                         VALUES (?1, ?2, ?3, ?4, ?5)
+                         ON CONFLICT(context_id, object_kind) DO UPDATE SET
+                            title_attention = excluded.title_attention,
+                            state_attention = excluded.state_attention,
+                            metadata_attention = excluded.metadata_attention",
+                        params![
+                            attention_default.context_id,
+                            external_object_kind_as_str(attention_default.object_kind),
+                            bool_as_i64(attention_default.policy.title),
+                            bool_as_i64(attention_default.policy.state),
+                            bool_as_i64(attention_default.policy.metadata),
                         ],
                     )?;
                 }
@@ -450,6 +573,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_item_number', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_external_object_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_link_id', 1);
+         INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_activity_id', 1);
          INSERT OR IGNORE INTO contexts (id, name) VALUES (1, 'Personal');",
     )?;
 
@@ -493,10 +617,33 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              metadata_json TEXT NOT NULL,
              fetched_at INTEGER NOT NULL
          );
+         CREATE TABLE IF NOT EXISTS link_attention_state (
+             link_id INTEGER PRIMARY KEY NOT NULL REFERENCES external_links(id) ON DELETE CASCADE,
+             reviewed_activity_id INTEGER NOT NULL DEFAULT 0,
+             title_attention INTEGER,
+             state_attention INTEGER,
+             metadata_attention INTEGER
+         );
+         CREATE TABLE IF NOT EXISTS activities (
+             id INTEGER PRIMARY KEY NOT NULL,
+             external_object_id INTEGER NOT NULL REFERENCES external_objects(id) ON DELETE CASCADE,
+             observed_at INTEGER NOT NULL,
+             changes_json TEXT NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS context_attention_defaults (
+             context_id INTEGER NOT NULL REFERENCES contexts(id) ON DELETE CASCADE,
+             object_kind TEXT NOT NULL CHECK (object_kind IN ('issue', 'pull_request', 'generic')),
+             title_attention INTEGER NOT NULL,
+             state_attention INTEGER NOT NULL,
+             metadata_attention INTEGER NOT NULL,
+             PRIMARY KEY (context_id, object_kind)
+         );
          CREATE INDEX IF NOT EXISTS external_links_by_item
              ON external_links (item_id);
          CREATE INDEX IF NOT EXISTS external_links_by_object
-             ON external_links (external_object_id);",
+             ON external_links (external_object_id);
+         CREATE INDEX IF NOT EXISTS activities_by_object
+             ON activities (external_object_id, id);",
     )?;
     ensure_sequence_at_least(connection, "next_context_id", "contexts", "id")?;
     ensure_sequence_at_least(connection, "next_project_id", "projects", "id")?;
@@ -508,6 +655,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
         "id",
     )?;
     ensure_sequence_at_least(connection, "next_link_id", "external_links", "id")?;
+    ensure_sequence_at_least(connection, "next_activity_id", "activities", "id")?;
 
     Ok(())
 }
@@ -593,6 +741,44 @@ fn ensure_sequence_at_least(
     Ok(())
 }
 
+fn persist_link_state(
+    transaction: &rusqlite::Transaction<'_>,
+    link: &Link,
+) -> Result<(), rusqlite::Error> {
+    let (title_attention, state_attention, metadata_attention) = link
+        .attention_policy
+        .map(|policy| {
+            (
+                Some(bool_as_i64(policy.title)),
+                Some(bool_as_i64(policy.state)),
+                Some(bool_as_i64(policy.metadata)),
+            )
+        })
+        .unwrap_or((None, None, None));
+    transaction.execute(
+        "INSERT INTO link_attention_state
+            (link_id, reviewed_activity_id, title_attention, state_attention, metadata_attention)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(link_id) DO UPDATE SET
+            reviewed_activity_id = excluded.reviewed_activity_id,
+            title_attention = excluded.title_attention,
+            state_attention = excluded.state_attention,
+            metadata_attention = excluded.metadata_attention",
+        params![
+            link.id,
+            link.reviewed_activity_id,
+            title_attention,
+            state_attention,
+            metadata_attention,
+        ],
+    )?;
+    Ok(())
+}
+
+fn bool_as_i64(value: bool) -> i64 {
+    i64::from(value)
+}
+
 fn item_status_as_str(status: ItemStatus) -> &'static str {
     match status {
         ItemStatus::Inbox => "Inbox",
@@ -675,8 +861,8 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        decide, Event, ExternalMetadata, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
-        ExternalSnapshotData,
+        decide, Event, ExternalChangePolicy, ExternalMetadata, ExternalObjectInput,
+        ExternalObjectKind, ExternalProvider, ExternalSnapshotData,
     };
 
     #[test]
@@ -849,6 +1035,61 @@ mod tests {
             store
                 .apply(&linked.effects)
                 .expect("External Object should persist");
+            let configured = decide(
+                linked.state,
+                Event::SetContextAttentionDefault {
+                    context_id: 1,
+                    object_kind: ExternalObjectKind::Issue,
+                    policy: ExternalChangePolicy {
+                        title: false,
+                        state: true,
+                        metadata: false,
+                    },
+                },
+            )
+            .expect("the Context attention default should be configurable");
+            store
+                .apply(&configured.effects)
+                .expect("the Context attention default should persist");
+            let refreshed = decide(
+                configured.state,
+                Event::RefreshExternalObject {
+                    external_object_id: 1,
+                    snapshot: ExternalSnapshotData {
+                        title: "Updated issue".into(),
+                        state: "CLOSED".into(),
+                        metadata: vec![ExternalMetadata {
+                            key: "author".into(),
+                            value: "new-author".into(),
+                        }],
+                        fetched_at: 456,
+                    },
+                },
+            )
+            .expect("the changed snapshot should persist");
+            store
+                .apply(&refreshed.effects)
+                .expect("the Activity should persist");
+            let reviewed = decide(refreshed.state, Event::MarkLinkReviewed { link_id: 1 })
+                .expect("the review watermark should persist");
+            store
+                .apply(&reviewed.effects)
+                .expect("the review watermark should persist");
+            let overridden = decide(
+                reviewed.state,
+                Event::SetLinkAttentionPolicy {
+                    link_id: 1,
+                    policy: Some(ExternalChangePolicy {
+                        title: true,
+                        state: false,
+                        metadata: true,
+                    }),
+                },
+            )
+            .expect("the Link attention policy should persist");
+            store
+                .apply(&overridden.effects)
+                .expect("the Link attention policy should persist");
             store
                 .set_gh_executable_path(&gh_path)
                 .expect("the resolved CLI path should persist");
@@ -861,13 +1102,27 @@ mod tests {
         assert_eq!(state.external_objects[0].external_key, "issue:acme/app#7");
         assert_eq!(state.links.len(), 1);
         assert_eq!(state.snapshots.len(), 1);
-        assert_eq!(state.snapshots[0].title, "Track the issue");
-        assert_eq!(state.snapshots[0].metadata[0].value, "octocat");
+        assert_eq!(state.snapshots[0].title, "Updated issue");
+        assert_eq!(state.snapshots[0].metadata[0].value, "new-author");
+        assert_eq!(state.activities.len(), 1);
+        assert_eq!(state.activities[0].changes.len(), 3);
+        assert_eq!(state.links[0].reviewed_activity_id, 1);
+        assert_eq!(
+            state.links[0].attention_policy,
+            Some(ExternalChangePolicy {
+                title: true,
+                state: false,
+                metadata: true,
+            })
+        );
+        assert_eq!(state.attention_defaults.len(), 1);
+        assert!(state.attention_defaults[0].policy.state);
         assert_eq!(
             reopened.gh_executable_path().expect("setting should load"),
             Some(gh_path)
         );
         assert_eq!(state.next_external_object_id, 2);
         assert_eq!(state.next_link_id, 2);
+        assert_eq!(state.next_activity_id, 2);
     }
 }

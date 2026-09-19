@@ -8,9 +8,10 @@ use tauri::State;
 
 use crate::{
     domain::{
-        decide, external_link_view, home_view, search_items, Context, DomainState, Event,
-        ExternalLinkView, ExternalObjectInput, ExternalProvider, ExternalSnapshot, HomeView, Item,
-        ItemRelation, ItemRelationKind, ItemStatus, ItemView, Project, ProjectDefaults,
+        decide, external_link_view, home_view, search_items, Context, ContextAttentionDefault,
+        DomainState, Event, ExternalChangePolicy, ExternalLinkView, ExternalObjectInput,
+        ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView, Item, ItemRelation,
+        ItemRelationKind, ItemStatus, ItemView, Project, ProjectDefaults,
     },
     persistence::SqliteStore,
     provider::{classify_url, resolve_gh_executable, GithubCli},
@@ -232,6 +233,105 @@ impl Runtime {
         Ok(snapshot)
     }
 
+    fn poll_external_objects(&mut self) -> PollResult {
+        let mut object_ids = self
+            .state
+            .links
+            .iter()
+            .filter_map(|link| {
+                self.state
+                    .external_objects
+                    .iter()
+                    .find(|object| object.id == link.external_object_id)
+                    .filter(|object| object.provider == ExternalProvider::GitHub)
+                    .map(|object| object.id)
+            })
+            .collect::<Vec<_>>();
+        object_ids.sort_unstable();
+        object_ids.dedup();
+
+        let mut result = PollResult {
+            refreshed: 0,
+            failures: Vec::new(),
+        };
+        for external_object_id in object_ids {
+            match self.refresh_external_object(external_object_id) {
+                Ok(_) => result.refreshed += 1,
+                Err(error) => result.failures.push(PollFailure {
+                    external_object_id,
+                    error,
+                }),
+            }
+        }
+        result
+    }
+
+    fn set_link_attention_policy(
+        &mut self,
+        link_id: i64,
+        policy: Option<ExternalChangePolicy>,
+    ) -> Result<ExternalLinkView, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::SetLinkAttentionPolicy { link_id, policy },
+        )
+        .map_err(|error| error.to_string())?;
+        let link = decision
+            .state
+            .links
+            .iter()
+            .find(|link| link.id == link_id)
+            .cloned()
+            .ok_or_else(|| "Link policy update produced no Link".to_owned())?;
+        self.commit(decision)?;
+        external_link_view(&self.state, &link)
+            .ok_or_else(|| "Link policy update produced no External Object".to_owned())
+    }
+
+    fn set_context_attention_default(
+        &mut self,
+        context_id: i64,
+        object_kind: ExternalObjectKind,
+        policy: ExternalChangePolicy,
+    ) -> Result<ContextAttentionDefault, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::SetContextAttentionDefault {
+                context_id,
+                object_kind,
+                policy,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let attention_default = decision
+            .state
+            .attention_defaults
+            .iter()
+            .find(|attention_default| {
+                attention_default.context_id == context_id
+                    && attention_default.object_kind == object_kind
+            })
+            .cloned()
+            .ok_or_else(|| "Context default update produced no default".to_owned())?;
+        self.commit(decision)?;
+        Ok(attention_default)
+    }
+
+    fn mark_link_reviewed(&mut self, link_id: i64) -> Result<ExternalLinkView, String> {
+        let decision = decide(self.state.clone(), Event::MarkLinkReviewed { link_id })
+            .map_err(|error| error.to_string())?;
+        let link = decision
+            .state
+            .links
+            .iter()
+            .find(|link| link.id == link_id)
+            .cloned()
+            .ok_or_else(|| "Mark reviewed produced no Link".to_owned())?;
+        self.commit(decision)?;
+        external_link_view(&self.state, &link)
+            .ok_or_else(|| "Mark reviewed produced no External Object".to_owned())
+    }
+
     fn fetch_github_object(
         &mut self,
         object: &ExternalObjectInput,
@@ -269,6 +369,18 @@ pub struct ExternalLinkAction {
     pub warning: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PollFailure {
+    pub external_object_id: i64,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct PollResult {
+    pub refreshed: usize,
+    pub failures: Vec<PollFailure>,
+}
+
 fn current_unix_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -290,6 +402,16 @@ pub fn list_projects(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Project>, S
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())
         .map(|runtime| runtime.state.projects.clone())
+}
+
+#[tauri::command]
+pub fn list_context_attention_defaults(
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Vec<ContextAttentionDefault>, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())
+        .map(|runtime| runtime.state.attention_defaults.clone())
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -448,4 +570,48 @@ pub fn refresh_external_object(
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .refresh_external_object(external_object_id)
+}
+
+#[tauri::command]
+pub fn poll_external_objects(state: State<'_, Mutex<Runtime>>) -> Result<PollResult, String> {
+    Ok(state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .poll_external_objects())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_link_attention_policy(
+    link_id: i64,
+    policy: Option<ExternalChangePolicy>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ExternalLinkView, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .set_link_attention_policy(link_id, policy)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_context_attention_default(
+    context_id: i64,
+    object_kind: ExternalObjectKind,
+    policy: ExternalChangePolicy,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ContextAttentionDefault, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .set_context_attention_default(context_id, object_kind, policy)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn mark_link_reviewed(
+    link_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ExternalLinkView, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .mark_link_reviewed(link_id)
 }

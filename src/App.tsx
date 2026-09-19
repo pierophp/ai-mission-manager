@@ -48,6 +48,8 @@ type ExternalObject = {
   canonical_url: string;
 };
 
+type ExternalObjectKind = ExternalObject["kind"];
+
 type ExternalMetadata = {
   key: string;
   value: string;
@@ -61,16 +63,52 @@ type ExternalSnapshot = {
   fetched_at: number;
 };
 
+type ExternalChangeKind = "title" | "state" | "metadata";
+
+type ExternalChange = {
+  kind: ExternalChangeKind;
+  key: string | null;
+  previous: string | null;
+  current: string | null;
+};
+
+type Activity = {
+  id: number;
+  external_object_id: number;
+  observed_at: number;
+  changes: ExternalChange[];
+};
+
+type ExternalChangePolicy = {
+  title: boolean;
+  state: boolean;
+  metadata: boolean;
+};
+
+type AttentionEntry = {
+  link_id: number;
+  item_id: number;
+  external_object_id: number;
+  source_title: string;
+  source_url: string;
+  activities: Activity[];
+  summary: string;
+};
+
 type ExternalLink = {
   id: number;
   item_id: number;
   external_object_id: number;
+  reviewed_activity_id: number;
+  attention_policy: ExternalChangePolicy | null;
 };
 
 type ExternalLinkView = {
   link: ExternalLink;
   object: ExternalObject;
   snapshot: ExternalSnapshot | null;
+  attention_policy: ExternalChangePolicy;
+  attention_entry: AttentionEntry | null;
 };
 
 type ExternalLinkAction = {
@@ -88,10 +126,22 @@ type ItemView = {
 
 type HomeView = {
   needs_attention: ItemView[];
+  attention_entries: AttentionEntry[];
   running: ItemView[];
   waiting: ItemView[];
   due: ItemView[];
   completed: ItemView[];
+};
+
+type PollResult = {
+  refreshed: number;
+  failures: { external_object_id: number; error: string }[];
+};
+
+type ContextAttentionDefault = {
+  context_id: number;
+  object_kind: ExternalObjectKind;
+  policy: ExternalChangePolicy;
 };
 
 const itemStatuses: ItemStatus[] = ["Inbox", "Active", "Waiting", "Done"];
@@ -104,6 +154,9 @@ const relationKinds: ItemRelationKind[] = [
 export function App() {
   const [contexts, setContexts] = useState<Context[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
+  const [attentionDefaults, setAttentionDefaults] = useState<
+    ContextAttentionDefault[]
+  >([]);
   const [home, setHome] = useState<HomeView>();
   const [searchResults, setSearchResults] = useState<ItemView[]>([]);
   const [contextFilterId, setContextFilterId] = useState<number>();
@@ -114,6 +167,10 @@ export function App() {
   const [projectName, setProjectName] = useState("");
   const [projectDefaultStatus, setProjectDefaultStatus] =
     useState<ItemStatus>("Inbox");
+  const [attentionObjectKind, setAttentionObjectKind] =
+    useState<ExternalObjectKind>("pull_request");
+  const [attentionDefaultPolicy, setAttentionDefaultPolicy] =
+    useState<ExternalChangePolicy>({ title: true, state: true, metadata: true });
   const [searchQuery, setSearchQuery] = useState("");
   const [error, setError] = useState<string>();
   const [isLoading, setIsLoading] = useState(true);
@@ -139,12 +196,20 @@ export function App() {
     void refreshSearch();
   }, [searchQuery, contextFilterId]);
 
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void pollExternalObjects(false);
+    }, 5 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [contextFilterId, searchQuery]);
+
   async function loadAppState() {
     setIsLoading(true);
     try {
-      const [loadedContexts, loadedProjects] = await Promise.all([
+      const [loadedContexts, loadedProjects, loadedAttentionDefaults] = await Promise.all([
         invoke<Context[]>("list_contexts"),
         invoke<Project[]>("list_projects"),
+        invoke<ContextAttentionDefault[]>("list_context_attention_defaults"),
       ]);
       const nextCaptureContextId =
         loadedContexts.find((context) => context.id === captureContextId)?.id ??
@@ -158,6 +223,7 @@ export function App() {
         loadedProjects.find(
           (project) => project.context_id === nextCaptureContextId,
         )?.id;
+      await invoke<PollResult>("poll_external_objects");
       const loadedHome = await invoke<HomeView>("get_home", {
         contextId: contextFilterId ?? null,
         now: currentMinute(),
@@ -165,6 +231,7 @@ export function App() {
 
       setContexts(loadedContexts);
       setProjects(loadedProjects);
+      setAttentionDefaults(loadedAttentionDefaults);
       setCaptureContextId(nextCaptureContextId);
       setCaptureProjectId(nextCaptureProjectId);
       setHome(loadedHome);
@@ -178,6 +245,17 @@ export function App() {
       setIsLoading(false);
     }
   }
+
+  useEffect(() => {
+    const configured = attentionDefaults.find(
+      (attentionDefault) =>
+        attentionDefault.context_id === captureContextId &&
+        attentionDefault.object_kind === attentionObjectKind,
+    );
+    setAttentionDefaultPolicy(
+      configured?.policy ?? { title: true, state: true, metadata: true },
+    );
+  }, [attentionDefaults, attentionObjectKind, captureContextId]);
 
   async function refreshHome() {
     const loadedHome = await invoke<HomeView>("get_home", {
@@ -197,6 +275,23 @@ export function App() {
       contextId: null,
     });
     setSearchResults(results);
+  }
+
+  async function pollExternalObjects(showErrors: boolean) {
+    try {
+      const result = await invoke<PollResult>("poll_external_objects");
+      if (result.refreshed > 0) {
+        await refreshHome();
+        await refreshSearch();
+      }
+      if (showErrors && result.failures.length > 0) {
+        setError(`Some External Objects could not be refreshed (${result.failures.length}).`);
+      }
+    } catch (pollError) {
+      if (showErrors) {
+        setError(errorMessage(pollError));
+      }
+    }
   }
 
   function handleCaptureContextChange(nextContextId: number) {
@@ -247,6 +342,36 @@ export function App() {
       setCaptureProjectId(project.id);
       setProjectName("");
       setProjectDefaultStatus("Inbox");
+      setError(undefined);
+    } catch (saveError) {
+      setError(errorMessage(saveError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function saveAttentionDefault(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!captureContextId) return;
+    setIsSaving(true);
+    try {
+      const saved = await invoke<ContextAttentionDefault>(
+        "set_context_attention_default",
+        {
+          contextId: captureContextId,
+          objectKind: attentionObjectKind,
+          policy: attentionDefaultPolicy,
+        },
+      );
+      setAttentionDefaults((current) => [
+        ...current.filter(
+          (attentionDefault) =>
+            attentionDefault.context_id !== saved.context_id ||
+            attentionDefault.object_kind !== saved.object_kind,
+        ),
+        saved,
+      ]);
+      await updateHomeAfterEdit();
       setError(undefined);
     } catch (saveError) {
       setError(errorMessage(saveError));
@@ -341,6 +466,13 @@ export function App() {
             placeholder="Search Items, notes, or identifiers"
           />
         </label>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={() => void pollExternalObjects(true)}
+        >
+          Refresh linked objects
+        </button>
       </section>
 
       {error && <p className="error-message" role="alert">{error}</p>}
@@ -381,7 +513,31 @@ export function App() {
         {isLoading || !home ? (
           <p className="empty-state">Loading your home view…</p>
         ) : (
-          <div className="home-columns">
+          <>
+            {home.attention_entries.length > 0 && (
+              <section className="attention-entries" aria-labelledby="attention-heading">
+                <div className="column-heading">
+                  <div>
+                    <h3 id="attention-heading">Review changes</h3>
+                    <span className="column-hint">
+                      Explicitly mark a Link reviewed when you have handled it.
+                    </span>
+                  </div>
+                  <span className="column-count">{home.attention_entries.length}</span>
+                </div>
+                <div className="attention-entry-list">
+                  {home.attention_entries.map((entry) => (
+                    <AttentionEntryCard
+                      key={entry.link_id}
+                      entry={entry}
+                      item={allItems.find((candidate) => candidate.item.id === entry.item_id)}
+                      onMarkedReviewed={updateHomeAfterEdit}
+                    />
+                  ))}
+                </div>
+              </section>
+            )}
+            <div className="home-columns">
             <HomeColumn
               title="Needs Attention"
               hint="Unstarted or due"
@@ -417,7 +573,8 @@ export function App() {
               allItems={allItems}
               onChanged={updateHomeAfterEdit}
             />
-          </div>
+            </div>
+          </>
         )}
       </section>
 
@@ -571,6 +728,65 @@ export function App() {
             </form>
           </div>
         </div>
+        <form className="attention-default-form" onSubmit={saveAttentionDefault}>
+          <div>
+            <h3>Attention defaults</h3>
+            <p className="column-hint">
+              Choose which changes interrupt Links in a Context by External Object type.
+            </p>
+          </div>
+          <label>
+            <span>Context</span>
+            <select
+              value={captureContextId ?? ""}
+              onChange={(event) =>
+                handleCaptureContextChange(Number(event.target.value))
+              }
+              disabled={isSaving || contexts.length === 0}
+            >
+              {contexts.map((context) => (
+                <option value={context.id} key={context.id}>
+                  {context.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>External Object type</span>
+            <select
+              value={attentionObjectKind}
+              onChange={(event) =>
+                setAttentionObjectKind(event.target.value as ExternalObjectKind)
+              }
+              disabled={isSaving}
+            >
+              <option value="issue">Issue</option>
+              <option value="pull_request">Pull request</option>
+              <option value="generic">Generic link</option>
+            </select>
+          </label>
+          <div className="attention-default-options">
+            {(["title", "state", "metadata"] as const).map((kind) => (
+              <label key={kind}>
+                <input
+                  type="checkbox"
+                  checked={attentionDefaultPolicy[kind]}
+                  onChange={(event) =>
+                    setAttentionDefaultPolicy((current) => ({
+                      ...current,
+                      [kind]: event.target.checked,
+                    }))
+                  }
+                  disabled={isSaving}
+                />
+                {kind[0].toUpperCase() + kind.slice(1)} changes
+              </label>
+            ))}
+          </div>
+          <button type="submit" disabled={isSaving || !captureContextId}>
+            Save attention defaults
+          </button>
+        </form>
       </section>
     </main>
   );
@@ -785,6 +1001,21 @@ function ItemCard({
             externalLink={externalLink}
             isSaving={isSaving}
             onRefresh={() => refreshExternalObject(externalLink.object.id)}
+            onSavePolicy={(policy) =>
+              saveItem(() =>
+                invoke("set_link_attention_policy", {
+                  linkId: externalLink.link.id,
+                  policy,
+                }),
+              )
+            }
+            onMarkReviewed={() =>
+              saveItem(() =>
+                invoke("mark_link_reviewed", {
+                  linkId: externalLink.link.id,
+                }),
+              )
+            }
           />
         ))}
         <form className="external-link-form" onSubmit={handleExternalLink}>
@@ -871,12 +1102,22 @@ function ExternalLinkCard({
   externalLink,
   isSaving,
   onRefresh,
+  onSavePolicy,
+  onMarkReviewed,
 }: {
   externalLink: ExternalLinkView;
   isSaving: boolean;
   onRefresh: () => Promise<void>;
+  onSavePolicy: (policy: ExternalChangePolicy | null) => Promise<void>;
+  onMarkReviewed: () => Promise<void>;
 }) {
   const { object, snapshot } = externalLink;
+  const [policy, setPolicy] = useState(externalLink.attention_policy);
+
+  useEffect(() => {
+    setPolicy(externalLink.attention_policy);
+  }, [externalLink.attention_policy]);
+
   return (
     <article className="external-link-card">
       <div className="external-link-heading">
@@ -914,6 +1155,119 @@ function ExternalLinkCard({
       ) : (
         <p className="external-age">No snapshot yet</p>
       )}
+      {externalLink.attention_entry && (
+        <div className="link-attention">
+          <strong>Needs review</strong>
+          <p>{externalLink.attention_entry.summary}</p>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={isSaving}
+            onClick={() => void onMarkReviewed()}
+          >
+            Mark reviewed
+          </button>
+        </div>
+      )}
+      <div className="attention-policy">
+        <span className="relationship-label">Attention for this Link</span>
+        <label>
+          <input
+            type="checkbox"
+            checked={policy.title}
+            onChange={(event) =>
+              setPolicy((current) => ({ ...current, title: event.target.checked }))
+            }
+            disabled={isSaving}
+          />
+          Title
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={policy.state}
+            onChange={(event) =>
+              setPolicy((current) => ({ ...current, state: event.target.checked }))
+            }
+            disabled={isSaving}
+          />
+          State
+        </label>
+        <label>
+          <input
+            type="checkbox"
+            checked={policy.metadata}
+            onChange={(event) =>
+              setPolicy((current) => ({ ...current, metadata: event.target.checked }))
+            }
+            disabled={isSaving}
+          />
+          Metadata
+        </label>
+        <button
+          type="button"
+          className="secondary-button"
+          disabled={isSaving}
+          onClick={() => void onSavePolicy(policy)}
+        >
+          Save Link policy
+        </button>
+        {externalLink.link.attention_policy && (
+          <button
+            type="button"
+            className="text-button"
+            disabled={isSaving}
+            onClick={() => void onSavePolicy(null)}
+          >
+            Use Context default
+          </button>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function AttentionEntryCard({
+  entry,
+  item,
+  onMarkedReviewed,
+}: {
+  entry: AttentionEntry;
+  item: ItemView | undefined;
+  onMarkedReviewed: () => Promise<void>;
+}) {
+  const [isSaving, setIsSaving] = useState(false);
+
+  async function markReviewed() {
+    setIsSaving(true);
+    try {
+      await invoke("mark_link_reviewed", { linkId: entry.link_id });
+      await onMarkedReviewed();
+    } catch (reviewError) {
+      window.alert(errorMessage(reviewError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  return (
+    <article className="attention-entry-card">
+      <div>
+        <strong>{entry.source_title}</strong>
+        <span className="external-link-kind">
+          {item?.item.human_identifier ?? "Item"} · {entry.activities.length} change
+          {entry.activities.length === 1 ? "" : "s"}
+        </span>
+      </div>
+      <p>{entry.summary}</p>
+      <button
+        type="button"
+        className="secondary-button"
+        disabled={isSaving}
+        onClick={() => void markReviewed()}
+      >
+        Mark reviewed
+      </button>
     </article>
   );
 }

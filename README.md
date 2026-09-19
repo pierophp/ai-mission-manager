@@ -13,6 +13,8 @@ The app creates a local `Personal` Context with a `Default` Project on first lau
 
 Paste a GitHub Issue or pull request URL into an Item to create a Link. GitHub data is fetched through the authenticated `gh` CLI and cached once per External Object, so multiple Items share one snapshot while keeping separate Links. Other URLs are kept as generic Links, and every snapshot shows its age.
 
+Linked GitHub Objects are polled when the app opens and while it remains open. Changed titles, states, and metadata are recorded as Activity; each Link has its own review watermark, so shared Objects produce separate Attention Entries. Use the refresh action for an immediate poll, configure attention defaults per Context and object type, and override them on an individual Link.
+
 The home view separates Items needing attention, running, waiting, due for a reminder, and completed. Statuses can move in any order. Each Item can carry notes and a reminder, and can be linked to other Items as `blocks`, `blocked_by`, or `related_to`. Use the Context filter to focus the home view; search always spans every Context and labels each result with its Context.
 
 ## Verify
