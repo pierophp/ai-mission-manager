@@ -594,6 +594,51 @@ button:disabled {
   font-size: 0.7rem;
 }
 
+.comment-form,
+.issue-preview {
+  display: grid;
+  gap: 7px;
+  margin-top: 9px;
+  padding-top: 8px;
+  border-top: 1px solid #eee8df;
+}
+
+.comment-form label,
+.issue-preview label {
+  gap: 4px;
+  color: #8b837a;
+  font-size: 0.66rem;
+}
+
+.comment-form textarea,
+.issue-preview input,
+.issue-preview textarea {
+  padding: 7px 8px;
+  font-size: 0.7rem;
+}
+
+.comment-form button {
+  justify-self: start;
+}
+
+.issue-preview strong {
+  color: #4a4139;
+  font-size: 0.76rem;
+}
+
+.issue-preview p {
+  margin: 4px 0 2px;
+  color: #8b837a;
+  font-size: 0.68rem;
+  line-height: 1.4;
+}
+
+.issue-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .relationship-label {
   width: 100%;
   color: #766f67;

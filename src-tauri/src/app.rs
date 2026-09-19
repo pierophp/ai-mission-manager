@@ -193,6 +193,101 @@ impl Runtime {
         })
     }
 
+    fn create_github_issue(
+        &mut self,
+        item_id: i64,
+        repository: String,
+        title: String,
+        body: String,
+    ) -> Result<ExternalLinkAction, String> {
+        let item_exists = self.state.items.iter().any(|item| item.id == item_id);
+        if !item_exists {
+            return Err(format!("Item {item_id} does not exist"));
+        }
+        if repository.trim().is_empty() {
+            return Err("A GitHub repository is required".into());
+        }
+        if title.trim().is_empty() {
+            return Err("A GitHub Issue title is required".into());
+        }
+
+        let executable = self.gh_executable_path()?;
+        let created_url = GithubCli::new(executable.clone())
+            .create_issue(repository.trim(), title.trim(), &body)
+            .map_err(|error| error.to_string())?;
+        let object = classify_url(&created_url).map_err(|error| error.to_string())?;
+        if object.provider != ExternalProvider::GitHub || object.kind != ExternalObjectKind::Issue {
+            return Err("GitHub CLI returned a URL that is not a GitHub Issue".into());
+        }
+
+        let mut warning = None;
+        let snapshot = match GithubCli::new(executable).fetch(&object, current_unix_seconds()) {
+            Ok(snapshot) => Some(snapshot),
+            Err(error) => {
+                warning = Some(error.to_string());
+                None
+            }
+        };
+        let decision = decide(
+            self.state.clone(),
+            Event::LinkExternalObject {
+                item_id,
+                object,
+                snapshot,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let link = decision
+            .state
+            .links
+            .last()
+            .cloned()
+            .ok_or_else(|| "Issue creation produced no Link".to_owned())?;
+        self.commit(decision)?;
+        let view = external_link_view(&self.state, &link)
+            .ok_or_else(|| "Issue creation produced no External Object".to_owned())?;
+        Ok(ExternalLinkAction {
+            link: view,
+            warning,
+        })
+    }
+
+    fn add_external_comment(
+        &mut self,
+        link_id: i64,
+        body: String,
+    ) -> Result<ExternalLinkView, String> {
+        let body = body.trim().to_owned();
+        if body.is_empty() {
+            return Err("A GitHub comment cannot be blank".into());
+        }
+        let link = self
+            .state
+            .links
+            .iter()
+            .find(|link| link.id == link_id)
+            .cloned()
+            .ok_or_else(|| format!("Link {link_id} does not exist"))?;
+        let object = self
+            .state
+            .external_objects
+            .iter()
+            .find(|object| object.id == link.external_object_id)
+            .cloned()
+            .ok_or_else(|| "The linked External Object does not exist".to_owned())?;
+        if object.provider != ExternalProvider::GitHub || object.kind == ExternalObjectKind::Generic
+        {
+            return Err("Comments are only supported for GitHub Issues and pull requests".into());
+        }
+
+        let executable = self.gh_executable_path()?;
+        GithubCli::new(executable)
+            .add_comment(&object.canonical_url, &body)
+            .map_err(|error| error.to_string())?;
+        external_link_view(&self.state, &link)
+            .ok_or_else(|| "Comment target produced no External Object".to_owned())
+    }
+
     fn refresh_external_object(
         &mut self,
         external_object_id: i64,
@@ -593,6 +688,32 @@ pub fn link_external_object(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn create_github_issue(
+    item_id: i64,
+    repository: String,
+    title: String,
+    body: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ExternalLinkAction, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .create_github_issue(item_id, repository, title, body)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn add_external_comment(
+    link_id: i64,
+    body: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ExternalLinkView, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .add_external_comment(link_id, body)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn refresh_external_object(
     external_object_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -695,4 +816,82 @@ pub fn mark_link_reviewed(
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .mark_link_reviewed(link_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::persistence::SqliteStore;
+
+    #[cfg(unix)]
+    #[test]
+    fn creating_a_github_issue_links_it_without_replacing_item_context() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let executable = directory.path().join("gh");
+        let script = r#"#!/bin/sh
+if [ "$1" = api ] && [ "$2" = repos/acme/app/issues ]; then
+  printf '%s' '{"html_url":"https://github.com/acme/app/issues/42"}'
+elif [ "$1" = issue ] && [ "$2" = view ]; then
+  printf '%s' '{"number":42,"title":"Created from Mission Manager","state":"OPEN","author":null,"labels":[],"milestone":null,"updatedAt":null}'
+fi
+"#;
+        fs::write(&executable, script).expect("fake gh should be written");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("fake gh should be executable");
+        let mut store = SqliteStore::open(&database).expect("database should open");
+        store
+            .set_gh_executable_path(&executable)
+            .expect("fake gh path should persist");
+        drop(store);
+
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .create_item("Keep this Item".into(), 1, 1)
+            .expect("Item should be created");
+        runtime
+            .update_item(
+                Event::SetItemNotes {
+                    item_id: 1,
+                    notes: "Private handoff context".into(),
+                },
+                1,
+            )
+            .expect("Item notes should be saved");
+        runtime
+            .create_item("Related Item".into(), 1, 1)
+            .expect("related Item should be created");
+        runtime
+            .set_item_relation(1, 2, ItemRelationKind::Blocks)
+            .expect("Item relationship should be saved");
+
+        let result = runtime
+            .create_github_issue(
+                1,
+                "acme/app".into(),
+                "Public title".into(),
+                "Public body".into(),
+            )
+            .expect("GitHub Issue should be created and linked");
+
+        assert_eq!(
+            result.link.object.canonical_url,
+            "https://github.com/acme/app/issues/42"
+        );
+        assert_eq!(runtime.state.items[0].human_identifier, "MC-1");
+        assert_eq!(runtime.state.items[0].title, "Keep this Item");
+        assert_eq!(runtime.state.items[0].notes, "Private handoff context");
+        assert_eq!(runtime.state.relationships.len(), 1);
+        assert_eq!(runtime.state.links[0].item_id, 1);
+        assert_eq!(
+            runtime.state.snapshots[0].title,
+            "Created from Mission Manager"
+        );
+    }
 }

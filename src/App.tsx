@@ -850,6 +850,10 @@ function ItemCard({
   const [relationKind, setRelationKind] = useState<ItemRelationKind>("Blocks");
   const [targetItemId, setTargetItemId] = useState<number>();
   const [externalUrl, setExternalUrl] = useState("");
+  const [isIssuePreviewOpen, setIsIssuePreviewOpen] = useState(false);
+  const [issueRepository, setIssueRepository] = useState("");
+  const [issueTitle, setIssueTitle] = useState(view.item.title);
+  const [issueBody, setIssueBody] = useState(view.item.notes);
   const [isSaving, setIsSaving] = useState(false);
 
   useEffect(() => {
@@ -909,6 +913,36 @@ function ItemCard({
       await onChanged();
     } catch (refreshError) {
       window.alert(errorMessage(refreshError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  function openIssuePreview() {
+    setIssueTitle(view.item.title);
+    setIssueBody(view.item.notes);
+    setIsIssuePreviewOpen(true);
+  }
+
+  async function handleCreateIssue(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!issueRepository.trim() || !issueTitle.trim()) return;
+    setIsSaving(true);
+    try {
+      const result = await invoke<ExternalLinkAction>("create_github_issue", {
+        itemId: view.item.id,
+        repository: issueRepository,
+        title: issueTitle,
+        body: issueBody,
+      });
+      setIsIssuePreviewOpen(false);
+      setIssueRepository("");
+      await onChanged();
+      if (result.warning) {
+        window.alert(result.warning);
+      }
+    } catch (createError) {
+      window.alert(errorMessage(createError));
     } finally {
       setIsSaving(false);
     }
@@ -1067,6 +1101,14 @@ function ItemCard({
                 }),
               )
             }
+            onAddComment={(body) =>
+              saveItem(() =>
+                invoke("add_external_comment", {
+                  linkId: externalLink.link.id,
+                  body,
+                }),
+              )
+            }
           />
         ))}
         <form className="external-link-form" onSubmit={handleExternalLink}>
@@ -1085,6 +1127,69 @@ function ItemCard({
             Add link
           </button>
         </form>
+        {!isIssuePreviewOpen ? (
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={isSaving}
+            onClick={openIssuePreview}
+          >
+            Create GitHub Issue
+          </button>
+        ) : (
+          <form className="issue-preview" onSubmit={handleCreateIssue}>
+            <div>
+              <strong>Preview GitHub Issue</strong>
+              <p>
+                Nothing is sent until you confirm. The existing Item will remain
+                unchanged and the created Issue will be linked to it.
+              </p>
+            </div>
+            <label>
+              <span>Repository</span>
+              <input
+                value={issueRepository}
+                onChange={(event) => setIssueRepository(event.target.value)}
+                placeholder="owner/repository"
+                disabled={isSaving}
+              />
+            </label>
+            <label>
+              <span>Public title</span>
+              <input
+                value={issueTitle}
+                onChange={(event) => setIssueTitle(event.target.value)}
+                disabled={isSaving}
+              />
+            </label>
+            <label>
+              <span>Public body</span>
+              <textarea
+                value={issueBody}
+                onChange={(event) => setIssueBody(event.target.value)}
+                rows={4}
+                placeholder="Optional public context"
+                disabled={isSaving}
+              />
+            </label>
+            <div className="issue-preview-actions">
+              <button
+                type="submit"
+                disabled={isSaving || !issueRepository.trim() || !issueTitle.trim()}
+              >
+                {isSaving ? "Creating…" : "Confirm and create Issue"}
+              </button>
+              <button
+                type="button"
+                className="text-button"
+                disabled={isSaving}
+                onClick={() => setIsIssuePreviewOpen(false)}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
+        )}
       </div>
       <div className="relationship-list">
         <span className="relationship-label">Relationships</span>
@@ -1158,6 +1263,7 @@ function ExternalLinkCard({
   onSaveWatchUntil,
   onSaveReviewAt,
   onClearReviewAt,
+  onAddComment,
 }: {
   externalLink: ExternalLinkView;
   isSaving: boolean;
@@ -1167,11 +1273,14 @@ function ExternalLinkCard({
   onSaveWatchUntil: (watchUntil: string | null) => Promise<void>;
   onSaveReviewAt: (reviewAt: string | null) => Promise<void>;
   onClearReviewAt: () => Promise<void>;
+  onAddComment: (body: string) => Promise<void>;
 }) {
   const { object, snapshot } = externalLink;
   const [policy, setPolicy] = useState(externalLink.attention_policy);
   const [watchUntil, setWatchUntil] = useState(externalLink.link.watch_until ?? "");
   const [reviewAt, setReviewAt] = useState(externalLink.link.review_at ?? "");
+  const [comment, setComment] = useState("");
+  const [isCommenting, setIsCommenting] = useState(false);
   const reviewDateReached =
     externalLink.link.review_at !== null &&
     externalLink.link.review_at <= currentMinute();
@@ -1185,6 +1294,20 @@ function ExternalLinkCard({
     externalLink.link.review_at,
     externalLink.link.watch_until,
   ]);
+
+  async function handleComment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!comment.trim()) return;
+    setIsCommenting(true);
+    try {
+      await onAddComment(comment);
+      setComment("");
+    } catch (commentError) {
+      window.alert(errorMessage(commentError));
+    } finally {
+      setIsCommenting(false);
+    }
+  }
 
   return (
     <article className="external-link-card">
@@ -1222,6 +1345,27 @@ function ExternalLinkCard({
         </>
       ) : (
         <p className="external-age">No snapshot yet</p>
+      )}
+      {object.provider === "github" && object.kind !== "generic" && (
+        <form className="comment-form" onSubmit={handleComment}>
+          <label>
+            <span>Comment on GitHub</span>
+            <textarea
+              value={comment}
+              onChange={(event) => setComment(event.target.value)}
+              rows={2}
+              placeholder="Write a short public reply"
+              disabled={isSaving || isCommenting}
+            />
+          </label>
+          <button
+            type="submit"
+            className="secondary-button"
+            disabled={isSaving || isCommenting || !comment.trim()}
+          >
+            {isCommenting ? "Posting…" : "Add comment"}
+          </button>
+        </form>
       )}
       {reviewDateReached && (
         <div className="link-attention">

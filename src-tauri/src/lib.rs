@@ -32,6 +32,8 @@ pub fn run() {
             app::remove_item_reminder,
             app::set_item_relation,
             app::link_external_object,
+            app::create_github_issue,
+            app::add_external_comment,
             app::refresh_external_object,
             app::poll_external_objects,
             app::set_link_attention_policy,

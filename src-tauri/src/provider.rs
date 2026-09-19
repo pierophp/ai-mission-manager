@@ -95,6 +95,63 @@ impl GithubCli {
         Self { executable }
     }
 
+    pub fn create_issue(
+        &self,
+        repository: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<String, ProviderError> {
+        if repository.trim().is_empty() {
+            return Err(ProviderError::GhFailed {
+                message: "a GitHub repository is required to create an Issue".into(),
+            });
+        }
+        if title.trim().is_empty() {
+            return Err(ProviderError::GhFailed {
+                message: "a GitHub Issue title cannot be blank".into(),
+            });
+        }
+
+        let endpoint = format!("repos/{repository}/issues");
+        let title_field = format!("title={title}");
+        let body_field = format!("body={body}");
+        let output = Command::new(&self.executable)
+            .args([
+                "api",
+                endpoint.as_str(),
+                "--method",
+                "POST",
+                "--raw-field",
+                title_field.as_str(),
+                "--raw-field",
+                body_field.as_str(),
+            ])
+            .output()?;
+        ensure_success(&output)?;
+
+        let response = serde_json::from_slice::<GithubCreatedIssue>(&output.stdout)?;
+        let object = classify_url(&response.html_url)?;
+        if object.provider != ExternalProvider::GitHub || object.kind != ExternalObjectKind::Issue {
+            return Err(ProviderError::GhFailed {
+                message: "GitHub API returned a URL that is not a GitHub Issue".into(),
+            });
+        }
+        Ok(object.canonical_url)
+    }
+
+    pub fn add_comment(&self, issue_url: &str, body: &str) -> Result<(), ProviderError> {
+        if body.trim().is_empty() {
+            return Err(ProviderError::GhFailed {
+                message: "a GitHub comment cannot be blank".into(),
+            });
+        }
+
+        let output = Command::new(&self.executable)
+            .args(["issue", "comment", issue_url, "--body", body])
+            .output()?;
+        ensure_success(&output)
+    }
+
     pub fn fetch(
         &self,
         object: &ExternalObjectInput,
@@ -118,20 +175,26 @@ impl GithubCli {
                 GH_JSON_FIELDS,
             ])
             .output()?;
-        if !output.status.success() {
-            let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-            return Err(ProviderError::GhFailed {
-                message: if message.is_empty() {
-                    "the command returned a non-zero exit status".into()
-                } else {
-                    message
-                },
-            });
-        }
+        ensure_success(&output)?;
 
         let response = serde_json::from_slice::<GithubResponse>(&output.stdout)?;
         Ok(response.into_snapshot(fetched_at))
     }
+}
+
+fn ensure_success(output: &std::process::Output) -> Result<(), ProviderError> {
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let message = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(ProviderError::GhFailed {
+        message: if message.is_empty() {
+            "the command returned a non-zero exit status".into()
+        } else {
+            message
+        },
+    })
 }
 
 pub fn resolve_gh_executable(stored_path: Option<&Path>) -> Result<PathBuf, ProviderError> {
@@ -177,6 +240,12 @@ struct GithubResponse {
     #[serde(rename = "updatedAt")]
     updated_at: Option<String>,
     number: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubCreatedIssue {
+    #[serde(rename = "html_url")]
+    html_url: String,
 }
 
 impl GithubResponse {
@@ -320,5 +389,55 @@ mod tests {
         assert_eq!(snapshot.title, "From gh");
         assert_eq!(snapshot.state, "OPEN");
         assert_eq!(snapshot.fetched_at, 123);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_cli_creates_an_issue_and_adds_a_comment_explicitly() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temporary provider directory should exist");
+        let executable = directory.path().join("gh");
+        let arguments = directory.path().join("arguments");
+        let script = format!(
+            r#"#!/bin/sh
+printf '%s\n' "$@" >> '{}'
+if [ "$1" = api ] && [ "$2" = repos/acme/app/issues ]; then
+  printf '%s' '{{"html_url":"https://github.com/acme/app/issues/42"}}'
+fi
+"#,
+            arguments.display()
+        );
+        fs::write(&executable, script).expect("fake gh should be written");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("fake gh should be executable");
+
+        let cli = GithubCli::new(executable);
+        let url = cli
+            .create_issue("acme/app", "Ship the parser", "Keep the existing Item")
+            .expect("issue creation should return its URL");
+        cli.add_comment(&url, "Please review the edge case")
+            .expect("comment creation should succeed");
+
+        assert_eq!(url, "https://github.com/acme/app/issues/42");
+        let arguments = fs::read_to_string(arguments).expect("CLI arguments should be recorded");
+        assert_eq!(
+            arguments.lines().collect::<Vec<_>>(),
+            vec![
+                "api",
+                "repos/acme/app/issues",
+                "--method",
+                "POST",
+                "--raw-field",
+                "title=Ship the parser",
+                "--raw-field",
+                "body=Keep the existing Item",
+                "issue",
+                "comment",
+                "https://github.com/acme/app/issues/42",
+                "--body",
+                "Please review the edge case",
+            ]
+        );
     }
 }
