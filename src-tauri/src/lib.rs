@@ -21,7 +21,6 @@ pub fn run() {
             app::list_contexts,
             app::list_projects,
             app::list_repositories,
-            app::list_worksets,
             app::list_context_attention_defaults,
             app::get_home,
             app::search_items_command,

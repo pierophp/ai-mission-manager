@@ -134,8 +134,11 @@ impl Runtime {
             .last()
             .cloned()
             .ok_or_else(|| "Workset creation produced no Workset".to_owned())?;
-        self.checkout_new_workset(&workset)?;
-        self.commit(decision)?;
+        let checkout = self.checkout_new_workset(&workset)?;
+        if let Err(error) = self.commit(decision) {
+            let cleanup_error = checkout.cleanup().err();
+            return Err(format_commit_error(error, cleanup_error));
+        }
         Ok(workset)
     }
 
@@ -175,17 +178,38 @@ impl Runtime {
             .find(|repository| repository.id == repository_id)
             .cloned()
             .ok_or_else(|| "Workset update produced no Repository".to_owned())?;
-        self.checkout_repository(
+        let destination = match self.checkout_repository(
             &workset,
             &repository,
             selected.branch_override.as_deref(),
             selected.base_branch_override.as_deref(),
-        )?;
-        self.commit(decision)?;
+        ) {
+            Ok(destination) => destination,
+            Err(error) => {
+                let cleanup_error = CheckoutReceipt {
+                    root: Path::new(&workset.root_directory).to_owned(),
+                    root_was_created: false,
+                    destinations: vec![Path::new(&workset.root_directory).join(&repository.name)],
+                }
+                .cleanup()
+                .err();
+                return Err(format_commit_error(error, cleanup_error));
+            }
+        };
+        if let Err(error) = self.commit(decision) {
+            let cleanup_error = CheckoutReceipt {
+                root: Path::new(&workset.root_directory).to_owned(),
+                root_was_created: false,
+                destinations: vec![destination],
+            }
+            .cleanup()
+            .err();
+            return Err(format_commit_error(error, cleanup_error));
+        }
         Ok(workset)
     }
 
-    fn checkout_new_workset(&self, workset: &Workset) -> Result<(), String> {
+    fn checkout_new_workset(&self, workset: &Workset) -> Result<CheckoutReceipt, String> {
         let root = Path::new(&workset.root_directory);
         let root_was_created = if root.exists() {
             if !root.is_dir() {
@@ -249,7 +273,11 @@ impl Runtime {
                 return Err(error);
             }
         }
-        Ok(())
+        Ok(CheckoutReceipt {
+            root: root.to_owned(),
+            root_was_created,
+            destinations: attempted,
+        })
     }
 
     fn checkout_repository(
@@ -258,12 +286,13 @@ impl Runtime {
         repository: &Repository,
         branch_override: Option<&str>,
         base_branch_override: Option<&str>,
-    ) -> Result<(), String> {
+    ) -> Result<PathBuf, String> {
         let branch = branch_override.unwrap_or(&workset.branch);
         let destination = Path::new(&workset.root_directory).join(&repository.name);
         GitCli::system()
             .checkout_repository(repository, &destination, branch, base_branch_override)
             .map_err(|error| error.to_string())
+            .map(|()| destination)
     }
 
     fn repository(&self, repository_id: i64) -> Result<Repository, String> {
@@ -669,6 +698,47 @@ impl Runtime {
     }
 }
 
+struct CheckoutReceipt {
+    root: PathBuf,
+    root_was_created: bool,
+    destinations: Vec<PathBuf>,
+}
+
+impl CheckoutReceipt {
+    fn cleanup(self) -> Result<(), String> {
+        let mut errors = Vec::new();
+        for destination in self.destinations.iter().rev() {
+            if destination.exists() {
+                if let Err(error) = fs::remove_dir_all(destination) {
+                    errors.push(format!("{}: {error}", destination.display()));
+                }
+            }
+        }
+        if self.root_was_created && self.root.exists() {
+            let is_empty = fs::read_dir(&self.root)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false);
+            if is_empty {
+                if let Err(error) = fs::remove_dir(&self.root) {
+                    errors.push(format!("{}: {error}", self.root.display()));
+                }
+            }
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("could not remove checkout: {}", errors.join(", ")))
+        }
+    }
+}
+
+fn format_commit_error(error: String, cleanup_error: Option<String>) -> String {
+    match cleanup_error {
+        Some(cleanup_error) => format!("{error}; {cleanup_error}"),
+        None => error,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExternalLinkAction {
     pub link: ExternalLinkView,
@@ -716,14 +786,6 @@ pub fn list_repositories(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Reposit
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())
         .map(|runtime| runtime.state.repositories.clone())
-}
-
-#[tauri::command]
-pub fn list_worksets(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Workset>, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())
-        .map(|runtime| runtime.state.worksets.clone())
 }
 
 #[tauri::command]
