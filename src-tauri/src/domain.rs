@@ -35,6 +35,8 @@ pub struct Item {
     pub title: String,
     pub project_id: i64,
     pub status: ItemStatus,
+    pub notes: String,
+    pub reminder_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,6 +45,37 @@ pub enum ItemStatus {
     Active,
     Waiting,
     Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ItemRelationKind {
+    Blocks,
+    BlockedBy,
+    RelatedTo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemRelation {
+    pub from_item_id: i64,
+    pub to_item_id: i64,
+    pub kind: ItemRelationKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ItemView {
+    pub item: Item,
+    pub context_name: String,
+    pub project_name: String,
+    pub relationships: Vec<ItemRelation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HomeView {
+    pub needs_attention: Vec<ItemView>,
+    pub running: Vec<ItemView>,
+    pub waiting: Vec<ItemView>,
+    pub due: Vec<ItemView>,
+    pub completed: Vec<ItemView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -54,6 +87,7 @@ pub struct DomainState {
     pub contexts: Vec<Context>,
     pub projects: Vec<Project>,
     pub items: Vec<Item>,
+    pub relationships: Vec<ItemRelation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,6 +105,23 @@ pub enum Event {
         context_id: i64,
         project_id: i64,
     },
+    SetItemStatus {
+        item_id: i64,
+        status: ItemStatus,
+    },
+    SetItemNotes {
+        item_id: i64,
+        notes: String,
+    },
+    SetItemRelation {
+        from_item_id: i64,
+        to_item_id: i64,
+        kind: ItemRelationKind,
+    },
+    SetItemReminder {
+        item_id: i64,
+        reminder_at: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +138,12 @@ pub enum Effect {
         item: Item,
         next_item_number: i64,
         next_item_id: i64,
+    },
+    PersistItemUpdate {
+        item: Item,
+    },
+    PersistItemRelation {
+        relation: ItemRelation,
     },
 }
 
@@ -114,6 +171,14 @@ pub enum DomainError {
     ProjectNotFound { project_id: i64 },
     #[error("Project {project_id} belongs to another Context")]
     ProjectContextMismatch { project_id: i64, context_id: i64 },
+    #[error("Item {item_id} does not exist")]
+    ItemNotFound { item_id: i64 },
+    #[error("Items {from_item_id} and {to_item_id} belong to different Contexts")]
+    ItemContextMismatch { from_item_id: i64, to_item_id: i64 },
+    #[error("an Item cannot relate to itself: {item_id}")]
+    SelfRelation { item_id: i64 },
+    #[error("the relationship already exists")]
+    RelationAlreadyExists,
     #[error("the Item identifier sequence is exhausted")]
     SequenceExhausted,
 }
@@ -227,6 +292,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 title: title.trim().to_owned(),
                 project_id,
                 status: project.defaults.item_status,
+                notes: String::new(),
+                reminder_at: None,
             };
 
             state.next_item_id = next_item_id;
@@ -242,7 +309,170 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 }],
             })
         }
+        Event::SetItemStatus { item_id, status } => {
+            let item = state
+                .items
+                .iter_mut()
+                .find(|item| item.id == item_id)
+                .ok_or(DomainError::ItemNotFound { item_id })?;
+            item.status = status;
+            let item = item.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistItemUpdate { item }],
+            })
+        }
+        Event::SetItemNotes { item_id, notes } => {
+            let item = state
+                .items
+                .iter_mut()
+                .find(|item| item.id == item_id)
+                .ok_or(DomainError::ItemNotFound { item_id })?;
+            item.notes = notes;
+            let item = item.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistItemUpdate { item }],
+            })
+        }
+        Event::SetItemRelation {
+            from_item_id,
+            to_item_id,
+            kind,
+        } => {
+            if from_item_id == to_item_id {
+                return Err(DomainError::SelfRelation {
+                    item_id: from_item_id,
+                });
+            }
+            let from_context_id = item_context_id(&state, from_item_id)?;
+            let to_context_id = item_context_id(&state, to_item_id)?;
+            if from_context_id != to_context_id {
+                return Err(DomainError::ItemContextMismatch {
+                    from_item_id,
+                    to_item_id,
+                });
+            }
+
+            let relation = ItemRelation {
+                from_item_id,
+                to_item_id,
+                kind,
+            };
+            if state.relationships.contains(&relation) {
+                return Err(DomainError::RelationAlreadyExists);
+            }
+            state.relationships.push(relation.clone());
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistItemRelation { relation }],
+            })
+        }
+        Event::SetItemReminder {
+            item_id,
+            reminder_at,
+        } => {
+            let item = state
+                .items
+                .iter_mut()
+                .find(|item| item.id == item_id)
+                .ok_or(DomainError::ItemNotFound { item_id })?;
+            item.reminder_at = reminder_at;
+            let item = item.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistItemUpdate { item }],
+            })
+        }
     }
+}
+
+pub fn home_view(state: &DomainState, context_id: Option<i64>, now: &str) -> HomeView {
+    let mut view = HomeView {
+        needs_attention: Vec::new(),
+        running: Vec::new(),
+        waiting: Vec::new(),
+        due: Vec::new(),
+        completed: Vec::new(),
+    };
+
+    for item in item_views(state, context_id) {
+        let is_due =
+            item.item.reminder_at.as_deref().is_some_and(|reminder_at| {
+                reminder_at <= now && item.item.status != ItemStatus::Done
+            });
+        if is_due {
+            view.due.push(item.clone());
+        }
+        if is_due || item.item.status == ItemStatus::Inbox {
+            view.needs_attention.push(item.clone());
+        }
+        match item.item.status {
+            ItemStatus::Inbox => {}
+            ItemStatus::Active => view.running.push(item),
+            ItemStatus::Waiting => view.waiting.push(item),
+            ItemStatus::Done => view.completed.push(item),
+        }
+    }
+
+    view
+}
+
+pub fn search_items(state: &DomainState, query: &str, context_id: Option<i64>) -> Vec<ItemView> {
+    let query = query.trim().to_lowercase();
+    item_views(state, context_id)
+        .into_iter()
+        .filter(|view| {
+            query.is_empty()
+                || [
+                    view.item.human_identifier.as_str(),
+                    view.item.title.as_str(),
+                    view.item.notes.as_str(),
+                    view.context_name.as_str(),
+                    view.project_name.as_str(),
+                ]
+                .iter()
+                .any(|field| field.to_lowercase().contains(&query))
+        })
+        .collect()
+}
+
+fn item_views(state: &DomainState, context_id: Option<i64>) -> Vec<ItemView> {
+    state
+        .items
+        .iter()
+        .filter_map(|item| {
+            let project = state
+                .projects
+                .iter()
+                .find(|project| project.id == item.project_id)?;
+            if context_id.is_some_and(|candidate| candidate != project.context_id) {
+                return None;
+            }
+            let context = state
+                .contexts
+                .iter()
+                .find(|context| context.id == project.context_id)?;
+            let relationships = state
+                .relationships
+                .iter()
+                .filter(|relation| {
+                    relation.from_item_id == item.id || relation.to_item_id == item.id
+                })
+                .cloned()
+                .collect();
+            Some(ItemView {
+                item: item.clone(),
+                context_name: context.name.clone(),
+                project_name: project.name.clone(),
+                relationships,
+            })
+        })
+        .collect()
 }
 
 fn clean_name<E>(name: String, empty_error: E) -> Result<String, E> {
@@ -263,6 +493,22 @@ fn ensure_context(state: &DomainState, context_id: i64) -> Result<(), DomainErro
     } else {
         Err(DomainError::ContextNotFound { context_id })
     }
+}
+
+fn item_context_id(state: &DomainState, item_id: i64) -> Result<i64, DomainError> {
+    let item = state
+        .items
+        .iter()
+        .find(|item| item.id == item_id)
+        .ok_or(DomainError::ItemNotFound { item_id })?;
+    state
+        .projects
+        .iter()
+        .find(|project| project.id == item.project_id)
+        .map(|project| project.context_id)
+        .ok_or(DomainError::ProjectNotFound {
+            project_id: item.project_id,
+        })
 }
 
 #[cfg(test)]
@@ -371,6 +617,8 @@ mod tests {
                 title: "Investigate timeout".into(),
                 project_id: 2,
                 status: ItemStatus::Active,
+                notes: String::new(),
+                reminder_at: None,
             }
         );
         assert_eq!(decision.state.next_item_number, 2);
@@ -488,6 +736,254 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_item_can_move_between_statuses_in_any_order() {
+        let mut state = state_with_context(7, "Work");
+        state.items.push(Item {
+            id: 1,
+            human_identifier: "MC-1".into(),
+            title: "Ship the change".into(),
+            project_id: 1,
+            status: ItemStatus::Inbox,
+            notes: String::new(),
+            reminder_at: None,
+        });
+        state.next_item_id = 2;
+        state.next_item_number = 2;
+
+        let active = decide(
+            state,
+            Event::SetItemStatus {
+                item_id: 1,
+                status: ItemStatus::Active,
+            },
+        )
+        .expect("an Item should move to Active");
+        assert_eq!(active.state.items[0].status, ItemStatus::Active);
+        assert_eq!(
+            active.effects,
+            vec![Effect::PersistItemUpdate {
+                item: active.state.items[0].clone(),
+            }]
+        );
+
+        let waiting = decide(
+            active.state,
+            Event::SetItemStatus {
+                item_id: 1,
+                status: ItemStatus::Waiting,
+            },
+        )
+        .expect("an Item should move to Waiting");
+        assert_eq!(waiting.state.items[0].status, ItemStatus::Waiting);
+
+        let done = decide(
+            waiting.state,
+            Event::SetItemStatus {
+                item_id: 1,
+                status: ItemStatus::Done,
+            },
+        )
+        .expect("an Item should move to Done");
+        let inbox = decide(
+            done.state,
+            Event::SetItemStatus {
+                item_id: 1,
+                status: ItemStatus::Inbox,
+            },
+        )
+        .expect("a Done Item should be able to return to Inbox");
+        assert_eq!(inbox.state.items[0].status, ItemStatus::Inbox);
+    }
+
+    #[test]
+    fn an_item_can_record_notes_and_relationships_within_its_context() {
+        let mut state = state_with_context(7, "Work");
+        state.items = vec![
+            Item {
+                id: 1,
+                human_identifier: "MC-1".into(),
+                title: "Ship the change".into(),
+                project_id: 1,
+                status: ItemStatus::Active,
+                notes: String::new(),
+                reminder_at: None,
+            },
+            Item {
+                id: 2,
+                human_identifier: "MC-2".into(),
+                title: "Prepare the release".into(),
+                project_id: 1,
+                status: ItemStatus::Waiting,
+                notes: String::new(),
+                reminder_at: None,
+            },
+        ];
+        state.next_item_id = 3;
+        state.next_item_number = 3;
+
+        let noted = decide(
+            state,
+            Event::SetItemNotes {
+                item_id: 1,
+                notes: "Release after the migration is verified.".into(),
+            },
+        )
+        .expect("notes should be saved");
+        assert_eq!(
+            noted.state.items[0].notes,
+            "Release after the migration is verified."
+        );
+        assert_eq!(
+            noted.effects,
+            vec![Effect::PersistItemUpdate {
+                item: noted.state.items[0].clone(),
+            }]
+        );
+
+        let related = decide(
+            noted.state,
+            Event::SetItemRelation {
+                from_item_id: 1,
+                to_item_id: 2,
+                kind: ItemRelationKind::Blocks,
+            },
+        )
+        .expect("Items in one Context should be related");
+        assert_eq!(
+            related.state.relationships,
+            vec![ItemRelation {
+                from_item_id: 1,
+                to_item_id: 2,
+                kind: ItemRelationKind::Blocks,
+            }]
+        );
+        assert_eq!(
+            related.effects,
+            vec![Effect::PersistItemRelation {
+                relation: related.state.relationships[0].clone(),
+            }]
+        );
+    }
+
+    #[test]
+    fn relationships_cannot_cross_contexts_or_point_to_themselves() {
+        let mut state = state_with_contexts(&[(7, "Work"), (8, "Personal")]);
+        state.items = vec![
+            Item {
+                id: 1,
+                human_identifier: "MC-1".into(),
+                title: "Work item".into(),
+                project_id: 1,
+                status: ItemStatus::Inbox,
+                notes: String::new(),
+                reminder_at: None,
+            },
+            Item {
+                id: 2,
+                human_identifier: "MC-2".into(),
+                title: "Personal item".into(),
+                project_id: 2,
+                status: ItemStatus::Inbox,
+                notes: String::new(),
+                reminder_at: None,
+            },
+        ];
+
+        assert_eq!(
+            decide(
+                state.clone(),
+                Event::SetItemRelation {
+                    from_item_id: 1,
+                    to_item_id: 2,
+                    kind: ItemRelationKind::BlockedBy,
+                },
+            ),
+            Err(DomainError::ItemContextMismatch {
+                from_item_id: 1,
+                to_item_id: 2,
+            })
+        );
+        assert_eq!(
+            decide(
+                state,
+                Event::SetItemRelation {
+                    from_item_id: 1,
+                    to_item_id: 1,
+                    kind: ItemRelationKind::RelatedTo,
+                },
+            ),
+            Err(DomainError::SelfRelation { item_id: 1 })
+        );
+    }
+
+    #[test]
+    fn home_view_groups_items_and_searches_across_contexts() {
+        let mut state = state_with_contexts(&[(7, "Work"), (8, "Personal")]);
+        state.items = vec![
+            Item {
+                id: 1,
+                human_identifier: "MC-1".into(),
+                title: "Reply to the design review".into(),
+                project_id: 1,
+                status: ItemStatus::Inbox,
+                notes: "Needs a decision".into(),
+                reminder_at: None,
+            },
+            Item {
+                id: 2,
+                human_identifier: "MC-2".into(),
+                title: "Implement the parser".into(),
+                project_id: 1,
+                status: ItemStatus::Active,
+                notes: String::new(),
+                reminder_at: Some("2026-09-18T09:00".into()),
+            },
+            Item {
+                id: 3,
+                human_identifier: "MC-3".into(),
+                title: "Wait for approval".into(),
+                project_id: 2,
+                status: ItemStatus::Waiting,
+                notes: String::new(),
+                reminder_at: None,
+            },
+            Item {
+                id: 4,
+                human_identifier: "MC-4".into(),
+                title: "Archive the old plan".into(),
+                project_id: 2,
+                status: ItemStatus::Done,
+                notes: String::new(),
+                reminder_at: Some("2026-09-17T09:00".into()),
+            },
+        ];
+
+        let view = home_view(&state, None, "2026-09-19T09:00");
+        assert_eq!(view.needs_attention[0].item.id, 1);
+        assert_eq!(view.needs_attention[1].item.id, 2);
+        assert_eq!(view.running[0].item.id, 2);
+        assert_eq!(view.waiting[0].item.id, 3);
+        assert_eq!(view.due[0].item.id, 2);
+        assert_eq!(view.completed[0].item.id, 4);
+        assert_eq!(view.running[0].context_name, "Work");
+
+        let personal = home_view(&state, Some(8), "2026-09-19T09:00");
+        assert!(personal.needs_attention.is_empty());
+        assert_eq!(personal.waiting[0].context_name, "Personal");
+
+        let results = search_items(&state, "design", None);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item.human_identifier, "MC-1");
+        assert_eq!(results[0].context_name, "Work");
+
+        let all_personal = search_items(&state, "", Some(8));
+        assert_eq!(all_personal.len(), 2);
+        assert!(all_personal
+            .iter()
+            .all(|result| result.context_name == "Personal"));
+    }
+
     fn state_with_context(id: i64, name: &str) -> DomainState {
         state_with_contexts(&[(id, name)])
     }
@@ -518,6 +1014,7 @@ mod tests {
                 })
                 .collect(),
             items: Vec::new(),
+            relationships: Vec::new(),
         }
     }
 
@@ -530,6 +1027,7 @@ mod tests {
             contexts: Vec::new(),
             projects: Vec::new(),
             items: Vec::new(),
+            relationships: Vec::new(),
         }
     }
 }

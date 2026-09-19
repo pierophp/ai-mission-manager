@@ -3,7 +3,10 @@ use std::{path::Path, sync::Mutex};
 use tauri::State;
 
 use crate::{
-    domain::{decide, Context, DomainState, Event, Item, ItemStatus, Project, ProjectDefaults},
+    domain::{
+        decide, home_view, search_items, Context, DomainState, Event, HomeView, Item, ItemRelation,
+        ItemRelationKind, ItemStatus, ItemView, Project, ProjectDefaults,
+    },
     persistence::SqliteStore,
 };
 
@@ -82,6 +85,44 @@ impl Runtime {
         Ok(item)
     }
 
+    fn update_item(&mut self, event: Event, item_id: i64) -> Result<Item, String> {
+        let decision = decide(self.state.clone(), event).map_err(|error| error.to_string())?;
+        let item = decision
+            .state
+            .items
+            .iter()
+            .find(|item| item.id == item_id)
+            .cloned()
+            .ok_or_else(|| "Item update produced no Item".to_owned())?;
+        self.commit(decision)?;
+        Ok(item)
+    }
+
+    fn set_item_relation(
+        &mut self,
+        from_item_id: i64,
+        to_item_id: i64,
+        kind: ItemRelationKind,
+    ) -> Result<ItemRelation, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::SetItemRelation {
+                from_item_id,
+                to_item_id,
+                kind,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let relation = decision
+            .state
+            .relationships
+            .last()
+            .cloned()
+            .ok_or_else(|| "Item relationship produced no relationship".to_owned())?;
+        self.commit(decision)?;
+        Ok(relation)
+    }
+
     fn commit(&mut self, decision: crate::domain::Decision) -> Result<(), String> {
         self.store
             .apply(&decision.effects)
@@ -105,6 +146,30 @@ pub fn list_projects(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Project>, S
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())
         .map(|runtime| runtime.state.projects.clone())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_home(
+    context_id: Option<i64>,
+    now: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<HomeView, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())
+        .map(|runtime| home_view(&runtime.state, context_id, &now))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn search_items_command(
+    query: String,
+    context_id: Option<i64>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Vec<ItemView>, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())
+        .map(|runtime| search_items(&runtime.state, &query, context_id))
 }
 
 #[tauri::command]
@@ -161,4 +226,59 @@ pub fn create_item(
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .create_item(title, context_id, project_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_item_status(
+    item_id: i64,
+    status: ItemStatus,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Item, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .update_item(Event::SetItemStatus { item_id, status }, item_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_item_notes(
+    item_id: i64,
+    notes: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Item, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .update_item(Event::SetItemNotes { item_id, notes }, item_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_item_reminder(
+    item_id: i64,
+    reminder_at: Option<String>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Item, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .update_item(
+            Event::SetItemReminder {
+                item_id,
+                reminder_at,
+            },
+            item_id,
+        )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_item_relation(
+    from_item_id: i64,
+    to_item_id: i64,
+    kind: ItemRelationKind,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ItemRelation, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .set_item_relation(from_item_id, to_item_id, kind)
 }

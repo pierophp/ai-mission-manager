@@ -3,7 +3,10 @@ use std::path::Path;
 use rusqlite::{params, Connection};
 use thiserror::Error;
 
-use crate::domain::{Context, DomainState, Effect, Item, ItemStatus, Project, ProjectDefaults};
+use crate::domain::{
+    Context, DomainState, Effect, Item, ItemRelation, ItemRelationKind, ItemStatus, Project,
+    ProjectDefaults,
+};
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -13,6 +16,8 @@ pub enum StoreError {
     InvalidItemStatus(String),
     #[error("invalid Project default status in database: {0}")]
     InvalidProjectDefaultStatus(String),
+    #[error("invalid Item relationship kind in database: {0}")]
+    InvalidItemRelationKind(String),
     #[error("invalid {key} value in database: {value}")]
     InvalidSequence { key: String, value: String },
     #[error("a database sequence is exhausted")]
@@ -30,7 +35,11 @@ impl SqliteStore {
         let mut connection = Connection::open(path)?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
         let item_columns = table_columns(&connection, "items")?;
-        if !item_columns.is_empty() && !item_columns.iter().any(|column| column == "project_id") {
+        if !item_columns.is_empty()
+            && (!item_columns.iter().any(|column| column == "project_id")
+                || !item_columns.iter().any(|column| column == "notes")
+                || !item_columns.iter().any(|column| column == "reminder_at"))
+        {
             return Err(StoreError::IncompatibleSchema);
         }
         initialize_schema(&mut connection)?;
@@ -82,7 +91,7 @@ impl SqliteStore {
         };
         let items = {
             let mut statement = self.connection.prepare(
-                "SELECT id, human_identifier, title, project_id, status
+                "SELECT id, human_identifier, title, project_id, status, notes, reminder_at
                  FROM items
                  ORDER BY id",
             )?;
@@ -100,6 +109,30 @@ impl SqliteStore {
                             Box::new(error),
                         )
                     })?,
+                    notes: row.get(5)?,
+                    reminder_at: row.get(6)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let relationships = {
+            let mut statement = self.connection.prepare(
+                "SELECT from_item_id, to_item_id, kind
+                 FROM item_relationships
+                 ORDER BY from_item_id, to_item_id, kind",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let kind: String = row.get(2)?;
+                Ok(ItemRelation {
+                    from_item_id: row.get(0)?,
+                    to_item_id: row.get(1)?,
+                    kind: parse_item_relation_kind(&kind).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -113,6 +146,7 @@ impl SqliteStore {
             contexts,
             projects,
             items,
+            relationships,
         })
     }
 
@@ -160,14 +194,16 @@ impl SqliteStore {
                 } => {
                     transaction.execute(
                         "INSERT INTO items
-                            (id, human_identifier, title, project_id, status)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                            (id, human_identifier, title, project_id, status, notes, reminder_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         params![
                             item.id,
                             item.human_identifier,
                             item.title,
                             item.project_id,
                             item_status_as_str(item.status),
+                            item.notes,
+                            item.reminder_at,
                         ],
                     )?;
                     transaction.execute(
@@ -177,6 +213,30 @@ impl SqliteStore {
                     transaction.execute(
                         "UPDATE metadata SET value = ?1 WHERE key = 'next_item_id'",
                         params![next_item_id],
+                    )?;
+                }
+                Effect::PersistItemUpdate { item } => {
+                    transaction.execute(
+                        "UPDATE items
+                         SET status = ?1, notes = ?2, reminder_at = ?3
+                         WHERE id = ?4",
+                        params![
+                            item_status_as_str(item.status),
+                            item.notes,
+                            item.reminder_at,
+                            item.id,
+                        ],
+                    )?;
+                }
+                Effect::PersistItemRelation { relation } => {
+                    transaction.execute(
+                        "INSERT INTO item_relationships (from_item_id, to_item_id, kind)
+                         VALUES (?1, ?2, ?3)",
+                        params![
+                            relation.from_item_id,
+                            relation.to_item_id,
+                            item_relation_kind_as_str(relation.kind),
+                        ],
                     )?;
                 }
             }
@@ -236,7 +296,15 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
         "CREATE INDEX IF NOT EXISTS projects_by_context
              ON projects (context_id);
          CREATE INDEX IF NOT EXISTS items_by_project_and_status
-             ON items (project_id, status);",
+             ON items (project_id, status);
+         CREATE TABLE IF NOT EXISTS item_relationships (
+             from_item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+             to_item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+             kind TEXT NOT NULL CHECK (kind IN ('blocks', 'blocked_by', 'related_to')),
+             PRIMARY KEY (from_item_id, to_item_id, kind)
+         );
+         CREATE INDEX IF NOT EXISTS relationships_by_target
+             ON item_relationships (to_item_id);",
     )?;
     ensure_sequence_at_least(connection, "next_context_id", "contexts", "id")?;
     ensure_sequence_at_least(connection, "next_project_id", "projects", "id")?;
@@ -293,7 +361,9 @@ fn create_items_table(connection: &Connection) -> Result<(), StoreError> {
              human_identifier TEXT NOT NULL UNIQUE,
              title TEXT NOT NULL,
              project_id INTEGER NOT NULL REFERENCES projects(id),
-             status TEXT NOT NULL CHECK (status IN ('Inbox', 'Active', 'Waiting', 'Done'))
+             status TEXT NOT NULL CHECK (status IN ('Inbox', 'Active', 'Waiting', 'Done')),
+             notes TEXT NOT NULL DEFAULT '',
+             reminder_at TEXT
          );",
     )?;
     Ok(())
@@ -339,6 +409,23 @@ fn parse_item_status(status: &str) -> Result<ItemStatus, StoreError> {
 
 fn parse_project_default_status(status: &str) -> Result<ItemStatus, StoreError> {
     parse_status(status).map_err(|other| StoreError::InvalidProjectDefaultStatus(other.into()))
+}
+
+fn item_relation_kind_as_str(kind: ItemRelationKind) -> &'static str {
+    match kind {
+        ItemRelationKind::Blocks => "blocks",
+        ItemRelationKind::BlockedBy => "blocked_by",
+        ItemRelationKind::RelatedTo => "related_to",
+    }
+}
+
+fn parse_item_relation_kind(kind: &str) -> Result<ItemRelationKind, StoreError> {
+    match kind {
+        "blocks" => Ok(ItemRelationKind::Blocks),
+        "blocked_by" => Ok(ItemRelationKind::BlockedBy),
+        "related_to" => Ok(ItemRelationKind::RelatedTo),
+        other => Err(StoreError::InvalidItemRelationKind(other.into())),
+    }
 }
 
 fn parse_status(status: &str) -> Result<ItemStatus, &str> {
@@ -404,6 +491,56 @@ mod tests {
             store
                 .apply(&item_decision.effects)
                 .expect("Item should be persisted");
+
+            let noted = decide(
+                item_decision.state,
+                Event::SetItemNotes {
+                    item_id: 1,
+                    notes: "Keep the migration checklist nearby".into(),
+                },
+            )
+            .expect("Item notes should update");
+            store
+                .apply(&noted.effects)
+                .expect("Item notes should be persisted");
+
+            let reminded = decide(
+                noted.state,
+                Event::SetItemReminder {
+                    item_id: 1,
+                    reminder_at: Some("2026-09-20T09:00".into()),
+                },
+            )
+            .expect("Item reminder should update");
+            store
+                .apply(&reminded.effects)
+                .expect("Item reminder should be persisted");
+
+            let second_item = decide(
+                reminded.state,
+                Event::CreateItem {
+                    title: "Review the migration".into(),
+                    context_id: 2,
+                    project_id: 3,
+                },
+            )
+            .expect("the second Item should be created");
+            store
+                .apply(&second_item.effects)
+                .expect("the second Item should be persisted");
+
+            let relation = decide(
+                second_item.state,
+                Event::SetItemRelation {
+                    from_item_id: 1,
+                    to_item_id: 2,
+                    kind: ItemRelationKind::Blocks,
+                },
+            )
+            .expect("the Item relationship should be created");
+            store
+                .apply(&relation.effects)
+                .expect("the Item relationship should be persisted");
         }
 
         let reopened = SqliteStore::open(&path).expect("database should reopen");
@@ -413,13 +550,24 @@ mod tests {
         assert_eq!(state.projects.len(), 3);
         assert_eq!(state.projects[2].name, "Billing");
         assert_eq!(state.projects[2].defaults.item_status, ItemStatus::Active);
-        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.items.len(), 2);
         assert_eq!(state.items[0].human_identifier, "MC-1");
         assert_eq!(state.items[0].title, "Remember this after restart");
         assert_eq!(state.items[0].project_id, 3);
         assert_eq!(state.items[0].status, ItemStatus::Active);
+        assert_eq!(state.items[0].notes, "Keep the migration checklist nearby");
+        assert_eq!(
+            state.items[0].reminder_at.as_deref(),
+            Some("2026-09-20T09:00")
+        );
+        assert_eq!(state.items[1].human_identifier, "MC-2");
+        assert_eq!(state.relationships.len(), 1);
+        assert_eq!(state.relationships[0].from_item_id, 1);
+        assert_eq!(state.relationships[0].to_item_id, 2);
+        assert_eq!(state.relationships[0].kind, ItemRelationKind::Blocks);
         assert_eq!(state.next_context_id, 3);
         assert_eq!(state.next_project_id, 4);
-        assert_eq!(state.next_item_number, 2);
+        assert_eq!(state.next_item_number, 3);
+        assert_eq!(state.next_item_id, 3);
     }
 }
