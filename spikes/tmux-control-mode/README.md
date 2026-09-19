@@ -62,6 +62,40 @@ The automated proof starts a real, temporary `sshd` on loopback with an ephemera
 
 The browser bridge remains transport-agnostic: it consumes the same `TmuxControlPane` output/input/resize interface that the local proof exercises. The remote-specific work is isolated to the process-launch adapter, so the terminal view does not need a local-versus-remote branch.
 
+## Agent lifecycle result (issue #5)
+
+Result: **yes**. A lifecycle command hook can report a Run without a remote daemon. `src/agent-state.ts` is the hook entrypoint after compilation:
+
+```sh
+node dist/src/agent-state.js claude < hook-input.json
+node dist/src/agent-state.js codex < hook-input.json
+```
+
+The app injects these variables when it starts the agent:
+
+```text
+AI_MISSION_MANAGER_RUN_ID
+AI_MISSION_MANAGER_STATE_FILE
+AI_MISSION_MANAGER_TMUX_PATH
+AI_MISSION_MANAGER_TMUX_SOCKET
+AI_MISSION_MANAGER_PANE_ID
+```
+
+The hook atomically writes `{ agent, runId, state, updatedAt }` to the state file first. It then best-effort sets the `@ai_mission_manager_run_state` user option on the exact Pane. A failed notification never turns into an agent failure; the state file remains the durable truth.
+
+The provider mappings are:
+
+| Provider | Working | Blocked | Finished |
+| --- | --- | --- | --- |
+| Claude Code | `SessionStart`, `UserPromptSubmit` | `Notification` matching permission or elicitation prompts | `Stop`, `SessionEnd` |
+| Codex | `SessionStart`, `UserPromptSubmit` | `PermissionRequest` | `Stop`, `SessionEnd` |
+
+Codex has no Claude-style general notification event in this mapping, so a Run is reported blocked when it is waiting for a permission decision; other waiting states remain unknown until Codex exposes a more specific lifecycle signal.
+
+The runtime subscribes with tmux control mode's `refresh-client -B name:pane:format`. tmux 3.7c emits `%subscription-changed` when `#{@ai_mission_manager_run_state}` changes, at most once per second. The notification therefore travels over the same local or SSH-backed control-mode connection; no reverse socket and no long-running process on the remote Machine are needed. On reconnect, `agentState()` reads the current option, recovering a state written while the connection was down.
+
+The automated remote proof runs the Claude hook on the SSH-backed Machine, verifies the Run identity for working and finished, changes it to blocked after killing the control client, and reads blocked after reconnecting. The proof uses the command-hook input contracts documented by [Claude Code](https://code.claude.com/docs/en/hooks) and [Codex](https://developers.openai.com/es-419/docs/hooks).
+
 ## External terminal focus proof (issue #4)
 
 Result: **yes**. A stored `TmuxControlPaneOptions` identity can be opened in a real terminal client without starting a new session or choosing the session's current Pane.

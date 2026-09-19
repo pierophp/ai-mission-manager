@@ -21,6 +21,7 @@ const sshdAvailable = existsSync(sshdPath);
 const socketName = `mission-ssh-spike-${process.pid}`;
 const sessionName = "remote-proof";
 const username = userInfo().username;
+const agentStateScript = resolve(dirname(fileURLToPath(import.meta.url)), "../src/agent-state.js");
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -192,6 +193,24 @@ class LoopbackSshd {
     this.runTmux(["send-keys", "-t", paneId, "-H", ...hexBytes]);
   }
 
+  public runAgentHook(
+    provider: "claude" | "codex",
+    event: Record<string, unknown>,
+    environment: Record<string, string>,
+  ): string {
+    const command = [
+      "printf %s",
+      shellQuote(JSON.stringify(event)),
+      "|",
+      "env",
+      ...Object.entries(environment).map(([name, value]) => shellQuote(`${name}=${value}`)),
+      shellQuote(process.execPath),
+      shellQuote(agentStateScript),
+      shellQuote(provider),
+    ].join(" ");
+    return this.runSsh(["sh", "-c", command]);
+  }
+
   public killControlClient(): void {
     try {
       this.runSsh([
@@ -347,6 +366,14 @@ test(
       },
     };
     const pane = new TmuxControlPane(options);
+    const stateFile = join(tmpdir(), `mission-remote-state-${process.pid}.json`);
+    const stateEnvironment = {
+      AI_MISSION_MANAGER_RUN_ID: "run-remote-123",
+      AI_MISSION_MANAGER_STATE_FILE: stateFile,
+      AI_MISSION_MANAGER_TMUX_PATH: remoteTmuxPath,
+      AI_MISSION_MANAGER_TMUX_SOCKET: socketName,
+      AI_MISSION_MANAGER_PANE_ID: remotePaneId,
+    };
     const spikeRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
     const server = createEmbeddedTerminalServer(pane, {
       publicRoot: resolve(spikeRoot, "public"),
@@ -356,7 +383,29 @@ test(
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     let reconnectedPane: TmuxControlPane | undefined;
     try {
+      const working = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("remote working state was not reported")), 5_000);
+        pane.once("agent-state", (record) => {
+          if (record.runId === "run-remote-123" && record.state === "working") {
+            clearTimeout(timeout);
+            resolve();
+          }
+        });
+      });
       await pane.connect();
+      machine.runAgentHook("claude", { hook_event_name: "SessionStart" }, stateEnvironment);
+      await working;
+      const finished = new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("remote finished state was not reported")), 5_000);
+        pane.once("agent-state", (record) => {
+          if (record.runId === "run-remote-123" && record.state === "finished") {
+            clearTimeout(timeout);
+            resolve();
+          }
+        });
+      });
+      machine.runAgentHook("claude", { hook_event_name: "Stop" }, stateEnvironment);
+      await finished;
       const page = await fetch(baseUrl + "/");
       assert.equal(page.status, 200);
       assert.match(await page.text(), /Existing tmux Pane/);
@@ -423,8 +472,19 @@ test(
           identityFile: machine.clientKeyPath,
         },
       });
-      const recovered = waitForOutput(reconnectedPane, "REMOTE_ECHO:recovered");
+      machine.runAgentHook(
+        "claude",
+        { hook_event_name: "Notification", notification_type: "permission_prompt" },
+        stateEnvironment,
+      );
       await reconnectedPane.connect();
+      assert.deepEqual(await reconnectedPane.agentState(), {
+        agent: "claude",
+        runId: "run-remote-123",
+        state: "blocked",
+        updatedAt: JSON.parse(readFileSync(stateFile, "utf8")).updatedAt,
+      });
+      const recovered = waitForOutput(reconnectedPane, "REMOTE_ECHO:recovered");
       await reconnectedPane.sendInput(Buffer.from("recovered\r"));
       await recovered;
       assert.equal(machine.runTmux(["list-sessions", "-F", "#{session_name}"]).trim(), sessionName);
@@ -433,6 +493,7 @@ test(
       await closeServer(server);
       await pane.close();
       await reconnectedPane?.close();
+      rmSync(stateFile, { force: true });
     }
   },
 );

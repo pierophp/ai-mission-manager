@@ -1,9 +1,12 @@
 import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { tmpdir } from "node:os";
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
 
+import { reportAgentState } from "../src/agent-state.js";
 import { TmuxControlPane } from "../src/control-mode.js";
 import { createEmbeddedTerminalServer } from "../src/server.js";
 
@@ -179,4 +182,40 @@ test("reports a missing pane instead of attaching to a different pane", async ()
   await assert.rejects(pane.connect(), /pane %9999 was not found/);
   await pane.close();
   assert.equal(tmux(["list-panes", "-t", sessionName]).trim().split("\n").length, 1);
+});
+
+test("receives the Run state from a Pane user-option subscription", async () => {
+  const beforeAttach = paneSnapshot();
+  const pane = new TmuxControlPane({
+    tmuxPath,
+    socketName,
+    sessionName,
+    paneId: beforeAttach.paneId,
+  });
+  const directory = mkdtempSync(`${tmpdir()}/mission-agent-state-`);
+  const stateFile = `${directory}/state.json`;
+
+  try {
+    const state = new Promise<unknown>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error("timed out waiting for Run state")), 3_000);
+      pane.once("agent-state", (record) => {
+        clearTimeout(timeout);
+        resolve(record);
+      });
+    });
+    await pane.connect();
+    const record = reportAgentState("claude", "working", {
+      runId: "run-local-123",
+      stateFile,
+      tmuxPath,
+      socketName,
+      paneId: beforeAttach.paneId,
+    });
+
+    assert.deepEqual(await state, record);
+    assert.deepEqual(await pane.agentState(), record);
+  } finally {
+    await pane.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
 });

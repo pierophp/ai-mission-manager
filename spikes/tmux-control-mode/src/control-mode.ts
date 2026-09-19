@@ -1,6 +1,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 
+import {
+  AGENT_STATE_OPTION,
+  type AgentStateRecord,
+} from "./agent-state.js";
+
 export interface PaneSize {
   columns: number;
   rows: number;
@@ -41,6 +46,7 @@ interface PendingCommand {
 
 const paneIdPattern = /^%\d+$/;
 const sessionTargetPattern = /^[\w$@%+.,:=~-]+$/;
+const agentStateSubscription = "mission-manager-agent-state";
 
 export function validatePaneId(value: string): string {
   if (!paneIdPattern.test(value)) {
@@ -139,6 +145,37 @@ function parsePaneInfo(line: string): PaneInfo | undefined {
   return parsed;
 }
 
+function parseAgentState(value: string): AgentStateRecord | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return undefined;
+    }
+    const record = parsed as Record<string, unknown>;
+    if (
+      (record.agent !== "claude" && record.agent !== "codex") ||
+      typeof record.runId !== "string" ||
+      !record.runId ||
+      (record.state !== "working" && record.state !== "blocked" && record.state !== "finished") ||
+      typeof record.updatedAt !== "string"
+    ) {
+      return undefined;
+    }
+    return {
+      agent: record.agent,
+      runId: record.runId,
+      state: record.state,
+      updatedAt: record.updatedAt,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The smallest useful runtime adapter proved by this spike.
  *
@@ -175,6 +212,7 @@ export class TmuxControlPane extends EventEmitter {
 
   public override on(event: "output", listener: (chunk: Buffer) => void): this;
   public override on(event: "exit", listener: (code: number | null) => void): this;
+  public override on(event: "agent-state", listener: (record: AgentStateRecord) => void): this;
   public override on(event: string, listener: (...args: any[]) => void): this {
     return super.on(event, listener);
   }
@@ -210,6 +248,13 @@ export class TmuxControlPane extends EventEmitter {
       const panes = await this.listPanes();
       if (!panes.some((pane) => pane.paneId === this.options.paneId)) {
         throw new Error(`pane ${this.options.paneId} was not found`);
+      }
+      await this.request(
+        `refresh-client -B ${shellQuote(`${agentStateSubscription}:${this.options.paneId}:#{${AGENT_STATE_OPTION}}`)}`,
+      );
+      const currentState = await this.agentState();
+      if (currentState) {
+        this.emit("agent-state", currentState);
       }
     } catch (error) {
       await this.close();
@@ -249,6 +294,13 @@ export class TmuxControlPane extends EventEmitter {
   public async snapshot(): Promise<Buffer> {
     const lines = await this.request(`capture-pane -p -e -t ${this.options.paneId}`);
     return Buffer.from(`${lines.join("\n")}\n`, "utf8");
+  }
+
+  public async agentState(): Promise<AgentStateRecord | undefined> {
+    const lines = await this.request(
+      `display-message -p -t ${this.options.paneId} ${shellQuote(`#{${AGENT_STATE_OPTION}}`)}`,
+    );
+    return parseAgentState(lines.join("\n").trim());
   }
 
   public async close(): Promise<void> {
@@ -378,6 +430,21 @@ export class TmuxControlPane extends EventEmitter {
     }
 
     const text = line.toString("utf8");
+    if (text.startsWith("%subscription-changed ")) {
+      const valueSeparator = text.indexOf(" : ");
+      if (valueSeparator !== -1) {
+        const header = text.slice(0, valueSeparator).split(" ");
+        const subscriptionName = header[1];
+        const paneId = header[5];
+        if (subscriptionName === agentStateSubscription && paneId === this.options.paneId) {
+          const state = parseAgentState(text.slice(valueSeparator + 3));
+          if (state) {
+            this.emit("agent-state", state);
+          }
+        }
+      }
+      return;
+    }
     if (text.startsWith("%begin ")) {
       if (!this.currentCommand) {
         this.initialCommandLines = [];
