@@ -16,7 +16,7 @@ type Context = {
   name: string;
 };
 
-type TrackerChoice = "github" | "none";
+type ProviderChoice = "github" | "none";
 type DependencyState =
   | "available"
   | "missing"
@@ -26,7 +26,7 @@ type DependencyState =
 
 type SetupState = {
   completed: boolean;
-  tracker: TrackerChoice;
+  provider: ProviderChoice;
 };
 
 type DependencyStatus = {
@@ -401,7 +401,7 @@ export function App() {
   const [machineStrictHostKeyChecking, setMachineStrictHostKeyChecking] =
     useState("accept-new");
   const [setupContextName, setSetupContextName] = useState("Personal");
-  const [setupTracker, setSetupTracker] = useState<TrackerChoice>("github");
+  const [setupProvider, setSetupProvider] = useState<ProviderChoice>("github");
   const [attentionObjectKind, setAttentionObjectKind] =
     useState<ExternalObjectKind>("pull_request");
   const [attentionDefaultPolicy, setAttentionDefaultPolicy] =
@@ -531,7 +531,7 @@ export function App() {
         invoke<Context[]>("list_contexts"),
         invoke<Project[]>("list_projects"),
         invoke<SetupState>("get_setup_state"),
-        invoke<HealthStatus>("get_health_status"),
+        invoke<HealthStatus>("get_health_status", { provider: null }),
         invoke<ContextAttentionDefault[]>("list_context_attention_defaults"),
         invoke<Machine[]>("list_machines"),
         invoke<Repository[]>("list_repositories"),
@@ -561,7 +561,7 @@ export function App() {
       if (!setupContextName.trim() || setupContextName === "Personal") {
         setSetupContextName(loadedContexts[0]?.name ?? "Personal");
       }
-      setSetupTracker(loadedSetupState.completed ? loadedSetupState.tracker : "github");
+      setSetupProvider(loadedSetupState.completed ? loadedSetupState.provider : "github");
       setRepositories(loadedRepositories);
       setMachines(loadedMachines);
       setAttentionDefaults(loadedAttentionDefaults);
@@ -585,7 +585,9 @@ export function App() {
   async function refreshHealthStatus() {
     setIsCheckingDependencies(true);
     try {
-      const loadedHealthStatus = await invoke<HealthStatus>("get_health_status");
+      const loadedHealthStatus = await invoke<HealthStatus>("get_health_status", {
+        provider: setupState?.completed ? null : setupProvider,
+      });
       setHealthStatus(loadedHealthStatus);
       setError(undefined);
     } catch (healthError) {
@@ -601,7 +603,7 @@ export function App() {
     try {
       const completed = await invoke<SetupState>("complete_setup", {
         contextName: setupContextName,
-        tracker: setupTracker,
+        provider: setupProvider,
       });
       setSetupState(completed);
       await loadAppState();
@@ -947,12 +949,12 @@ export function App() {
       {setupState && !setupState.completed && (
         <SetupWizard
           contextName={setupContextName}
-          tracker={setupTracker}
+          provider={setupProvider}
           health={healthStatus}
           isSaving={isSaving}
           isCheckingDependencies={isCheckingDependencies}
           onContextNameChange={setSetupContextName}
-          onTrackerChange={setSetupTracker}
+          onProviderChange={setSetupProvider}
           onCheckDependencies={() => void refreshHealthStatus()}
           onSubmit={handleCompleteSetup}
         />
@@ -1598,22 +1600,22 @@ export function App() {
 
 function SetupWizard({
   contextName,
-  tracker,
+  provider,
   health,
   isSaving,
   isCheckingDependencies,
   onContextNameChange,
-  onTrackerChange,
+  onProviderChange,
   onCheckDependencies,
   onSubmit,
 }: {
   contextName: string;
-  tracker: TrackerChoice;
+  provider: ProviderChoice;
   health: HealthStatus | undefined;
   isSaving: boolean;
   isCheckingDependencies: boolean;
   onContextNameChange: (value: string) => void;
-  onTrackerChange: (value: TrackerChoice) => void;
+  onProviderChange: (value: ProviderChoice) => void;
   onCheckDependencies: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
@@ -1652,16 +1654,16 @@ function SetupWizard({
         <div className="setup-step">
           <span className="setup-step-number">2</span>
           <div>
-            <h3>Choose a tracker</h3>
-            <p className="column-hint">You can keep local work here and connect a tracker later.</p>
+            <h3>Choose a provider</h3>
+            <p className="column-hint">You can keep local work here and connect a provider later.</p>
             <div className="setup-choice-list">
               <label className="setup-choice">
                 <input
                   type="radio"
-                  name="tracker"
+                  name="provider"
                   value="github"
-                  checked={tracker === "github"}
-                  onChange={() => onTrackerChange("github")}
+                  checked={provider === "github"}
+                  onChange={() => onProviderChange("github")}
                   disabled={isSaving}
                 />
                 <span><strong>GitHub</strong><small>Use the installed `gh` CLI for Issues and pull requests.</small></span>
@@ -1669,13 +1671,13 @@ function SetupWizard({
               <label className="setup-choice">
                 <input
                   type="radio"
-                  name="tracker"
+                  name="provider"
                   value="none"
-                  checked={tracker === "none"}
-                  onChange={() => onTrackerChange("none")}
+                  checked={provider === "none"}
+                  onChange={() => onProviderChange("none")}
                   disabled={isSaving}
                 />
-                <span><strong>No tracker yet</strong><small>Local Items and Runs remain available.</small></span>
+                <span><strong>No provider yet</strong><small>Local Items and Runs remain available.</small></span>
               </label>
             </div>
           </div>

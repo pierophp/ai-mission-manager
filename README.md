@@ -2,7 +2,7 @@
 
 AI Mission Manager is a personal macOS control plane for work done by people and AI agents.
 
-Work often spans a thought, a GitHub issue, several repositories, agent sessions, pull requests, and someone else's review. Each tool owns one part of that workflow, but none of them owns the relationships between the parts. AI Mission Manager keeps those relationships together so you can answer:
+Work often spans a thought, a GitHub issue, several repositories, agent Runs, pull requests, and someone else's review. Each tool owns one part of that workflow, but none of them owns the relationships between the parts. AI Mission Manager keeps those relationships together so you can answer:
 
 - Where is this work running, and on which Machine?
 - Is the agent working, blocked, finished, or no longer reachable?

@@ -26,8 +26,9 @@ use crate::{
     provider::{classify_url, resolve_gh_executable, GithubCli},
     terminal::{
         capture_pane, find_agent_executable, list_agent_panes, list_panes, open_pane_in_terminal,
-        probe_machine, terminal_transport, workset_root_exists, AgentLaunchContext,
-        ExternalPaneIdentity, PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime,
+        probe_local_runtime, probe_machine, terminal_transport, workset_root_exists,
+        AgentLaunchContext, ExternalPaneIdentity, PaneSummary, TerminalRuntime, TmuxControlPane,
+        TmuxRuntime,
     },
 };
 
@@ -42,7 +43,7 @@ pub struct Runtime {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum TrackerChoice {
+pub enum ProviderChoice {
     GitHub,
     None,
 }
@@ -51,7 +52,7 @@ pub enum TrackerChoice {
 #[serde(rename_all = "camelCase")]
 pub struct SetupState {
     pub completed: bool,
-    pub tracker: TrackerChoice,
+    pub provider: ProviderChoice,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -115,23 +116,26 @@ impl Runtime {
             .map_err(|error| error.to_string())?
             .as_deref()
             == Some("true");
-        let tracker = match self
+        let provider = match self
             .store
-            .setting("tracker_provider")
+            .setting("provider_choice")
             .map_err(|error| error.to_string())?
             .as_deref()
         {
-            Some("github") => TrackerChoice::GitHub,
-            Some("none") | None => TrackerChoice::None,
-            Some(other) => return Err(format!("Unknown tracker choice: {other}")),
+            Some("github") | None => ProviderChoice::GitHub,
+            Some("none") => ProviderChoice::None,
+            Some(other) => return Err(format!("Unknown provider choice: {other}")),
         };
-        Ok(SetupState { completed, tracker })
+        Ok(SetupState {
+            completed,
+            provider,
+        })
     }
 
     fn complete_setup(
         &mut self,
         context_name: String,
-        tracker: TrackerChoice,
+        provider: ProviderChoice,
     ) -> Result<SetupState, String> {
         let context_name = context_name.trim();
         if context_name.is_empty() {
@@ -149,39 +153,36 @@ impl Runtime {
             .set_setting("setup_completed", "true")
             .and_then(|_| {
                 self.store.set_setting(
-                    "tracker_provider",
-                    match tracker {
-                        TrackerChoice::GitHub => "github",
-                        TrackerChoice::None => "none",
+                    "provider_choice",
+                    match provider {
+                        ProviderChoice::GitHub => "github",
+                        ProviderChoice::None => "none",
                     },
                 )
             })
             .map_err(|error| error.to_string())?;
         Ok(SetupState {
             completed: true,
-            tracker,
+            provider,
         })
     }
 
-    fn health_status(&mut self) -> Result<HealthStatus, String> {
-        let runtime = self.check_local_dependency(
-            "tmux",
-            "tmux",
-            "tmux_executable_path",
-            &["-V"],
-            "Install tmux (for example, with `brew install tmux`) and check again.",
-        )?;
+    fn health_status(
+        &mut self,
+        provider_override: Option<ProviderChoice>,
+    ) -> Result<HealthStatus, String> {
+        let runtime = self.check_runtime_dependency()?;
         let setup = self.setup_state()?;
-        let provider = match setup.tracker {
-            TrackerChoice::GitHub => self.check_github_dependency()?,
-            TrackerChoice::None => DependencyStatus {
+        let provider = match provider_override.unwrap_or(setup.provider) {
+            ProviderChoice::GitHub => self.check_github_dependency()?,
+            ProviderChoice::None => DependencyStatus {
                 key: "github".into(),
-                label: "GitHub tracker".into(),
+                label: "GitHub provider".into(),
                 state: DependencyState::NotConfigured,
                 executable_path: None,
-                message: "No tracker selected; local Items remain available.".into(),
+                message: "No provider selected; local Items remain available.".into(),
                 action: Some(
-                    "Choose GitHub in setup when you are ready to link tracked work.".into(),
+                    "Choose GitHub in setup when you are ready to link external work.".into(),
                 ),
             },
         };
@@ -208,12 +209,46 @@ impl Runtime {
         })
     }
 
+    fn check_runtime_dependency(&mut self) -> Result<DependencyStatus, String> {
+        let path = self.resolve_and_store_executable("tmux", "tmux_executable_path")?;
+        let Some(path) = path else {
+            return Ok(DependencyStatus {
+                key: "tmux".into(),
+                label: "tmux runtime".into(),
+                state: DependencyState::Missing,
+                executable_path: None,
+                message: "tmux was not found.".into(),
+                action: Some(
+                    "Install tmux (for example, with `brew install tmux`) and check again.".into(),
+                ),
+            });
+        };
+        match probe_local_runtime(&path) {
+            Ok(()) => Ok(DependencyStatus {
+                key: "tmux".into(),
+                label: "tmux runtime".into(),
+                state: DependencyState::Available,
+                executable_path: Some(path.to_string_lossy().into_owned()),
+                message: "tmux is ready.".into(),
+                action: None,
+            }),
+            Err(detail) => Ok(DependencyStatus {
+                key: "tmux".into(),
+                label: "tmux runtime".into(),
+                state: DependencyState::Unavailable,
+                executable_path: Some(path.to_string_lossy().into_owned()),
+                message: format!("tmux could not be checked: {detail}"),
+                action: Some("Repair or reinstall tmux, then check again.".into()),
+            }),
+        }
+    }
+
     fn check_github_dependency(&mut self) -> Result<DependencyStatus, String> {
         let path = self.resolve_and_store_executable("gh", "gh_executable_path")?;
         let Some(path) = path else {
             return Ok(DependencyStatus {
                 key: "github".into(),
-                label: "GitHub tracker".into(),
+                label: "GitHub provider".into(),
                 state: DependencyState::Missing,
                 executable_path: None,
                 message: "GitHub CLI (`gh`) was not found.".into(),
@@ -222,22 +257,40 @@ impl Runtime {
                 ),
             });
         };
+        if let Err(detail) = check_command(&path, &["--version"]) {
+            return Ok(DependencyStatus {
+                key: "github".into(),
+                label: "GitHub provider".into(),
+                state: DependencyState::Unavailable,
+                executable_path: Some(path.to_string_lossy().into_owned()),
+                message: format!("GitHub CLI could not run: {detail}"),
+                action: Some("Repair or reinstall GitHub CLI, then check again.".into()),
+            });
+        }
         match check_command(&path, &["auth", "status", "--hostname", "github.com"]) {
             Ok(()) => Ok(DependencyStatus {
                 key: "github".into(),
-                label: "GitHub tracker".into(),
+                label: "GitHub provider".into(),
                 state: DependencyState::Available,
                 executable_path: Some(path.to_string_lossy().into_owned()),
                 message: "GitHub CLI is installed and authenticated.".into(),
                 action: None,
             }),
-            Err(detail) => Ok(DependencyStatus {
+            Err(detail) if looks_like_authentication_failure(&detail) => Ok(DependencyStatus {
                 key: "github".into(),
-                label: "GitHub tracker".into(),
+                label: "GitHub provider".into(),
                 state: DependencyState::Unauthenticated,
                 executable_path: Some(path.to_string_lossy().into_owned()),
                 message: format!("GitHub CLI is not authenticated: {detail}"),
                 action: Some("Run `gh auth login` in your terminal; Mission Manager will not log in for you.".into()),
+            }),
+            Err(detail) => Ok(DependencyStatus {
+                key: "github".into(),
+                label: "GitHub provider".into(),
+                state: DependencyState::Unavailable,
+                executable_path: Some(path.to_string_lossy().into_owned()),
+                message: format!("GitHub authentication status could not be checked: {detail}"),
+                action: Some("Check network access to github.com, then check again.".into()),
             }),
         }
     }
@@ -309,6 +362,32 @@ impl Runtime {
             }
         }
         Ok(path)
+    }
+
+    fn agent_executable(&mut self, machine: &Machine, agent: AgentKind) -> Result<PathBuf, String> {
+        let name = agent_executable_name(agent);
+        let setting_key = if matches!(&machine.transport, MachineTransport::Local) {
+            format!("{name}_executable_path")
+        } else {
+            format!("machine_{}_{}_executable_path", machine.id, name)
+        };
+        if matches!(&machine.transport, MachineTransport::Local) {
+            return self
+                .resolve_and_store_executable(name, &setting_key)?
+                .ok_or_else(|| format!("{name} is not installed on Machine {}", machine.name));
+        }
+
+        let executable = find_agent_executable(machine, name)?;
+        if !executable.is_absolute() {
+            return Err(format!(
+                "Machine {} returned a non-absolute {name} executable path",
+                machine.name
+            ));
+        }
+        self.store
+            .set_executable_path(&setting_key, &executable)
+            .map_err(|error| error.to_string())?;
+        Ok(executable)
     }
 
     fn create_project(
@@ -601,7 +680,8 @@ impl Runtime {
         } else {
             PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
         };
-        let executable = find_agent_executable(&machine, agent_executable_name(agent))
+        let executable = self
+            .agent_executable(&machine, agent)
             .map_err(|error| format!("{}: {error}", agent_display_name(agent)))?;
         let terminal = TmuxRuntime;
         let pane_id = terminal.launch_agent(
@@ -1823,6 +1903,19 @@ impl Runtime {
     }
 }
 
+fn looks_like_authentication_failure(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "not logged in",
+        "not authenticated",
+        "no accounts",
+        "authentication token",
+        "token is invalid",
+    ]
+    .iter()
+    .any(|marker| detail.contains(marker))
+}
+
 fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
     effects
         .iter()
@@ -2203,21 +2296,24 @@ pub fn get_setup_state(state: State<'_, Mutex<Runtime>>) -> Result<SetupState, S
 #[tauri::command(rename_all = "camelCase")]
 pub fn complete_setup(
     context_name: String,
-    tracker: TrackerChoice,
+    provider: ProviderChoice,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<SetupState, String> {
     state
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .complete_setup(context_name, tracker)
+        .complete_setup(context_name, provider)
 }
 
-#[tauri::command]
-pub fn get_health_status(state: State<'_, Mutex<Runtime>>) -> Result<HealthStatus, String> {
+#[tauri::command(rename_all = "camelCase")]
+pub fn get_health_status(
+    provider: Option<ProviderChoice>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<HealthStatus, String> {
     state
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .health_status()
+        .health_status(provider)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2812,11 +2908,11 @@ mod tests {
                 .completed
         );
         let setup = runtime
-            .complete_setup("Personal".into(), TrackerChoice::GitHub)
+            .complete_setup("Personal".into(), ProviderChoice::GitHub)
             .expect("setup should complete");
 
         assert!(setup.completed);
-        assert_eq!(setup.tracker, TrackerChoice::GitHub);
+        assert_eq!(setup.provider, ProviderChoice::GitHub);
         assert_eq!(runtime.state.contexts.len(), 1);
 
         let reopened = Runtime::open(&database).expect("runtime should reopen");
@@ -2827,6 +2923,63 @@ mod tests {
             setup
         );
         assert_eq!(reopened.state.contexts.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn health_reports_an_unauthenticated_provider_without_hiding_a_healthy_runtime() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let tmux = directory.path().join("tmux");
+        let gh = directory.path().join("gh");
+        fs::write(&tmux, "#!/bin/sh\nprintf 'tmux 3.4\\n'\n").expect("fake tmux should be written");
+        fs::write(
+            &gh,
+            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nprintf 'not logged in\\n' >&2\nexit 1\n",
+        )
+        .expect("fake gh should be written");
+        for path in [&tmux, &gh] {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+                .expect("fake dependency should be executable");
+        }
+
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .complete_setup("Personal".into(), ProviderChoice::GitHub)
+            .expect("setup should complete");
+        runtime
+            .store
+            .set_executable_path("tmux_executable_path", &tmux)
+            .expect("tmux path should persist");
+        runtime
+            .store
+            .set_executable_path("gh_executable_path", &gh)
+            .expect("gh path should persist");
+
+        let health = runtime
+            .health_status(None)
+            .expect("health checks should return independent statuses");
+
+        assert_eq!(health.runtime.state, DependencyState::Available);
+        assert_eq!(health.provider.state, DependencyState::Unauthenticated);
+        assert!(Path::new(health.runtime.executable_path.as_deref().unwrap()).is_absolute());
+        assert_eq!(
+            runtime
+                .store
+                .executable_path("tmux_executable_path")
+                .expect("tmux path should remain readable")
+                .unwrap()
+                .to_string_lossy(),
+            health.runtime.executable_path.as_deref().unwrap()
+        );
+        assert!(health
+            .provider
+            .action
+            .as_deref()
+            .unwrap()
+            .contains("gh auth login"));
     }
 
     #[test]

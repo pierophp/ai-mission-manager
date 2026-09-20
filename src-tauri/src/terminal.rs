@@ -605,6 +605,23 @@ pub fn workset_root_exists(machine: &Machine, root: &Path) -> Result<(), String>
     }
 }
 
+pub fn probe_local_runtime(executable: &Path) -> Result<(), String> {
+    let output = Command::new(executable)
+        .arg("-V")
+        .output()
+        .map_err(|error| format!("could not run tmux: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if detail.is_empty() {
+            format!("tmux exited with {}", output.status)
+        } else {
+            detail
+        })
+    }
+}
+
 pub fn find_agent_executable(machine: &Machine, name: &str) -> Result<PathBuf, String> {
     if name.is_empty()
         || !name
@@ -627,6 +644,11 @@ pub fn find_agent_executable(machine: &Machine, name: &str) -> Result<PathBuf, S
             if path.is_empty() {
                 Err(format!(
                     "{name} is not installed on Machine {}",
+                    machine.name
+                ))
+            } else if !Path::new(path).is_absolute() {
+                Err(format!(
+                    "Machine {} returned a non-absolute {name} executable path",
                     machine.name
                 ))
             } else {
