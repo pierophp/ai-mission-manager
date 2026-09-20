@@ -57,6 +57,28 @@ type WorksetRepositoryInput = {
   baseBranchOverride: string | null;
 };
 
+type MachineTransport =
+  | { kind: "local" }
+  | {
+      kind: "ssh";
+      host: string;
+      user: string | null;
+      port: number | null;
+      identityFile: string | null;
+      knownHostsFile: string | null;
+      strictHostKeyChecking: string | null;
+    };
+
+type Machine = {
+  id: number;
+  context_id: number;
+  name: string;
+  socket_name: string;
+  transport: MachineTransport;
+  last_observed: "unknown" | "available" | "offline";
+  last_observed_at: number | null;
+};
+
 type AgentKind = "claude" | "codex";
 type ExecutionProfile = "investigate" | "implement" | "review" | "custom";
 type RunState = "unknown" | "working" | "blocked" | "finished";
@@ -218,6 +240,7 @@ type ExternalLinkAction = {
 
 type ItemView = {
   item: Item;
+  context_id: number;
   context_name: string;
   project_name: string;
   relationships: ItemRelation[];
@@ -274,6 +297,7 @@ export function App() {
   const [contexts, setContexts] = useState<Context[]>([]);
   const [projects, setProjects] = useState<Project[]>([]);
   const [repositories, setRepositories] = useState<Repository[]>([]);
+  const [machines, setMachines] = useState<Machine[]>([]);
   const [attentionDefaults, setAttentionDefaults] = useState<
     ContextAttentionDefault[]
   >([]);
@@ -289,6 +313,16 @@ export function App() {
     useState<ItemStatus>("Inbox");
   const [repositoryName, setRepositoryName] = useState("");
   const [repositoryRemoteUrl, setRepositoryRemoteUrl] = useState("");
+  const [machineName, setMachineName] = useState("");
+  const [machineSocketName, setMachineSocketName] = useState("ai-mission-manager");
+  const [machineKind, setMachineKind] = useState<"local" | "ssh">("ssh");
+  const [machineHost, setMachineHost] = useState("");
+  const [machineUser, setMachineUser] = useState("");
+  const [machinePort, setMachinePort] = useState("");
+  const [machineIdentityFile, setMachineIdentityFile] = useState("");
+  const [machineKnownHostsFile, setMachineKnownHostsFile] = useState("");
+  const [machineStrictHostKeyChecking, setMachineStrictHostKeyChecking] =
+    useState("accept-new");
   const [attentionObjectKind, setAttentionObjectKind] =
     useState<ExternalObjectKind>("pull_request");
   const [attentionDefaultPolicy, setAttentionDefaultPolicy] =
@@ -363,10 +397,11 @@ export function App() {
   async function loadAppState() {
     setIsLoading(true);
     try {
-      const [loadedContexts, loadedProjects, loadedAttentionDefaults] = await Promise.all([
+      const [loadedContexts, loadedProjects, loadedAttentionDefaults, loadedMachines] = await Promise.all([
         invoke<Context[]>("list_contexts"),
         invoke<Project[]>("list_projects"),
         invoke<ContextAttentionDefault[]>("list_context_attention_defaults"),
+        invoke<Machine[]>("list_machines"),
       ]);
       const loadedRepositories = await invoke<Repository[]>("list_repositories");
       const nextCaptureContextId =
@@ -390,6 +425,7 @@ export function App() {
       setContexts(loadedContexts);
       setProjects(loadedProjects);
       setRepositories(loadedRepositories);
+      setMachines(loadedMachines);
       setAttentionDefaults(loadedAttentionDefaults);
       setCaptureContextId(nextCaptureContextId);
       setCaptureProjectId(nextCaptureProjectId);
@@ -534,6 +570,59 @@ export function App() {
     }
   }
 
+  async function handleRegisterMachine(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!captureContextId || !machineName.trim() || !machineSocketName.trim()) {
+      setError("Choose a Context and name the Machine before registering it.");
+      return;
+    }
+
+    const transport: MachineTransport =
+      machineKind === "local"
+        ? { kind: "local" }
+        : {
+            kind: "ssh",
+            host: machineHost.trim(),
+            user: machineUser.trim() || null,
+            port: machinePort.trim() ? Number(machinePort) : null,
+            identityFile: machineIdentityFile.trim() || null,
+            knownHostsFile: machineKnownHostsFile.trim() || null,
+            strictHostKeyChecking: machineStrictHostKeyChecking || null,
+          };
+    setIsSaving(true);
+    try {
+      const machine = await invoke<Machine>("register_machine", {
+        contextId: captureContextId,
+        name: machineName,
+        socketName: machineSocketName,
+        transport,
+      });
+      setMachines((current) => [...current, machine]);
+      setMachineName("");
+      setMachineHost("");
+      setMachineUser("");
+      setMachinePort("");
+      setMachineIdentityFile("");
+      setMachineKnownHostsFile("");
+      setError(undefined);
+    } catch (saveError) {
+      setError(errorMessage(saveError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleCheckMachine(machineId: number) {
+    try {
+      const checked = await invoke<Machine>("check_machine", { machineId });
+      setMachines((current) =>
+        current.map((machine) => (machine.id === checked.id ? checked : machine)),
+      );
+    } catch (checkError) {
+      setError(errorMessage(checkError));
+    }
+  }
+
   async function saveAttentionDefault(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!captureContextId) return;
@@ -607,12 +696,14 @@ export function App() {
   }
 
   async function updateHomeAfterEdit() {
-    const [loadedRepositories] = await Promise.all([
+    const [loadedRepositories, loadedMachines] = await Promise.all([
       invoke<Repository[]>("list_repositories"),
+      invoke<Machine[]>("list_machines"),
       refreshHome(),
       refreshSearch(),
     ]);
     setRepositories(loadedRepositories);
+    setMachines(loadedMachines);
   }
 
   return (
@@ -741,6 +832,7 @@ export function App() {
               items={home.needs_attention}
               allItems={allItems}
               repositories={repositories}
+              machines={machines}
               onChanged={updateHomeAfterEdit}
               onOpenTerminal={(worksetId, pane) => setTerminalRequest({ worksetId, pane })}
             />
@@ -750,6 +842,7 @@ export function App() {
               items={home.running}
               allItems={allItems}
               repositories={repositories}
+              machines={machines}
               onChanged={updateHomeAfterEdit}
               onOpenTerminal={(worksetId, pane) => setTerminalRequest({ worksetId, pane })}
             />
@@ -759,6 +852,7 @@ export function App() {
               items={home.waiting}
               allItems={allItems}
               repositories={repositories}
+              machines={machines}
               onChanged={updateHomeAfterEdit}
               onOpenTerminal={(worksetId, pane) => setTerminalRequest({ worksetId, pane })}
             />
@@ -768,6 +862,7 @@ export function App() {
               items={home.due}
               allItems={allItems}
               repositories={repositories}
+              machines={machines}
               onChanged={updateHomeAfterEdit}
               onOpenTerminal={(worksetId, pane) => setTerminalRequest({ worksetId, pane })}
             />
@@ -777,6 +872,7 @@ export function App() {
               items={home.completed}
               allItems={allItems}
               repositories={repositories}
+              machines={machines}
               onChanged={updateHomeAfterEdit}
               onOpenTerminal={(worksetId, pane) => setTerminalRequest({ worksetId, pane })}
             />
@@ -988,6 +1084,161 @@ export function App() {
                     <li className="entity-row" key={repository.id}>
                       <span>{repository.name}</span>
                       <span className="entity-meta">{repository.remote_url}</span>
+                    </li>
+                  ))}
+              </ul>
+            </div>
+            <div>
+              <h3>Machines</h3>
+              <form className="compact-form" onSubmit={handleRegisterMachine}>
+                <label>
+                  <span>Context</span>
+                  <select
+                    value={captureContextId ?? ""}
+                    onChange={(event) =>
+                      handleCaptureContextChange(Number(event.target.value))
+                    }
+                    disabled={isSaving || contexts.length === 0}
+                  >
+                    {contexts.map((context) => (
+                      <option value={context.id} key={context.id}>
+                        {context.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  <span>Name</span>
+                  <input
+                    value={machineName}
+                    onChange={(event) => setMachineName(event.target.value)}
+                    placeholder="Build Mac"
+                    disabled={isSaving}
+                  />
+                </label>
+                <label>
+                  <span>Transport</span>
+                  <select
+                    value={machineKind}
+                    onChange={(event) =>
+                      setMachineKind(event.target.value as "local" | "ssh")
+                    }
+                    disabled={isSaving}
+                  >
+                    <option value="ssh">SSH remote</option>
+                    <option value="local">Local</option>
+                  </select>
+                </label>
+                <label>
+                  <span>tmux socket</span>
+                  <input
+                    value={machineSocketName}
+                    onChange={(event) => setMachineSocketName(event.target.value)}
+                    placeholder="ai-mission-manager"
+                    disabled={isSaving}
+                  />
+                </label>
+                {machineKind === "ssh" && (
+                  <>
+                    <label>
+                      <span>Host</span>
+                      <input
+                        value={machineHost}
+                        onChange={(event) => setMachineHost(event.target.value)}
+                        placeholder="build.example.com"
+                        disabled={isSaving}
+                      />
+                    </label>
+                    <label>
+                      <span>User</span>
+                      <input
+                        value={machineUser}
+                        onChange={(event) => setMachineUser(event.target.value)}
+                        placeholder="runner"
+                        disabled={isSaving}
+                      />
+                    </label>
+                    <label>
+                      <span>Port</span>
+                      <input
+                        type="number"
+                        min="1"
+                        value={machinePort}
+                        onChange={(event) => setMachinePort(event.target.value)}
+                        placeholder="22"
+                        disabled={isSaving}
+                      />
+                    </label>
+                    <label>
+                      <span>Identity file</span>
+                      <input
+                        value={machineIdentityFile}
+                        onChange={(event) => setMachineIdentityFile(event.target.value)}
+                        placeholder="~/.ssh/mission"
+                        disabled={isSaving}
+                      />
+                    </label>
+                    <label>
+                      <span>Known hosts file</span>
+                      <input
+                        value={machineKnownHostsFile}
+                        onChange={(event) => setMachineKnownHostsFile(event.target.value)}
+                        placeholder="~/.ssh/known_hosts"
+                        disabled={isSaving}
+                      />
+                    </label>
+                    <label>
+                      <span>Host-key checking</span>
+                      <select
+                        value={machineStrictHostKeyChecking}
+                        onChange={(event) =>
+                          setMachineStrictHostKeyChecking(event.target.value)
+                        }
+                        disabled={isSaving}
+                      >
+                        <option value="yes">Strict</option>
+                        <option value="accept-new">Accept new</option>
+                        <option value="no">Disabled</option>
+                      </select>
+                    </label>
+                  </>
+                )}
+                <button
+                  type="submit"
+                  disabled={
+                    isSaving ||
+                    !captureContextId ||
+                    !machineName.trim() ||
+                    !machineSocketName.trim() ||
+                    (machineKind === "ssh" && !machineHost.trim())
+                  }
+                >
+                  Register Machine
+                </button>
+              </form>
+              <ul className="entity-list">
+                {machines
+                  .filter((machine) => machine.context_id === captureContextId)
+                  .map((machine) => (
+                    <li className="entity-row" key={machine.id}>
+                      <span>
+                        {machine.name} ·{" "}
+                        {machine.transport.kind === "ssh" ? "SSH" : "Local"}
+                      </span>
+                      <span className="entity-meta">
+                        Last observed: {machine.last_observed}
+                        {machine.last_observed_at
+                          ? " · " +
+                            new Date(machine.last_observed_at * 1000).toLocaleString()
+                          : ""}
+                        <button
+                          type="button"
+                          className="text-button"
+                          onClick={() => void handleCheckMachine(machine.id)}
+                        >
+                          Check
+                        </button>
+                      </span>
                     </li>
                   ))}
               </ul>
@@ -1231,6 +1482,7 @@ function HomeColumn({
   items,
   allItems,
   repositories,
+  machines,
   onChanged,
   onOpenTerminal,
 }: {
@@ -1239,6 +1491,7 @@ function HomeColumn({
   items: ItemView[];
   allItems: ItemView[];
   repositories: Repository[];
+  machines: Machine[];
   onChanged: () => Promise<void>;
   onOpenTerminal: (worksetId: number, pane: PaneTab) => void;
 }) {
@@ -1261,6 +1514,7 @@ function HomeColumn({
               view={view}
               allItems={allItems}
               repositories={repositories}
+              machines={machines}
               onChanged={onChanged}
               onOpenTerminal={onOpenTerminal}
             />
@@ -1275,12 +1529,14 @@ function ItemCard({
   view,
   allItems,
   repositories,
+  machines,
   onChanged,
   onOpenTerminal,
 }: {
   view: ItemView;
   allItems: ItemView[];
   repositories: Repository[];
+  machines: Machine[];
   onChanged: () => Promise<void>;
   onOpenTerminal: (worksetId: number, pane: PaneTab) => void;
 }) {
@@ -1309,6 +1565,7 @@ function ItemCard({
     useState("");
   const [removalReport, setRemovalReport] = useState<WorksetRemovalReport>();
   const [runPreviewWorksetId, setRunPreviewWorksetId] = useState<number>();
+  const [runMachineId, setRunMachineId] = useState<number>();
   const [runAgent, setRunAgent] = useState<AgentKind>("claude");
   const [runProfile, setRunProfile] = useState<ExecutionProfile>("implement");
   const [includeRunObjective, setIncludeRunObjective] = useState(true);
@@ -1490,6 +1747,7 @@ function ItemCard({
 
   async function openRunPreview(workset: Workset) {
     setRunPreviewWorksetId(workset.id);
+    setRunMachineId(undefined);
     setRunAgent("claude");
     setRunProfile("implement");
     setIncludeRunObjective(true);
@@ -1525,6 +1783,7 @@ function ItemCard({
       await invoke<Run>("start_run", {
         itemId: view.item.id,
         worksetId: runPreviewWorksetId,
+        machineId: runMachineId ?? null,
         agent: runAgent,
         executionProfile: runProfile,
         prompt: runPrompt,
@@ -1581,6 +1840,9 @@ function ItemCard({
     (candidate) =>
       candidate.item.id !== view.item.id &&
       candidate.context_name === view.context_name,
+  );
+  const itemMachines = machines.filter(
+    (machine) => machine.context_id === view.context_id,
   );
 
   function renderRemovalFinding(
@@ -1702,12 +1964,33 @@ function ItemCard({
                   Context: {view.context_name} · Project: {view.project_name} · Workset: {workset.branch}
                 </p>
               </div>
-              <span className="run-machine">Machine: Local Mac</span>
+              <span className="run-machine">
+                Machine:{" "}
+                {itemMachines.find((machine) => machine.id === runMachineId)?.name ??
+                  "Local Mac"}
+              </span>
             </div>
             <p className="run-working-directory">
               Working directory: <code>{workset.root_directory}</code>
             </p>
             <div className="run-options">
+              <label>
+                <span>Machine</span>
+                <select
+                  value={runMachineId ?? ""}
+                  onChange={(event) =>
+                    setRunMachineId(Number(event.target.value) || undefined)
+                  }
+                  disabled={isSaving}
+                >
+                  <option value="">Local Mac (default)</option>
+                  {itemMachines.map((machine) => (
+                    <option value={machine.id} key={machine.id}>
+                      {machine.name} · {machine.last_observed}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <label>
                 <span>Agent</span>
                 <select
@@ -1995,7 +2278,10 @@ function ItemCard({
                   Run #{run.id} · {run.agent === "claude" ? "Claude Code" : "Codex"}
                 </strong>
                 <span>
-                  {run.execution_profile} · Local Mac · {runStateLabel(run.state)}
+                  {run.execution_profile} ·{" "}
+                  {machines.find((machine) => machine.id === run.machine_id)?.name ??
+                    "Machine #" + run.machine_id}{" "}
+                  · {runStateLabel(run.state)}
                 </span>
               </div>
               <code>{run.working_directory}</code>

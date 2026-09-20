@@ -73,11 +73,40 @@ pub struct Workset {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum MachineTransport {
+    #[serde(rename = "local")]
+    Local,
+    #[serde(rename = "ssh")]
+    Ssh {
+        host: String,
+        user: Option<String>,
+        port: Option<u16>,
+        identity_file: Option<String>,
+        known_hosts_file: Option<String>,
+        strict_host_key_checking: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MachineObservation {
+    #[serde(rename = "unknown")]
+    Unknown,
+    #[serde(rename = "available")]
+    Available,
+    #[serde(rename = "offline")]
+    Offline,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Machine {
     pub id: i64,
     pub context_id: i64,
     pub name: String,
     pub socket_name: String,
+    pub transport: MachineTransport,
+    pub last_observed: MachineObservation,
+    pub last_observed_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -340,6 +369,7 @@ pub struct ItemRelation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ItemView {
     pub item: Item,
+    pub context_id: i64,
     pub context_name: String,
     pub project_name: String,
     pub relationships: Vec<ItemRelation>,
@@ -423,6 +453,12 @@ pub enum Event {
         context_id: i64,
         name: String,
         socket_name: String,
+        transport: MachineTransport,
+    },
+    ObserveMachine {
+        machine_id: i64,
+        observation: MachineObservation,
+        observed_at: i64,
     },
     AddRepositoryToWorkset {
         workset_id: i64,
@@ -542,6 +578,9 @@ pub enum Effect {
         machine: Machine,
         next_machine_id: i64,
     },
+    PersistMachineObservation {
+        machine: Machine,
+    },
     PersistRun {
         run: Run,
         next_run_id: i64,
@@ -642,6 +681,18 @@ pub enum DomainError {
     MachineNotFound { machine_id: i64 },
     #[error("Machine {machine_id} belongs to another Context")]
     MachineContextMismatch { machine_id: i64, context_id: i64 },
+    #[error("a remote Machine host cannot be blank")]
+    EmptyMachineHost,
+    #[error("a remote Machine host contains unsupported characters")]
+    InvalidMachineHost,
+    #[error("a remote Machine user cannot be blank")]
+    EmptyMachineUser,
+    #[error("a remote Machine user contains unsupported characters")]
+    InvalidMachineUser,
+    #[error("a remote Machine SSH port must be positive")]
+    InvalidMachinePort,
+    #[error("a remote Machine host-key checking mode is unsupported")]
+    InvalidMachineHostKeyChecking,
     #[error("a Run prompt cannot be blank")]
     EmptyRunPrompt,
     #[error("a Run working directory cannot be blank")]
@@ -1006,10 +1057,12 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             context_id,
             name,
             socket_name,
+            transport,
         } => {
             ensure_context(&state, context_id)?;
             let name = clean_name(name, DomainError::EmptyMachineName)?;
             let socket_name = clean_name(socket_name, DomainError::EmptyMachineSocketName)?;
+            let transport = clean_machine_transport(transport)?;
             if state
                 .machines
                 .iter()
@@ -1024,6 +1077,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 context_id,
                 name,
                 socket_name,
+                transport,
+                last_observed: MachineObservation::Unknown,
+                last_observed_at: None,
             };
             state.next_machine_id = next_machine_id;
             state.machines.push(machine.clone());
@@ -1033,6 +1089,24 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     machine,
                     next_machine_id,
                 }],
+            })
+        }
+        Event::ObserveMachine {
+            machine_id,
+            observation,
+            observed_at,
+        } => {
+            let machine = state
+                .machines
+                .iter_mut()
+                .find(|machine| machine.id == machine_id)
+                .ok_or(DomainError::MachineNotFound { machine_id })?;
+            machine.last_observed = observation;
+            machine.last_observed_at = Some(observed_at);
+            let machine = machine.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistMachineObservation { machine }],
             })
         }
         Event::AddRepositoryToWorkset {
@@ -1837,6 +1911,7 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 .collect();
             Some(ItemView {
                 item: item.clone(),
+                context_id: context.id,
                 context_name: context.name.clone(),
                 project_name: project.name.clone(),
                 relationships,
@@ -1922,6 +1997,59 @@ fn clean_name<E>(name: String, empty_error: E) -> Result<String, E> {
         return Err(empty_error);
     }
     Ok(name.to_owned())
+}
+
+fn clean_machine_transport(transport: MachineTransport) -> Result<MachineTransport, DomainError> {
+    match transport {
+        MachineTransport::Local => Ok(MachineTransport::Local),
+        MachineTransport::Ssh {
+            host,
+            user,
+            port,
+            identity_file,
+            known_hosts_file,
+            strict_host_key_checking,
+        } => {
+            let host = host.trim().to_owned();
+            if host.is_empty() {
+                return Err(DomainError::EmptyMachineHost);
+            }
+            if !host
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b".@:_-".contains(&byte))
+            {
+                return Err(DomainError::InvalidMachineHost);
+            }
+            let user = user.map(|value| value.trim().to_owned());
+            if user.as_deref().is_some_and(str::is_empty) {
+                return Err(DomainError::EmptyMachineUser);
+            }
+            if user.as_deref().is_some_and(|value| {
+                !value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+            }) {
+                return Err(DomainError::InvalidMachineUser);
+            }
+            if port == Some(0) {
+                return Err(DomainError::InvalidMachinePort);
+            }
+            if strict_host_key_checking
+                .as_deref()
+                .is_some_and(|value| !matches!(value, "yes" | "accept-new" | "no"))
+            {
+                return Err(DomainError::InvalidMachineHostKeyChecking);
+            }
+            Ok(MachineTransport::Ssh {
+                host,
+                user,
+                port,
+                identity_file: identity_file.map(|value| value.trim().to_owned()),
+                known_hosts_file: known_hosts_file.map(|value| value.trim().to_owned()),
+                strict_host_key_checking,
+            })
+        }
+    }
 }
 
 fn ensure_context(state: &DomainState, context_id: i64) -> Result<(), DomainError> {
@@ -3605,6 +3733,64 @@ mod tests {
     }
 
     #[test]
+    fn machines_keep_their_ssh_transport_and_last_observed_state() {
+        let state = state_with_contexts(&[(1, "Work")]);
+        let registered = decide(
+            state,
+            Event::RegisterMachine {
+                context_id: 1,
+                name: "Build host".into(),
+                socket_name: "mission-manager".into(),
+                transport: MachineTransport::Ssh {
+                    host: "build.example.com".into(),
+                    user: Some("runner".into()),
+                    port: Some(2222),
+                    identity_file: Some("/Users/me/.ssh/mission".into()),
+                    known_hosts_file: Some("/Users/me/.ssh/known_hosts".into()),
+                    strict_host_key_checking: Some("accept-new".into()),
+                },
+            },
+        )
+        .expect("a remote Machine should register");
+
+        assert_eq!(
+            registered.state.machines[0].transport,
+            MachineTransport::Ssh {
+                host: "build.example.com".into(),
+                user: Some("runner".into()),
+                port: Some(2222),
+                identity_file: Some("/Users/me/.ssh/mission".into()),
+                known_hosts_file: Some("/Users/me/.ssh/known_hosts".into()),
+                strict_host_key_checking: Some("accept-new".into()),
+            }
+        );
+        assert_eq!(
+            registered.state.machines[0].last_observed,
+            MachineObservation::Unknown
+        );
+
+        let observed = decide(
+            registered.state,
+            Event::ObserveMachine {
+                machine_id: 1,
+                observation: MachineObservation::Available,
+                observed_at: 123,
+            },
+        )
+        .expect("a Machine observation should be recorded");
+        assert_eq!(
+            observed.state.machines[0].last_observed,
+            MachineObservation::Available
+        );
+        assert_eq!(observed.state.machines[0].last_observed_at, Some(123));
+        assert!(matches!(
+            observed.effects.as_slice(),
+            [Effect::PersistMachineObservation { machine }]
+                if machine.last_observed == MachineObservation::Available
+        ));
+    }
+
+    #[test]
     fn runs_keep_history_allow_repeated_workset_use_and_scope_prompt_sources() {
         let mut state = state_with_item(1, "Work");
         state.items[0].notes = "Check the importer boundary".into();
@@ -3621,6 +3807,9 @@ mod tests {
             context_id: 1,
             name: "Local Mac".into(),
             socket_name: "mission-manager".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
         });
         state.external_objects.push(ExternalObject {
             id: 1,
@@ -3718,6 +3907,9 @@ mod tests {
             context_id: 1,
             name: "Local Mac".into(),
             socket_name: "mission-manager".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
         });
 
         let started = decide(
@@ -3804,6 +3996,9 @@ mod tests {
             context_id: 2,
             name: "Personal Mac".into(),
             socket_name: "personal".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
         });
 
         let error = decide(

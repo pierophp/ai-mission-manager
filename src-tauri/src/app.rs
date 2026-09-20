@@ -15,16 +15,17 @@ use crate::{
         search_items, AgentKind, AttachedRepositoryInput, Context, ContextAttentionDefault,
         DomainState, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
         ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView,
-        Item, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine, Project,
-        ProjectDefaults, Repository, Run, RunPromptSelection, RunState, Workset,
-        WorksetRepositoryInput,
+        Item, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine, MachineObservation,
+        MachineTransport, Project, ProjectDefaults, Repository, Run, RunPromptSelection, RunState,
+        Workset, WorksetRepositoryInput,
     },
     git::GitCli,
     persistence::SqliteStore,
     provider::{classify_url, resolve_gh_executable, GithubCli},
     terminal::{
-        capture_pane, list_panes, open_pane_in_terminal, AgentLaunchContext, ExternalPaneIdentity,
-        PaneSummary, TerminalRuntime, TerminalTransport, TmuxControlPane, TmuxRuntime,
+        capture_pane, find_agent_executable, list_panes, open_pane_in_terminal, probe_machine,
+        terminal_transport, workset_root_exists, AgentLaunchContext, ExternalPaneIdentity,
+        PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime,
     },
 };
 
@@ -213,6 +214,7 @@ impl Runtime {
                 context_id,
                 name: "Local Mac".into(),
                 socket_name: "ai-mission-manager".into(),
+                transport: MachineTransport::Local,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -224,6 +226,96 @@ impl Runtime {
             .ok_or_else(|| "Machine registration produced no Machine".to_owned())?;
         self.commit(decision)?;
         Ok(machine)
+    }
+
+    fn machine_for_item(
+        &mut self,
+        item_id: i64,
+        machine_id: Option<i64>,
+    ) -> Result<Machine, String> {
+        let Some(machine_id) = machine_id else {
+            return self.local_machine_for_item(item_id);
+        };
+        let context_id = self.item_context_id(item_id)?;
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
+        if machine.context_id != context_id {
+            return Err(format!(
+                "Machine {} is not available in this Item's Context",
+                machine.name
+            ));
+        }
+        Ok(machine)
+    }
+
+    fn register_machine(
+        &mut self,
+        context_id: i64,
+        name: String,
+        socket_name: String,
+        transport: MachineTransport,
+    ) -> Result<Machine, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::RegisterMachine {
+                context_id,
+                name,
+                socket_name,
+                transport,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let machine = decision
+            .state
+            .machines
+            .last()
+            .cloned()
+            .ok_or_else(|| "Machine registration produced no Machine".to_owned())?;
+        self.commit(decision)?;
+        Ok(machine)
+    }
+
+    fn observe_machine(
+        &mut self,
+        machine_id: i64,
+        observation: MachineObservation,
+    ) -> Result<Machine, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::ObserveMachine {
+                machine_id,
+                observation,
+                observed_at: current_unix_seconds(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let machine = decision
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
+        self.commit(decision)?;
+        Ok(machine)
+    }
+
+    fn check_machine(&mut self, machine_id: i64) -> Result<Machine, String> {
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
+        probe_machine(&machine)
+            .map_err(|error| format!("Could not check Machine {}: {error}", machine.name))?;
+        self.observe_machine(machine_id, MachineObservation::Available)
     }
 
     fn compose_run_prompt(
@@ -247,6 +339,7 @@ impl Runtime {
         &mut self,
         item_id: i64,
         workset_id: i64,
+        machine_id: Option<i64>,
         agent: AgentKind,
         execution_profile: ExecutionProfile,
         prompt: String,
@@ -259,25 +352,28 @@ impl Runtime {
             .find(|workset| workset.id == workset_id && workset.item_id == item_id)
             .cloned()
             .ok_or_else(|| format!("Workset {workset_id} does not belong to Item {item_id}"))?;
-        let root = Path::new(&workset.root_directory);
-        if !root.is_dir() {
+        let machine = self.machine_for_item(item_id, machine_id)?;
+        if let Err(error) = probe_machine(&machine) {
             return Err(format!(
-                "Workset root is not a directory: {}",
-                root.display()
+                "Could not reach Machine {}. The Run was not started locally: {error}",
+                machine.name
             ));
         }
-
-        let machine = self.local_machine_for_item(item_id)?;
-        self.provision_agent_hooks()?;
+        self.observe_machine(machine.id, MachineObservation::Available)?;
+        let root = Path::new(&workset.root_directory);
+        workset_root_exists(&machine, root)?;
+        if matches!(machine.transport, MachineTransport::Local) {
+            self.provision_agent_hooks()?;
+        }
         let run_id = self.state.next_run_id;
         let session_name = format!("mission-item-{item_id}-run-{run_id}");
-        let state_file = state_file_path(&self.agent_state_directory, run_id);
-        let executable = find_executable(agent_executable_name(agent)).ok_or_else(|| {
-            format!(
-                "{} is not installed on Local Mac",
-                agent_display_name(agent)
-            )
-        })?;
+        let state_file = if matches!(machine.transport, MachineTransport::Local) {
+            state_file_path(&self.agent_state_directory, run_id)
+        } else {
+            PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
+        };
+        let executable = find_agent_executable(&machine, agent_executable_name(agent))
+            .map_err(|error| format!("{}: {error}", agent_display_name(agent)))?;
         let terminal = TmuxRuntime;
         let pane_id = terminal.launch_agent(
             &machine,
@@ -549,12 +645,13 @@ impl Runtime {
             ));
         }
 
+        let transport = terminal_transport(&machine);
         let identity = ExternalPaneIdentity {
             tmux_path: "tmux".into(),
             socket_name: machine.socket_name,
             session_name: run.session_name,
             pane_id: run.pane_id,
-            transport: TerminalTransport::Local,
+            transport,
         };
         open_pane_in_terminal(&identity)
     }
@@ -1501,31 +1598,6 @@ fn agent_display_name(agent: AgentKind) -> &'static str {
     }
 }
 
-fn find_executable(name: &str) -> Option<PathBuf> {
-    let path = env::var_os("PATH")?;
-    env::split_paths(&path)
-        .map(|directory| directory.join(name))
-        .find(|candidate| is_executable(candidate))
-}
-
-fn is_executable(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        path.metadata()
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
-}
-
 #[tauri::command]
 pub fn list_contexts(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Context>, String> {
     state
@@ -1576,6 +1648,7 @@ pub fn compose_run_prompt(
 pub fn start_run(
     item_id: i64,
     workset_id: i64,
+    machine_id: Option<i64>,
     agent: AgentKind,
     execution_profile: ExecutionProfile,
     prompt: String,
@@ -1588,11 +1661,34 @@ pub fn start_run(
         .start_run(
             item_id,
             workset_id,
+            machine_id,
             agent,
             execution_profile,
             prompt,
             prompt_selection,
         )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn register_machine(
+    context_id: i64,
+    name: String,
+    socket_name: String,
+    transport: MachineTransport,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Machine, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .register_machine(context_id, name, socket_name, transport)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn check_machine(machine_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Machine, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .check_machine(machine_id)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2077,6 +2173,9 @@ mod tests {
             context_id: 1,
             name: "Local Mac".into(),
             socket_name: format!("mission-manager-missing-pane-{}", std::process::id()),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
         });
         runtime.state.runs.push(Run {
             id: 1,
@@ -2344,6 +2443,7 @@ fi
                 context_id: 1,
                 name: "Local Mac".into(),
                 socket_name: "mission-manager".into(),
+                transport: MachineTransport::Local,
             },
         )
         .expect("Machine should register");

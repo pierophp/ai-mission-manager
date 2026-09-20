@@ -1,6 +1,7 @@
 use std::{
+    env,
     io::{BufRead, BufReader, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
@@ -11,7 +12,7 @@ use serde::Serialize;
 
 use crate::{
     agent_state::{AgentStateRecord, AGENT_STATE_OPTION},
-    domain::Machine,
+    domain::{Machine, MachineTransport},
 };
 
 pub trait TerminalRuntime {
@@ -58,8 +59,6 @@ pub struct SshTransport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-// Remote Machine records will supply this branch when remote Runs are wired.
-#[allow(dead_code)]
 pub enum TerminalTransport {
     Local,
     Ssh(SshTransport),
@@ -264,22 +263,31 @@ impl TmuxControlPane {
     {
         validate_tmux_target(session_name)?;
         validate_pane_id(pane_id)?;
-        let mut child = Command::new("tmux")
-            .args([
-                "-C",
-                "-f",
-                "/dev/null",
-                "-L",
-                &machine.socket_name,
-                "attach-session",
-                "-t",
-                session_name,
-            ])
+        let transport = terminal_transport(machine);
+        let tmux_args = [
+            "-C",
+            "-f",
+            "/dev/null",
+            "-L",
+            &machine.socket_name,
+            "attach-session",
+            "-t",
+            session_name,
+        ];
+        let (program, arguments) =
+            build_tmux_process_command(&transport, false, &tmux_args, "tmux")?;
+        let mut child = Command::new(program)
+            .args(arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|error| format!("Could not attach to Pane: {error}"))?;
+            .map_err(|error| {
+                format!(
+                    "Could not attach to Pane on Machine {}: {error}",
+                    machine.name
+                )
+            })?;
         let input = child
             .stdin
             .take()
@@ -325,7 +333,12 @@ impl TmuxControlPane {
         pane.send_command("list-panes")?;
         ready_receiver
             .recv_timeout(Duration::from_secs(2))
-            .map_err(|_| "tmux control client did not become ready".to_owned())?;
+            .map_err(|_| {
+                format!(
+                    "Could not connect to Machine {}: tmux control client did not become ready",
+                    machine.name
+                )
+            })?;
         pane.send_command(&format!(
             "refresh-client -B 'mission-manager-agent-state:{}:#{{{}}}'",
             pane_id, AGENT_STATE_OPTION
@@ -422,21 +435,257 @@ fn run_tmux(machine: &Machine, args: &[String]) -> Result<String, String> {
 }
 
 fn run_tmux_output(machine: &Machine, args: &[String]) -> Result<std::process::Output, String> {
-    let output = Command::new("tmux")
-        .args(["-f", "/dev/null", "-L"])
-        .arg(&machine.socket_name)
-        .args(args)
+    let mut tmux_args = vec!["-f", "/dev/null", "-L", machine.socket_name.as_str()];
+    tmux_args.extend(args.iter().map(String::as_str));
+    let transport = terminal_transport(machine);
+    let (program, arguments) = build_tmux_process_command(&transport, false, &tmux_args, "tmux")?;
+    let output = Command::new(program)
+        .args(arguments)
         .output()
-        .map_err(|error| format!("Could not start tmux: {error}"))?;
+        .map_err(|error| format!("Could not connect to Machine {}: {error}", machine.name))?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
         Err(if detail.is_empty() {
-            format!("tmux exited with {}", output.status)
+            format!(
+                "Machine {} tmux exited with {}",
+                machine.name, output.status
+            )
         } else {
-            detail
+            format!("Machine {}: {detail}", machine.name)
         })
     } else {
         Ok(output)
+    }
+}
+
+pub fn terminal_transport(machine: &Machine) -> TerminalTransport {
+    match &machine.transport {
+        MachineTransport::Local => TerminalTransport::Local,
+        MachineTransport::Ssh {
+            host,
+            user,
+            port,
+            identity_file,
+            known_hosts_file,
+            strict_host_key_checking,
+        } => TerminalTransport::Ssh(SshTransport {
+            host: host.clone(),
+            user: user.clone(),
+            port: *port,
+            identity_file: identity_file.clone(),
+            known_hosts_file: known_hosts_file.clone(),
+            strict_host_key_checking: strict_host_key_checking.clone(),
+            ssh_path: None,
+        }),
+    }
+}
+
+fn build_tmux_process_command(
+    transport: &TerminalTransport,
+    allocate_tty: bool,
+    tmux_args: &[&str],
+    tmux_path: &str,
+) -> Result<(String, Vec<String>), String> {
+    if tmux_path.trim().is_empty() {
+        return Err("tmux executable path cannot be blank".to_owned());
+    }
+    if matches!(transport, TerminalTransport::Local) {
+        return Ok((
+            tmux_path.to_owned(),
+            tmux_args
+                .iter()
+                .map(|argument| (*argument).to_owned())
+                .collect(),
+        ));
+    }
+
+    let TerminalTransport::Ssh(transport) = transport else {
+        unreachable!("local transport returned above");
+    };
+    validate_ssh_transport(transport)?;
+    let target = match &transport.user {
+        Some(user) => format!("{user}@{}", transport.host),
+        None => transport.host.clone(),
+    };
+    let remote_command = std::iter::once(tmux_path)
+        .chain(tmux_args.iter().copied())
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut arguments = vec![
+        if allocate_tty { "-tt" } else { "-T" }.to_owned(),
+        "-o".to_owned(),
+        "BatchMode=yes".to_owned(),
+    ];
+    if let Some(port) = transport.port {
+        arguments.extend(["-p".to_owned(), port.to_string()]);
+    }
+    if let Some(identity_file) = &transport.identity_file {
+        arguments.extend(["-i".to_owned(), identity_file.clone()]);
+    }
+    if let Some(known_hosts_file) = &transport.known_hosts_file {
+        arguments.extend([
+            "-o".to_owned(),
+            format!("UserKnownHostsFile={known_hosts_file}"),
+        ]);
+    }
+    if let Some(strict_host_key_checking) = &transport.strict_host_key_checking {
+        arguments.extend([
+            "-o".to_owned(),
+            format!("StrictHostKeyChecking={strict_host_key_checking}"),
+        ]);
+    }
+    arguments.extend([target, remote_command]);
+    Ok((
+        transport.ssh_path.as_deref().unwrap_or("ssh").to_owned(),
+        arguments,
+    ))
+}
+
+pub fn probe_machine(machine: &Machine) -> Result<(), String> {
+    match &machine.transport {
+        MachineTransport::Local => Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map_err(|error| format!("Could not inspect Machine {}: {error}", machine.name))
+            .and_then(|output| {
+                if output.status.success() {
+                    Ok(())
+                } else {
+                    Err(format!("Machine {} could not run tmux", machine.name))
+                }
+            }),
+        MachineTransport::Ssh { .. } => run_machine_shell(machine, "tmux -V").map(|_| ()),
+    }
+}
+
+pub fn workset_root_exists(machine: &Machine, root: &Path) -> Result<(), String> {
+    match machine.transport {
+        MachineTransport::Local => {
+            if root.is_dir() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Workset root is not a directory: {}",
+                    root.display()
+                ))
+            }
+        }
+        MachineTransport::Ssh { .. } => {
+            let command = format!("test -d {}", shell_quote(&root.to_string_lossy()));
+            run_machine_shell(machine, &command)
+                .map(|_| ())
+                .map_err(|error| {
+                    format!(
+                        "Workset root is not a directory on Machine {}: {}",
+                        machine.name, error
+                    )
+                })
+        }
+    }
+}
+
+pub fn find_agent_executable(machine: &Machine, name: &str) -> Result<PathBuf, String> {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(format!("unsupported agent executable name: {name}"));
+    }
+    match machine.transport {
+        MachineTransport::Local => env::var_os("PATH")
+            .into_iter()
+            .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
+            .map(|directory| directory.join(name))
+            .find(|candidate| is_executable(candidate))
+            .ok_or_else(|| format!("{name} is not installed on Machine {}", machine.name)),
+        MachineTransport::Ssh { .. } => {
+            let output = run_machine_shell(machine, &format!("command -v {}", shell_quote(name)))?;
+            let path = output.trim();
+            if path.is_empty() {
+                Err(format!(
+                    "{name} is not installed on Machine {}",
+                    machine.name
+                ))
+            } else {
+                Ok(PathBuf::from(path))
+            }
+        }
+    }
+}
+
+fn run_machine_shell(machine: &Machine, command: &str) -> Result<String, String> {
+    let output = match &machine.transport {
+        MachineTransport::Local => Command::new("sh")
+            .args(["-lc", command])
+            .output()
+            .map_err(|error| format!("Could not inspect Machine {}: {error}", machine.name))?,
+        MachineTransport::Ssh { .. } => {
+            let transport = terminal_transport(machine);
+            let TerminalTransport::Ssh(transport) = transport else {
+                unreachable!("SSH transport should remain SSH");
+            };
+            validate_ssh_transport(&transport)?;
+            let target = match &transport.user {
+                Some(user) => format!("{user}@{}", transport.host),
+                None => transport.host.clone(),
+            };
+            let mut arguments = vec!["-T".to_owned(), "-o".to_owned(), "BatchMode=yes".to_owned()];
+            if let Some(port) = transport.port {
+                arguments.extend(["-p".to_owned(), port.to_string()]);
+            }
+            if let Some(identity_file) = &transport.identity_file {
+                arguments.extend(["-i".to_owned(), identity_file.clone()]);
+            }
+            if let Some(known_hosts_file) = &transport.known_hosts_file {
+                arguments.extend([
+                    "-o".to_owned(),
+                    format!("UserKnownHostsFile={known_hosts_file}"),
+                ]);
+            }
+            if let Some(strict_host_key_checking) = &transport.strict_host_key_checking {
+                arguments.extend([
+                    "-o".to_owned(),
+                    format!("StrictHostKeyChecking={strict_host_key_checking}"),
+                ]);
+            }
+            arguments.extend([target, command.to_owned()]);
+            Command::new(transport.ssh_path.as_deref().unwrap_or("ssh"))
+                .args(arguments)
+                .output()
+                .map_err(|error| {
+                    format!("Could not connect to Machine {}: {error}", machine.name)
+                })?
+        }
+    };
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if detail.is_empty() {
+            format!("command exited with {}", output.status)
+        } else {
+            detail
+        })
+    }
+}
+
+fn is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        path.metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
     }
 }
 
@@ -690,6 +939,9 @@ mod tests {
             context_id: 1,
             name: "Test Mac".into(),
             socket_name: format!("ai-mission-manager-test-{}", std::process::id()),
+            transport: MachineTransport::Local,
+            last_observed: crate::domain::MachineObservation::Unknown,
+            last_observed_at: None,
         };
         let session_name = format!("mission-manager-test-{}", std::process::id());
         let pane_id = TmuxRuntime
@@ -731,6 +983,9 @@ mod tests {
             context_id: 1,
             name: "Test Mac".into(),
             socket_name: format!("ai-mission-manager-control-test-{}", std::process::id()),
+            transport: MachineTransport::Local,
+            last_observed: crate::domain::MachineObservation::Unknown,
+            last_observed_at: None,
         };
         let session_name = format!("mission-manager-control-test-{}", std::process::id());
         let program = "trap 'printf INTERRUPTED\\n' INT; sleep 0.3; printf 'READY\\n'; while IFS= read -r line; do printf 'ECHO:%s\\n' \"$line\"; done";
@@ -896,6 +1151,37 @@ mod tests {
         .expect_err("a display name must not be accepted as a Pane identity");
 
         assert_eq!(error, "invalid tmux Pane identity: main");
+    }
+
+    #[test]
+    fn remote_tmux_commands_use_ssh_without_a_local_fallback() {
+        let command = build_tmux_process_command(
+            &TerminalTransport::Ssh(SshTransport {
+                host: "remote.example".into(),
+                user: Some("runner".into()),
+                port: Some(2222),
+                identity_file: None,
+                known_hosts_file: None,
+                strict_host_key_checking: Some("yes".into()),
+                ssh_path: Some("/usr/bin/ssh".into()),
+            }),
+            false,
+            &["-f", "/dev/null", "-L", "mission-manager", "list-sessions"],
+            "tmux",
+        )
+        .expect("the remote tmux command should build");
+
+        assert_eq!(command.0, "/usr/bin/ssh");
+        assert_eq!(&command.1[..4], &["-T", "-o", "BatchMode=yes", "-p"]);
+        assert!(command
+            .1
+            .iter()
+            .any(|argument| argument == "runner@remote.example"));
+        assert!(command
+            .1
+            .last()
+            .is_some_and(|argument| argument.contains("'tmux'")));
+        assert!(!command.0.ends_with("tmux"));
     }
 
     fn receive_until(receiver: &std::sync::mpsc::Receiver<Vec<u8>>, expected: &str) -> String {

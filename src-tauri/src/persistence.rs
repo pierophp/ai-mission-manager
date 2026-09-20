@@ -6,8 +6,9 @@ use thiserror::Error;
 use crate::domain::{
     Activity, AgentKind, Context, ContextAttentionDefault, DomainState, Effect, ExecutionProfile,
     ExternalChangePolicy, ExternalMetadata, ExternalObject, ExternalObjectKind, ExternalProvider,
-    ExternalSnapshot, Item, ItemRelation, ItemRelationKind, ItemStatus, Link, Machine, Project,
-    ProjectDefaults, Reminder, Repository, Run, RunState, Workset, WorksetRepository,
+    ExternalSnapshot, Item, ItemRelation, ItemRelationKind, ItemStatus, Link, Machine,
+    MachineObservation, Project, ProjectDefaults, Reminder, Repository, Run, RunState, Workset,
+    WorksetRepository,
 };
 
 #[derive(Debug, Error)]
@@ -34,6 +35,10 @@ pub enum StoreError {
     InvalidExecutionProfile(String),
     #[error("invalid Run state in database: {0}")]
     InvalidRunState(String),
+    #[error("invalid Machine transport in database: {0}")]
+    InvalidMachineTransport(String),
+    #[error("invalid Machine observation in database: {0}")]
+    InvalidMachineObservation(String),
     #[error("invalid {key} value in database: {value}")]
     InvalidSequence { key: String, value: String },
     #[error("a database sequence is exhausted")]
@@ -83,6 +88,37 @@ impl SqliteStore {
         if !workset_columns.is_empty() && !workset_columns.iter().any(|column| column == "archived")
         {
             return Err(StoreError::IncompatibleSchema);
+        }
+        let machine_columns = table_columns(&connection, "machines")?;
+        if !machine_columns.is_empty()
+            && !machine_columns
+                .iter()
+                .any(|column| column == "transport_json")
+        {
+            connection.execute(
+                "ALTER TABLE machines ADD COLUMN transport_json TEXT NOT NULL DEFAULT '{\"kind\":\"local\"}'",
+                [],
+            )?;
+        }
+        if !machine_columns.is_empty()
+            && !machine_columns
+                .iter()
+                .any(|column| column == "last_observed")
+        {
+            connection.execute(
+                "ALTER TABLE machines ADD COLUMN last_observed TEXT NOT NULL DEFAULT 'unknown'",
+                [],
+            )?;
+        }
+        if !machine_columns.is_empty()
+            && !machine_columns
+                .iter()
+                .any(|column| column == "last_observed_at")
+        {
+            connection.execute(
+                "ALTER TABLE machines ADD COLUMN last_observed_at INTEGER",
+                [],
+            )?;
         }
         initialize_schema(&mut connection)?;
 
@@ -157,16 +193,34 @@ impl SqliteStore {
         };
         let machines = {
             let mut statement = self.connection.prepare(
-                "SELECT id, context_id, name, socket_name
+                "SELECT id, context_id, name, socket_name, transport_json, last_observed,
+                        last_observed_at
                  FROM machines
                  ORDER BY id",
             )?;
             let rows = statement.query_map([], |row| {
+                let transport: String = row.get(4)?;
+                let observation: String = row.get(5)?;
                 Ok(Machine {
                     id: row.get(0)?,
                     context_id: row.get(1)?,
                     name: row.get(2)?,
                     socket_name: row.get(3)?,
+                    transport: serde_json::from_str(&transport).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(StoreError::InvalidMachineTransport(error.to_string())),
+                        )
+                    })?,
+                    last_observed: parse_machine_observation(&observation).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    last_observed_at: row.get(6)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -653,19 +707,40 @@ impl SqliteStore {
                     machine,
                     next_machine_id,
                 } => {
+                    let transport_json =
+                        serde_json::to_string(&machine.transport).map_err(|error| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                        })?;
                     transaction.execute(
-                        "INSERT INTO machines (id, context_id, name, socket_name)
-                         VALUES (?1, ?2, ?3, ?4)",
+                        "INSERT INTO machines
+                            (id, context_id, name, socket_name, transport_json,
+                             last_observed, last_observed_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                         params![
                             machine.id,
                             machine.context_id,
                             machine.name,
                             machine.socket_name,
+                            transport_json,
+                            machine_observation_as_str(machine.last_observed),
+                            machine.last_observed_at,
                         ],
                     )?;
                     transaction.execute(
                         "UPDATE metadata SET value = ?1 WHERE key = 'next_machine_id'",
                         params![next_machine_id],
+                    )?;
+                }
+                Effect::PersistMachineObservation { machine } => {
+                    transaction.execute(
+                        "UPDATE machines
+                         SET last_observed = ?1, last_observed_at = ?2
+                         WHERE id = ?3",
+                        params![
+                            machine_observation_as_str(machine.last_observed),
+                            machine.last_observed_at,
+                            machine.id,
+                        ],
                     )?;
                 }
                 Effect::PersistRun { run, next_run_id } => {
@@ -922,6 +997,9 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              context_id INTEGER NOT NULL REFERENCES contexts(id),
              name TEXT NOT NULL,
              socket_name TEXT NOT NULL,
+             transport_json TEXT NOT NULL DEFAULT '{\"kind\":\"local\"}',
+             last_observed TEXT NOT NULL DEFAULT 'unknown',
+             last_observed_at INTEGER,
              UNIQUE (context_id, name)
          );
          CREATE INDEX IF NOT EXISTS machines_by_context
@@ -1275,6 +1353,23 @@ fn parse_run_state(state: &str) -> Result<RunState, StoreError> {
     }
 }
 
+fn machine_observation_as_str(observation: MachineObservation) -> &'static str {
+    match observation {
+        MachineObservation::Unknown => "unknown",
+        MachineObservation::Available => "available",
+        MachineObservation::Offline => "offline",
+    }
+}
+
+fn parse_machine_observation(observation: &str) -> Result<MachineObservation, StoreError> {
+    match observation {
+        "unknown" => Ok(MachineObservation::Unknown),
+        "available" => Ok(MachineObservation::Available),
+        "offline" => Ok(MachineObservation::Offline),
+        other => Err(StoreError::InvalidMachineObservation(other.into())),
+    }
+}
+
 fn item_status_as_str(status: ItemStatus) -> &'static str {
     match status {
         ItemStatus::Inbox => "Inbox",
@@ -1359,8 +1454,71 @@ mod tests {
     use crate::domain::{
         decide, AgentKind, Event, ExecutionProfile, ExternalChangePolicy, ExternalMetadata,
         ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshotData,
-        RunPromptSelection, RunState, WorksetRepositoryInput,
+        MachineTransport, RunPromptSelection, RunState, WorksetRepositoryInput,
     };
+
+    #[test]
+    fn remote_machine_configuration_and_observation_survive_reopening() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+        {
+            let mut store = SqliteStore::open(&path).expect("database should open");
+            let decision = decide(
+                store.load_state().expect("state should load"),
+                Event::RegisterMachine {
+                    context_id: 1,
+                    name: "Build host".into(),
+                    socket_name: "mission-manager".into(),
+                    transport: MachineTransport::Ssh {
+                        host: "build.example.com".into(),
+                        user: Some("runner".into()),
+                        port: Some(2222),
+                        identity_file: Some("/Users/me/.ssh/mission".into()),
+                        known_hosts_file: Some("/Users/me/.ssh/known_hosts".into()),
+                        strict_host_key_checking: Some("accept-new".into()),
+                    },
+                },
+            )
+            .expect("remote Machine should register");
+            store
+                .apply(&decision.effects)
+                .expect("Machine should persist");
+            let observed = decide(
+                decision.state,
+                Event::ObserveMachine {
+                    machine_id: 1,
+                    observation: crate::domain::MachineObservation::Available,
+                    observed_at: 123,
+                },
+            )
+            .expect("Machine observation should persist");
+            store
+                .apply(&observed.effects)
+                .expect("Machine observation should be persisted");
+        }
+
+        let state = SqliteStore::open(&path)
+            .expect("database should reopen")
+            .load_state()
+            .expect("state should reload");
+        assert_eq!(state.machines[0].name, "Build host");
+        assert_eq!(
+            state.machines[0].transport,
+            MachineTransport::Ssh {
+                host: "build.example.com".into(),
+                user: Some("runner".into()),
+                port: Some(2222),
+                identity_file: Some("/Users/me/.ssh/mission".into()),
+                known_hosts_file: Some("/Users/me/.ssh/known_hosts".into()),
+                strict_host_key_checking: Some("accept-new".into()),
+            }
+        );
+        assert_eq!(
+            state.machines[0].last_observed,
+            crate::domain::MachineObservation::Available
+        );
+        assert_eq!(state.machines[0].last_observed_at, Some(123));
+    }
 
     #[test]
     fn contexts_projects_and_items_are_available_after_reopening_the_database() {
@@ -1551,6 +1709,7 @@ mod tests {
                     context_id: 1,
                     name: "Local Mac".into(),
                     socket_name: "ai-mission-manager".into(),
+                    transport: MachineTransport::Local,
                 },
             )
             .expect("Machine should register");

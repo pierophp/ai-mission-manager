@@ -30,6 +30,8 @@ pub fn run() {
             app::create_context,
             app::create_project,
             app::register_repository,
+            app::register_machine,
+            app::check_machine,
             app::create_workset,
             app::attach_workset,
             app::add_repository_to_workset,
