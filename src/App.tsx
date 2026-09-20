@@ -42,6 +42,7 @@ type Workset = {
   item_id: number;
   root_directory: string;
   branch: string;
+  archived: boolean;
   repositories: WorksetRepository[];
 };
 
@@ -155,7 +156,24 @@ type ItemView = {
   project_name: string;
   relationships: ItemRelation[];
   worksets: Workset[];
+  archived_worksets: Workset[];
   links: ExternalLinkView[];
+};
+
+type RepositoryRemovalReport = {
+  repository_id: number;
+  name: string;
+  path: string;
+  current_branch: string;
+  unpushed_commits: string[];
+  unpushed_commits_unknown: boolean;
+  uncommitted_changes: string[];
+};
+
+type WorksetRemovalReport = {
+  workset_id: number;
+  root_directory: string;
+  repositories: RepositoryRemovalReport[];
 };
 
 type HomeView = {
@@ -1000,6 +1018,7 @@ function ItemCard({
   const [additionalBranchOverride, setAdditionalBranchOverride] = useState("");
   const [additionalBaseBranchOverride, setAdditionalBaseBranchOverride] =
     useState("");
+  const [removalReport, setRemovalReport] = useState<WorksetRemovalReport>();
   const [isSaving, setIsSaving] = useState(false);
 
   const itemRepositories = repositories.filter(
@@ -1111,6 +1130,38 @@ function ItemCard({
     });
   }
 
+  async function handleSetWorksetArchived(worksetId: number, archived: boolean) {
+    await saveItem(() =>
+      invoke("set_workset_archived", { worksetId, archived }),
+    );
+    if (removalReport?.workset_id === worksetId) {
+      setRemovalReport(undefined);
+    }
+  }
+
+  async function handlePrepareRemoval(worksetId: number) {
+    setIsSaving(true);
+    try {
+      const report = await invoke<WorksetRemovalReport>("prepare_workset_removal", {
+        worksetId,
+      });
+      setRemovalReport(report);
+    } catch (reportError) {
+      window.alert(errorMessage(reportError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleRemoveWorkset(worksetId: number) {
+    if (removalReport?.workset_id !== worksetId) return;
+    if (!window.confirm("Remove this Workset and its directory from disk?")) return;
+    await saveItem(async () => {
+      await invoke("remove_workset", { worksetId, confirmed: true });
+      setRemovalReport(undefined);
+    });
+  }
+
   async function refreshExternalObject(externalObjectId: number) {
     setIsSaving(true);
     try {
@@ -1158,6 +1209,154 @@ function ItemCard({
       candidate.item.id !== view.item.id &&
       candidate.context_name === view.context_name,
   );
+
+  function renderRemovalFinding(
+    label: string,
+    values: string[],
+    emptyMessage: string,
+  ) {
+    return (
+      <p>
+        {values.length === 0 ? emptyMessage : `${label}: ${values.join("; ")}`}
+      </p>
+    );
+  }
+
+  function renderWorksetCard(workset: Workset, archived: boolean) {
+    const selectedIds = new Set(
+      workset.repositories.map((selected) => selected.repository_id),
+    );
+    const availableRepositories = itemRepositories.filter(
+      (repository) => !selectedIds.has(repository.id),
+    );
+    const report = removalReport?.workset_id === workset.id ? removalReport : undefined;
+
+    return (
+      <article className={`workset-card${archived ? " archived-workset-card" : ""}`} key={workset.id}>
+        <div className="workset-heading">
+          <div>
+            <strong>{workset.branch}</strong>
+            {archived && <span className="archived-label">Archived</span>}
+          </div>
+          <span>{workset.root_directory}</span>
+        </div>
+        <div className="workset-repositories">
+          {workset.repositories.map((selected) => (
+            <span className="relationship-chip" key={selected.repository_id}>
+              <strong>{repositoryName(repositories, selected.repository_id)}</strong>
+              <span>
+                {selected.current_branch} · {selected.is_dirty ? "uncommitted changes" : "clean"}
+              </span>
+            </span>
+          ))}
+        </div>
+        <div className="workset-actions">
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={isSaving}
+            onClick={() => void handleSetWorksetArchived(workset.id, !archived)}
+          >
+            {archived ? "Restore" : "Archive"}
+          </button>
+          <button
+            type="button"
+            className="secondary-button"
+            disabled={isSaving}
+            onClick={() => void handlePrepareRemoval(workset.id)}
+          >
+            Review removal
+          </button>
+        </div>
+        {report && (
+          <div className="removal-report" role="alert">
+            <strong>Removal safety report</strong>
+            <p>{report.root_directory} will be removed from disk.</p>
+            {report.repositories.map((repository) => (
+              <div className="removal-repository" key={repository.repository_id}>
+                <strong>{repository.name}</strong>
+                <span>{repository.current_branch} · {repository.path}</span>
+                {repository.unpushed_commits_unknown ? (
+                  <p>Unpushed commits could not be verified: no upstream branch is configured.</p>
+                ) : (
+                  renderRemovalFinding(
+                    "Unpushed commits",
+                    repository.unpushed_commits,
+                    "No unpushed commits.",
+                  )
+                )}
+                {renderRemovalFinding(
+                  "Uncommitted changes",
+                  repository.uncommitted_changes,
+                  "No uncommitted changes.",
+                )}
+              </div>
+            ))}
+            <div className="workset-actions">
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() => void handleRemoveWorkset(workset.id)}
+              >
+                Confirm and remove
+              </button>
+              <button
+                type="button"
+                className="text-button"
+                disabled={isSaving}
+                onClick={() => setRemovalReport(undefined)}
+              >
+                Keep Workset
+              </button>
+            </div>
+          </div>
+        )}
+        {!archived && availableRepositories.length > 0 && (
+          <div className="workset-add-repository">
+            <select
+              aria-label={`Repository to add to Workset ${workset.id}`}
+              value={additionalRepositoryId ?? ""}
+              onChange={(event) =>
+                setAdditionalRepositoryId(Number(event.target.value) || undefined)
+              }
+              disabled={isSaving}
+            >
+              <option value="">Add a Repository</option>
+              {availableRepositories.map((repository) => (
+                <option value={repository.id} key={repository.id}>
+                  {repository.name}
+                </option>
+              ))}
+            </select>
+            <input
+              aria-label="Added Repository branch override"
+              value={additionalBranchOverride}
+              onChange={(event) => setAdditionalBranchOverride(event.target.value)}
+              placeholder="Branch override (optional)"
+              disabled={isSaving}
+            />
+            <input
+              aria-label="Added Repository base branch override"
+              value={additionalBaseBranchOverride}
+              onChange={(event) =>
+                setAdditionalBaseBranchOverride(event.target.value)
+              }
+              placeholder="Base branch override (optional)"
+              disabled={isSaving}
+            />
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={isSaving || !additionalRepositoryId}
+              onClick={() => void handleAddRepositoryToWorkset(workset.id)}
+            >
+              Add
+            </button>
+          </div>
+        )}
+      </article>
+    );
+  }
 
   return (
     <article className="item-card">
@@ -1262,75 +1461,13 @@ function ItemCard({
       )}
       <div className="worksets">
         <span className="relationship-label">Worksets</span>
-        {view.worksets.map((workset) => {
-          const selectedIds = new Set(
-            workset.repositories.map((selected) => selected.repository_id),
-          );
-          const availableRepositories = itemRepositories.filter(
-            (repository) => !selectedIds.has(repository.id),
-          );
-          return (
-            <article className="workset-card" key={workset.id}>
-              <div className="workset-heading">
-                <strong>{workset.branch}</strong>
-                <span>{workset.root_directory}</span>
-              </div>
-              <div className="workset-repositories">
-                {workset.repositories.map((selected) => (
-                  <span className="relationship-chip" key={selected.repository_id}>
-                    <strong>{repositoryName(repositories, selected.repository_id)}</strong>
-                    <span>
-                      {selected.current_branch} · {selected.is_dirty ? "uncommitted changes" : "clean"}
-                    </span>
-                  </span>
-                ))}
-              </div>
-              {availableRepositories.length > 0 && (
-                <div className="workset-add-repository">
-                  <select
-                    aria-label={`Repository to add to Workset ${workset.id}`}
-                    value={additionalRepositoryId ?? ""}
-                    onChange={(event) =>
-                      setAdditionalRepositoryId(Number(event.target.value) || undefined)
-                    }
-                    disabled={isSaving}
-                  >
-                    <option value="">Add a Repository</option>
-                    {availableRepositories.map((repository) => (
-                      <option value={repository.id} key={repository.id}>
-                        {repository.name}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    aria-label="Added Repository branch override"
-                    value={additionalBranchOverride}
-                    onChange={(event) => setAdditionalBranchOverride(event.target.value)}
-                    placeholder="Branch override (optional)"
-                    disabled={isSaving}
-                  />
-                  <input
-                    aria-label="Added Repository base branch override"
-                    value={additionalBaseBranchOverride}
-                    onChange={(event) =>
-                      setAdditionalBaseBranchOverride(event.target.value)
-                    }
-                    placeholder="Base branch override (optional)"
-                    disabled={isSaving}
-                  />
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    disabled={isSaving || !additionalRepositoryId}
-                    onClick={() => void handleAddRepositoryToWorkset(workset.id)}
-                  >
-                    Add
-                  </button>
-                </div>
-              )}
-            </article>
-          );
-        })}
+        {view.worksets.map((workset) => renderWorksetCard(workset, false))}
+        {view.archived_worksets.length > 0 && (
+          <div className="archived-worksets">
+            <span className="relationship-label">Archived Worksets</span>
+            {view.archived_worksets.map((workset) => renderWorksetCard(workset, true))}
+          </div>
+        )}
         <form className="workset-form" onSubmit={handleCreateWorkset}>
           <strong>Create a Workset</strong>
           <label>

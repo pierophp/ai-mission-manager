@@ -68,6 +68,7 @@ pub struct Workset {
     pub item_id: i64,
     pub root_directory: String,
     pub branch: String,
+    pub archived: bool,
     pub repositories: Vec<WorksetRepository>,
 }
 
@@ -276,6 +277,7 @@ pub struct ItemView {
     pub project_name: String,
     pub relationships: Vec<ItemRelation>,
     pub worksets: Vec<Workset>,
+    pub archived_worksets: Vec<Workset>,
     pub links: Vec<ExternalLinkView>,
 }
 
@@ -350,6 +352,13 @@ pub enum Event {
         repository_id: i64,
         branch_override: Option<String>,
         base_branch_override: Option<String>,
+    },
+    SetWorksetArchived {
+        workset_id: i64,
+        archived: bool,
+    },
+    RemoveWorkset {
+        workset_id: i64,
     },
     SetItemStatus {
         item_id: i64,
@@ -431,6 +440,9 @@ pub enum Effect {
     },
     PersistWorksetUpdate {
         workset: Workset,
+    },
+    RemoveWorkset {
+        workset_id: i64,
     },
     PersistItemUpdate {
         item: Item,
@@ -730,6 +742,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 item_id,
                 root_directory,
                 branch,
+                archived: false,
                 repositories,
             };
             state.next_workset_id = next_workset_id;
@@ -831,6 +844,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 item_id,
                 root_directory,
                 branch,
+                archived: false,
                 repositories: attached_repositories,
             };
             state.next_repository_id = next_repository_id;
@@ -909,6 +923,36 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             Ok(Decision {
                 state,
                 effects: vec![Effect::PersistWorksetUpdate { workset }],
+            })
+        }
+        Event::SetWorksetArchived {
+            workset_id,
+            archived,
+        } => {
+            let workset = state
+                .worksets
+                .iter_mut()
+                .find(|workset| workset.id == workset_id)
+                .ok_or(DomainError::WorksetNotFound { workset_id })?;
+            workset.archived = archived;
+            let workset = workset.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistWorksetUpdate { workset }],
+            })
+        }
+        Event::RemoveWorkset { workset_id } => {
+            let position = state
+                .worksets
+                .iter()
+                .position(|workset| workset.id == workset_id)
+                .ok_or(DomainError::WorksetNotFound { workset_id })?;
+            state.worksets.remove(position);
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::RemoveWorkset { workset_id }],
             })
         }
         Event::SetItemStatus { item_id, status } => {
@@ -1482,18 +1526,19 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 .filter(|link| link.item_id == item.id)
                 .filter_map(|link| external_link_view_at(state, link, now))
                 .collect();
-            let worksets = state
+            let (worksets, archived_worksets): (Vec<_>, Vec<_>) = state
                 .worksets
                 .iter()
                 .filter(|workset| workset.item_id == item.id)
                 .cloned()
-                .collect();
+                .partition(|workset| !workset.archived);
             Some(ItemView {
                 item: item.clone(),
                 context_name: context.name.clone(),
                 project_name: project.name.clone(),
                 relationships,
                 worksets,
+                archived_worksets,
                 links,
             })
         })
@@ -2876,6 +2921,7 @@ mod tests {
                 item_id: 1,
                 root_directory: "/Users/me/worksets/PLAT-847".into(),
                 branch: "feature/PLAT-847".into(),
+                archived: false,
                 repositories: vec![WorksetRepository {
                     repository_id: 1,
                     branch_override: None,
@@ -2987,6 +3033,7 @@ mod tests {
                 item_id: 1,
                 root_directory: "/tmp/worksets/PLAT-847".into(),
                 branch: "feature/PLAT-847".into(),
+                archived: false,
                 repositories: vec![
                     WorksetRepository {
                         repository_id: 1,
@@ -3089,6 +3136,60 @@ mod tests {
             extended.effects.as_slice(),
             [Effect::PersistWorksetUpdate { .. }]
         ));
+    }
+
+    #[test]
+    fn archiving_hides_a_workset_without_removing_it_and_removal_is_separate() {
+        let mut state = state_with_item(7, "Work");
+        state.repositories.push(Repository {
+            id: 1,
+            project_id: 1,
+            name: "service-a".into(),
+            remote_url: "https://example.com/service-a.git".into(),
+        });
+        let created = decide(
+            state,
+            Event::CreateWorkset {
+                item_id: 1,
+                root_directory: "/tmp/worksets/archive-me".into(),
+                branch: "feature/archive-me".into(),
+                repositories: vec![WorksetRepositoryInput {
+                    repository_id: 1,
+                    branch_override: None,
+                    base_branch_override: None,
+                }],
+            },
+        )
+        .expect("Workset should be created");
+
+        let archived = decide(
+            created.state,
+            Event::SetWorksetArchived {
+                workset_id: 1,
+                archived: true,
+            },
+        )
+        .expect("Workset should be archivable");
+
+        assert!(archived.state.worksets[0].archived);
+        assert!(item_views(&archived.state, None)[0].worksets.is_empty());
+        assert_eq!(
+            item_views(&archived.state, None)[0].archived_worksets.len(),
+            1
+        );
+        assert!(matches!(
+            archived.effects.as_slice(),
+            [Effect::PersistWorksetUpdate { workset }] if workset.archived
+        ));
+
+        let removed = decide(archived.state, Event::RemoveWorkset { workset_id: 1 })
+            .expect("Workset removal should be a separate decision");
+
+        assert!(removed.state.worksets.is_empty());
+        assert_eq!(
+            removed.effects,
+            vec![Effect::RemoveWorkset { workset_id: 1 }]
+        );
     }
 
     #[test]

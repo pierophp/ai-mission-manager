@@ -24,6 +24,7 @@ pub struct Runtime {
     store: SqliteStore,
     state: DomainState,
     gh_executable_path: Option<PathBuf>,
+    pending_workset_removal: Option<WorksetRemovalReport>,
 }
 
 impl Runtime {
@@ -45,6 +46,7 @@ impl Runtime {
             store,
             state,
             gh_executable_path,
+            pending_workset_removal: None,
         })
     }
 
@@ -239,6 +241,125 @@ impl Runtime {
             return Err(format_commit_error(error, cleanup_error));
         }
         Ok(workset)
+    }
+
+    fn set_workset_archived(&mut self, workset_id: i64, archived: bool) -> Result<Workset, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::SetWorksetArchived {
+                workset_id,
+                archived,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let workset = decision
+            .state
+            .worksets
+            .iter()
+            .find(|workset| workset.id == workset_id)
+            .cloned()
+            .ok_or_else(|| "Workset archive update produced no Workset".to_owned())?;
+        self.commit(decision)?;
+        Ok(workset)
+    }
+
+    fn build_workset_removal_report(
+        &self,
+        workset_id: i64,
+    ) -> Result<WorksetRemovalReport, String> {
+        let workset = self
+            .state
+            .worksets
+            .iter()
+            .find(|workset| workset.id == workset_id)
+            .ok_or_else(|| format!("Workset {workset_id} does not exist"))?;
+        let root = Path::new(&workset.root_directory);
+        let inspected = GitCli::system()
+            .inspect_workset(root)
+            .map_err(|error| error.to_string())?;
+        let repositories = workset
+            .repositories
+            .iter()
+            .map(|selected| {
+                let repository = self.repository(selected.repository_id)?;
+                let repository_state = inspected
+                    .iter()
+                    .find(|candidate| candidate.name == repository.name)
+                    .ok_or_else(|| {
+                        format!(
+                            "Repository directory is missing from Workset: {}",
+                            repository.name
+                        )
+                    })?;
+                Ok(RepositoryRemovalReport {
+                    repository_id: repository.id,
+                    name: repository.name.clone(),
+                    path: root.join(&repository.name).to_string_lossy().into_owned(),
+                    current_branch: repository_state.current_branch.clone(),
+                    unpushed_commits: repository_state.unpushed_commits.clone(),
+                    unpushed_commits_unknown: repository_state.unpushed_commits_unknown,
+                    uncommitted_changes: repository_state.uncommitted_changes.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        Ok(WorksetRemovalReport {
+            workset_id,
+            root_directory: workset.root_directory.clone(),
+            repositories,
+        })
+    }
+
+    fn prepare_workset_removal(&mut self, workset_id: i64) -> Result<WorksetRemovalReport, String> {
+        let report = self.build_workset_removal_report(workset_id)?;
+        self.pending_workset_removal = Some(report.clone());
+        Ok(report)
+    }
+
+    fn remove_workset(&mut self, workset_id: i64, confirmed: bool) -> Result<(), String> {
+        if !confirmed {
+            return Err(
+                "Workset removal requires explicit confirmation after reviewing its safety report"
+                    .into(),
+            );
+        }
+        let pending = self
+            .pending_workset_removal
+            .as_ref()
+            .filter(|report| report.workset_id == workset_id)
+            .cloned()
+            .ok_or_else(|| {
+                "Review the Workset removal safety report before removing it".to_owned()
+            })?;
+        let current = self.build_workset_removal_report(workset_id)?;
+        if current != pending {
+            return Err(
+                "The Workset changed after the safety report; review the updated report before removing it"
+                    .into(),
+            );
+        }
+
+        let decision = decide(self.state.clone(), Event::RemoveWorkset { workset_id })
+            .map_err(|error| error.to_string())?;
+        let root = Path::new(&current.root_directory);
+        let staging = workset_removal_staging_path(root, workset_id)?;
+        fs::rename(root, &staging)
+            .map_err(|error| format!("Could not stage Workset directory for removal: {error}"))?;
+        if let Err(error) = self.commit(decision) {
+            let restore_error = fs::rename(&staging, root).err().map(|restore_error| {
+                format!(
+                    "could not restore Workset directory after persistence failed: {restore_error}"
+                )
+            });
+            return Err(format_commit_error(error, restore_error));
+        }
+        self.pending_workset_removal = None;
+        fs::remove_dir_all(&staging).map_err(|error| {
+            format!(
+                "Workset was removed from Mission Manager, but its staged directory could not be deleted at {}: {error}",
+                staging.display()
+            )
+        })
     }
 
     fn checkout_new_workset(&self, workset: &Workset) -> Result<CheckoutReceipt, String> {
@@ -771,6 +892,45 @@ fn format_commit_error(error: String, cleanup_error: Option<String>) -> String {
     }
 }
 
+fn workset_removal_staging_path(root: &Path, workset_id: i64) -> Result<PathBuf, String> {
+    let parent = root.parent().unwrap_or_else(|| Path::new("."));
+    let name = root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            format!(
+                "Workset root has no usable directory name: {}",
+                root.display()
+            )
+        })?;
+    let staging = parent.join(format!(".{name}.mission-manager-removing-{workset_id}"));
+    if staging.exists() {
+        return Err(format!(
+            "Workset removal staging path already exists: {}",
+            staging.display()
+        ));
+    }
+    Ok(staging)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RepositoryRemovalReport {
+    pub repository_id: i64,
+    pub name: String,
+    pub path: String,
+    pub current_branch: String,
+    pub unpushed_commits: Vec<String>,
+    pub unpushed_commits_unknown: bool,
+    pub uncommitted_changes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct WorksetRemovalReport {
+    pub workset_id: i64,
+    pub root_directory: String,
+    pub repositories: Vec<RepositoryRemovalReport>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ExternalLinkAction {
     pub link: ExternalLinkView,
@@ -937,6 +1097,41 @@ pub fn add_repository_to_workset(
             branch_override,
             base_branch_override,
         )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_workset_archived(
+    workset_id: i64,
+    archived: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Workset, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .set_workset_archived(workset_id, archived)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn prepare_workset_removal(
+    workset_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<WorksetRemovalReport, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .prepare_workset_removal(workset_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn remove_workset(
+    workset_id: i64,
+    confirmed: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .remove_workset(workset_id, confirmed)
 }
 
 #[tauri::command]
@@ -1355,6 +1550,29 @@ fi
         let reopened = Runtime::open(&database).expect("runtime should reopen");
         assert_eq!(reopened.state.worksets, vec![workset]);
         assert_eq!(reopened.state.repositories[0].remote_url, origin_url);
+
+        runtime
+            .set_workset_archived(1, true)
+            .expect("Workset should be archivable");
+        assert!(root.is_dir(), "archiving must leave the Workset on disk");
+        assert!(runtime.state.worksets[0].archived);
+
+        let report = runtime
+            .prepare_workset_removal(1)
+            .expect("removal safety report should be available");
+        assert_eq!(report.repositories.len(), 1);
+        assert!(!report.repositories[0].uncommitted_changes.is_empty());
+        assert!(runtime.remove_workset(1, false).is_err());
+        assert!(
+            root.is_dir(),
+            "a rejected confirmation must keep the Workset"
+        );
+
+        runtime
+            .remove_workset(1, true)
+            .expect("confirmed removal should delete the Workset");
+        assert!(!root.exists());
+        assert!(runtime.state.worksets.is_empty());
     }
 
     fn run_git(directory: &Path, args: &[&str]) {

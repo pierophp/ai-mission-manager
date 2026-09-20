@@ -46,6 +46,9 @@ pub struct GitRepositoryState {
     pub remote_url: String,
     pub current_branch: String,
     pub is_dirty: bool,
+    pub unpushed_commits: Vec<String>,
+    pub unpushed_commits_unknown: bool,
+    pub uncommitted_changes: Vec<String>,
 }
 
 impl GitCli {
@@ -177,6 +180,14 @@ impl GitCli {
                     "--untracked-files=all",
                 ],
             )?;
+            let uncommitted_changes = status
+                .lines()
+                .map(str::trim_end)
+                .filter(|line| !line.is_empty())
+                .map(str::to_owned)
+                .collect();
+            let (unpushed_commits, unpushed_commits_unknown) =
+                self.read_unpushed_commits(&child_string)?;
             let name = child
                 .file_name()
                 .and_then(|name| name.to_str())
@@ -190,6 +201,9 @@ impl GitCli {
                 remote_url,
                 current_branch,
                 is_dirty: !status.trim().is_empty(),
+                unpushed_commits,
+                unpushed_commits_unknown,
+                uncommitted_changes,
             });
         }
 
@@ -199,6 +213,53 @@ impl GitCli {
             });
         }
         Ok(repositories)
+    }
+
+    fn read_unpushed_commits(&self, repository: &str) -> Result<(Vec<String>, bool), GitError> {
+        let upstream = self
+            .run_optional_output(
+                "read the child Git repository upstream",
+                &[
+                    "-C",
+                    repository,
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{upstream}",
+                ],
+            )?
+            .map(|upstream| upstream.trim().to_owned());
+        let remote_default = self
+            .run_optional_output(
+                "read the child Git repository remote default branch",
+                &[
+                    "-C",
+                    repository,
+                    "symbolic-ref",
+                    "--short",
+                    "refs/remotes/origin/HEAD",
+                ],
+            )?
+            .map(|branch| branch.trim().to_owned());
+        let Some(range) = upstream
+            .map(|branch| format!("{branch}..HEAD"))
+            .or_else(|| remote_default.map(|branch| format!("{branch}..HEAD")))
+        else {
+            return Ok((Vec::new(), true));
+        };
+        let commits = self.run_with_output(
+            "read unpushed child Git repository commits",
+            &["-C", repository, "log", "--format=%s", range.as_str()],
+        )?;
+        Ok((
+            commits
+                .lines()
+                .map(str::trim)
+                .filter(|commit| !commit.is_empty())
+                .map(str::to_owned)
+                .collect(),
+            false,
+        ))
     }
 
     fn read_repository_remote(&self, child: &str) -> Result<String, GitError> {
@@ -364,6 +425,48 @@ mod tests {
     }
 
     #[test]
+    fn removal_report_lists_unpushed_commits_and_uncommitted_changes() {
+        let directory = tempdir().expect("temporary Git directory should exist");
+        let root = directory.path().join("workset");
+        fs::create_dir(&root).expect("Workset root should exist");
+        let repository_path = root.join("service-a");
+        run_git(&root, &["init", "--initial-branch=main", "service-a"]);
+        run_git(
+            &repository_path,
+            &["config", "user.email", "test@example.com"],
+        );
+        run_git(&repository_path, &["config", "user.name", "Test User"]);
+        fs::write(repository_path.join("README.md"), "service-a\n")
+            .expect("repository file should be written");
+        run_git(&repository_path, &["add", "README.md"]);
+        run_git(&repository_path, &["commit", "-m", "initial"]);
+
+        let origin = directory.path().join("service-a.git");
+        run_git(directory.path(), &["init", "--bare", "service-a.git"]);
+        run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        let origin_url = path_arg(&origin);
+        run_git(&repository_path, &["remote", "add", "origin", &origin_url]);
+        run_git(
+            &repository_path,
+            &["push", "--set-upstream", "origin", "main"],
+        );
+        fs::write(repository_path.join("README.md"), "local work\n")
+            .expect("uncommitted change should be written");
+        run_git(&repository_path, &["add", "README.md"]);
+        run_git(&repository_path, &["commit", "-m", "local work"]);
+        fs::write(repository_path.join("notes.txt"), "keep this\n")
+            .expect("uncommitted file should be written");
+        let report = GitCli::system()
+            .inspect_workset(&root)
+            .expect("the Workset should be safe to inspect");
+
+        assert_eq!(report.len(), 1);
+        assert_eq!(report[0].current_branch, "main");
+        assert_eq!(report[0].unpushed_commits, vec!["local work"]);
+        assert_eq!(report[0].uncommitted_changes, vec!["?? notes.txt"]);
+    }
+
+    #[test]
     fn inspect_accepts_a_child_repository_without_a_remote() {
         let directory = tempdir().expect("temporary Git directory should exist");
         let root = directory.path().join("workset");
@@ -389,6 +492,7 @@ mod tests {
         assert_eq!(inspected[0].remote_url, repository_path.to_string_lossy());
         assert_eq!(inspected[0].current_branch, "main");
         assert!(!inspected[0].is_dirty);
+        assert!(inspected[0].unpushed_commits_unknown);
     }
 
     fn run_git(directory: &Path, args: &[&str]) {

@@ -73,6 +73,11 @@ impl SqliteStore {
         {
             return Err(StoreError::IncompatibleSchema);
         }
+        let workset_columns = table_columns(&connection, "worksets")?;
+        if !workset_columns.is_empty() && !workset_columns.iter().any(|column| column == "archived")
+        {
+            return Err(StoreError::IncompatibleSchema);
+        }
         initialize_schema(&mut connection)?;
 
         Ok(Self { connection })
@@ -192,7 +197,7 @@ impl SqliteStore {
         }
         let mut worksets = {
             let mut statement = self.connection.prepare(
-                "SELECT id, item_id, root_directory, branch
+                "SELECT id, item_id, root_directory, branch, archived
                  FROM worksets
                  ORDER BY id",
             )?;
@@ -202,6 +207,7 @@ impl SqliteStore {
                     item_id: row.get(1)?,
                     root_directory: row.get(2)?,
                     branch: row.get(3)?,
+                    archived: row.get::<_, i64>(4)? != 0,
                     repositories: Vec::new(),
                 })
             })?;
@@ -538,13 +544,14 @@ impl SqliteStore {
                     next_workset_id,
                 } => {
                     transaction.execute(
-                        "INSERT INTO worksets (id, item_id, root_directory, branch)
-                         VALUES (?1, ?2, ?3, ?4)",
+                        "INSERT INTO worksets (id, item_id, root_directory, branch, archived)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
                         params![
                             workset.id,
                             workset.item_id,
                             workset.root_directory,
                             workset.branch,
+                            bool_as_i64(workset.archived),
                         ],
                     )?;
                     persist_workset_repositories(&transaction, workset)?;
@@ -556,11 +563,20 @@ impl SqliteStore {
                 Effect::PersistWorksetUpdate { workset } => {
                     transaction.execute(
                         "UPDATE worksets
-                         SET root_directory = ?1, branch = ?2
-                         WHERE id = ?3",
-                        params![workset.root_directory, workset.branch, workset.id],
+                         SET root_directory = ?1, branch = ?2, archived = ?3
+                         WHERE id = ?4",
+                        params![
+                            workset.root_directory,
+                            workset.branch,
+                            bool_as_i64(workset.archived),
+                            workset.id,
+                        ],
                     )?;
                     persist_workset_repositories(&transaction, workset)?;
+                }
+                Effect::RemoveWorkset { workset_id } => {
+                    transaction
+                        .execute("DELETE FROM worksets WHERE id = ?1", params![workset_id])?;
                 }
                 Effect::PersistItemRelation { relation } => {
                     transaction.execute(
@@ -777,7 +793,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              id INTEGER PRIMARY KEY NOT NULL,
              item_id INTEGER NOT NULL REFERENCES items(id),
              root_directory TEXT NOT NULL,
-             branch TEXT NOT NULL
+             branch TEXT NOT NULL,
+             archived INTEGER NOT NULL DEFAULT 0
          );
          CREATE INDEX IF NOT EXISTS worksets_by_item
              ON worksets (item_id, id);

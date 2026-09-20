@@ -684,6 +684,25 @@ button:disabled {
   white-space: nowrap;
 }
 
+.workset-heading > div {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.archived-workset-card {
+  border-style: dashed;
+  opacity: 0.82;
+}
+
+.archived-label {
+  color: #9a5a3d;
+  font-size: 0.62rem;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .workset-repositories,
 .workset-add-repository,
 .workset-overrides {
@@ -708,6 +727,54 @@ button:disabled {
 
 .workset-add-repository input {
   flex: 1 1 130px;
+}
+
+.workset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.archived-worksets {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #eee8df;
+}
+
+.removal-report {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #d5aa8c;
+  border-radius: 8px;
+  background: #fff4eb;
+  color: #5f493d;
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.removal-report > p,
+.removal-repository p {
+  margin: 0;
+}
+
+.removal-repository {
+  display: grid;
+  gap: 2px;
+  padding: 7px;
+  border: 1px solid #eedbcf;
+  border-radius: 7px;
+  background: #fffdf9;
+}
+
+.removal-repository > span {
+  overflow: hidden;
+  color: #8b837a;
+  font-size: 0.64rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .workset-selection-list {
