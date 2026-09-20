@@ -2394,9 +2394,13 @@ function ItemCard({
       });
       setDeletionPreview(undefined);
       await onChanged();
-      if (result.physicalCleanupWarning) {
-        window.alert(result.physicalCleanupWarning);
-      }
+      const summary = result.summary;
+      const physicalWarning = result.physicalCleanupWarning
+        ? `\n\n${result.physicalCleanupWarning}`
+        : "";
+      window.alert(
+        `Deleted ${deletionPreview.plan.humanIdentifier}.\n\nRemoved ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.worksetCount} Workset(s), ${summary.runCount} Run(s), ${summary.linkCount} Link(s), and ${summary.externalObjectCount} orphaned External Object(s).${physicalWarning}`,
+      );
     } catch (deleteError) {
       setDeletionPreview(undefined);
       window.alert(errorMessage(deleteError));
