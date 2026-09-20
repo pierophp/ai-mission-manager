@@ -1,11 +1,12 @@
 use std::{
+    collections::{HashMap, HashSet},
     env, fs,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::{
     domain::{
@@ -19,7 +20,9 @@ use crate::{
     git::GitCli,
     persistence::SqliteStore,
     provider::{classify_url, resolve_gh_executable, GithubCli},
-    terminal::{TerminalRuntime, TmuxRuntime},
+    terminal::{
+        capture_pane, list_panes, PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime,
+    },
 };
 
 pub struct Runtime {
@@ -27,6 +30,7 @@ pub struct Runtime {
     state: DomainState,
     gh_executable_path: Option<PathBuf>,
     pending_workset_removal: Option<WorksetRemovalReport>,
+    terminal_connections: HashMap<String, TmuxControlPane>,
 }
 
 impl Runtime {
@@ -49,6 +53,7 @@ impl Runtime {
             state,
             gh_executable_path,
             pending_workset_removal: None,
+            terminal_connections: HashMap::new(),
         })
     }
 
@@ -293,6 +298,175 @@ impl Runtime {
             return Err(format_commit_error(error, cleanup.err()));
         }
         Ok(run)
+    }
+
+    fn list_workset_panes(&self, workset_id: i64) -> Result<Vec<PaneTab>, String> {
+        if !self
+            .state
+            .worksets
+            .iter()
+            .any(|workset| workset.id == workset_id)
+        {
+            return Err(format!("Workset {workset_id} does not exist"));
+        }
+
+        let mut tabs = Vec::new();
+        let mut seen = HashSet::new();
+        for run in self
+            .state
+            .runs
+            .iter()
+            .filter(|run| run.workset_id == workset_id)
+        {
+            let machine = self
+                .state
+                .machines
+                .iter()
+                .find(|machine| machine.id == run.machine_id)
+                .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
+            match list_panes(machine, &run.session_name) {
+                Ok(panes) => {
+                    for pane in panes {
+                        if seen.insert((run.session_name.clone(), pane.pane_id.clone())) {
+                            tabs.push(PaneTab::from_summary(run, &run.session_name, pane, true));
+                        }
+                    }
+                }
+                Err(_) if seen.insert((run.session_name.clone(), run.pane_id.clone())) => {
+                    tabs.push(PaneTab::from_summary(
+                        run,
+                        &run.session_name,
+                        PaneSummary {
+                            pane_id: run.pane_id.clone(),
+                            pane_index: 0,
+                            pid: 0,
+                            columns: 0,
+                            rows: 0,
+                            title: String::new(),
+                            current_command: String::new(),
+                            current_path: run.working_directory.clone(),
+                        },
+                        false,
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(tabs)
+    }
+
+    fn open_terminal(
+        &mut self,
+        app: &AppHandle,
+        workset_id: i64,
+        terminal_id: String,
+        session_name: String,
+        pane_id: String,
+    ) -> Result<TerminalAttachment, String> {
+        if terminal_id.trim().is_empty() {
+            return Err("A terminal identity is required".to_owned());
+        }
+        let run = self
+            .state
+            .runs
+            .iter()
+            .find(|run| run.workset_id == workset_id && run.session_name == session_name)
+            .cloned()
+            .ok_or_else(|| "The Pane does not belong to a Run in this Workset".to_owned())?;
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == run.machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
+        let pane_exists = list_panes(&machine, &session_name)?
+            .iter()
+            .any(|pane| pane.pane_id == pane_id);
+        if !pane_exists {
+            return Err(format!(
+                "Pane {pane_id} is not available in session {session_name}"
+            ));
+        }
+
+        if let Some(previous) = self.terminal_connections.remove(&terminal_id) {
+            previous.close()?;
+        }
+        let output_app = app.clone();
+        let output_terminal_id = terminal_id.clone();
+        let output_pane_id = pane_id.clone();
+        let exit_app = app.clone();
+        let exit_terminal_id = terminal_id.clone();
+        let exit_pane_id = pane_id.clone();
+        let connection = TmuxControlPane::attach(
+            &machine,
+            &session_name,
+            &pane_id,
+            move |data| {
+                let _ = output_app.emit(
+                    "terminal-output",
+                    TerminalOutputEvent {
+                        terminal_id: output_terminal_id.clone(),
+                        pane_id: output_pane_id.clone(),
+                        data,
+                    },
+                );
+            },
+            move |code| {
+                let _ = exit_app.emit(
+                    "terminal-exit",
+                    TerminalExitEvent {
+                        terminal_id: exit_terminal_id.clone(),
+                        pane_id: exit_pane_id.clone(),
+                        code,
+                    },
+                );
+            },
+        )?;
+        let snapshot = match capture_pane(&machine, &pane_id) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                let _ = connection.close();
+                return Err(error);
+            }
+        };
+        let panes = match self.list_workset_panes(workset_id) {
+            Ok(panes) => panes,
+            Err(error) => {
+                let _ = connection.close();
+                return Err(error);
+            }
+        };
+        self.terminal_connections
+            .insert(terminal_id.clone(), connection);
+        Ok(TerminalAttachment {
+            terminal_id,
+            session_name,
+            pane_id,
+            snapshot,
+            panes,
+        })
+    }
+
+    fn terminal_input(&self, terminal_id: &str, input: Vec<u8>) -> Result<(), String> {
+        self.terminal_connections
+            .get(terminal_id)
+            .ok_or_else(|| "The embedded terminal is not attached".to_owned())?
+            .send_input(&input)
+    }
+
+    fn terminal_resize(&self, terminal_id: &str, columns: u16, rows: u16) -> Result<(), String> {
+        self.terminal_connections
+            .get(terminal_id)
+            .ok_or_else(|| "The embedded terminal is not attached".to_owned())?
+            .resize(columns, rows)
+    }
+
+    fn close_terminal(&mut self, terminal_id: &str) -> Result<(), String> {
+        if let Some(connection) = self.terminal_connections.remove(terminal_id) {
+            connection.close()?;
+        }
+        Ok(())
     }
 
     fn item_context_id(&self, item_id: i64) -> Result<i64, String> {
@@ -1083,6 +1257,73 @@ pub struct PollResult {
     pub failures: Vec<PollFailure>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PaneTab {
+    pub pane_id: String,
+    pub session_name: String,
+    pub run_id: i64,
+    pub label: String,
+    pub available: bool,
+    pub pane_index: u32,
+    pub pid: u32,
+    pub columns: u16,
+    pub rows: u16,
+    pub title: String,
+    pub current_command: String,
+    pub current_path: String,
+}
+
+impl PaneTab {
+    fn from_summary(run: &Run, session_name: &str, pane: PaneSummary, available: bool) -> Self {
+        let label = if pane.pane_id == run.pane_id {
+            format!("Run #{}", run.id)
+        } else {
+            format!("Pane {}", pane.pane_index)
+        };
+        Self {
+            pane_id: pane.pane_id,
+            session_name: session_name.to_owned(),
+            run_id: run.id,
+            label,
+            available,
+            pane_index: pane.pane_index,
+            pid: pane.pid,
+            columns: pane.columns,
+            rows: pane.rows,
+            title: pane.title,
+            current_command: pane.current_command,
+            current_path: pane.current_path,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalAttachment {
+    pub terminal_id: String,
+    pub session_name: String,
+    pub pane_id: String,
+    pub snapshot: Vec<u8>,
+    pub panes: Vec<PaneTab>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalOutputEvent {
+    pub terminal_id: String,
+    pub pane_id: String,
+    pub data: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalExitEvent {
+    pub terminal_id: String,
+    pub pane_id: String,
+    pub code: Option<i32>,
+}
+
 fn current_unix_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1196,6 +1437,65 @@ pub fn start_run(
             prompt,
             prompt_selection,
         )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_workset_panes(
+    workset_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Vec<PaneTab>, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .list_workset_panes(workset_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_terminal(
+    workset_id: i64,
+    terminal_id: String,
+    session_name: String,
+    pane_id: String,
+    app: AppHandle,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<TerminalAttachment, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .open_terminal(&app, workset_id, terminal_id, session_name, pane_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn terminal_input(
+    terminal_id: String,
+    input: Vec<u8>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .terminal_input(&terminal_id, input)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn terminal_resize(
+    terminal_id: String,
+    columns: u16,
+    rows: u16,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .terminal_resize(&terminal_id, columns, rows)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn close_terminal(terminal_id: String, state: State<'_, Mutex<Runtime>>) -> Result<(), String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .close_terminal(&terminal_id)
 }
 
 #[tauri::command]

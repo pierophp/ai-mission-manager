@@ -1,10 +1,15 @@
 import {
   FormEvent,
+  useRef,
   useEffect,
   useMemo,
   useState,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { FitAddon } from "@xterm/addon-fit";
+import { Terminal } from "@xterm/xterm";
+import "@xterm/xterm/css/xterm.css";
 
 type Context = {
   id: number;
@@ -67,6 +72,41 @@ type Run = {
   session_name: string;
   pane_id: string;
   started_at: number;
+};
+
+type PaneTab = {
+  paneId: string;
+  sessionName: string;
+  runId: number;
+  label: string;
+  available: boolean;
+  paneIndex: number;
+  pid: number;
+  columns: number;
+  rows: number;
+  title: string;
+  currentCommand: string;
+  currentPath: string;
+};
+
+type TerminalAttachment = {
+  terminalId: string;
+  sessionName: string;
+  paneId: string;
+  snapshot: number[];
+  panes: PaneTab[];
+};
+
+type TerminalOutputEvent = {
+  terminalId: string;
+  paneId: string;
+  data: number[];
+};
+
+type TerminalExitEvent = {
+  terminalId: string;
+  paneId: string;
+  code: number | null;
 };
 
 type RunPromptSelection = {
@@ -254,6 +294,10 @@ export function App() {
   const [error, setError] = useState<string>();
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [terminalRequest, setTerminalRequest] = useState<{
+    worksetId: number;
+    pane: PaneTab;
+  }>();
 
   const captureProjects = projects.filter(
     (project) => project.context_id === captureContextId,
@@ -587,6 +631,15 @@ export function App() {
 
       {error && <p className="error-message" role="alert">{error}</p>}
 
+      {terminalRequest && (
+        <EmbeddedTerminal
+          key={`${terminalRequest.worksetId}-${terminalRequest.pane.paneId}`}
+          worksetId={terminalRequest.worksetId}
+          initialPane={terminalRequest.pane}
+          onClose={() => setTerminalRequest(undefined)}
+        />
+      )}
+
       {searchQuery.trim() && (
         <section className="search-section" aria-labelledby="search-heading">
           <div className="section-heading">
@@ -655,6 +708,7 @@ export function App() {
               allItems={allItems}
               repositories={repositories}
               onChanged={updateHomeAfterEdit}
+              onOpenTerminal={(worksetId, pane) => setTerminalRequest({ worksetId, pane })}
             />
             <HomeColumn
               title="Running"
@@ -663,6 +717,7 @@ export function App() {
               allItems={allItems}
               repositories={repositories}
               onChanged={updateHomeAfterEdit}
+              onOpenTerminal={(worksetId, pane) => setTerminalRequest({ worksetId, pane })}
             />
             <HomeColumn
               title="Waiting"
@@ -671,6 +726,7 @@ export function App() {
               allItems={allItems}
               repositories={repositories}
               onChanged={updateHomeAfterEdit}
+              onOpenTerminal={(worksetId, pane) => setTerminalRequest({ worksetId, pane })}
             />
             <HomeColumn
               title="Due"
@@ -679,6 +735,7 @@ export function App() {
               allItems={allItems}
               repositories={repositories}
               onChanged={updateHomeAfterEdit}
+              onOpenTerminal={(worksetId, pane) => setTerminalRequest({ worksetId, pane })}
             />
             <HomeColumn
               title="Completed"
@@ -687,6 +744,7 @@ export function App() {
               allItems={allItems}
               repositories={repositories}
               onChanged={updateHomeAfterEdit}
+              onOpenTerminal={(worksetId, pane) => setTerminalRequest({ worksetId, pane })}
             />
             </div>
           </>
@@ -965,6 +1023,174 @@ export function App() {
   );
 }
 
+function EmbeddedTerminal({
+  worksetId,
+  initialPane,
+  onClose,
+}: {
+  worksetId: number;
+  initialPane: PaneTab;
+  onClose: () => void;
+}) {
+  const terminalContainerRef = useRef<HTMLDivElement>(null);
+  const attachPaneRef = useRef<((pane: PaneTab) => Promise<void>) | undefined>(undefined);
+  const activePaneRef = useRef(initialPane);
+  const attachedRef = useRef(false);
+  const terminalId = `workset-${worksetId}`;
+  const [activePane, setActivePane] = useState(initialPane);
+  const [panes, setPanes] = useState<PaneTab[]>([initialPane]);
+  const [status, setStatus] = useState("Attaching…");
+  const [terminalError, setTerminalError] = useState<string>();
+
+  useEffect(() => {
+    const container = terminalContainerRef.current;
+    if (!container) return;
+
+    let disposed = false;
+    const terminal = new Terminal({
+      cursorBlink: true,
+      fontFamily: "SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+      fontSize: 13,
+      theme: {
+        background: "#201c19",
+        foreground: "#f7f0e6",
+        cursor: "#efb28e",
+      },
+    });
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
+    terminal.open(container);
+    fitAddon.fit();
+
+    const inputDisposable = terminal.onData((data) => {
+      if (!attachedRef.current) return;
+      void invoke("terminal_input", {
+        terminalId,
+        input: Array.from(new TextEncoder().encode(data)),
+      }).catch((inputError) => {
+        if (!disposed) setTerminalError(errorMessage(inputError));
+      });
+    });
+    const resizeTerminal = () => {
+      fitAddon.fit();
+      if (!attachedRef.current || terminal.cols < 1 || terminal.rows < 1) return;
+      void invoke("terminal_resize", {
+        terminalId,
+        columns: terminal.cols,
+        rows: terminal.rows,
+      }).catch((resizeError) => {
+        if (!disposed) setTerminalError(errorMessage(resizeError));
+      });
+    };
+    const resizeObserver = new ResizeObserver(resizeTerminal);
+    resizeObserver.observe(container);
+    const unlisteners: UnlistenFn[] = [];
+
+    const attachPane = async (pane: PaneTab) => {
+      activePaneRef.current = pane;
+      setActivePane(pane);
+      attachedRef.current = false;
+      setStatus(`Attaching ${pane.label}…`);
+      setTerminalError(undefined);
+      const attachment = await invoke<TerminalAttachment>("open_terminal", {
+        worksetId,
+        terminalId,
+        sessionName: pane.sessionName,
+        paneId: pane.paneId,
+      });
+      if (disposed) return;
+      setPanes(attachment.panes);
+      const attachedPane =
+        attachment.panes.find((candidate) => candidate.paneId === attachment.paneId) ??
+        pane;
+      activePaneRef.current = attachedPane;
+      setActivePane(attachedPane);
+      terminal.reset();
+      terminal.write(Uint8Array.from(attachment.snapshot));
+      attachedRef.current = true;
+      setStatus("Connected · closing this view leaves the Run running");
+      resizeTerminal();
+    };
+    attachPaneRef.current = attachPane;
+
+    const start = async () => {
+      unlisteners.push(
+        await listen<TerminalOutputEvent>("terminal-output", (event) => {
+          const payload = event.payload;
+          if (
+            payload.terminalId === terminalId &&
+            payload.paneId === activePaneRef.current.paneId
+          ) {
+            terminal.write(Uint8Array.from(payload.data));
+          }
+        }),
+        await listen<TerminalExitEvent>("terminal-exit", (event) => {
+          if (
+            event.payload.terminalId === terminalId &&
+            event.payload.paneId === activePaneRef.current.paneId &&
+            !disposed
+          ) {
+            attachedRef.current = false;
+            setStatus("Pane connection closed; the Run was left untouched");
+          }
+        }),
+      );
+      await attachPane(initialPane);
+    };
+    void start().catch((attachError) => {
+      if (!disposed) {
+        attachedRef.current = false;
+        setStatus("Could not attach");
+        setTerminalError(errorMessage(attachError));
+      }
+    });
+
+    return () => {
+      disposed = true;
+      attachedRef.current = false;
+      attachPaneRef.current = undefined;
+      inputDisposable.dispose();
+      resizeObserver.disconnect();
+      terminal.dispose();
+      unlisteners.forEach((unlisten) => unlisten());
+      void invoke("close_terminal", { terminalId }).catch(() => undefined);
+    };
+  }, [initialPane, terminalId, worksetId]);
+
+  return (
+    <section className="embedded-terminal" aria-labelledby="embedded-terminal-heading">
+      <div className="embedded-terminal-heading">
+        <div>
+          <p className="eyebrow">Embedded terminal</p>
+          <h2 id="embedded-terminal-heading">{activePane.label}</h2>
+          <p className="embedded-terminal-status">{status}</p>
+        </div>
+        <button type="button" className="secondary-button" onClick={onClose}>
+          Close view
+        </button>
+      </div>
+      <div className="terminal-tabs" role="tablist" aria-label="Panes in this Workset">
+        {panes.map((pane) => (
+          <button
+            type="button"
+            role="tab"
+            aria-selected={pane.paneId === activePane.paneId}
+            className={pane.paneId === activePane.paneId ? "terminal-tab active" : "terminal-tab"}
+            key={`${pane.sessionName}-${pane.paneId}`}
+            disabled={!pane.available}
+            onClick={() => void attachPaneRef.current?.(pane)}
+          >
+            {pane.label}
+            <small>{pane.currentCommand || pane.currentPath || "unavailable"}</small>
+          </button>
+        ))}
+      </div>
+      <div className="terminal-surface" ref={terminalContainerRef} />
+      {terminalError && <p className="error-message">{terminalError}</p>}
+    </section>
+  );
+}
+
 function HomeColumn({
   title,
   hint,
@@ -972,6 +1198,7 @@ function HomeColumn({
   allItems,
   repositories,
   onChanged,
+  onOpenTerminal,
 }: {
   title: string;
   hint: string;
@@ -979,6 +1206,7 @@ function HomeColumn({
   allItems: ItemView[];
   repositories: Repository[];
   onChanged: () => Promise<void>;
+  onOpenTerminal: (worksetId: number, pane: PaneTab) => void;
 }) {
   return (
     <section className="home-column" aria-labelledby={`${title}-heading`}>
@@ -1000,6 +1228,7 @@ function HomeColumn({
               allItems={allItems}
               repositories={repositories}
               onChanged={onChanged}
+              onOpenTerminal={onOpenTerminal}
             />
           ))}
         </div>
@@ -1013,11 +1242,13 @@ function ItemCard({
   allItems,
   repositories,
   onChanged,
+  onOpenTerminal,
 }: {
   view: ItemView;
   allItems: ItemView[];
   repositories: Repository[];
   onChanged: () => Promise<void>;
+  onOpenTerminal: (worksetId: number, pane: PaneTab) => void;
 }) {
   const [notes, setNotes] = useState(view.item.notes);
   const [reminderAt, setReminderAt] = useState("");
@@ -1737,6 +1968,17 @@ function ItemCard({
               <span>
                 Session {run.session_name} · Pane {run.pane_id}
               </span>
+              {findWorkset(view, run.workset_id) && (
+                <button
+                  type="button"
+                  className="secondary-button"
+                  onClick={() =>
+                    onOpenTerminal(run.workset_id, paneTabForRun(run))
+                  }
+                >
+                  Open terminal
+                </button>
+              )}
             </article>
           ))}
         </div>
@@ -2465,6 +2707,29 @@ function flattenHome(view: HomeView): ItemView[] {
     ...view.due,
     ...view.completed,
   ];
+}
+
+function findWorkset(view: ItemView, worksetId: number): Workset | undefined {
+  return [...view.worksets, ...view.archived_worksets].find(
+    (workset) => workset.id === worksetId,
+  );
+}
+
+function paneTabForRun(run: Run): PaneTab {
+  return {
+    paneId: run.pane_id,
+    sessionName: run.session_name,
+    runId: run.id,
+    label: `Run #${run.id}`,
+    available: true,
+    paneIndex: 0,
+    pid: 0,
+    columns: 0,
+    rows: 0,
+    title: "",
+    currentCommand: "",
+    currentPath: run.working_directory,
+  };
 }
 
 function uniqueItems(items: ItemView[]): ItemView[] {
