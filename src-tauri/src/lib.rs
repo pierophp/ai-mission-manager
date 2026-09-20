@@ -1,3 +1,4 @@
+mod agent_state;
 pub mod domain;
 mod git;
 pub mod persistence;
@@ -63,4 +64,11 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Mission Manager");
+}
+
+pub fn run_agent_state_hook(args: &[String]) -> Result<(), String> {
+    let provider = args
+        .first()
+        .ok_or_else(|| "usage: --agent-state-hook <claude|codex>".to_owned())?;
+    agent_state::run_hook_from_stdin(provider)
 }

@@ -4,11 +4,15 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
+    time::Duration,
 };
 
 use serde::Serialize;
 
-use crate::domain::Machine;
+use crate::{
+    agent_state::{AgentStateRecord, AGENT_STATE_OPTION},
+    domain::Machine,
+};
 
 pub trait TerminalRuntime {
     fn launch_agent(
@@ -18,9 +22,15 @@ pub trait TerminalRuntime {
         root: &Path,
         executable: &Path,
         prompt: &str,
+        launch: AgentLaunchContext<'_>,
     ) -> Result<String, String>;
 
     fn kill_session(&self, machine: &Machine, session_name: &str) -> Result<(), String>;
+}
+
+pub struct AgentLaunchContext<'a> {
+    pub run_id: i64,
+    pub state_file: &'a Path,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -48,6 +58,7 @@ impl TmuxControlPane {
         session_name: &str,
         pane_id: &str,
         on_output: Output,
+        on_agent_state: impl Fn(AgentStateRecord) + Send + 'static,
         on_exit: Exit,
     ) -> Result<Self, String>
     where
@@ -83,6 +94,7 @@ impl TmuxControlPane {
         let child = Arc::new(Mutex::new(child));
         let reader_child = Arc::clone(&child);
         let expected_pane_id = pane_id.to_owned();
+        let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
         thread::spawn(move || {
             let mut reader = BufReader::new(output);
             let mut line = Vec::new();
@@ -90,7 +102,13 @@ impl TmuxControlPane {
                 line.clear();
                 match reader.read_until(b'\n', &mut line) {
                     Ok(0) => break,
-                    Ok(_) => handle_control_line(&line, &expected_pane_id, &on_output),
+                    Ok(_) => {
+                        let trimmed = line.strip_suffix(b"\n").unwrap_or(&line);
+                        if trimmed.starts_with(b"%end ") {
+                            let _ = ready_sender.send(());
+                        }
+                        handle_control_line(&line, &expected_pane_id, &on_output, &on_agent_state);
+                    }
                     Err(_) => break,
                 }
             }
@@ -102,11 +120,20 @@ impl TmuxControlPane {
             on_exit(status);
         });
 
-        Ok(Self {
+        let pane = Self {
             input: Arc::new(Mutex::new(input)),
             child,
             pane_id: pane_id.to_owned(),
-        })
+        };
+        pane.send_command("list-panes")?;
+        ready_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .map_err(|_| "tmux control client did not become ready".to_owned())?;
+        pane.send_command(&format!(
+            "refresh-client -B 'mission-manager-agent-state:{}:#{{{}}}'",
+            pane_id, AGENT_STATE_OPTION
+        ))?;
+        Ok(pane)
     }
 
     pub fn send_input(&self, input: &[u8]) -> Result<(), String> {
@@ -178,8 +205,9 @@ impl TerminalRuntime for TmuxRuntime {
         root: &Path,
         executable: &Path,
         prompt: &str,
+        launch: AgentLaunchContext<'_>,
     ) -> Result<String, String> {
-        launch_tmux_agent(machine, session_name, root, executable, prompt)
+        launch_tmux_agent(machine, session_name, root, executable, prompt, launch)
     }
 
     fn kill_session(&self, machine: &Machine, session_name: &str) -> Result<(), String> {
@@ -298,11 +326,31 @@ fn validate_pane_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn handle_control_line(line: &[u8], pane_id: &str, on_output: &impl Fn(Vec<u8>)) {
+fn handle_control_line(
+    line: &[u8],
+    pane_id: &str,
+    on_output: &impl Fn(Vec<u8>),
+    on_agent_state: &impl Fn(AgentStateRecord),
+) {
     let line = line.strip_suffix(b"\n").unwrap_or(line);
     let line = line.strip_suffix(b"\r").unwrap_or(line);
     let prefix = b"%output ";
     if !line.starts_with(prefix) {
+        let prefix = b"%subscription-changed ";
+        if !line.starts_with(prefix) {
+            return;
+        }
+        let text = String::from_utf8_lossy(&line[prefix.len()..]);
+        let Some((header, value)) = text.split_once(" : ") else {
+            return;
+        };
+        let fields = header.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 5 || fields[0] != "mission-manager-agent-state" || fields[4] != pane_id {
+            return;
+        }
+        if let Ok(state) = serde_json::from_str::<AgentStateRecord>(value.trim()) {
+            on_agent_state(state);
+        }
         return;
     }
     let Some(separator) = line[prefix.len()..].iter().position(|byte| *byte == b' ') else {
@@ -348,9 +396,13 @@ fn launch_tmux_agent(
     root: &Path,
     executable: &Path,
     prompt: &str,
+    launch: AgentLaunchContext<'_>,
 ) -> Result<String, String> {
     let command = format!(
-        "exec {} {}",
+        "export AI_MISSION_MANAGER_RUN_ID={}; export AI_MISSION_MANAGER_STATE_FILE={}; export AI_MISSION_MANAGER_TMUX_PATH=tmux; export AI_MISSION_MANAGER_TMUX_SOCKET={}; export AI_MISSION_MANAGER_PANE_ID=\"$TMUX_PANE\"; exec {} {}",
+        shell_quote(&launch.run_id.to_string()),
+        shell_quote(&launch.state_file.to_string_lossy()),
+        shell_quote(&machine.socket_name),
         shell_quote(&executable.to_string_lossy()),
         shell_quote(prompt)
     );
@@ -450,6 +502,10 @@ mod tests {
                 directory.path(),
                 Path::new("/bin/sleep"),
                 "30",
+                AgentLaunchContext {
+                    run_id: 1,
+                    state_file: &directory.path().join("state.json"),
+                },
             )
             .expect("tmux should launch the test process");
 
@@ -501,6 +557,7 @@ mod tests {
             .next()
             .expect("the test session should contain a Pane");
         let (output_sender, output_receiver) = std::sync::mpsc::channel();
+        let (state_sender, state_receiver) = std::sync::mpsc::channel();
         let pane = TmuxControlPane::attach(
             &machine,
             &session_name,
@@ -510,9 +567,41 @@ mod tests {
                     .send(chunk)
                     .expect("the test output receiver should remain available");
             },
+            move |state| {
+                state_sender
+                    .send(state)
+                    .expect("the test state receiver should remain available");
+            },
             |_| {},
         )
         .expect("the control client should attach to the existing Pane");
+
+        let state = serde_json::json!({
+            "agent": "claude",
+            "runId": "7",
+            "state": "blocked",
+            "updatedAt": "2026-09-19T12:34:56Z"
+        })
+        .to_string();
+        run_tmux(
+            &machine,
+            &[
+                "set-option".into(),
+                "-p".into(),
+                "-t".into(),
+                before.pane_id.clone(),
+                AGENT_STATE_OPTION.into(),
+                state,
+            ],
+        )
+        .expect("the test state should be published through tmux");
+        assert_eq!(
+            state_receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .expect("the control client should receive the state notification")
+                .state,
+            crate::domain::RunState::Blocked
+        );
 
         let ready = receive_until(&output_receiver, "READY");
         assert!(ready.contains("READY"));

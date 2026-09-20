@@ -100,6 +100,18 @@ pub enum ExecutionProfile {
     CustomPrompt,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunState {
+    #[serde(rename = "unknown")]
+    Unknown,
+    #[serde(rename = "working")]
+    Working,
+    #[serde(rename = "blocked")]
+    Blocked,
+    #[serde(rename = "finished")]
+    Finished,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunPromptSelection {
@@ -121,6 +133,7 @@ pub struct Run {
     pub session_name: String,
     pub pane_id: String,
     pub started_at: i64,
+    pub state: RunState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,6 +288,8 @@ pub enum AttentionEntryKind {
     Review,
     #[serde(rename = "reminder")]
     Reminder,
+    #[serde(rename = "blocked_run")]
+    BlockedRun,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,6 +297,7 @@ pub struct AttentionEntry {
     pub kind: AttentionEntryKind,
     pub link_id: i64,
     pub reminder_id: Option<i64>,
+    pub run_id: Option<i64>,
     pub item_id: i64,
     pub external_object_id: i64,
     pub source_title: String,
@@ -434,6 +450,10 @@ pub enum Event {
         started_at: i64,
         prompt_selection: RunPromptSelection,
     },
+    UpdateRunState {
+        run_id: i64,
+        state: RunState,
+    },
     SetItemStatus {
         item_id: i64,
         status: ItemStatus,
@@ -525,6 +545,9 @@ pub enum Effect {
     PersistRun {
         run: Run,
         next_run_id: i64,
+    },
+    PersistRunState {
+        run: Run,
     },
     PersistItemUpdate {
         item: Item,
@@ -629,6 +652,8 @@ pub enum DomainError {
     EmptyRunSessionName,
     #[error("a Run Pane identity cannot be blank")]
     EmptyRunPaneId,
+    #[error("Run {run_id} does not exist")]
+    RunNotFound { run_id: i64 },
     #[error("Workset {workset_id} belongs to another Item")]
     WorksetItemMismatch { workset_id: i64, item_id: i64 },
     #[error("External Object {external_object_id} is not linked to Item {item_id}")]
@@ -1170,12 +1195,30 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 session_name,
                 pane_id,
                 started_at,
+                state: RunState::Unknown,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
             Ok(Decision {
                 state,
                 effects: vec![Effect::PersistRun { run, next_run_id }],
+            })
+        }
+        Event::UpdateRunState {
+            run_id,
+            state: run_state,
+        } => {
+            let run = state
+                .runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
+                .ok_or(DomainError::RunNotFound { run_id })?;
+            run.state = run_state;
+            let run = run.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRunState { run }],
             })
         }
         Event::SetItemStatus { item_id, status } => {
@@ -1663,6 +1706,7 @@ fn attention_entries_at(
                 kind: AttentionEntryKind::Review,
                 link_id: link.id,
                 reminder_id: None,
+                run_id: None,
                 item_id: link.item_id,
                 external_object_id: object.id,
                 source_title: state
@@ -1696,6 +1740,7 @@ fn attention_entries_at(
                     kind: AttentionEntryKind::Reminder,
                     link_id: 0,
                     reminder_id: Some(reminder.id),
+                    run_id: None,
                     item_id: item.id,
                     external_object_id: 0,
                     source_title: item.title.clone(),
@@ -1705,6 +1750,35 @@ fn attention_entries_at(
                 }),
         );
     }
+
+    entries.extend(
+        state
+            .runs
+            .iter()
+            .filter(|run| run.state == RunState::Blocked)
+            .filter(|run| {
+                context_id.is_none_or(|context_id| {
+                    item_context_id(state, run.item_id)
+                        .map(|run_context_id| run_context_id == context_id)
+                        .unwrap_or(false)
+                })
+            })
+            .filter_map(|run| {
+                let item = state.items.iter().find(|item| item.id == run.item_id)?;
+                Some(AttentionEntry {
+                    kind: AttentionEntryKind::BlockedRun,
+                    link_id: 0,
+                    reminder_id: None,
+                    run_id: Some(run.id),
+                    item_id: item.id,
+                    external_object_id: 0,
+                    source_title: item.title.clone(),
+                    source_url: String::new(),
+                    activities: Vec::new(),
+                    summary: format!("Run #{} is blocked and needs your input", run.id),
+                })
+            }),
+    );
 
     entries
 }
@@ -2040,6 +2114,7 @@ fn attention_entry_for_link_at(
         kind: AttentionEntryKind::ExternalChange,
         link_id: link.id,
         reminder_id: None,
+        run_id: None,
         item_id: link.item_id,
         external_object_id: object.id,
         source_title,
@@ -3625,6 +3700,83 @@ mod tests {
             second.effects.as_slice(),
             [Effect::PersistRun { run, next_run_id }] if run.id == 2 && *next_run_id == 3
         ));
+    }
+
+    #[test]
+    fn a_run_state_is_unknown_until_reported_and_blocked_runs_need_attention() {
+        let mut state = state_with_item(1, "Work");
+        state.worksets.push(Workset {
+            id: 1,
+            item_id: 1,
+            root_directory: "/tmp/workset".into(),
+            branch: "main".into(),
+            archived: false,
+            repositories: Vec::new(),
+        });
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: "mission-manager".into(),
+        });
+
+        let started = decide(
+            state,
+            Event::StartRun {
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Claude,
+                execution_profile: ExecutionProfile::Implement,
+                prompt: "Do the work".into(),
+                working_directory: "/tmp/workset".into(),
+                session_name: "mission-item-1-run-1".into(),
+                pane_id: "%1".into(),
+                started_at: 10,
+                prompt_selection: RunPromptSelection {
+                    include_objective: true,
+                    include_notes: false,
+                    external_object_ids: Vec::new(),
+                },
+            },
+        )
+        .expect("Run should start without guessing its state");
+
+        assert_eq!(started.state.runs[0].state, RunState::Unknown);
+        assert!(home_view(&started.state, None, "now")
+            .attention_entries
+            .is_empty());
+
+        let blocked = decide(
+            started.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Blocked,
+            },
+        )
+        .expect("a hook report should update the Run");
+        let blocked_home = home_view(&blocked.state, None, "now");
+        assert_eq!(blocked_home.attention_entries.len(), 1);
+        assert_eq!(
+            blocked_home.attention_entries[0].kind,
+            AttentionEntryKind::BlockedRun
+        );
+        assert_eq!(blocked_home.attention_entries[0].run_id, Some(1));
+        assert_eq!(blocked_home.needs_attention[0].item.id, 1);
+        assert_eq!(blocked.state.items[0].status, ItemStatus::Inbox);
+
+        let finished = decide(
+            blocked.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("a finished hook report should update the Run");
+        assert!(home_view(&finished.state, None, "now")
+            .attention_entries
+            .is_empty());
+        assert_eq!(finished.state.items[0].status, ItemStatus::Inbox);
     }
 
     #[test]

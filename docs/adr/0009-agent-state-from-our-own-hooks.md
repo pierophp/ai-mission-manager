@@ -12,6 +12,8 @@ The spike's executable proof is in `spikes/tmux-control-mode/src/agent-state.ts`
 
 The app provisions the hook on a Machine the first time it is used. This is our own tooling, not a third-party dependency, so it falls under the same exception that lets the app install its own CLI.
 
+The production hook entrypoint is the application binary itself (`--agent-state-hook <claude|codex>`), so a Run does not depend on a separate Node installation or a long-running helper. Run state is stored in the domain and SQLite as `unknown`, `working`, `blocked`, or `finished`; the app reconciles the durable state file when it opens and whenever it reconnects to a Run Pane. A blocked Run is projected into Needs Attention, while all Run-state transitions leave Item state unchanged.
+
 ## Consequences
 
 This is what keeps the terminal runtime swappable (ADR-0001). Agent awareness is the one capability that differs sharply between runtimes, and sourcing it ourselves reduces the runtime to a small, portable surface: create a session, spawn a process, stream a Pane, send input, stable identity. The mechanism is identical locally and remotely because the hook talks to the Machine's tmux server and the app receives the option change through its existing runtime connection.

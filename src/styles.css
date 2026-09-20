@@ -285,6 +285,12 @@ button:disabled {
   line-height: 1.4;
 }
 
+.attention-state {
+  color: #a45230;
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
 .home-column {
   min-width: 0;
   padding: 15px;

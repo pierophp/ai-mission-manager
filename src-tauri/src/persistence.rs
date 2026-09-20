@@ -7,7 +7,7 @@ use crate::domain::{
     Activity, AgentKind, Context, ContextAttentionDefault, DomainState, Effect, ExecutionProfile,
     ExternalChangePolicy, ExternalMetadata, ExternalObject, ExternalObjectKind, ExternalProvider,
     ExternalSnapshot, Item, ItemRelation, ItemRelationKind, ItemStatus, Link, Machine, Project,
-    ProjectDefaults, Reminder, Repository, Run, Workset, WorksetRepository,
+    ProjectDefaults, Reminder, Repository, Run, RunState, Workset, WorksetRepository,
 };
 
 #[derive(Debug, Error)]
@@ -32,6 +32,8 @@ pub enum StoreError {
     InvalidAgentKind(String),
     #[error("invalid Execution Profile in database: {0}")]
     InvalidExecutionProfile(String),
+    #[error("invalid Run state in database: {0}")]
+    InvalidRunState(String),
     #[error("invalid {key} value in database: {value}")]
     InvalidSequence { key: String, value: String },
     #[error("a database sequence is exhausted")]
@@ -264,7 +266,7 @@ impl SqliteStore {
         let runs = {
             let mut statement = self.connection.prepare(
                 "SELECT id, item_id, workset_id, machine_id, agent, execution_profile,
-                        prompt, working_directory, session_name, pane_id, started_at
+                        prompt, working_directory, session_name, pane_id, started_at, state
                  FROM runs
                  ORDER BY id",
             )?;
@@ -297,6 +299,13 @@ impl SqliteStore {
                     session_name: row.get(8)?,
                     pane_id: row.get(9)?,
                     started_at: row.get(10)?,
+                    state: parse_run_state(&row.get::<_, String>(11)?).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            11,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -663,8 +672,8 @@ impl SqliteStore {
                     transaction.execute(
                         "INSERT INTO runs
                             (id, item_id, workset_id, machine_id, agent, execution_profile,
-                            prompt, working_directory, session_name, pane_id, started_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                            prompt, working_directory, session_name, pane_id, started_at, state)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                         params![
                             run.id,
                             run.item_id,
@@ -677,11 +686,18 @@ impl SqliteStore {
                             run.session_name,
                             run.pane_id,
                             run.started_at,
+                            run_state_as_str(run.state),
                         ],
                     )?;
                     transaction.execute(
                         "UPDATE metadata SET value = ?1 WHERE key = 'next_run_id'",
                         params![next_run_id],
+                    )?;
+                }
+                Effect::PersistRunState { run } => {
+                    transaction.execute(
+                        "UPDATE runs SET state = ?1 WHERE id = ?2",
+                        params![run_state_as_str(run.state), run.id],
                     )?;
                 }
                 Effect::RemoveWorkset { workset_id } => {
@@ -942,7 +958,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              working_directory TEXT NOT NULL,
              session_name TEXT NOT NULL,
              pane_id TEXT NOT NULL,
-             started_at INTEGER NOT NULL
+             started_at INTEGER NOT NULL,
+             state TEXT NOT NULL DEFAULT 'unknown'
          );
          CREATE INDEX IF NOT EXISTS runs_by_item
              ON runs (item_id, id);
@@ -1014,6 +1031,13 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          CREATE INDEX IF NOT EXISTS activities_by_object
              ON activities (external_object_id, id);",
     )?;
+    let run_columns = table_columns(connection, "runs")?;
+    if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "state") {
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN state TEXT NOT NULL DEFAULT 'unknown'",
+            [],
+        )?;
+    }
     ensure_sequence_at_least(connection, "next_context_id", "contexts", "id")?;
     ensure_sequence_at_least(connection, "next_project_id", "projects", "id")?;
     ensure_sequence_at_least(connection, "next_item_id", "items", "id")?;
@@ -1232,6 +1256,25 @@ fn parse_execution_profile(profile: &str) -> Result<ExecutionProfile, StoreError
     }
 }
 
+fn run_state_as_str(state: RunState) -> &'static str {
+    match state {
+        RunState::Unknown => "unknown",
+        RunState::Working => "working",
+        RunState::Blocked => "blocked",
+        RunState::Finished => "finished",
+    }
+}
+
+fn parse_run_state(state: &str) -> Result<RunState, StoreError> {
+    match state {
+        "unknown" => Ok(RunState::Unknown),
+        "working" => Ok(RunState::Working),
+        "blocked" => Ok(RunState::Blocked),
+        "finished" => Ok(RunState::Finished),
+        other => Err(StoreError::InvalidRunState(other.into())),
+    }
+}
+
 fn item_status_as_str(status: ItemStatus) -> &'static str {
     match status {
         ItemStatus::Inbox => "Inbox",
@@ -1316,7 +1359,7 @@ mod tests {
     use crate::domain::{
         decide, AgentKind, Event, ExecutionProfile, ExternalChangePolicy, ExternalMetadata,
         ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshotData,
-        RunPromptSelection, WorksetRepositoryInput,
+        RunPromptSelection, RunState, WorksetRepositoryInput,
     };
 
     #[test]
@@ -1536,6 +1579,17 @@ mod tests {
             )
             .expect("Run should start");
             store.apply(&run.effects).expect("Run should persist");
+            let blocked = decide(
+                run.state,
+                Event::UpdateRunState {
+                    run_id: 1,
+                    state: RunState::Blocked,
+                },
+            )
+            .expect("Run state should update");
+            store
+                .apply(&blocked.effects)
+                .expect("Run state should persist");
         }
 
         let reopened = SqliteStore::open(&path).expect("database should reopen");
@@ -1570,6 +1624,7 @@ mod tests {
         assert_eq!(state.runs[0].agent, AgentKind::Codex);
         assert_eq!(state.runs[0].session_name, "mission-item-1-run-1");
         assert_eq!(state.runs[0].pane_id, "%1");
+        assert_eq!(state.runs[0].state, RunState::Blocked);
         assert_eq!(state.next_machine_id, 2);
         assert_eq!(state.next_run_id, 2);
     }

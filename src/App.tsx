@@ -59,6 +59,7 @@ type WorksetRepositoryInput = {
 
 type AgentKind = "claude" | "codex";
 type ExecutionProfile = "investigate" | "implement" | "review" | "custom";
+type RunState = "unknown" | "working" | "blocked" | "finished";
 
 type Run = {
   id: number;
@@ -72,6 +73,7 @@ type Run = {
   session_name: string;
   pane_id: string;
   started_at: number;
+  state: RunState;
 };
 
 type PaneTab = {
@@ -179,9 +181,10 @@ type ExternalChangePolicy = {
 };
 
 type AttentionEntry = {
-  kind: "external_change" | "review" | "reminder";
+  kind: "external_change" | "review" | "reminder" | "blocked_run";
   link_id: number;
   reminder_id: number | null;
+  run_id: number | null;
   item_id: number;
   external_object_id: number;
   source_title: string;
@@ -323,6 +326,37 @@ export function App() {
     const interval = window.setInterval(() => {
       void pollExternalObjects(false);
     }, 5 * 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [contextFilterId, searchQuery]);
+
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let disposed = false;
+    void listen("run-state-changed", () => {
+      void refreshHome();
+      if (searchQuery.trim()) {
+        void refreshSearch();
+      }
+    }).then((cleanup) => {
+      if (disposed) {
+        cleanup();
+      } else {
+        unlisten = cleanup;
+      }
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [contextFilterId, searchQuery]);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void refreshHome().catch(() => undefined);
+      if (searchQuery.trim()) {
+        void refreshSearch().catch(() => undefined);
+      }
+    }, 3_000);
     return () => window.clearInterval(interval);
   }, [contextFilterId, searchQuery]);
 
@@ -691,7 +725,7 @@ export function App() {
                 <div className="attention-entry-list">
                   {home.attention_entries.map((entry) => (
                     <AttentionEntryCard
-                      key={`${entry.kind}-${entry.link_id}-${entry.reminder_id ?? ""}`}
+                      key={`${entry.kind}-${entry.link_id}-${entry.reminder_id ?? ""}-${entry.run_id ?? ""}`}
                       entry={entry}
                       item={allItems.find((candidate) => candidate.item.id === entry.item_id)}
                       onMarkedReviewed={updateHomeAfterEdit}
@@ -1961,7 +1995,7 @@ function ItemCard({
                   Run #{run.id} · {run.agent === "claude" ? "Claude Code" : "Codex"}
                 </strong>
                 <span>
-                  {run.execution_profile} · Local Mac
+                  {run.execution_profile} · Local Mac · {runStateLabel(run.state)}
                 </span>
               </div>
               <code>{run.working_directory}</code>
@@ -2604,6 +2638,8 @@ function AttentionEntryCard({
         >
           Clear review date
         </button>
+      ) : entry.kind === "blocked_run" ? (
+        <span className="attention-state">Open the Run to answer the agent.</span>
       ) : (
         <button
           type="button"
@@ -2645,7 +2681,15 @@ function AttentionEntryCard({
 function attentionEntryLabel(entry: AttentionEntry): string {
   if (entry.kind === "reminder") return "Reminder due";
   if (entry.kind === "review") return "Review date reached";
+  if (entry.kind === "blocked_run") return "Run blocked";
   return `${entry.activities.length} change${entry.activities.length === 1 ? "" : "s"}`;
+}
+
+function runStateLabel(state: RunState): string {
+  if (state === "working") return "Working";
+  if (state === "blocked") return "Blocked";
+  if (state === "finished") return "Finished";
+  return "Unknown";
 }
 
 function SearchResult({ view }: { view: ItemView }) {

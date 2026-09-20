@@ -6,22 +6,25 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
+    agent_state::{provision_hooks, read_state_file, state_file_path, AgentStateRecord},
     domain::{
         compose_run_prompt as build_run_prompt, decide, external_link_view, home_view,
         search_items, AgentKind, AttachedRepositoryInput, Context, ContextAttentionDefault,
         DomainState, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
         ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView,
         Item, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine, Project,
-        ProjectDefaults, Repository, Run, RunPromptSelection, Workset, WorksetRepositoryInput,
+        ProjectDefaults, Repository, Run, RunPromptSelection, RunState, Workset,
+        WorksetRepositoryInput,
     },
     git::GitCli,
     persistence::SqliteStore,
     provider::{classify_url, resolve_gh_executable, GithubCli},
     terminal::{
-        capture_pane, list_panes, PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime,
+        capture_pane, list_panes, AgentLaunchContext, PaneSummary, TerminalRuntime,
+        TmuxControlPane, TmuxRuntime,
     },
 };
 
@@ -31,11 +34,17 @@ pub struct Runtime {
     gh_executable_path: Option<PathBuf>,
     pending_workset_removal: Option<WorksetRemovalReport>,
     terminal_connections: HashMap<String, TmuxControlPane>,
+    agent_state_directory: PathBuf,
 }
 
 impl Runtime {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
-        let mut store = SqliteStore::open(path).map_err(|error| error.to_string())?;
+        let database_path = path.as_ref().to_path_buf();
+        let agent_state_directory = database_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("agent-state");
+        let mut store = SqliteStore::open(&database_path).map_err(|error| error.to_string())?;
         let state = store.load_state().map_err(|error| error.to_string())?;
         let configured_gh_path = store
             .gh_executable_path()
@@ -48,13 +57,16 @@ impl Runtime {
                     .map_err(|error| error.to_string())?;
             }
         }
-        Ok(Self {
+        let mut runtime = Self {
             store,
             state,
             gh_executable_path,
             pending_workset_removal: None,
             terminal_connections: HashMap::new(),
-        })
+            agent_state_directory,
+        };
+        runtime.recover_run_states()?;
+        Ok(runtime)
     }
 
     fn create_context(&mut self, name: String) -> Result<Context, String> {
@@ -256,8 +268,10 @@ impl Runtime {
         }
 
         let machine = self.local_machine_for_item(item_id)?;
+        self.provision_agent_hooks()?;
         let run_id = self.state.next_run_id;
         let session_name = format!("mission-item-{item_id}-run-{run_id}");
+        let state_file = state_file_path(&self.agent_state_directory, run_id);
         let executable = find_executable(agent_executable_name(agent)).ok_or_else(|| {
             format!(
                 "{} is not installed on Local Mac",
@@ -265,7 +279,17 @@ impl Runtime {
             )
         })?;
         let terminal = TmuxRuntime;
-        let pane_id = terminal.launch_agent(&machine, &session_name, root, &executable, &prompt)?;
+        let pane_id = terminal.launch_agent(
+            &machine,
+            &session_name,
+            root,
+            &executable,
+            &prompt,
+            AgentLaunchContext {
+                run_id,
+                state_file: &state_file,
+            },
+        )?;
         let decision = decide(
             self.state.clone(),
             Event::StartRun {
@@ -300,7 +324,8 @@ impl Runtime {
         Ok(run)
     }
 
-    fn list_workset_panes(&self, workset_id: i64) -> Result<Vec<PaneTab>, String> {
+    fn list_workset_panes(&mut self, workset_id: i64) -> Result<Vec<PaneTab>, String> {
+        self.recover_run_states()?;
         if !self
             .state
             .worksets
@@ -398,6 +423,7 @@ impl Runtime {
         let exit_app = app.clone();
         let exit_terminal_id = terminal_id.clone();
         let exit_pane_id = pane_id.clone();
+        let state_app = app.clone();
         let connection = TmuxControlPane::attach(
             &machine,
             &session_name,
@@ -411,6 +437,32 @@ impl Runtime {
                         data,
                     },
                 );
+            },
+            move |record| {
+                let run_id = record.run_id.parse::<i64>().ok();
+                let Some(app_state) = state_app.try_state::<Mutex<Runtime>>() else {
+                    return;
+                };
+                let Ok(mut runtime) = app_state.lock() else {
+                    return;
+                };
+                if let Some(run_id) = run_id {
+                    match runtime.apply_agent_state_record(run_id, record.clone()) {
+                        Ok(true) => {
+                            let _ = state_app.emit(
+                                "run-state-changed",
+                                RunStateChangedEvent {
+                                    run_id,
+                                    state: record.state,
+                                },
+                            );
+                        }
+                        Ok(false) => {}
+                        Err(error) => {
+                            eprintln!("Could not persist state for Run {run_id}: {error}");
+                        }
+                    }
+                }
             },
             move |code| {
                 let _ = exit_app.emit(
@@ -467,6 +519,65 @@ impl Runtime {
             connection.close()?;
         }
         Ok(())
+    }
+
+    fn provision_agent_hooks(&self) -> Result<(), String> {
+        let home = env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| "HOME is not set; agent hooks cannot be provisioned".to_owned())?;
+        let executable = env::current_exe()
+            .map_err(|error| format!("Could not locate the Mission Manager executable: {error}"))?;
+        provision_hooks(&home, &executable)
+    }
+
+    fn recover_run_states(&mut self) -> Result<(), String> {
+        for run in self.state.runs.clone() {
+            let path = state_file_path(&self.agent_state_directory, run.id);
+            let record = match read_state_file(&path) {
+                Ok(record) => record,
+                Err(error) => {
+                    if path.exists() {
+                        eprintln!(
+                            "Could not recover state for Run {} from {}: {error}",
+                            run.id,
+                            path.display()
+                        );
+                    }
+                    continue;
+                }
+            };
+            let Ok(record_run_id) = record.run_id.parse::<i64>() else {
+                continue;
+            };
+            if record_run_id != run.id || record.agent != run.agent {
+                continue;
+            }
+            self.apply_agent_state_record(record_run_id, record)?;
+        }
+        Ok(())
+    }
+
+    fn apply_agent_state_record(
+        &mut self,
+        run_id: i64,
+        record: AgentStateRecord,
+    ) -> Result<bool, String> {
+        let Some(run) = self.state.runs.iter().find(|run| run.id == run_id) else {
+            return Ok(false);
+        };
+        if run.agent != record.agent || run.state == record.state {
+            return Ok(false);
+        }
+        let decision = decide(
+            self.state.clone(),
+            Event::UpdateRunState {
+                run_id,
+                state: record.state,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        self.commit(decision)?;
+        Ok(true)
     }
 
     fn item_context_id(&self, item_id: i64) -> Result<i64, String> {
@@ -1324,6 +1435,13 @@ pub struct TerminalExitEvent {
     pub code: Option<i32>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunStateChangedEvent {
+    pub run_id: i64,
+    pub state: RunState,
+}
+
 fn current_unix_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1517,7 +1635,10 @@ pub fn get_home(
     state
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())
-        .map(|runtime| home_view(&runtime.state, context_id, &now))
+        .and_then(|mut runtime| {
+            runtime.recover_run_states()?;
+            Ok(home_view(&runtime.state, context_id, &now))
+        })
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2091,6 +2212,110 @@ fi
             .expect("confirmed removal should delete the Workset");
         assert!(!root.exists());
         assert!(runtime.state.worksets.is_empty());
+    }
+
+    #[test]
+    fn reopening_recovers_a_run_state_written_while_the_connection_was_down() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut store = SqliteStore::open(&database).expect("database should open");
+
+        let item = decide(
+            store.load_state().expect("state should load"),
+            Event::CreateItem {
+                title: "Recover the blocked Run".into(),
+                context_id: 1,
+                project_id: 1,
+            },
+        )
+        .expect("Item should be created");
+        store.apply(&item.effects).expect("Item should persist");
+        let repository = decide(
+            item.state,
+            Event::RegisterRepository {
+                project_id: 1,
+                name: "service".into(),
+                remote_url: "https://example.com/service.git".into(),
+            },
+        )
+        .expect("Repository should register");
+        store
+            .apply(&repository.effects)
+            .expect("Repository should persist");
+        let workset = decide(
+            repository.state,
+            Event::CreateWorkset {
+                item_id: 1,
+                root_directory: "/tmp/recovery-workset".into(),
+                branch: "main".into(),
+                repositories: vec![WorksetRepositoryInput {
+                    repository_id: 1,
+                    branch_override: None,
+                    base_branch_override: None,
+                }],
+            },
+        )
+        .expect("Workset should be created");
+        store
+            .apply(&workset.effects)
+            .expect("Workset should persist");
+        let machine = decide(
+            workset.state,
+            Event::RegisterMachine {
+                context_id: 1,
+                name: "Local Mac".into(),
+                socket_name: "mission-manager".into(),
+            },
+        )
+        .expect("Machine should register");
+        store
+            .apply(&machine.effects)
+            .expect("Machine should persist");
+        let run = decide(
+            machine.state,
+            Event::StartRun {
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Claude,
+                execution_profile: ExecutionProfile::Implement,
+                prompt: "Do the work".into(),
+                working_directory: "/tmp/recovery-workset".into(),
+                session_name: "mission-item-1-run-1".into(),
+                pane_id: "%1".into(),
+                started_at: 123,
+                prompt_selection: RunPromptSelection {
+                    include_objective: true,
+                    include_notes: false,
+                    external_object_ids: Vec::new(),
+                },
+            },
+        )
+        .expect("Run should start");
+        store.apply(&run.effects).expect("Run should persist");
+        drop(store);
+
+        let state_file = state_file_path(&directory.path().join("agent-state"), 1);
+        fs::create_dir_all(state_file.parent().expect("state directory should exist"))
+            .expect("state directory should be created");
+        fs::write(
+            &state_file,
+            serde_json::json!({
+                "agent": "claude",
+                "runId": "1",
+                "state": "blocked",
+                "updatedAt": "2026-09-19T12:34:56Z"
+            })
+            .to_string(),
+        )
+        .expect("hook state should be written");
+
+        let reopened = Runtime::open(&database).expect("runtime should reopen");
+        assert_eq!(reopened.state.runs[0].state, RunState::Blocked);
+        assert_eq!(
+            home_view(&reopened.state, None, "2026-09-19T13:00").attention_entries[0].kind,
+            crate::domain::AttentionEntryKind::BlockedRun
+        );
     }
 
     fn run_git(directory: &Path, args: &[&str]) {
