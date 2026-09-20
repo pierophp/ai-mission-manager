@@ -359,12 +359,61 @@ type ContextAttentionDefault = {
   policy: ExternalChangePolicy;
 };
 
+type AppTab = "work" | "structure" | "activity";
+
+const appTabs: {
+  id: AppTab;
+  label: string;
+  description: string;
+}[] = [
+  {
+    id: "work",
+    label: "Work",
+    description: "One calm view of what needs your attention, what is moving, and what is waiting.",
+  },
+  {
+    id: "structure",
+    label: "Structure",
+    description: "Contexts, Projects, Repositories, and Machines that support your work.",
+  },
+  {
+    id: "activity",
+    label: "History",
+    description: "A record of the actions the app has taken and the changes it has observed.",
+  },
+];
+
+const selectedTabStorageKey = "ai-mission-manager.selected-tab";
+
 const itemStatuses: ItemStatus[] = ["Inbox", "Active", "Waiting", "Done"];
 const relationKinds: ItemRelationKind[] = [
   "Blocks",
   "BlockedBy",
   "RelatedTo",
 ];
+
+function isAppTab(value: string | null): value is AppTab {
+  return value === "work" || value === "structure" || value === "activity";
+}
+
+function loadSelectedTab(): AppTab {
+  if (typeof window === "undefined") return "work";
+
+  try {
+    const storedTab = window.localStorage.getItem(selectedTabStorageKey);
+    return isAppTab(storedTab) ? storedTab : "work";
+  } catch {
+    return "work";
+  }
+}
+
+function saveSelectedTab(tab: AppTab) {
+  try {
+    window.localStorage.setItem(selectedTabStorageKey, tab);
+  } catch {
+    // Local persistence is a convenience; tab navigation still works when it is unavailable.
+  }
+}
 
 export function App() {
   const [contexts, setContexts] = useState<Context[]>([]);
@@ -413,6 +462,7 @@ export function App() {
   const [isCheckingDependencies, setIsCheckingDependencies] = useState(false);
   const [showHealthDetails, setShowHealthDetails] = useState(false);
   const [initialStateLoaded, setInitialStateLoaded] = useState(false);
+  const [selectedTab, setSelectedTab] = useState<AppTab>(loadSelectedTab);
   const [terminalRequest, setTerminalRequest] = useState<{
     worksetId: number;
     pane: PaneTab;
@@ -425,10 +475,16 @@ export function App() {
     () => uniqueItems(home ? flattenHome(home) : []),
     [home],
   );
+  const selectedTabDetails =
+    appTabs.find((tab) => tab.id === selectedTab) ?? appTabs[0];
 
   useEffect(() => {
     void loadAppState();
   }, []);
+
+  useEffect(() => {
+    saveSelectedTab(selectedTab);
+  }, [selectedTab]);
 
   useEffect(() => {
     if (!initialStateLoaded) return;
@@ -916,11 +972,8 @@ export function App() {
       <header className="app-header">
         <div>
           <p className="eyebrow">AI Mission Manager</p>
-          <h1>Home</h1>
-          <p className="subtitle">
-            One calm view of what needs your attention, what is moving, and what
-            is waiting.
-          </p>
+          <h1>{selectedTabDetails.label}</h1>
+          <p className="subtitle">{selectedTabDetails.description}</p>
         </div>
         <button
           type="button"
@@ -937,6 +990,8 @@ export function App() {
           <span>GitHub: {healthStatus ? dependencyStateLabel(healthStatus.provider.state) : "Checking"}</span>
         </button>
       </header>
+
+      <TabNavigation selectedTab={selectedTab} onSelect={setSelectedTab} />
 
       {showHealthDetails && setupState?.completed && healthStatus && (
         <HealthDetails
@@ -960,8 +1015,20 @@ export function App() {
         />
       )}
 
-      <section className="home-controls" aria-label="Home view controls">
-        <label>
+      {error && <p className="error-message" role="alert">{error}</p>}
+
+      {terminalRequest && (
+        <EmbeddedTerminal
+          key={`${terminalRequest.worksetId}-${terminalRequest.pane.paneId}`}
+          worksetId={terminalRequest.worksetId}
+          initialPane={terminalRequest.pane}
+          onClose={() => setTerminalRequest(undefined)}
+        />
+      )}
+
+      {selectedTab === "work" && (
+        <section className="home-controls" aria-label="Work view controls">
+          <label>
           <span>Context</span>
           <select
             value={contextFilterId ?? "all"}
@@ -974,36 +1041,26 @@ export function App() {
               </option>
             ))}
           </select>
-        </label>
-        <label className="search-field">
+          </label>
+          <label className="search-field">
           <span>Search every Context</span>
           <input
             value={searchQuery}
             onChange={(event) => setSearchQuery(event.target.value)}
             placeholder="Search Items, notes, or identifiers"
           />
-        </label>
-        <button
-          type="button"
-          className="secondary-button"
-          onClick={() => void pollExternalObjects(true)}
-        >
-          Refresh linked objects
-        </button>
-      </section>
-
-      {error && <p className="error-message" role="alert">{error}</p>}
-
-      {terminalRequest && (
-        <EmbeddedTerminal
-          key={`${terminalRequest.worksetId}-${terminalRequest.pane.paneId}`}
-          worksetId={terminalRequest.worksetId}
-          initialPane={terminalRequest.pane}
-          onClose={() => setTerminalRequest(undefined)}
-        />
+          </label>
+          <button
+            type="button"
+            className="secondary-button"
+            onClick={() => void pollExternalObjects(true)}
+          >
+            Refresh linked objects
+          </button>
+        </section>
       )}
 
-      {runSuggestions.filter(
+      {selectedTab === "work" && runSuggestions.filter(
         (suggestion) =>
           contextFilterId === undefined || suggestion.contextId === contextFilterId,
       ).length > 0 && (
@@ -1033,7 +1090,7 @@ export function App() {
         </section>
       )}
 
-      {searchQuery.trim() && (
+      {selectedTab === "work" && searchQuery.trim() && (
         <section className="search-section" aria-labelledby="search-heading">
           <div className="section-heading">
             <div>
@@ -1054,7 +1111,7 @@ export function App() {
         </section>
       )}
 
-      {auditHistory.length > 0 && (
+      {selectedTab === "activity" && (
         <section className="audit-history" aria-labelledby="audit-history-heading">
           <div className="section-heading">
             <div>
@@ -1063,21 +1120,26 @@ export function App() {
             </div>
             <span className="item-count">No prompts or terminal content</span>
           </div>
-          <ol className="audit-history-list">
-            {auditHistory.slice(0, 12).map((entry) => (
-              <li key={entry.id}>
-                <span>{auditActionLabel(entry.action)}</span>
-                <time dateTime={new Date(entry.recorded_at * 1000).toISOString()}>
-                  {new Date(entry.recorded_at * 1000).toLocaleString()}
-                </time>
-              </li>
-            ))}
-          </ol>
+          {auditHistory.length === 0 ? (
+            <p className="empty-state">No actions have been recorded yet.</p>
+          ) : (
+            <ol className="audit-history-list">
+              {auditHistory.slice(0, 12).map((entry) => (
+                <li key={entry.id}>
+                  <span>{auditActionLabel(entry.action)}</span>
+                  <time dateTime={new Date(entry.recorded_at * 1000).toISOString()}>
+                    {new Date(entry.recorded_at * 1000).toLocaleString()}
+                  </time>
+                </li>
+              ))}
+            </ol>
+          )}
         </section>
       )}
 
-      <section className="home-board" aria-labelledby="board-heading">
-        <div className="section-heading board-heading">
+      {selectedTab === "work" && (
+        <section className="home-board" aria-labelledby="board-heading">
+          <div className="section-heading board-heading">
           <div>
             <p className="eyebrow">Your work</p>
             <h2 id="board-heading">
@@ -1169,10 +1231,12 @@ export function App() {
             </div>
           </>
         )}
-      </section>
+        </section>
+      )}
 
-      <section className="capture-card" aria-labelledby="capture-heading">
-        <div className="section-heading">
+      {selectedTab === "work" && (
+        <section className="capture-card" aria-labelledby="capture-heading">
+          <div className="section-heading">
           <div>
             <p className="eyebrow">New Item</p>
             <h2 id="capture-heading">Give the next decision a place</h2>
@@ -1229,10 +1293,12 @@ export function App() {
             {isSaving ? "Saving…" : "Add Item"}
           </button>
         </form>
-      </section>
+        </section>
+      )}
 
-      <section className="organise-card" aria-labelledby="organise-heading">
-        <div className="section-heading">
+      {selectedTab === "structure" && (
+        <section className="organise-card" aria-labelledby="organise-heading">
+          <div className="section-heading">
           <div>
             <p className="eyebrow">Organisation</p>
             <h2 id="organise-heading">Contexts and Projects</h2>
@@ -1593,8 +1659,37 @@ export function App() {
             Save attention defaults
           </button>
         </form>
-      </section>
+        </section>
+      )}
     </main>
+  );
+}
+
+function TabNavigation({
+  selectedTab,
+  onSelect,
+}: {
+  selectedTab: AppTab;
+  onSelect: (tab: AppTab) => void;
+}) {
+  return (
+    <nav className="app-tabs" aria-label="Home sections">
+      <div className="app-tab-list" role="tablist" aria-label="Home sections">
+        {appTabs.map((tab) => (
+          <button
+            className={`app-tab${selectedTab === tab.id ? " app-tab-selected" : ""}`}
+            key={tab.id}
+            type="button"
+            role="tab"
+            aria-selected={selectedTab === tab.id}
+            tabIndex={selectedTab === tab.id ? 0 : -1}
+            onClick={() => onSelect(tab.id)}
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+    </nav>
   );
 }
 

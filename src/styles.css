@@ -55,6 +55,40 @@ button {
   gap: 24px;
 }
 
+.app-tabs {
+  margin-top: 36px;
+  border-bottom: 1px solid #e4ddd2;
+}
+
+.app-tab-list {
+  display: flex;
+  gap: 26px;
+}
+
+.app-tab {
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 0;
+  background: transparent;
+  color: #8b837a;
+  padding: 12px 2px 11px;
+  font-size: 0.78rem;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.app-tab:hover,
+.app-tab:focus-visible {
+  color: #984a2b;
+}
+
+.app-tab-selected {
+  border-bottom-color: #b05c39;
+  color: #24221f;
+}
+
 .eyebrow {
   margin: 0 0 10px;
   color: #b05c39;
