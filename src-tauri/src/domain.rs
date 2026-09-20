@@ -477,6 +477,26 @@ pub struct ItemDeletionSummary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryDeletionWorkset {
+    pub id: i64,
+    pub root_directory: String,
+    pub branch: String,
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryDeletionPlan {
+    pub repository_id: i64,
+    pub name: String,
+    pub remote_url: String,
+    pub worksets: Vec<RepositoryDeletionWorkset>,
+    #[serde(skip)]
+    pub state_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HomeView {
     pub needs_attention: Vec<ItemView>,
     pub attention_entries: Vec<AttentionEntry>,
@@ -572,6 +592,9 @@ pub enum AuditAction {
     ItemDeleted {
         summary: ItemDeletionSummary,
     },
+    RepositoryDeleted {
+        repository_id: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -624,6 +647,10 @@ pub enum Event {
         project_id: i64,
         name: String,
         remote_url: String,
+    },
+    DeleteRepository {
+        repository_id: i64,
+        workset_ids: Vec<i64>,
     },
     CreateItem {
         title: String,
@@ -783,6 +810,9 @@ pub enum Effect {
     RemoveWorkset {
         workset_id: i64,
     },
+    RemoveRepository {
+        repository_id: i64,
+    },
     PersistMachine {
         machine: Machine,
         next_machine_id: i64,
@@ -928,6 +958,42 @@ pub fn plan_item_deletion(
     })
 }
 
+pub fn plan_repository_deletion(
+    state: &DomainState,
+    repository_id: i64,
+) -> Result<RepositoryDeletionPlan, DomainError> {
+    let repository = state
+        .repositories
+        .iter()
+        .find(|repository| repository.id == repository_id)
+        .ok_or(DomainError::RepositoryNotFound { repository_id })?;
+    let worksets = state
+        .worksets
+        .iter()
+        .filter(|workset| {
+            workset
+                .repositories
+                .iter()
+                .any(|selected| selected.repository_id == repository_id)
+        })
+        .map(|workset| RepositoryDeletionWorkset {
+            id: workset.id,
+            root_directory: workset.root_directory.clone(),
+            branch: workset.branch.clone(),
+            archived: workset.archived,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(RepositoryDeletionPlan {
+        repository_id,
+        name: repository.name.clone(),
+        remote_url: repository.remote_url.clone(),
+        worksets,
+        state_fingerprint: serde_json::to_string(state)
+            .expect("DomainState should always be serializable"),
+    })
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DomainError {
     #[error("a Context name cannot be blank")]
@@ -962,6 +1028,14 @@ pub enum DomainError {
     RepositoryNotFound { repository_id: i64 },
     #[error("Repository {repository_id} belongs to another Project than {project_id}")]
     RepositoryProjectMismatch { repository_id: i64, project_id: i64 },
+    #[error(
+        "Repository {repository_id} deletion must include Worksets {expected_workset_ids:?}; received {provided_workset_ids:?}"
+    )]
+    RepositoryWorksetsMismatch {
+        repository_id: i64,
+        expected_workset_ids: Vec<i64>,
+        provided_workset_ids: Vec<i64>,
+    },
     #[error("a Workset root directory cannot be blank")]
     EmptyWorksetRoot,
     #[error("a Workset branch cannot be blank")]
@@ -1168,6 +1242,56 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     next_repository_id,
                 }],
             })
+        }
+        Event::DeleteRepository {
+            repository_id,
+            workset_ids,
+        } => {
+            let plan = plan_repository_deletion(&state, repository_id)?;
+            let mut expected_workset_ids = plan
+                .worksets
+                .iter()
+                .map(|workset| workset.id)
+                .collect::<Vec<_>>();
+            let mut provided_workset_ids = workset_ids;
+            expected_workset_ids.sort_unstable();
+            provided_workset_ids.sort_unstable();
+            if expected_workset_ids != provided_workset_ids {
+                return Err(DomainError::RepositoryWorksetsMismatch {
+                    repository_id,
+                    expected_workset_ids,
+                    provided_workset_ids,
+                });
+            }
+            if let Some(workset_id) = plan.worksets.iter().find_map(|workset| {
+                state
+                    .runs
+                    .iter()
+                    .any(|run| run.workset_id == workset.id)
+                    .then_some(workset.id)
+            }) {
+                return Err(DomainError::WorksetHasRuns { workset_id });
+            }
+
+            for workset in &plan.worksets {
+                state
+                    .worksets
+                    .retain(|candidate| candidate.id != workset.id);
+            }
+            state
+                .repositories
+                .retain(|repository| repository.id != repository_id);
+
+            let mut effects = plan
+                .worksets
+                .iter()
+                .map(|workset| Effect::RemoveWorkset {
+                    workset_id: workset.id,
+                })
+                .collect::<Vec<_>>();
+            effects.push(Effect::RemoveRepository { repository_id });
+
+            Ok(Decision { state, effects })
         }
         Event::CreateItem {
             title,
@@ -4376,6 +4500,97 @@ mod tests {
         assert_eq!(
             removed.effects,
             vec![Effect::RemoveWorkset { workset_id: 1 }]
+        );
+    }
+
+    #[test]
+    fn repository_deletion_requires_all_referencing_worksets_and_keeps_sequences_monotonic() {
+        let mut state = state_with_item(1, "Personal");
+        state.repositories.push(Repository {
+            id: 1,
+            project_id: 1,
+            name: "service".into(),
+            remote_url: "https://example.com/service.git".into(),
+        });
+        state.next_repository_id = 2;
+        state.worksets.extend([
+            Workset {
+                id: 1,
+                item_id: 1,
+                root_directory: "/tmp/first".into(),
+                branch: "feature/first".into(),
+                archived: false,
+                repositories: vec![WorksetRepository {
+                    repository_id: 1,
+                    branch_override: None,
+                    base_branch_override: None,
+                    current_branch: "feature/first".into(),
+                    is_dirty: false,
+                }],
+            },
+            Workset {
+                id: 2,
+                item_id: 1,
+                root_directory: "/tmp/second".into(),
+                branch: "feature/second".into(),
+                archived: true,
+                repositories: vec![WorksetRepository {
+                    repository_id: 1,
+                    branch_override: None,
+                    base_branch_override: None,
+                    current_branch: "feature/second".into(),
+                    is_dirty: false,
+                }],
+            },
+        ]);
+        state.next_workset_id = 3;
+
+        let plan = plan_repository_deletion(&state, 1)
+            .expect("a Repository deletion plan should describe every referencing Workset");
+        assert_eq!(
+            plan.worksets
+                .iter()
+                .map(|workset| workset.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+
+        let blocked = decide(
+            state.clone(),
+            Event::DeleteRepository {
+                repository_id: 1,
+                workset_ids: vec![1],
+            },
+        )
+        .expect_err("a Repository cannot be deleted with an incomplete Workset selection");
+        assert_eq!(
+            blocked,
+            DomainError::RepositoryWorksetsMismatch {
+                repository_id: 1,
+                expected_workset_ids: vec![1, 2],
+                provided_workset_ids: vec![1],
+            }
+        );
+
+        let deleted = decide(
+            state,
+            Event::DeleteRepository {
+                repository_id: 1,
+                workset_ids: vec![2, 1],
+            },
+        )
+        .expect("a Repository should delete with all affected Worksets explicitly included");
+        assert!(deleted.state.repositories.is_empty());
+        assert!(deleted.state.worksets.is_empty());
+        assert_eq!(deleted.state.next_repository_id, 2);
+        assert_eq!(deleted.state.next_workset_id, 3);
+        assert_eq!(
+            deleted.effects,
+            vec![
+                Effect::RemoveWorkset { workset_id: 1 },
+                Effect::RemoveWorkset { workset_id: 2 },
+                Effect::RemoveRepository { repository_id: 1 },
+            ]
         );
     }
 

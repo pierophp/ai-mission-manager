@@ -312,6 +312,8 @@ type WorksetRemovalReport = {
   workset_id: number;
   root_directory: string;
   repositories: RepositoryRemovalReport[];
+  safe: boolean;
+  blockers: string[];
 };
 
 type ItemDeletionPlan = {
@@ -334,7 +336,7 @@ type ItemDeletionPlan = {
   orphanedActivityCount: number;
 };
 
-type ItemWorksetDeletionPreview = {
+type WorksetDeletionPreview = {
   worksetId: number;
   rootDirectory: string;
   branch: string;
@@ -346,7 +348,7 @@ type ItemWorksetDeletionPreview = {
 
 type ItemDeletionPreview = {
   plan: ItemDeletionPlan;
-  worksets: ItemWorksetDeletionPreview[];
+  worksets: WorksetDeletionPreview[];
   blockers: string[];
 };
 
@@ -362,6 +364,37 @@ type ItemDeletionResult = {
     snapshotCount: number;
     activityCount: number;
   };
+  worksetDirectoriesDeleted: boolean;
+  physicalCleanupWarning: string | null;
+};
+
+type RepositoryDeletionPlan = {
+  repositoryId: number;
+  name: string;
+  remoteUrl: string;
+  worksets: {
+    id: number;
+    rootDirectory: string;
+    branch: string;
+    archived: boolean;
+  }[];
+};
+
+type RepositoryDeletionPreview = {
+  plan: RepositoryDeletionPlan;
+  worksets: WorksetDeletionPreview[];
+  blockers: string[];
+};
+
+type RepositoryDeletionResult = {
+  repositoryId: number;
+  worksetCount: number;
+  worksetDirectoriesDeleted: boolean;
+  physicalCleanupWarning: string | null;
+};
+
+type WorksetRemovalResult = {
+  worksetId: number;
   worksetDirectoriesDeleted: boolean;
   physicalCleanupWarning: string | null;
 };
@@ -474,6 +507,8 @@ export function App() {
   const [healthStatus, setHealthStatus] = useState<HealthStatus>();
   const [projects, setProjects] = useState<Project[]>([]);
   const [repositories, setRepositories] = useState<Repository[]>([]);
+  const [repositoryDeletionPreview, setRepositoryDeletionPreview] =
+    useState<RepositoryDeletionPreview>();
   const [machines, setMachines] = useState<Machine[]>([]);
   const [attentionDefaults, setAttentionDefaults] = useState<
     ContextAttentionDefault[]
@@ -862,6 +897,65 @@ export function App() {
       setError(undefined);
     } catch (saveError) {
       setError(errorMessage(saveError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handlePrepareRepositoryDeletion(repositoryId: number) {
+    setIsSaving(true);
+    try {
+      const preview = await invoke<RepositoryDeletionPreview>(
+        "prepare_repository_deletion",
+        { repositoryId },
+      );
+      setRepositoryDeletionPreview(preview);
+      setError(undefined);
+    } catch (previewError) {
+      window.alert(errorMessage(previewError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDeleteRepository(repositoryId: number) {
+    if (
+      !repositoryDeletionPreview ||
+      repositoryDeletionPreview.plan.repositoryId !== repositoryId ||
+      repositoryDeletionPreview.blockers.length > 0
+    ) {
+      return;
+    }
+    const { plan } = repositoryDeletionPreview;
+    if (
+      !window.confirm(
+        `Delete Repository ${plan.name} and its local Workset records? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    const deleteWorksetDirectories =
+      plan.worksets.length > 0 &&
+      window.confirm(
+        `Permanently delete these ${plan.worksets.length} Workset director${plan.worksets.length === 1 ? "y" : "ies"} from disk too? Choose Cancel to keep the directories while removing their records.`,
+      );
+
+    setIsSaving(true);
+    try {
+      const result = await invoke<RepositoryDeletionResult>("delete_repository", {
+        repositoryId,
+        worksetIds: plan.worksets.map((workset) => workset.id),
+        confirmed: true,
+        deleteWorksetDirectories,
+      });
+      setRepositoryDeletionPreview(undefined);
+      await updateHomeAfterEdit();
+      if (result.physicalCleanupWarning) {
+        window.alert(result.physicalCleanupWarning);
+      }
+    } catch (deleteError) {
+      setRepositoryDeletionPreview(undefined);
+      window.alert(errorMessage(deleteError));
     } finally {
       setIsSaving(false);
     }
@@ -1491,8 +1585,97 @@ export function App() {
                   .filter((repository) => repository.project_id === captureProjectId)
                   .map((repository) => (
                     <li className="entity-row" key={repository.id}>
-                      <span>{repository.name}</span>
-                      <span className="entity-meta">{repository.remote_url}</span>
+                      <div>
+                        <span>{repository.name}</span>
+                        <span className="entity-meta">{repository.remote_url}</span>
+                      </div>
+                      <div className="entity-actions">
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={isSaving}
+                          onClick={() =>
+                            void handlePrepareRepositoryDeletion(repository.id)
+                          }
+                        >
+                          Review deletion
+                        </button>
+                      </div>
+                      {repositoryDeletionPreview?.plan.repositoryId === repository.id && (
+                        <div className="deletion-preview" role="alert">
+                          <strong>Repository deletion preview</strong>
+                          <p>
+                            Deleting <b>{repository.name}</b> removes its local record.
+                            Every referencing Workset must be included explicitly.
+                          </p>
+                          {repositoryDeletionPreview.worksets.length > 0 && (
+                            <div className="deletion-worksets">
+                              <span className="relationship-label">
+                                Affected Workset directories
+                              </span>
+                              {repositoryDeletionPreview.worksets.map((workset) => (
+                                <div className="deletion-workset" key={workset.worksetId}>
+                                  <strong>
+                                    {workset.branch} {workset.archived ? "· Archived" : ""}
+                                  </strong>
+                                  <code>{workset.rootDirectory}</code>
+                                  {workset.safetyReport?.repositories.map((repository) => (
+                                    <span key={repository.repository_id}>
+                                      {repository.unpushed_commits_unknown
+                                        ? `${repository.name}: unpushed commits could not be verified.`
+                                        : repository.unpushed_commits.length > 0
+                                          ? `${repository.name}: ${repository.unpushed_commits.length} unpushed commit(s).`
+                                          : `${repository.name}: no unpushed commits.`}
+                                      {repository.uncommitted_changes.length > 0
+                                        ? ` ${repository.uncommitted_changes.length} uncommitted change(s).`
+                                        : " No uncommitted changes."}
+                                    </span>
+                                  ))}
+                                  {workset.blockers.map((blocker) => (
+                                    <span key={blocker}>{blocker}</span>
+                                  ))}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {repositoryDeletionPreview.plan.worksets.length === 0 && (
+                            <p>No Worksets reference this Repository.</p>
+                          )}
+                          {repositoryDeletionPreview.blockers.length > 0 && (
+                            <div className="deletion-blockers">
+                              <strong>Deletion blocked</strong>
+                              {repositoryDeletionPreview.blockers.map((blocker) => (
+                                <span key={blocker}>{blocker}</span>
+                              ))}
+                              <p>
+                                Resolve each finding, then create a fresh preview.
+                              </p>
+                            </div>
+                          )}
+                          <div className="deletion-preview-actions">
+                            <button
+                              type="button"
+                              className="danger-button"
+                              disabled={
+                                isSaving || repositoryDeletionPreview.blockers.length > 0
+                              }
+                              onClick={() =>
+                                void handleDeleteRepository(repository.id)
+                              }
+                            >
+                              Confirm logical deletion
+                            </button>
+                            <button
+                              type="button"
+                              className="text-button"
+                              disabled={isSaving}
+                              onClick={() => setRepositoryDeletionPreview(undefined)}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </li>
                   ))}
               </ul>
@@ -2351,8 +2534,14 @@ function ItemCard({
     if (removalReport?.workset_id !== worksetId) return;
     if (!window.confirm("Remove this Workset and its directory from disk?")) return;
     await saveItem(async () => {
-      await invoke("remove_workset", { worksetId, confirmed: true });
+      const result = await invoke<WorksetRemovalResult>("remove_workset", {
+        worksetId,
+        confirmed: true,
+      });
       setRemovalReport(undefined);
+      if (result.physicalCleanupWarning) {
+        window.alert(result.physicalCleanupWarning);
+      }
     });
   }
 
@@ -2627,10 +2816,19 @@ function ItemCard({
                 )}
               </div>
             ))}
+            {report.blockers.length > 0 && (
+              <div className="deletion-blockers">
+                <strong>Removal blocked</strong>
+                {report.blockers.map((blocker) => (
+                  <span key={blocker}>{blocker}</span>
+                ))}
+                <p>Resolve each finding, then create a fresh report.</p>
+              </div>
+            )}
             <div className="workset-actions">
               <button
                 type="button"
-                disabled={isSaving}
+                disabled={isSaving || !report.safe}
                 onClick={() => void handleRemoveWorkset(workset.id)}
               >
                 Confirm and remove
@@ -3951,6 +4149,8 @@ function auditActionLabel(action: AuditAction): string {
       return `Created Project #${action.project_id}`;
     case "repositoryRegistered":
       return `Registered Repository #${action.repository_id}`;
+    case "repositoryDeleted":
+      return `Deleted Repository #${action.repository_id}`;
     case "machineRegistered":
       return `Registered Machine #${action.machine_id}`;
     case "machineObserved":

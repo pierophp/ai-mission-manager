@@ -13,13 +13,14 @@ use crate::{
     dependencies::{check_command, resolve_executable, DependencyState, DependencyStatus},
     domain::{
         compose_run_prompt as build_run_prompt, decide, external_link_view, home_view,
-        plan_item_deletion, search_items, suggest_untracked_runs, AgentKind, AgentPaneObservation,
-        AttachedRepositoryInput, AuditAction, AuditEntry, Context, ContextAttentionDefault,
-        DomainState, Effect, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
-        ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView,
-        Item, ItemDeletionPlan, ItemDeletionSummary, ItemRelation, ItemRelationKind, ItemStatus,
-        ItemView, Machine, MachineObservation, MachineTransport, Project, ProjectDefaults,
-        Repository, Run, RunPaneStatus, RunPromptSelection, RunState, RunSuggestion, Workset,
+        plan_item_deletion, plan_repository_deletion, search_items, suggest_untracked_runs,
+        AgentKind, AgentPaneObservation, AttachedRepositoryInput, AuditAction, AuditEntry, Context,
+        ContextAttentionDefault, DomainState, Effect, Event, ExecutionProfile,
+        ExternalChangePolicy, ExternalLinkView, ExternalObjectInput, ExternalObjectKind,
+        ExternalProvider, ExternalSnapshot, HomeView, Item, ItemDeletionPlan, ItemDeletionSummary,
+        ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine, MachineObservation,
+        MachineTransport, Project, ProjectDefaults, Repository, RepositoryDeletionPlan, Run,
+        RunPaneStatus, RunPromptSelection, RunState, RunSuggestion, Workset,
         WorksetRepositoryInput,
     },
     git::GitCli,
@@ -39,6 +40,7 @@ pub struct Runtime {
     gh_executable_path: Option<PathBuf>,
     pending_workset_removal: Option<WorksetRemovalReport>,
     pending_item_deletion: Option<ItemDeletionPreview>,
+    pending_repository_deletion: Option<RepositoryDeletionPreview>,
     terminal_connections: HashMap<String, TmuxControlPane>,
     agent_state_directory: PathBuf,
 }
@@ -92,6 +94,7 @@ impl Runtime {
             gh_executable_path,
             pending_workset_removal: None,
             pending_item_deletion: None,
+            pending_repository_deletion: None,
             terminal_connections: HashMap::new(),
             agent_state_directory,
         };
@@ -1342,16 +1345,48 @@ impl Runtime {
             })
             .collect::<Result<Vec<_>, String>>()?;
 
-        Ok(WorksetRemovalReport {
+        let mut report = WorksetRemovalReport {
             workset_id,
             root_directory: workset.root_directory.clone(),
             repositories,
-        })
+            safe: true,
+            blockers: Vec::new(),
+        };
+        report.blockers = workset_safety_blockers(&report);
+        if self.state.worksets.iter().any(|candidate| {
+            candidate.id != workset_id && candidate.root_directory == workset.root_directory
+        }) {
+            report.blockers.push(
+                "Another Workset references this physical root; separate the roots before deleting."
+                    .into(),
+            );
+        }
+        report.safe = report.blockers.is_empty();
+        Ok(report)
     }
 
     fn prepare_workset_removal(&mut self, workset_id: i64) -> Result<WorksetRemovalReport, String> {
-        let report = self.build_workset_removal_report(workset_id)?;
+        let report = self.build_standalone_workset_removal_report(workset_id)?;
         self.pending_workset_removal = Some(report.clone());
+        Ok(report)
+    }
+
+    fn build_standalone_workset_removal_report(
+        &self,
+        workset_id: i64,
+    ) -> Result<WorksetRemovalReport, String> {
+        let mut report = self.build_workset_removal_report(workset_id)?;
+        if self
+            .state
+            .runs
+            .iter()
+            .any(|run| run.workset_id == workset_id)
+        {
+            report
+                .blockers
+                .push("This Workset has Run history and cannot be removed directly.".into());
+            report.safe = false;
+        }
         Ok(report)
     }
 
@@ -1362,42 +1397,23 @@ impl Runtime {
             .iter()
             .map(|run_id| format!("Run #{run_id} is active; stop it before deleting this Item."))
             .collect::<Vec<_>>();
-        let mut seen_roots = HashSet::new();
         let worksets = plan
             .worksets
             .iter()
             .map(|workset| {
-                let mut workset_blockers = Vec::new();
-                let safety_report = match self.build_workset_removal_report(workset.id) {
-                    Ok(report) => {
-                        workset_blockers.extend(workset_safety_blockers(&report));
-                        Some(report)
-                    }
-                    Err(error) => {
-                        workset_blockers.push(error);
-                        None
-                    }
-                };
-                if !seen_roots.insert(workset.root_directory.clone()) {
-                    workset_blockers.push(format!(
-                        "Workset #{} shares its directory with another Workset; separate the roots before deleting the Item.",
-                        workset.id
-                    ));
-                }
+                let preview = self.build_workset_deletion_preview(
+                    workset.id,
+                    &workset.root_directory,
+                    &workset.branch,
+                    workset.archived,
+                );
                 blockers.extend(
-                    workset_blockers
+                    preview
+                        .blockers
                         .iter()
                         .map(|blocker| format!("Workset #{}: {blocker}", workset.id)),
                 );
-                ItemWorksetDeletionPreview {
-                    workset_id: workset.id,
-                    root_directory: workset.root_directory.clone(),
-                    branch: workset.branch.clone(),
-                    archived: workset.archived,
-                    safe: workset_blockers.is_empty(),
-                    blockers: workset_blockers,
-                    safety_report,
-                }
+                preview
             })
             .collect();
 
@@ -1406,6 +1422,90 @@ impl Runtime {
             worksets,
             blockers,
         })
+    }
+
+    fn build_workset_deletion_preview(
+        &self,
+        workset_id: i64,
+        root_directory: &str,
+        branch: &str,
+        archived: bool,
+    ) -> WorksetDeletionPreview {
+        match self.build_workset_removal_report(workset_id) {
+            Ok(report) => WorksetDeletionPreview {
+                workset_id,
+                root_directory: root_directory.into(),
+                branch: branch.into(),
+                archived,
+                safe: report.safe,
+                blockers: report.blockers.clone(),
+                safety_report: Some(report),
+            },
+            Err(error) => WorksetDeletionPreview {
+                workset_id,
+                root_directory: root_directory.into(),
+                branch: branch.into(),
+                archived,
+                safe: false,
+                blockers: vec![error],
+                safety_report: None,
+            },
+        }
+    }
+
+    fn build_repository_deletion_preview(
+        &self,
+        repository_id: i64,
+    ) -> Result<RepositoryDeletionPreview, String> {
+        let plan = plan_repository_deletion(&self.state, repository_id)
+            .map_err(|error| error.to_string())?;
+        let mut blockers = Vec::new();
+        let worksets = plan
+            .worksets
+            .iter()
+            .map(|workset| {
+                let mut preview = self.build_workset_deletion_preview(
+                    workset.id,
+                    &workset.root_directory,
+                    &workset.branch,
+                    workset.archived,
+                );
+                if self
+                    .state
+                    .runs
+                    .iter()
+                    .any(|run| run.workset_id == workset.id)
+                {
+                    preview.blockers.push(
+                        "This Workset has Run history and cannot be removed with the Repository."
+                            .into(),
+                    );
+                    preview.safe = false;
+                }
+                blockers.extend(
+                    preview
+                        .blockers
+                        .iter()
+                        .map(|blocker| format!("Workset #{}: {blocker}", workset.id)),
+                );
+                preview
+            })
+            .collect();
+
+        Ok(RepositoryDeletionPreview {
+            plan,
+            worksets,
+            blockers,
+        })
+    }
+
+    fn prepare_repository_deletion(
+        &mut self,
+        repository_id: i64,
+    ) -> Result<RepositoryDeletionPreview, String> {
+        let preview = self.build_repository_deletion_preview(repository_id)?;
+        self.pending_repository_deletion = Some(preview.clone());
+        Ok(preview)
     }
 
     fn prepare_item_deletion(&mut self, item_id: i64) -> Result<ItemDeletionPreview, String> {
@@ -1511,7 +1611,119 @@ impl Runtime {
         })
     }
 
-    fn remove_workset(&mut self, workset_id: i64, confirmed: bool) -> Result<(), String> {
+    fn delete_repository(
+        &mut self,
+        repository_id: i64,
+        workset_ids: Vec<i64>,
+        confirmed: bool,
+        delete_workset_directories: bool,
+    ) -> Result<RepositoryDeletionResult, String> {
+        if !confirmed {
+            return Err(
+                "Repository deletion requires explicit confirmation after reviewing its deletion preview"
+                    .into(),
+            );
+        }
+        let pending = self
+            .pending_repository_deletion
+            .as_ref()
+            .filter(|preview| preview.plan.repository_id == repository_id)
+            .cloned()
+            .ok_or_else(|| {
+                "Review the Repository deletion preview before deleting it".to_owned()
+            })?;
+        let current = self.build_repository_deletion_preview(repository_id)?;
+        if current != pending {
+            return Err(
+                "The Repository or a Workset safety report changed after the preview; review the updated deletion preview before deleting it"
+                    .into(),
+            );
+        }
+        if !current.blockers.is_empty() {
+            return Err(format!(
+                "Repository deletion is blocked:\n{}",
+                current.blockers.join("\n")
+            ));
+        }
+
+        let mut staged = Vec::new();
+        if delete_workset_directories {
+            for workset in &current.plan.worksets {
+                let root = Path::new(&workset.root_directory);
+                let staging = match workset_removal_staging_path(root, workset.id) {
+                    Ok(staging) => staging,
+                    Err(error) => {
+                        let restore_error = restore_staged_directories(&staged);
+                        return Err(format_commit_error(error, restore_error));
+                    }
+                };
+                if let Err(error) = fs::rename(root, &staging) {
+                    let restore_error = restore_staged_directories(&staged);
+                    return Err(format_commit_error(
+                        format!(
+                            "Could not stage Workset directory for Repository deletion: {error}"
+                        ),
+                        restore_error,
+                    ));
+                }
+                staged.push((root.to_owned(), staging));
+            }
+        }
+
+        let decision = match decide(
+            self.state.clone(),
+            Event::DeleteRepository {
+                repository_id,
+                workset_ids,
+            },
+        ) {
+            Ok(decision) => decision,
+            Err(error) => {
+                let restore_error = restore_staged_directories(&staged);
+                return Err(format_commit_error(error.to_string(), restore_error));
+            }
+        };
+        if let Err(error) = self.commit(decision) {
+            let restore_error = restore_staged_directories(&staged);
+            return Err(format_commit_error(error, restore_error));
+        }
+        self.pending_repository_deletion = None;
+
+        let physical_cleanup_warning = if delete_workset_directories {
+            let mut cleanup_errors = Vec::new();
+            for (_, staging) in staged {
+                if let Err(error) = fs::remove_dir_all(&staging) {
+                    cleanup_errors.push(format!("{}: {error}", staging.display()));
+                }
+            }
+            (!cleanup_errors.is_empty()).then(|| {
+                format!(
+                    "Repository and Workset records were deleted, but some Workset directories could not be removed: {}",
+                    cleanup_errors.join(", ")
+                )
+            })
+        } else if current.plan.worksets.is_empty() {
+            None
+        } else {
+            Some(
+                "Repository and Workset records were deleted; Workset directories were left on disk by choice."
+                    .into(),
+            )
+        };
+
+        Ok(RepositoryDeletionResult {
+            repository_id,
+            workset_count: current.plan.worksets.len(),
+            workset_directories_deleted: delete_workset_directories,
+            physical_cleanup_warning,
+        })
+    }
+
+    fn remove_workset(
+        &mut self,
+        workset_id: i64,
+        confirmed: bool,
+    ) -> Result<WorksetRemovalResult, String> {
         if !confirmed {
             return Err(
                 "Workset removal requires explicit confirmation after reviewing its safety report"
@@ -1526,12 +1738,18 @@ impl Runtime {
             .ok_or_else(|| {
                 "Review the Workset removal safety report before removing it".to_owned()
             })?;
-        let current = self.build_workset_removal_report(workset_id)?;
+        let current = self.build_standalone_workset_removal_report(workset_id)?;
         if current != pending {
             return Err(
                 "The Workset changed after the safety report; review the updated report before removing it"
                     .into(),
             );
+        }
+        if !current.safe {
+            return Err(format!(
+                "Workset removal is blocked:\n{}",
+                current.blockers.join("\n")
+            ));
         }
 
         let decision = decide(self.state.clone(), Event::RemoveWorkset { workset_id })
@@ -1549,11 +1767,16 @@ impl Runtime {
             return Err(format_commit_error(error, restore_error));
         }
         self.pending_workset_removal = None;
-        fs::remove_dir_all(&staging).map_err(|error| {
+        let physical_cleanup_warning = fs::remove_dir_all(&staging).err().map(|error| {
             format!(
                 "Workset was removed from Mission Manager, but its staged directory could not be deleted at {}: {error}",
                 staging.display()
             )
+        });
+        Ok(WorksetRemovalResult {
+            workset_id,
+            workset_directories_deleted: true,
+            physical_cleanup_warning,
         })
     }
 
@@ -2144,6 +2367,9 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
             Effect::RemoveWorkset { workset_id } => Some(AuditAction::WorksetRemoved {
                 workset_id: *workset_id,
             }),
+            Effect::RemoveRepository { repository_id } => Some(AuditAction::RepositoryDeleted {
+                repository_id: *repository_id,
+            }),
             Effect::RemoveItemCascade { summary, .. } => Some(AuditAction::ItemDeleted {
                 summary: summary.clone(),
             }),
@@ -2344,11 +2570,13 @@ pub struct WorksetRemovalReport {
     pub workset_id: i64,
     pub root_directory: String,
     pub repositories: Vec<RepositoryRemovalReport>,
+    pub safe: bool,
+    pub blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ItemWorksetDeletionPreview {
+pub struct WorksetDeletionPreview {
     pub workset_id: i64,
     pub root_directory: String,
     pub branch: String,
@@ -2362,7 +2590,7 @@ pub struct ItemWorksetDeletionPreview {
 #[serde(rename_all = "camelCase")]
 pub struct ItemDeletionPreview {
     pub plan: ItemDeletionPlan,
-    pub worksets: Vec<ItemWorksetDeletionPreview>,
+    pub worksets: Vec<WorksetDeletionPreview>,
     pub blockers: Vec<String>,
 }
 
@@ -2370,6 +2598,31 @@ pub struct ItemDeletionPreview {
 #[serde(rename_all = "camelCase")]
 pub struct ItemDeletionResult {
     pub summary: ItemDeletionSummary,
+    pub workset_directories_deleted: bool,
+    pub physical_cleanup_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryDeletionPreview {
+    pub plan: RepositoryDeletionPlan,
+    pub worksets: Vec<WorksetDeletionPreview>,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RepositoryDeletionResult {
+    pub repository_id: i64,
+    pub workset_count: usize,
+    pub workset_directories_deleted: bool,
+    pub physical_cleanup_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorksetRemovalResult {
+    pub workset_id: i64,
     pub workset_directories_deleted: bool,
     pub physical_cleanup_warning: Option<String>,
 }
@@ -2859,6 +3112,36 @@ pub fn set_workset_archived(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn prepare_repository_deletion(
+    repository_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<RepositoryDeletionPreview, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .prepare_repository_deletion(repository_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_repository(
+    repository_id: i64,
+    workset_ids: Vec<i64>,
+    confirmed: bool,
+    delete_workset_directories: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<RepositoryDeletionResult, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .delete_repository(
+            repository_id,
+            workset_ids,
+            confirmed,
+            delete_workset_directories,
+        )
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn prepare_workset_removal(
     workset_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -2874,7 +3157,7 @@ pub fn remove_workset(
     workset_id: i64,
     confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
-) -> Result<(), String> {
+) -> Result<WorksetRemovalResult, String> {
     state
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
@@ -3765,6 +4048,7 @@ fi
         run_git(directory.path(), &["init", "--bare", "service-a.git"]);
         let origin_url = origin.to_string_lossy().into_owned();
         run_git(&repository, &["remote", "add", "origin", &origin_url]);
+        run_git(&repository, &["push", "--set-upstream", "origin", "main"]);
         fs::write(repository.join("notes.txt"), "keep this work\n")
             .expect("uncommitted file should be written");
 
@@ -3811,15 +4095,28 @@ fi
             .expect("removal safety report should be available");
         assert_eq!(report.repositories.len(), 1);
         assert!(!report.repositories[0].uncommitted_changes.is_empty());
+        assert!(!report.safe);
+        assert!(report
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("uncommitted changes")));
+        assert!(runtime.remove_workset(1, true).is_err());
+        assert_eq!(runtime.state.worksets.len(), 1);
         assert!(runtime.remove_workset(1, false).is_err());
         assert!(
             root.is_dir(),
             "a rejected confirmation must keep the Workset"
         );
 
-        runtime
+        fs::remove_file(repository.join("notes.txt")).expect("uncommitted file should be removed");
+        let safe_report = runtime
+            .prepare_workset_removal(1)
+            .expect("a safe removal report should be available");
+        assert!(safe_report.safe);
+        let result = runtime
             .remove_workset(1, true)
             .expect("confirmed removal should delete the Workset");
+        assert!(result.physical_cleanup_warning.is_none());
         assert!(!root.exists());
         assert!(runtime.state.worksets.is_empty());
     }
@@ -3920,6 +4217,123 @@ fi
         assert!(result.workset_directories_deleted);
         assert!(!root.exists());
         assert!(runtime.state.items.is_empty());
+    }
+
+    #[test]
+    fn repository_deletion_stages_all_safe_workset_roots_and_audits_each_record() {
+        let directory = tempdir().expect("temporary repository directory should exist");
+        let seed = directory.path().join("seed");
+        run_git(directory.path(), &["init", "--initial-branch=main", "seed"]);
+        run_git(&seed, &["config", "user.email", "test@example.com"]);
+        run_git(&seed, &["config", "user.name", "Test User"]);
+        fs::write(seed.join("README.md"), "safe\n").expect("seed file should be written");
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-m", "initial"]);
+        let origin = directory.path().join("service.git");
+        run_git(directory.path(), &["init", "--bare", "service.git"]);
+        let origin_url = origin.to_string_lossy().into_owned();
+        run_git(&seed, &["remote", "add", "origin", &origin_url]);
+        run_git(&seed, &["push", "origin", "main"]);
+
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .register_repository(1, "service".into(), origin_url)
+            .expect("Repository should register");
+        runtime
+            .create_item("Delete the Repository and its Worksets".into(), 1, 1)
+            .expect("Item should be created");
+        let first_root = directory.path().join("first-workset");
+        let second_root = directory.path().join("second-workset");
+        runtime
+            .create_workset(
+                1,
+                first_root.to_string_lossy().into_owned(),
+                "feature/first".into(),
+                vec![WorksetRepositoryInput {
+                    repository_id: 1,
+                    branch_override: None,
+                    base_branch_override: Some("main".into()),
+                }],
+            )
+            .expect("first Workset should be created");
+        runtime
+            .create_workset(
+                1,
+                second_root.to_string_lossy().into_owned(),
+                "feature/second".into(),
+                vec![WorksetRepositoryInput {
+                    repository_id: 1,
+                    branch_override: None,
+                    base_branch_override: Some("main".into()),
+                }],
+            )
+            .expect("second Workset should be created");
+        for root in [&first_root, &second_root] {
+            run_git(
+                &root.join("service"),
+                &["branch", "--set-upstream-to=origin/main"],
+            );
+        }
+        runtime
+            .set_workset_archived(2, true)
+            .expect("the second Workset should be archived");
+
+        let preview = runtime
+            .prepare_repository_deletion(1)
+            .expect("Repository deletion preview should be available");
+        assert_eq!(
+            preview
+                .plan
+                .worksets
+                .iter()
+                .map(|workset| workset.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert!(preview.blockers.is_empty());
+        assert!(preview.worksets.iter().all(|workset| workset.safe));
+
+        let blocking_staging_path = directory
+            .path()
+            .join(".second-workset.mission-manager-removing-2");
+        fs::create_dir(&blocking_staging_path).expect("the staging-path blocker should be created");
+        let staging_error = runtime
+            .delete_repository(1, vec![1, 2], true, true)
+            .expect_err("a staging failure should abort before logical deletion");
+        assert!(staging_error.contains("staging path already exists"));
+        assert!(first_root.is_dir());
+        assert!(second_root.is_dir());
+        assert_eq!(runtime.state.repositories.len(), 1);
+        assert_eq!(runtime.state.worksets.len(), 2);
+        fs::remove_dir_all(&blocking_staging_path)
+            .expect("the staging-path blocker should be removed");
+
+        let result = runtime
+            .delete_repository(1, vec![1, 2], true, true)
+            .expect("Repository deletion should remove all explicitly included Worksets");
+        assert_eq!(result.workset_count, 2);
+        assert!(result.workset_directories_deleted);
+        assert!(result.physical_cleanup_warning.is_none());
+        assert!(!first_root.exists());
+        assert!(!second_root.exists());
+        assert!(runtime.state.repositories.is_empty());
+        assert!(runtime.state.worksets.is_empty());
+        assert_eq!(runtime.state.items.len(), 1);
+        let history = runtime
+            .list_audit_history()
+            .expect("audit history should be available");
+        assert_eq!(
+            history
+                .iter()
+                .filter(|entry| matches!(entry.action, AuditAction::WorksetRemoved { .. }))
+                .count(),
+            2
+        );
+        assert!(history.iter().any(|entry| matches!(
+            entry.action,
+            AuditAction::RepositoryDeleted { repository_id: 1 }
+        )));
     }
 
     #[test]

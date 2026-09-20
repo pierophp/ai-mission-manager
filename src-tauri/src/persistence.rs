@@ -834,6 +834,12 @@ impl SqliteStore {
                     transaction
                         .execute("DELETE FROM worksets WHERE id = ?1", params![workset_id])?;
                 }
+                Effect::RemoveRepository { repository_id } => {
+                    transaction.execute(
+                        "DELETE FROM repositories WHERE id = ?1",
+                        params![repository_id],
+                    )?;
+                }
                 Effect::RemoveItemCascade {
                     item_id,
                     orphaned_external_object_ids,
@@ -1940,6 +1946,100 @@ mod tests {
         assert_eq!(state.next_item_id, 3);
         assert_eq!(state.next_run_id, 2);
         assert_eq!(state.next_link_id, 3);
+    }
+
+    #[test]
+    fn repository_deletion_round_trip_removes_worksets_and_preserves_audit_and_sequences() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+
+        {
+            let mut store = SqliteStore::open(&path).expect("database should open");
+            let repository = decide(
+                store.load_state().expect("state should load"),
+                Event::RegisterRepository {
+                    project_id: 1,
+                    name: "service".into(),
+                    remote_url: "https://example.com/service.git".into(),
+                },
+            )
+            .expect("Repository should register");
+            store
+                .apply(&repository.effects)
+                .expect("Repository should persist");
+            let item = decide(
+                repository.state,
+                Event::CreateItem {
+                    title: "Delete its Repository".into(),
+                    context_id: 1,
+                    project_id: 1,
+                },
+            )
+            .expect("Item should be created");
+            store.apply(&item.effects).expect("Item should persist");
+            let workset = decide(
+                item.state,
+                Event::CreateWorkset {
+                    item_id: 1,
+                    root_directory: "/tmp/repository-deletion-round-trip".into(),
+                    branch: "feature/remove-repository".into(),
+                    repositories: vec![WorksetRepositoryInput {
+                        repository_id: 1,
+                        branch_override: None,
+                        base_branch_override: None,
+                    }],
+                },
+            )
+            .expect("Workset should be created");
+            store
+                .apply(&workset.effects)
+                .expect("Workset should persist");
+            let archived = decide(
+                workset.state,
+                Event::SetWorksetArchived {
+                    workset_id: 1,
+                    archived: true,
+                },
+            )
+            .expect("Workset should be archived");
+            store
+                .apply(&archived.effects)
+                .expect("archive should persist");
+            let deletion = decide(
+                archived.state,
+                Event::DeleteRepository {
+                    repository_id: 1,
+                    workset_ids: vec![1],
+                },
+            )
+            .expect("Repository deletion should be decided");
+            store
+                .apply_with_audit(
+                    &deletion.effects,
+                    &[
+                        AuditAction::WorksetRemoved { workset_id: 1 },
+                        AuditAction::RepositoryDeleted { repository_id: 1 },
+                    ],
+                )
+                .expect("Repository deletion should persist transactionally");
+        }
+
+        let reopened = SqliteStore::open(&path).expect("database should reopen");
+        let state = reopened.load_state().expect("state should reload");
+        assert!(state.repositories.is_empty());
+        assert!(state.worksets.is_empty());
+        assert_eq!(state.next_repository_id, 2);
+        assert_eq!(state.next_workset_id, 2);
+        let history = reopened
+            .list_audit_history()
+            .expect("audit history should load");
+        assert!(history
+            .iter()
+            .any(|entry| matches!(entry.action, AuditAction::WorksetRemoved { workset_id: 1 })));
+        assert!(history.iter().any(|entry| matches!(
+            entry.action,
+            AuditAction::RepositoryDeleted { repository_id: 1 }
+        )));
     }
 
     #[test]

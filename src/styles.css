@@ -1582,6 +1582,7 @@ button:disabled {
 
 .entity-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   justify-content: space-between;
   gap: 12px;
@@ -1594,6 +1595,22 @@ button:disabled {
   color: #8b837a;
   font-size: 0.74rem;
   text-align: right;
+}
+
+.entity-row > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.entity-actions {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.entity-row > .deletion-preview {
+  flex-basis: 100%;
 }
 
 .audit-history {

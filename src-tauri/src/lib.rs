@@ -41,6 +41,8 @@ pub fn run() {
             app::attach_workset,
             app::add_repository_to_workset,
             app::set_workset_archived,
+            app::prepare_repository_deletion,
+            app::delete_repository,
             app::prepare_workset_removal,
             app::remove_workset,
             app::prepare_item_deletion,
