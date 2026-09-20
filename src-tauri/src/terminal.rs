@@ -27,6 +27,9 @@ pub trait TerminalRuntime {
     ) -> Result<String, String>;
 
     fn kill_session(&self, machine: &Machine, session_name: &str) -> Result<(), String>;
+
+    fn kill_pane(&self, machine: &Machine, session_name: &str, pane_id: &str)
+        -> Result<(), String>;
 }
 
 pub struct AgentLaunchContext<'a> {
@@ -430,6 +433,15 @@ impl TerminalRuntime for TmuxRuntime {
 
     fn kill_session(&self, machine: &Machine, session_name: &str) -> Result<(), String> {
         kill_tmux_session(machine, session_name)
+    }
+
+    fn kill_pane(
+        &self,
+        machine: &Machine,
+        _session_name: &str,
+        pane_id: &str,
+    ) -> Result<(), String> {
+        kill_tmux_pane(machine, pane_id)
     }
 }
 
@@ -973,6 +985,11 @@ fn launch_tmux_agent(
 
 fn kill_tmux_session(machine: &Machine, session_name: &str) -> Result<(), String> {
     let args = vec!["kill-session".into(), "-t".into(), session_name.into()];
+    run_tmux(machine, &args).map(|_| ())
+}
+
+fn kill_tmux_pane(machine: &Machine, pane_id: &str) -> Result<(), String> {
+    let args = vec!["kill-pane".into(), "-t".into(), pane_id.into()];
     run_tmux(machine, &args).map(|_| ())
 }
 

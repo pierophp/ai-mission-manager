@@ -4,11 +4,11 @@ use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 
 use crate::domain::{
-    Activity, AgentKind, Context, ContextAttentionDefault, DomainState, Effect, ExecutionProfile,
-    ExternalChangePolicy, ExternalMetadata, ExternalObject, ExternalObjectKind, ExternalProvider,
-    ExternalSnapshot, Item, ItemRelation, ItemRelationKind, ItemStatus, Link, Machine,
-    MachineObservation, Project, ProjectDefaults, Reminder, Repository, Run, RunPaneStatus,
-    RunState, Workset, WorksetRepository,
+    Activity, AgentKind, AuditAction, AuditEntry, Context, ContextAttentionDefault, DomainState,
+    Effect, ExecutionProfile, ExternalChangePolicy, ExternalMetadata, ExternalObject,
+    ExternalObjectKind, ExternalProvider, ExternalSnapshot, Item, ItemRelation, ItemRelationKind,
+    ItemStatus, Link, Machine, MachineObservation, Project, ProjectDefaults, Reminder, Repository,
+    Run, RunPaneStatus, RunState, Workset, WorksetRepository,
 };
 
 #[derive(Debug, Error)]
@@ -41,6 +41,8 @@ pub enum StoreError {
     InvalidMachineTransport(String),
     #[error("invalid Machine observation in database: {0}")]
     InvalidMachineObservation(String),
+    #[error("invalid audit action in database: {0}")]
+    InvalidAuditAction(String),
     #[error("invalid {key} value in database: {value}")]
     InvalidSequence { key: String, value: String },
     #[error("a database sequence is exhausted")]
@@ -573,7 +575,40 @@ impl SqliteStore {
         })
     }
 
+    pub fn list_audit_history(&self) -> Result<Vec<AuditEntry>, StoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT id, recorded_at, action_json
+             FROM audit_entries
+             ORDER BY id DESC
+             LIMIT 200",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let action_json: String = row.get(2)?;
+            Ok(AuditEntry {
+                id: row.get(0)?,
+                recorded_at: row.get(1)?,
+                action: serde_json::from_str(&action_json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Text,
+                        Box::new(StoreError::InvalidAuditAction(error.to_string())),
+                    )
+                })?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)
+    }
+
     pub fn apply(&mut self, effects: &[Effect]) -> Result<(), StoreError> {
+        self.apply_with_audit(effects, &[])
+    }
+
+    pub fn apply_with_audit(
+        &mut self,
+        effects: &[Effect],
+        audit_actions: &[AuditAction],
+    ) -> Result<(), StoreError> {
         let transaction = self.connection.transaction()?;
         for effect in effects {
             match effect {
@@ -914,6 +949,29 @@ impl SqliteStore {
                 }
             }
         }
+        if !audit_actions.is_empty() {
+            let mut next_audit_id: i64 = transaction.query_row(
+                "SELECT value FROM metadata WHERE key = 'next_audit_id'",
+                [],
+                |row| row.get(0),
+            )?;
+            for action in audit_actions {
+                let action_json = serde_json::to_string(action)
+                    .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+                transaction.execute(
+                    "INSERT INTO audit_entries (id, recorded_at, action_json)
+                     VALUES (?1, strftime('%s', 'now'), ?2)",
+                    params![next_audit_id, action_json],
+                )?;
+                next_audit_id = next_audit_id
+                    .checked_add(1)
+                    .ok_or(StoreError::SequenceExhausted)?;
+            }
+            transaction.execute(
+                "UPDATE metadata SET value = ?1 WHERE key = 'next_audit_id'",
+                params![next_audit_id],
+            )?;
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -989,6 +1047,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_link_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_activity_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_reminder_id', 1);
+         INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_audit_id', 1);
          INSERT OR IGNORE INTO contexts (id, name) VALUES (1, 'Personal');",
     )?;
 
@@ -1128,7 +1187,14 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          CREATE INDEX IF NOT EXISTS external_links_by_object
              ON external_links (external_object_id);
          CREATE INDEX IF NOT EXISTS activities_by_object
-             ON activities (external_object_id, id);",
+             ON activities (external_object_id, id);
+         CREATE TABLE IF NOT EXISTS audit_entries (
+             id INTEGER PRIMARY KEY NOT NULL,
+             recorded_at INTEGER NOT NULL,
+             action_json TEXT NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS audit_entries_by_recorded_at
+             ON audit_entries (recorded_at, id);",
     )?;
     let run_columns = table_columns(connection, "runs")?;
     if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "state") {
@@ -1159,6 +1225,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     ensure_sequence_at_least(connection, "next_link_id", "external_links", "id")?;
     ensure_sequence_at_least(connection, "next_activity_id", "activities", "id")?;
     ensure_sequence_at_least(connection, "next_reminder_id", "reminders", "id")?;
+    ensure_sequence_at_least(connection, "next_audit_id", "audit_entries", "id")?;
 
     Ok(())
 }
@@ -1496,10 +1563,55 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        decide, AgentKind, Event, ExternalChangePolicy, ExternalMetadata, ExternalObjectInput,
-        ExternalObjectKind, ExternalProvider, ExternalSnapshotData, MachineTransport, RunState,
-        WorksetRepositoryInput,
+        decide, AgentKind, AuditAction, Event, ExternalChangePolicy, ExternalMetadata,
+        ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshotData,
+        MachineTransport, RunState, WorksetRepositoryInput,
     };
+
+    #[test]
+    fn audit_history_is_append_only_and_survives_reopening() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+
+        {
+            let mut store = SqliteStore::open(&path).expect("database should open");
+            store
+                .apply_with_audit(
+                    &[],
+                    &[
+                        AuditAction::ItemCreated { item_id: 1 },
+                        AuditAction::ItemStatusChanged {
+                            item_id: 1,
+                            from: ItemStatus::Inbox,
+                            to: ItemStatus::Done,
+                        },
+                    ],
+                )
+                .expect("audit actions should persist");
+
+            let history = store
+                .list_audit_history()
+                .expect("audit history should be readable");
+            assert_eq!(history.len(), 2);
+            assert_eq!(history[0].id, 2);
+            assert_eq!(history[1].id, 1);
+            assert!(matches!(
+                history[0].action,
+                AuditAction::ItemStatusChanged {
+                    item_id: 1,
+                    from: ItemStatus::Inbox,
+                    to: ItemStatus::Done,
+                }
+            ));
+        }
+
+        let history = SqliteStore::open(&path)
+            .expect("database should reopen")
+            .list_audit_history()
+            .expect("audit history should survive reopening");
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().all(|entry| entry.recorded_at > 0));
+    }
 
     #[test]
     fn remote_machine_configuration_and_observation_survive_reopening() {

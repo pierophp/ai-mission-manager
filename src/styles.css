@@ -1226,6 +1226,38 @@ button:disabled {
   text-align: right;
 }
 
+.audit-history {
+  margin-top: 28px;
+  padding: 22px 24px;
+  border: 1px solid #ddd3c7;
+  border-radius: 14px;
+  background: #fffdf9;
+}
+
+.audit-history-list {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.audit-history-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 9px 0;
+  border-bottom: 1px solid #eee7de;
+  color: #4e4942;
+  font-size: 0.82rem;
+}
+
+.audit-history-list time {
+  flex: 0 0 auto;
+  color: #8b837a;
+  font-size: 0.72rem;
+}
+
 @media (max-width: 1120px) {
   .home-columns {
     grid-template-columns: repeat(3, minmax(210px, 1fr));

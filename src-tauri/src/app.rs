@@ -13,12 +13,12 @@ use crate::{
     domain::{
         compose_run_prompt as build_run_prompt, decide, external_link_view, home_view,
         search_items, suggest_untracked_runs, AgentKind, AgentPaneObservation,
-        AttachedRepositoryInput, Context, ContextAttentionDefault, DomainState, Event,
-        ExecutionProfile, ExternalChangePolicy, ExternalLinkView, ExternalObjectInput,
-        ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView, Item, ItemRelation,
-        ItemRelationKind, ItemStatus, ItemView, Machine, MachineObservation, MachineTransport,
-        Project, ProjectDefaults, Repository, Run, RunPaneStatus, RunPromptSelection, RunState,
-        RunSuggestion, Workset, WorksetRepositoryInput,
+        AttachedRepositoryInput, AuditAction, AuditEntry, Context, ContextAttentionDefault,
+        DomainState, Effect, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
+        ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView,
+        Item, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine, MachineObservation,
+        MachineTransport, Project, ProjectDefaults, Repository, Run, RunPaneStatus,
+        RunPromptSelection, RunState, RunSuggestion, Workset, WorksetRepositoryInput,
     },
     git::GitCli,
     persistence::SqliteStore,
@@ -715,6 +715,44 @@ impl Runtime {
             connection.close()?;
         }
         Ok(())
+    }
+
+    fn stop_run(&mut self, run_id: i64) -> Result<Run, String> {
+        let run = self
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == run.machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
+
+        TmuxRuntime
+            .kill_pane(&machine, &run.session_name, &run.pane_id)
+            .map_err(|error| format!("Could not stop Run {run_id}: {error}"))?;
+        let decision = decide(
+            self.state.clone(),
+            Event::SetRunPaneStatus {
+                run_id,
+                status: RunPaneStatus::Missing,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let stopped = decision
+            .state
+            .runs
+            .iter()
+            .find(|candidate| candidate.id == run_id)
+            .cloned()
+            .ok_or_else(|| "Run stop produced no Run".to_owned())?;
+        self.commit_with_audit(decision, &[AuditAction::RunStopped { run_id }])?;
+        Ok(stopped)
     }
 
     fn open_external_terminal(&self, run_id: i64) -> Result<(), String> {
@@ -1533,13 +1571,173 @@ impl Runtime {
         Ok(executable)
     }
 
-    fn commit(&mut self, decision: crate::domain::Decision) -> Result<(), String> {
+    fn list_audit_history(&self) -> Result<Vec<AuditEntry>, String> {
         self.store
-            .apply(&decision.effects)
+            .list_audit_history()
+            .map_err(|error| error.to_string())
+    }
+
+    fn commit(&mut self, decision: crate::domain::Decision) -> Result<(), String> {
+        self.commit_with_audit(decision, &[])
+    }
+
+    fn commit_with_audit(
+        &mut self,
+        decision: crate::domain::Decision,
+        additional_actions: &[AuditAction],
+    ) -> Result<(), String> {
+        let mut audit_actions = audit_actions(&self.state, &decision.effects);
+        audit_actions.extend_from_slice(additional_actions);
+        self.store
+            .apply_with_audit(&decision.effects, &audit_actions)
             .map_err(|error| error.to_string())?;
         self.state = decision.state;
         Ok(())
     }
+}
+
+fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::PersistContext { context, .. } => Some(AuditAction::ContextCreated {
+                context_id: context.id,
+            }),
+            Effect::PersistProject { project, .. } => Some(AuditAction::ProjectCreated {
+                project_id: project.id,
+            }),
+            Effect::PersistRepository { repository, .. } => {
+                Some(AuditAction::RepositoryRegistered {
+                    repository_id: repository.id,
+                })
+            }
+            Effect::PersistItem { item, .. } => Some(AuditAction::ItemCreated { item_id: item.id }),
+            Effect::PersistItemUpdate { item } => {
+                let previous = before
+                    .items
+                    .iter()
+                    .find(|candidate| candidate.id == item.id);
+                match previous {
+                    Some(previous) if previous.status != item.status => {
+                        Some(AuditAction::ItemStatusChanged {
+                            item_id: item.id,
+                            from: previous.status,
+                            to: item.status,
+                        })
+                    }
+                    Some(previous) if previous.notes != item.notes => {
+                        Some(AuditAction::ItemNotesChanged { item_id: item.id })
+                    }
+                    Some(_) => None,
+                    None => Some(AuditAction::ItemNotesChanged { item_id: item.id }),
+                }
+            }
+            Effect::PersistItemReminders { item, .. } => {
+                Some(AuditAction::ItemRemindersChanged { item_id: item.id })
+            }
+            Effect::PersistWorkset { workset, .. } => Some(AuditAction::WorksetCreated {
+                workset_id: workset.id,
+            }),
+            Effect::PersistWorksetUpdate { workset } => {
+                let previous = before
+                    .worksets
+                    .iter()
+                    .find(|candidate| candidate.id == workset.id);
+                match previous {
+                    Some(previous) if previous.archived != workset.archived => {
+                        Some(AuditAction::WorksetArchived {
+                            workset_id: workset.id,
+                            archived: workset.archived,
+                        })
+                    }
+                    Some(previous)
+                        if previous.root_directory == workset.root_directory
+                            && previous.branch == workset.branch
+                            && previous.repositories == workset.repositories =>
+                    {
+                        None
+                    }
+                    _ => Some(AuditAction::WorksetUpdated {
+                        workset_id: workset.id,
+                    }),
+                }
+            }
+            Effect::RemoveWorkset { workset_id } => Some(AuditAction::WorksetRemoved {
+                workset_id: *workset_id,
+            }),
+            Effect::PersistMachine { machine, .. } => Some(AuditAction::MachineRegistered {
+                machine_id: machine.id,
+            }),
+            Effect::PersistMachineObservation { machine } => {
+                let previous = before
+                    .machines
+                    .iter()
+                    .find(|candidate| candidate.id == machine.id);
+                (previous.is_none()
+                    || previous.map(|candidate| candidate.last_observed)
+                        != Some(machine.last_observed)
+                    || previous.and_then(|candidate| candidate.last_observed_at)
+                        != machine.last_observed_at)
+                    .then_some(AuditAction::MachineObserved {
+                        machine_id: machine.id,
+                        observation: machine.last_observed,
+                    })
+            }
+            Effect::PersistRun { run, .. } => Some(AuditAction::RunCreated { run_id: run.id }),
+            Effect::PersistRunState { run } => {
+                let previous = before.runs.iter().find(|candidate| candidate.id == run.id);
+                previous
+                    .filter(|previous| previous.state != run.state)
+                    .map(|previous| AuditAction::RunStateChanged {
+                        run_id: run.id,
+                        from: previous.state,
+                        to: run.state,
+                    })
+            }
+            Effect::PersistRunPaneStatus { run } => {
+                let previous = before.runs.iter().find(|candidate| candidate.id == run.id);
+                previous
+                    .filter(|previous| previous.pane_status != run.pane_status)
+                    .map(|previous| AuditAction::RunPaneStatusChanged {
+                        run_id: run.id,
+                        from: previous.pane_status,
+                        to: run.pane_status,
+                    })
+            }
+            Effect::PersistItemRelation { relation } => Some(AuditAction::ItemRelationChanged {
+                from_item_id: relation.from_item_id,
+                to_item_id: relation.to_item_id,
+                kind: relation.kind,
+            }),
+            Effect::PersistExternalObject { object, .. } => {
+                Some(AuditAction::ExternalObjectCreated {
+                    external_object_id: object.id,
+                })
+            }
+            Effect::PersistLink { link, .. } => Some(AuditAction::LinkCreated { link_id: link.id }),
+            Effect::PersistLinkState { link } => {
+                let previous = before
+                    .links
+                    .iter()
+                    .find(|candidate| candidate.id == link.id);
+                previous
+                    .filter(|previous| previous != &link)
+                    .map(|_| AuditAction::LinkUpdated { link_id: link.id })
+            }
+            Effect::PersistActivity { activity, .. } => {
+                Some(AuditAction::ExternalObjectRefreshed {
+                    external_object_id: activity.external_object_id,
+                })
+            }
+            Effect::PersistExternalSnapshot { .. } => None,
+            Effect::PersistContextAttentionDefault { attention_default } => {
+                Some(AuditAction::ContextAttentionDefaultChanged {
+                    context_id: attention_default.context_id,
+                    object_kind: attention_default.object_kind,
+                })
+            }
+        })
+        .collect()
 }
 
 struct CheckoutReceipt {
@@ -1915,6 +2113,22 @@ pub fn open_external_terminal(run_id: i64, state: State<'_, Mutex<Runtime>>) -> 
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .open_external_terminal(run_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn stop_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .stop_run(run_id)
+}
+
+#[tauri::command]
+pub fn list_audit_history(state: State<'_, Mutex<Runtime>>) -> Result<Vec<AuditEntry>, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .list_audit_history()
 }
 
 #[tauri::command]
@@ -2329,6 +2543,129 @@ mod tests {
 
     use super::*;
     use crate::persistence::SqliteStore;
+
+    #[test]
+    fn completing_an_item_leaves_active_runs_running_and_records_the_action() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .create_item("Keep the agent running".into(), 1, 1)
+            .expect("Item should be created");
+        runtime.state.runs.push(Run {
+            id: 1,
+            item_id: 1,
+            workset_id: 1,
+            machine_id: 1,
+            agent: AgentKind::Claude,
+            execution_profile: ExecutionProfile::Implement,
+            prompt: "private prompt that must not enter the audit history".into(),
+            working_directory: "/private/workset".into(),
+            session_name: "private-session".into(),
+            pane_id: "%1".into(),
+            started_at: 1,
+            state: RunState::Working,
+            pane_status: RunPaneStatus::Available,
+        });
+
+        let item = runtime
+            .update_item(
+                Event::SetItemStatus {
+                    item_id: 1,
+                    status: ItemStatus::Done,
+                },
+                1,
+            )
+            .expect("explicit completion should succeed");
+
+        assert_eq!(item.status, ItemStatus::Done);
+        assert_eq!(runtime.state.runs[0].state, RunState::Working);
+        assert_eq!(runtime.state.runs[0].pane_status, RunPaneStatus::Available);
+        let history = runtime
+            .list_audit_history()
+            .expect("audit history should be available");
+        assert!(history.iter().any(|entry| {
+            matches!(
+                entry.action,
+                AuditAction::ItemStatusChanged {
+                    item_id: 1,
+                    to: ItemStatus::Done,
+                    ..
+                }
+            )
+        }));
+        let serialized = serde_json::to_string(&history).expect("audit history should serialize");
+        assert!(!serialized.contains("private prompt"));
+        assert!(!serialized.contains("private-session"));
+        assert!(!serialized.contains("/private/workset"));
+    }
+
+    #[test]
+    fn stopping_a_run_is_explicit_and_only_marks_its_pane_missing() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let socket = format!("mission-manager-stop-{}", std::process::id());
+        let session = format!("stop-run-{}", std::process::id());
+        run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "new-session",
+            "-d",
+            "-s",
+            &session,
+        ]);
+        let pane_id = run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "display-message",
+            "-p",
+            "-t",
+            &session,
+            "#{pane_id}",
+        ]);
+
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime.state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: socket,
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+        runtime.state.runs.push(Run {
+            id: 1,
+            item_id: 1,
+            workset_id: 1,
+            machine_id: 1,
+            agent: AgentKind::Claude,
+            execution_profile: ExecutionProfile::Implement,
+            prompt: "private prompt".into(),
+            working_directory: "/tmp".into(),
+            session_name: session,
+            pane_id,
+            started_at: 1,
+            state: RunState::Working,
+            pane_status: RunPaneStatus::Available,
+        });
+
+        let stopped = runtime
+            .stop_run(1)
+            .expect("the explicit stop should succeed");
+
+        assert_eq!(stopped.state, RunState::Working);
+        assert_eq!(stopped.pane_status, RunPaneStatus::Missing);
+        assert!(runtime
+            .list_audit_history()
+            .expect("audit history should be available")
+            .iter()
+            .any(|entry| matches!(entry.action, AuditAction::RunStopped { run_id: 1 })));
+    }
 
     #[test]
     fn opening_external_terminal_reports_a_missing_run_pane_before_launching_anything() {

@@ -299,6 +299,31 @@ type PollResult = {
   failures: { external_object_id: number; error: string }[];
 };
 
+type AuditAction = {
+  action: string;
+  context_id?: number;
+  project_id?: number;
+  repository_id?: number;
+  item_id?: number;
+  from?: string;
+  to?: string;
+  workset_id?: number;
+  archived?: boolean;
+  machine_id?: number;
+  observation?: string;
+  run_id?: number;
+  external_object_id?: number;
+  link_id?: number;
+  from_item_id?: number;
+  to_item_id?: number;
+};
+
+type AuditEntry = {
+  id: number;
+  recorded_at: number;
+  action: AuditAction;
+};
+
 type ContextAttentionDefault = {
   context_id: number;
   object_kind: ExternalObjectKind;
@@ -322,6 +347,7 @@ export function App() {
   >([]);
   const [home, setHome] = useState<HomeView>();
   const [runSuggestions, setRunSuggestions] = useState<RunSuggestion[]>([]);
+  const [auditHistory, setAuditHistory] = useState<AuditEntry[]>([]);
   const [searchResults, setSearchResults] = useState<ItemView[]>([]);
   const [contextFilterId, setContextFilterId] = useState<number>();
   const [captureContextId, setCaptureContextId] = useState<number>();
@@ -378,6 +404,7 @@ export function App() {
         if (!disposed) {
           await refreshHome();
           await refreshRunSuggestions();
+          await refreshAuditHistory();
           if (searchQuery.trim()) {
             await refreshSearch();
           }
@@ -416,6 +443,7 @@ export function App() {
     let disposed = false;
     void listen("run-state-changed", () => {
       void refreshHome();
+      void refreshAuditHistory();
       if (searchQuery.trim()) {
         void refreshSearch();
       }
@@ -461,6 +489,7 @@ export function App() {
         loadedRepositories,
         loadedHome,
         loadedRunSuggestions,
+        loadedAuditHistory,
       ] = await Promise.all([
         invoke<Context[]>("list_contexts"),
         invoke<Project[]>("list_projects"),
@@ -472,6 +501,7 @@ export function App() {
           now: currentMinute(),
         }),
         invoke<RunSuggestion[]>("list_run_suggestions"),
+        invoke<AuditEntry[]>("list_audit_history"),
       ]);
       const nextCaptureContextId =
         loadedContexts.find((context) => context.id === captureContextId)?.id ??
@@ -491,6 +521,7 @@ export function App() {
       setMachines(loadedMachines);
       setAttentionDefaults(loadedAttentionDefaults);
       setRunSuggestions(loadedRunSuggestions);
+      setAuditHistory(loadedAuditHistory);
       setCaptureContextId(nextCaptureContextId);
       setCaptureProjectId(nextCaptureProjectId);
       setHome(loadedHome);
@@ -530,6 +561,11 @@ export function App() {
     setRunSuggestions(suggestions);
   }
 
+  async function refreshAuditHistory() {
+    const history = await invoke<AuditEntry[]>("list_audit_history");
+    setAuditHistory(history);
+  }
+
   async function refreshSearch() {
     if (!searchQuery.trim()) {
       setSearchResults([]);
@@ -548,6 +584,7 @@ export function App() {
       if (result.refreshed > 0) {
         await refreshHome();
         await refreshSearch();
+        await refreshAuditHistory();
       }
       if (showErrors && result.failures.length > 0) {
         setError(`Some External Objects could not be refreshed (${result.failures.length}).`);
@@ -581,6 +618,7 @@ export function App() {
         loadedProjects.find((project) => project.context_id === context.id)?.id,
       );
       setContextName("");
+      await refreshAuditHistory();
       setError(undefined);
     } catch (saveError) {
       setError(errorMessage(saveError));
@@ -607,6 +645,7 @@ export function App() {
       setCaptureProjectId(project.id);
       setProjectName("");
       setProjectDefaultStatus("Inbox");
+      await refreshAuditHistory();
       setError(undefined);
     } catch (saveError) {
       setError(errorMessage(saveError));
@@ -632,6 +671,7 @@ export function App() {
       setRepositories((current) => [...current, repository]);
       setRepositoryName("");
       setRepositoryRemoteUrl("");
+      await refreshAuditHistory();
       setError(undefined);
     } catch (saveError) {
       setError(errorMessage(saveError));
@@ -674,6 +714,7 @@ export function App() {
       setMachinePort("");
       setMachineIdentityFile("");
       setMachineKnownHostsFile("");
+      await refreshAuditHistory();
       setError(undefined);
     } catch (saveError) {
       setError(errorMessage(saveError));
@@ -688,6 +729,7 @@ export function App() {
       setMachines((current) =>
         current.map((machine) => (machine.id === checked.id ? checked : machine)),
       );
+      await refreshAuditHistory();
     } catch (checkError) {
       setError(errorMessage(checkError));
     }
@@ -739,7 +781,7 @@ export function App() {
       });
       setTitle("");
       setError(undefined);
-      await refreshHome();
+      await updateHomeAfterEdit();
     } catch (saveError) {
       setError(errorMessage(saveError));
     } finally {
@@ -785,6 +827,7 @@ export function App() {
       refreshHome(),
       refreshSearch(),
       refreshRunSuggestions(),
+      refreshAuditHistory(),
     ]);
     setRepositories(loadedRepositories);
     setMachines(loadedMachines);
@@ -897,6 +940,28 @@ export function App() {
               ))}
             </div>
           )}
+        </section>
+      )}
+
+      {auditHistory.length > 0 && (
+        <section className="audit-history" aria-labelledby="audit-history-heading">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Append-only record</p>
+              <h2 id="audit-history-heading">Recent actions</h2>
+            </div>
+            <span className="item-count">No prompts or terminal content</span>
+          </div>
+          <ol className="audit-history-list">
+            {auditHistory.slice(0, 12).map((entry) => (
+              <li key={entry.id}>
+                <span>{auditActionLabel(entry.action)}</span>
+                <time dateTime={new Date(entry.recorded_at * 1000).toISOString()}>
+                  {new Date(entry.recorded_at * 1000).toLocaleString()}
+                </time>
+              </li>
+            ))}
+          </ol>
         </section>
       )}
 
@@ -1809,6 +1874,17 @@ function ItemCard({
     }
   }
 
+  async function handleStopRun(run: Run) {
+    if (
+      !window.confirm(
+        `Stop Run #${run.id}? This is separate from completing the Item and will leave the Run in its history.`,
+      )
+    ) {
+      return;
+    }
+    await saveItem(() => invoke<Run>("stop_run", { runId: run.id }));
+  }
+
   async function handlePrepareRemoval(worksetId: number) {
     setIsSaving(true);
     try {
@@ -2288,14 +2364,28 @@ function ItemCard({
         <select
           aria-label={`Status for ${view.item.human_identifier}`}
           value={view.item.status}
-          onChange={(event) =>
+          onChange={(event) => {
+            const nextStatus = event.target.value as ItemStatus;
+            if (nextStatus === "Done" && view.item.status !== "Done") {
+              const activeRuns = view.runs.filter(
+                (run) => run.state !== "finished" && run.pane_status !== "missing",
+              );
+              if (
+                activeRuns.length > 0 &&
+                !window.confirm(
+                  `${activeRuns.length} Run${activeRuns.length === 1 ? " is" : "s are"} still active. Complete the Item without stopping them?`,
+                )
+              ) {
+                return;
+              }
+            }
             void saveItem(() =>
               invoke("set_item_status", {
                 itemId: view.item.id,
-                status: event.target.value,
+                status: nextStatus,
               }),
-            )
-          }
+            );
+          }}
           disabled={isSaving}
         >
           {itemStatuses.map((status) => (
@@ -2437,6 +2527,16 @@ function ItemCard({
                     >
                       Open in Terminal
                     </button>
+                    {run.state !== "finished" && run.pane_status !== "missing" && (
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        disabled={isSaving}
+                        onClick={() => void handleStopRun(run)}
+                      >
+                        Stop Run
+                      </button>
+                    )}
                     {run.pane_status === "missing" && !runWorkset.archived && (
                       <button
                         type="button"
@@ -3232,6 +3332,59 @@ function findWorkset(view: ItemView, worksetId: number): Workset | undefined {
   return [...view.worksets, ...view.archived_worksets].find(
     (workset) => workset.id === worksetId,
   );
+}
+
+function auditActionLabel(action: AuditAction): string {
+  switch (action.action) {
+    case "itemCreated":
+      return `Created Item #${action.item_id}`;
+    case "itemStatusChanged":
+      return `Moved Item #${action.item_id} from ${action.from} to ${action.to}`;
+    case "itemNotesChanged":
+      return `Updated notes on Item #${action.item_id}`;
+    case "itemRemindersChanged":
+      return `Updated reminders on Item #${action.item_id}`;
+    case "itemRelationChanged":
+      return `Updated the relationship between Items #${action.from_item_id} and #${action.to_item_id}`;
+    case "worksetCreated":
+      return `Created Workset #${action.workset_id}`;
+    case "worksetArchived":
+      return `${action.archived ? "Archived" : "Restored"} Workset #${action.workset_id}`;
+    case "worksetRemoved":
+      return `Removed Workset #${action.workset_id}`;
+    case "worksetUpdated":
+      return `Updated Workset #${action.workset_id}`;
+    case "runCreated":
+      return `Created Run #${action.run_id}`;
+    case "runStopped":
+      return `Stopped Run #${action.run_id}`;
+    case "runStateChanged":
+      return `Run #${action.run_id} changed from ${action.from} to ${action.to}`;
+    case "runPaneStatusChanged":
+      return `Run #${action.run_id} Pane changed from ${action.from} to ${action.to}`;
+    case "externalObjectCreated":
+      return `Added External Object #${action.external_object_id}`;
+    case "externalObjectRefreshed":
+      return `Refreshed External Object #${action.external_object_id}`;
+    case "linkCreated":
+      return `Linked External Object through Link #${action.link_id}`;
+    case "linkUpdated":
+      return `Updated Link #${action.link_id}`;
+    case "contextCreated":
+      return `Created Context #${action.context_id}`;
+    case "projectCreated":
+      return `Created Project #${action.project_id}`;
+    case "repositoryRegistered":
+      return `Registered Repository #${action.repository_id}`;
+    case "machineRegistered":
+      return `Registered Machine #${action.machine_id}`;
+    case "machineObserved":
+      return `Observed Machine #${action.machine_id} as ${action.observation}`;
+    case "contextAttentionDefaultChanged":
+      return `Updated attention defaults for Context #${action.context_id}`;
+    default:
+      return "Recorded action";
+  }
 }
 
 function paneTabForRun(run: Run): PaneTab {

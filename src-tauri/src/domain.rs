@@ -429,6 +429,98 @@ pub struct HomeView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "action", rename_all = "camelCase")]
+pub enum AuditAction {
+    ContextCreated {
+        context_id: i64,
+    },
+    ProjectCreated {
+        project_id: i64,
+    },
+    RepositoryRegistered {
+        repository_id: i64,
+    },
+    ItemCreated {
+        item_id: i64,
+    },
+    ItemStatusChanged {
+        item_id: i64,
+        from: ItemStatus,
+        to: ItemStatus,
+    },
+    ItemNotesChanged {
+        item_id: i64,
+    },
+    ItemRemindersChanged {
+        item_id: i64,
+    },
+    ItemRelationChanged {
+        from_item_id: i64,
+        to_item_id: i64,
+        kind: ItemRelationKind,
+    },
+    WorksetCreated {
+        workset_id: i64,
+    },
+    WorksetUpdated {
+        workset_id: i64,
+    },
+    WorksetArchived {
+        workset_id: i64,
+        archived: bool,
+    },
+    WorksetRemoved {
+        workset_id: i64,
+    },
+    MachineRegistered {
+        machine_id: i64,
+    },
+    MachineObserved {
+        machine_id: i64,
+        observation: MachineObservation,
+    },
+    RunCreated {
+        run_id: i64,
+    },
+    RunStopped {
+        run_id: i64,
+    },
+    RunStateChanged {
+        run_id: i64,
+        from: RunState,
+        to: RunState,
+    },
+    RunPaneStatusChanged {
+        run_id: i64,
+        from: RunPaneStatus,
+        to: RunPaneStatus,
+    },
+    ExternalObjectCreated {
+        external_object_id: i64,
+    },
+    ExternalObjectRefreshed {
+        external_object_id: i64,
+    },
+    LinkCreated {
+        link_id: i64,
+    },
+    LinkUpdated {
+        link_id: i64,
+    },
+    ContextAttentionDefaultChanged {
+        context_id: i64,
+        object_kind: ExternalObjectKind,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AuditEntry {
+    pub id: i64,
+    pub recorded_at: i64,
+    pub action: AuditAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DomainState {
     pub next_context_id: i64,
     pub next_project_id: i64,

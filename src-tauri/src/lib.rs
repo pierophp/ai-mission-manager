@@ -51,6 +51,8 @@ pub fn run() {
             app::terminal_resize,
             app::close_terminal,
             app::open_external_terminal,
+            app::stop_run,
+            app::list_audit_history,
             app::set_item_status,
             app::set_item_notes,
             app::add_item_reminder,
