@@ -411,6 +411,7 @@ export function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [isCheckingDependencies, setIsCheckingDependencies] = useState(false);
+  const [showHealthDetails, setShowHealthDetails] = useState(false);
   const [initialStateLoaded, setInitialStateLoaded] = useState(false);
   const [terminalRequest, setTerminalRequest] = useState<{
     worksetId: number;
@@ -560,7 +561,7 @@ export function App() {
       if (!setupContextName.trim() || setupContextName === "Personal") {
         setSetupContextName(loadedContexts[0]?.name ?? "Personal");
       }
-      setSetupTracker(loadedSetupState.tracker);
+      setSetupTracker(loadedSetupState.completed ? loadedSetupState.tracker : "github");
       setRepositories(loadedRepositories);
       setMachines(loadedMachines);
       setAttentionDefaults(loadedAttentionDefaults);
@@ -919,10 +920,43 @@ export function App() {
             is waiting.
           </p>
         </div>
-        <div className="status-mark" aria-label="Local database connected">
-          <span className="status-dot" /> Local
-        </div>
+        <button
+          type="button"
+          className="health-indicator health-button"
+          aria-label="Runtime and provider health"
+          aria-expanded={showHealthDetails}
+          onClick={() => setShowHealthDetails((current) => !current)}
+        >
+          <span
+            className={`status-dot health-${healthStatus ? healthStatus.runtime.state : "unavailable"}`}
+          />
+          <span>Runtime: {healthStatus ? dependencyStateLabel(healthStatus.runtime.state) : "Checking"}</span>
+          <span className="health-separator">·</span>
+          <span>GitHub: {healthStatus ? dependencyStateLabel(healthStatus.provider.state) : "Checking"}</span>
+        </button>
       </header>
+
+      {showHealthDetails && setupState?.completed && healthStatus && (
+        <HealthDetails
+          health={healthStatus}
+          isCheckingDependencies={isCheckingDependencies}
+          onCheckDependencies={() => void refreshHealthStatus()}
+        />
+      )}
+
+      {setupState && !setupState.completed && (
+        <SetupWizard
+          contextName={setupContextName}
+          tracker={setupTracker}
+          health={healthStatus}
+          isSaving={isSaving}
+          isCheckingDependencies={isCheckingDependencies}
+          onContextNameChange={setSetupContextName}
+          onTrackerChange={setSetupTracker}
+          onCheckDependencies={() => void refreshHealthStatus()}
+          onSubmit={handleCompleteSetup}
+        />
+      )}
 
       <section className="home-controls" aria-label="Home view controls">
         <label>
@@ -1560,6 +1594,194 @@ export function App() {
       </section>
     </main>
   );
+}
+
+function SetupWizard({
+  contextName,
+  tracker,
+  health,
+  isSaving,
+  isCheckingDependencies,
+  onContextNameChange,
+  onTrackerChange,
+  onCheckDependencies,
+  onSubmit,
+}: {
+  contextName: string;
+  tracker: TrackerChoice;
+  health: HealthStatus | undefined;
+  isSaving: boolean;
+  isCheckingDependencies: boolean;
+  onContextNameChange: (value: string) => void;
+  onTrackerChange: (value: TrackerChoice) => void;
+  onCheckDependencies: () => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <section className="setup-wizard" aria-labelledby="setup-heading">
+      <div className="section-heading">
+        <div>
+          <p className="eyebrow">First run</p>
+          <h2 id="setup-heading">Make the app ready for your work</h2>
+          <p className="setup-intro">
+            Choose your first Context, decide whether to connect GitHub, and check the tools
+            already installed on this Machine. Mission Manager never installs or authenticates
+            anything on your behalf.
+          </p>
+        </div>
+        <span className="item-count">Three quick checks</span>
+      </div>
+      <form className="setup-form" onSubmit={onSubmit}>
+        <div className="setup-step">
+          <span className="setup-step-number">1</span>
+          <div>
+            <h3>Create a Context</h3>
+            <p className="column-hint">A Context keeps its Items, providers, and Machines together.</p>
+            <label>
+              <span>Context name</span>
+              <input
+                value={contextName}
+                onChange={(event) => onContextNameChange(event.target.value)}
+                placeholder="Personal"
+                disabled={isSaving}
+                autoFocus
+              />
+            </label>
+          </div>
+        </div>
+        <div className="setup-step">
+          <span className="setup-step-number">2</span>
+          <div>
+            <h3>Choose a tracker</h3>
+            <p className="column-hint">You can keep local work here and connect a tracker later.</p>
+            <div className="setup-choice-list">
+              <label className="setup-choice">
+                <input
+                  type="radio"
+                  name="tracker"
+                  value="github"
+                  checked={tracker === "github"}
+                  onChange={() => onTrackerChange("github")}
+                  disabled={isSaving}
+                />
+                <span><strong>GitHub</strong><small>Use the installed `gh` CLI for Issues and pull requests.</small></span>
+              </label>
+              <label className="setup-choice">
+                <input
+                  type="radio"
+                  name="tracker"
+                  value="none"
+                  checked={tracker === "none"}
+                  onChange={() => onTrackerChange("none")}
+                  disabled={isSaving}
+                />
+                <span><strong>No tracker yet</strong><small>Local Items and Runs remain available.</small></span>
+              </label>
+            </div>
+          </div>
+        </div>
+        <div className="setup-step setup-dependencies">
+          <span className="setup-step-number">3</span>
+          <div>
+            <div className="setup-dependency-heading">
+              <div>
+                <h3>Check dependencies</h3>
+                <p className="column-hint">Missing or unauthenticated tools do not stop the rest of the app.</p>
+              </div>
+              <button
+                type="button"
+                className="secondary-button"
+                onClick={onCheckDependencies}
+                disabled={isCheckingDependencies || isSaving}
+              >
+                {isCheckingDependencies ? "Checking…" : "Check again"}
+              </button>
+            </div>
+            <DependencyList health={health} />
+          </div>
+        </div>
+        <div className="setup-actions">
+          <p className="column-hint">You can revisit tool setup from the health indicator at any time.</p>
+          <button type="submit" disabled={isSaving || !contextName.trim()}>
+            {isSaving ? "Saving setup…" : "Finish setup"}
+          </button>
+        </div>
+      </form>
+    </section>
+  );
+}
+
+function HealthDetails({
+  health,
+  isCheckingDependencies,
+  onCheckDependencies,
+}: {
+  health: HealthStatus;
+  isCheckingDependencies: boolean;
+  onCheckDependencies: () => void;
+}) {
+  return (
+    <section className="health-details" aria-label="Tool health details">
+      <div className="health-details-heading">
+        <div>
+          <p className="eyebrow">Tool health</p>
+          <h2>Runtime and provider status</h2>
+        </div>
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={onCheckDependencies}
+          disabled={isCheckingDependencies}
+        >
+          {isCheckingDependencies ? "Checking…" : "Check again"}
+        </button>
+      </div>
+      <DependencyList health={health} />
+    </section>
+  );
+}
+
+function DependencyList({ health }: { health: HealthStatus | undefined }) {
+  const dependencies = health
+    ? [health.runtime, health.provider, ...health.agents]
+    : [];
+
+  return (
+    <ul className="dependency-list">
+      {dependencies.length === 0 ? (
+        <li className="dependency-row"><span>Checking installed tools…</span></li>
+      ) : (
+        dependencies.map((dependency) => (
+          <li className="dependency-row" key={dependency.key}>
+            <span className={`dependency-state dependency-${dependency.state}`}>
+              {dependencyStateLabel(dependency.state)}
+            </span>
+            <span className="dependency-copy">
+              <strong>{dependency.label}</strong>
+              <span>{dependency.message}</span>
+              {dependency.executablePath && <code>{dependency.executablePath}</code>}
+              {dependency.action && <small>{dependency.action}</small>}
+            </span>
+          </li>
+        ))
+      )}
+    </ul>
+  );
+}
+
+function dependencyStateLabel(state: DependencyState): string {
+  switch (state) {
+    case "available":
+      return "Ready";
+    case "missing":
+      return "Missing";
+    case "unauthenticated":
+      return "Needs login";
+    case "notConfigured":
+      return "Not selected";
+    case "unavailable":
+      return "Unavailable";
+  }
 }
 
 function EmbeddedTerminal({

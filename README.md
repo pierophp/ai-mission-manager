@@ -91,7 +91,7 @@ The initial provider is GitHub. The initial Terminal Runtime is tmux. Both are b
 - Claude Code and/or Codex for agent Runs
 - SSH access to a remote Machine for remote execution
 
-The last three are optional depending on which parts of the application you want to use. Tauri development also requires the usual macOS developer tools; install them with xcode-select --install if they are not already present.
+Claude Code, Codex, and SSH are optional depending on which parts of the application you want to use; gh is needed for GitHub integration. Tauri development also requires the usual macOS developer tools; install them with xcode-select --install if they are not already present.
 
 Check the local integrations before launching:
 
