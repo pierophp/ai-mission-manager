@@ -26,6 +26,7 @@ pub fn run() {
             app::list_machines,
             app::list_context_attention_defaults,
             app::get_home,
+            app::reconcile_runs,
             app::search_items_command,
             app::create_context,
             app::create_project,

@@ -16,8 +16,8 @@ use crate::{
         DomainState, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
         ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView,
         Item, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine, MachineObservation,
-        MachineTransport, Project, ProjectDefaults, Repository, Run, RunPromptSelection, RunState,
-        Workset, WorksetRepositoryInput,
+        MachineTransport, Project, ProjectDefaults, Repository, Run, RunPaneStatus,
+        RunPromptSelection, RunState, Workset, WorksetRepositoryInput,
     },
     git::GitCli,
     persistence::SqliteStore,
@@ -335,6 +335,7 @@ impl Runtime {
         .map_err(|error| error.to_string())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_run(
         &mut self,
         item_id: i64,
@@ -688,6 +689,43 @@ impl Runtime {
                 continue;
             }
             self.apply_agent_state_record(record_run_id, record)?;
+        }
+        Ok(())
+    }
+
+    fn reconcile_runs(&mut self) -> Result<(), String> {
+        self.recover_run_states()?;
+        for run in self.state.runs.clone() {
+            let Some(machine) = self
+                .state
+                .machines
+                .iter()
+                .find(|machine| machine.id == run.machine_id)
+            else {
+                continue;
+            };
+            let pane_status = if probe_machine(machine).is_err() {
+                RunPaneStatus::Unknown
+            } else {
+                match list_panes(machine, &run.session_name) {
+                    Ok(panes) if panes.iter().any(|pane| pane.pane_id == run.pane_id) => {
+                        RunPaneStatus::Available
+                    }
+                    Ok(_) | Err(_) => RunPaneStatus::Missing,
+                }
+            };
+            if pane_status == run.pane_status {
+                continue;
+            }
+            let decision = decide(
+                self.state.clone(),
+                Event::SetRunPaneStatus {
+                    run_id: run.id,
+                    status: pane_status,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            self.commit(decision)?;
         }
         Ok(())
     }
@@ -1645,6 +1683,7 @@ pub fn compose_run_prompt(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 pub fn start_run(
     item_id: i64,
     workset_id: i64,
@@ -1781,6 +1820,14 @@ pub fn get_home(
             runtime.recover_run_states()?;
             Ok(home_view(&runtime.state, context_id, &now))
         })
+}
+
+#[tauri::command]
+pub fn reconcile_runs(state: State<'_, Mutex<Runtime>>) -> Result<(), String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .reconcile_runs()
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2190,6 +2237,7 @@ mod tests {
             pane_id: "%99".into(),
             started_at: 1,
             state: RunState::Unknown,
+            pane_status: RunPaneStatus::Unknown,
         });
 
         let error = runtime
@@ -2197,6 +2245,117 @@ mod tests {
             .expect_err("a missing Pane must stop before Terminal.app launches");
 
         assert!(error.contains("Pane %99 is not available in session missing-session"));
+    }
+
+    #[test]
+    fn startup_reconciliation_marks_known_and_missing_panes_without_creating_runs() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let socket = format!("mission-manager-reconcile-{}", std::process::id());
+        let session = format!("reconcile-{}", std::process::id());
+        run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "new-session",
+            "-d",
+            "-s",
+            &session,
+            "-c",
+            directory
+                .path()
+                .to_str()
+                .expect("temporary path should be valid"),
+        ]);
+        let pane_id = run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "display-message",
+            "-p",
+            "-t",
+            &session,
+            "#{pane_id}",
+        ]);
+
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime.state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: socket.clone(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+        runtime.state.runs.extend([
+            Run {
+                id: 1,
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Claude,
+                execution_profile: ExecutionProfile::Implement,
+                prompt: "Keep the known Run".into(),
+                working_directory: directory.path().to_string_lossy().into_owned(),
+                session_name: session.clone(),
+                pane_id: pane_id.clone(),
+                started_at: 1,
+                state: RunState::Working,
+                pane_status: RunPaneStatus::Unknown,
+            },
+            Run {
+                id: 2,
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Codex,
+                execution_profile: ExecutionProfile::Review,
+                prompt: "Keep the missing Run".into(),
+                working_directory: directory.path().to_string_lossy().into_owned(),
+                session_name: session.clone(),
+                pane_id: "%999".into(),
+                started_at: 2,
+                state: RunState::Blocked,
+                pane_status: RunPaneStatus::Unknown,
+            },
+            Run {
+                id: 3,
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Claude,
+                execution_profile: ExecutionProfile::Investigate,
+                prompt: "Keep the missing session Run".into(),
+                working_directory: directory.path().to_string_lossy().into_owned(),
+                session_name: "gone-session".into(),
+                pane_id: "%1".into(),
+                started_at: 3,
+                state: RunState::Finished,
+                pane_status: RunPaneStatus::Unknown,
+            },
+        ]);
+
+        runtime
+            .reconcile_runs()
+            .expect("startup reconciliation should complete");
+
+        assert_eq!(runtime.state.runs.len(), 3);
+        assert_eq!(runtime.state.runs[0].pane_status, RunPaneStatus::Available);
+        assert_eq!(runtime.state.runs[1].pane_status, RunPaneStatus::Missing);
+        assert_eq!(runtime.state.runs[1].state, RunState::Blocked);
+        assert_eq!(runtime.state.runs[2].pane_status, RunPaneStatus::Missing);
+        run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "kill-session",
+            "-t",
+            &session,
+        ]);
     }
 
     #[cfg(unix)]
@@ -2517,6 +2676,19 @@ fi
             .output()
             .expect("Git should start");
         assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn run_tmux(args: &[&str]) -> String {
+        let output = Command::new("tmux")
+            .args(args)
+            .output()
+            .expect("tmux should start");
+        assert!(
+            output.status.success(),
+            "tmux failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 }

@@ -7,8 +7,8 @@ use crate::domain::{
     Activity, AgentKind, Context, ContextAttentionDefault, DomainState, Effect, ExecutionProfile,
     ExternalChangePolicy, ExternalMetadata, ExternalObject, ExternalObjectKind, ExternalProvider,
     ExternalSnapshot, Item, ItemRelation, ItemRelationKind, ItemStatus, Link, Machine,
-    MachineObservation, Project, ProjectDefaults, Reminder, Repository, Run, RunState, Workset,
-    WorksetRepository,
+    MachineObservation, Project, ProjectDefaults, Reminder, Repository, Run, RunPaneStatus,
+    RunState, Workset, WorksetRepository,
 };
 
 #[derive(Debug, Error)]
@@ -35,6 +35,8 @@ pub enum StoreError {
     InvalidExecutionProfile(String),
     #[error("invalid Run state in database: {0}")]
     InvalidRunState(String),
+    #[error("invalid Run Pane status in database: {0}")]
+    InvalidRunPaneStatus(String),
     #[error("invalid Machine transport in database: {0}")]
     InvalidMachineTransport(String),
     #[error("invalid Machine observation in database: {0}")]
@@ -320,7 +322,8 @@ impl SqliteStore {
         let runs = {
             let mut statement = self.connection.prepare(
                 "SELECT id, item_id, workset_id, machine_id, agent, execution_profile,
-                        prompt, working_directory, session_name, pane_id, started_at, state
+                        prompt, working_directory, session_name, pane_id, started_at, state,
+                        pane_status
                  FROM runs
                  ORDER BY id",
             )?;
@@ -360,6 +363,15 @@ impl SqliteStore {
                             Box::new(error),
                         )
                     })?,
+                    pane_status: parse_run_pane_status(&row.get::<_, String>(12)?).map_err(
+                        |error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                12,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        },
+                    )?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -747,8 +759,9 @@ impl SqliteStore {
                     transaction.execute(
                         "INSERT INTO runs
                             (id, item_id, workset_id, machine_id, agent, execution_profile,
-                            prompt, working_directory, session_name, pane_id, started_at, state)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                            prompt, working_directory, session_name, pane_id, started_at, state,
+                            pane_status)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                         params![
                             run.id,
                             run.item_id,
@@ -762,6 +775,7 @@ impl SqliteStore {
                             run.pane_id,
                             run.started_at,
                             run_state_as_str(run.state),
+                            run_pane_status_as_str(run.pane_status),
                         ],
                     )?;
                     transaction.execute(
@@ -773,6 +787,12 @@ impl SqliteStore {
                     transaction.execute(
                         "UPDATE runs SET state = ?1 WHERE id = ?2",
                         params![run_state_as_str(run.state), run.id],
+                    )?;
+                }
+                Effect::PersistRunPaneStatus { run } => {
+                    transaction.execute(
+                        "UPDATE runs SET pane_status = ?1 WHERE id = ?2",
+                        params![run_pane_status_as_str(run.pane_status), run.id],
                     )?;
                 }
                 Effect::RemoveWorkset { workset_id } => {
@@ -1037,7 +1057,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              session_name TEXT NOT NULL,
              pane_id TEXT NOT NULL,
              started_at INTEGER NOT NULL,
-             state TEXT NOT NULL DEFAULT 'unknown'
+             state TEXT NOT NULL DEFAULT 'unknown',
+             pane_status TEXT NOT NULL DEFAULT 'unknown'
          );
          CREATE INDEX IF NOT EXISTS runs_by_item
              ON runs (item_id, id);
@@ -1113,6 +1134,12 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "state") {
         connection.execute(
             "ALTER TABLE runs ADD COLUMN state TEXT NOT NULL DEFAULT 'unknown'",
+            [],
+        )?;
+    }
+    if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "pane_status") {
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN pane_status TEXT NOT NULL DEFAULT 'unknown'",
             [],
         )?;
     }
@@ -1350,6 +1377,23 @@ fn parse_run_state(state: &str) -> Result<RunState, StoreError> {
         "blocked" => Ok(RunState::Blocked),
         "finished" => Ok(RunState::Finished),
         other => Err(StoreError::InvalidRunState(other.into())),
+    }
+}
+
+fn run_pane_status_as_str(status: RunPaneStatus) -> &'static str {
+    match status {
+        RunPaneStatus::Unknown => "unknown",
+        RunPaneStatus::Available => "available",
+        RunPaneStatus::Missing => "missing",
+    }
+}
+
+fn parse_run_pane_status(status: &str) -> Result<RunPaneStatus, StoreError> {
+    match status {
+        "unknown" => Ok(RunPaneStatus::Unknown),
+        "available" => Ok(RunPaneStatus::Available),
+        "missing" => Ok(RunPaneStatus::Missing),
+        other => Err(StoreError::InvalidRunPaneStatus(other.into())),
     }
 }
 
@@ -1749,6 +1793,17 @@ mod tests {
             store
                 .apply(&blocked.effects)
                 .expect("Run state should persist");
+            let missing = decide(
+                blocked.state,
+                Event::SetRunPaneStatus {
+                    run_id: 1,
+                    status: RunPaneStatus::Missing,
+                },
+            )
+            .expect("Run Pane status should update");
+            store
+                .apply(&missing.effects)
+                .expect("Run Pane status should persist");
         }
 
         let reopened = SqliteStore::open(&path).expect("database should reopen");
@@ -1784,6 +1839,7 @@ mod tests {
         assert_eq!(state.runs[0].session_name, "mission-item-1-run-1");
         assert_eq!(state.runs[0].pane_id, "%1");
         assert_eq!(state.runs[0].state, RunState::Blocked);
+        assert_eq!(state.runs[0].pane_status, RunPaneStatus::Missing);
         assert_eq!(state.next_machine_id, 2);
         assert_eq!(state.next_run_id, 2);
     }

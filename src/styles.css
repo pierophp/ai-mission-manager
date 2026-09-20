@@ -831,6 +831,15 @@ button:disabled {
   color: #4a4139;
 }
 
+.run-pane-missing {
+  color: #a74e3b;
+  font-weight: 600;
+}
+
+.run-pane-unknown {
+  color: #9a6a2f;
+}
+
 .embedded-terminal {
   display: grid;
   gap: 14px;

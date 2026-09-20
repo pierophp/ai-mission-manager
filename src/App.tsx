@@ -82,6 +82,7 @@ type Machine = {
 type AgentKind = "claude" | "codex";
 type ExecutionProfile = "investigate" | "implement" | "review" | "custom";
 type RunState = "unknown" | "working" | "blocked" | "finished";
+type RunPaneStatus = "unknown" | "available" | "missing";
 
 type Run = {
   id: number;
@@ -96,6 +97,7 @@ type Run = {
   pane_id: string;
   started_at: number;
   state: RunState;
+  pane_status: RunPaneStatus;
 };
 
 type PaneTab = {
@@ -331,6 +333,7 @@ export function App() {
   const [error, setError] = useState<string>();
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [initialStateLoaded, setInitialStateLoaded] = useState(false);
   const [terminalRequest, setTerminalRequest] = useState<{
     worksetId: number;
     pane: PaneTab;
@@ -347,6 +350,32 @@ export function App() {
   useEffect(() => {
     void loadAppState();
   }, []);
+
+  useEffect(() => {
+    if (!initialStateLoaded) return;
+    let disposed = false;
+    void (async () => {
+      try {
+        await invoke("reconcile_runs");
+        if (!disposed) {
+          await refreshHome();
+          if (searchQuery.trim()) {
+            await refreshSearch();
+          }
+        }
+      } catch (reconcileError) {
+        if (!disposed) {
+          setError(errorMessage(reconcileError));
+        }
+      }
+      if (!disposed) {
+        await pollExternalObjects(false);
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [initialStateLoaded]);
 
   useEffect(() => {
     if (!home || !searchQuery.trim()) {
@@ -397,13 +426,24 @@ export function App() {
   async function loadAppState() {
     setIsLoading(true);
     try {
-      const [loadedContexts, loadedProjects, loadedAttentionDefaults, loadedMachines] = await Promise.all([
+      const [
+        loadedContexts,
+        loadedProjects,
+        loadedAttentionDefaults,
+        loadedMachines,
+        loadedRepositories,
+        loadedHome,
+      ] = await Promise.all([
         invoke<Context[]>("list_contexts"),
         invoke<Project[]>("list_projects"),
         invoke<ContextAttentionDefault[]>("list_context_attention_defaults"),
         invoke<Machine[]>("list_machines"),
+        invoke<Repository[]>("list_repositories"),
+        invoke<HomeView>("get_home", {
+          contextId: contextFilterId ?? null,
+          now: currentMinute(),
+        }),
       ]);
-      const loadedRepositories = await invoke<Repository[]>("list_repositories");
       const nextCaptureContextId =
         loadedContexts.find((context) => context.id === captureContextId)?.id ??
         loadedContexts[0]?.id;
@@ -416,12 +456,6 @@ export function App() {
         loadedProjects.find(
           (project) => project.context_id === nextCaptureContextId,
         )?.id;
-      await invoke<PollResult>("poll_external_objects");
-      const loadedHome = await invoke<HomeView>("get_home", {
-        contextId: contextFilterId ?? null,
-        now: currentMinute(),
-      });
-
       setContexts(loadedContexts);
       setProjects(loadedProjects);
       setRepositories(loadedRepositories);
@@ -431,6 +465,7 @@ export function App() {
       setCaptureProjectId(nextCaptureProjectId);
       setHome(loadedHome);
       setError(undefined);
+      setInitialStateLoaded(true);
       if (searchQuery.trim()) {
         await refreshSearch();
       }
@@ -2271,50 +2306,73 @@ function ItemCard({
       {view.runs.length > 0 && (
         <div className="run-history">
           <span className="relationship-label">Run history</span>
-          {view.runs.map((run) => (
-            <article className="run-history-card" key={run.id}>
-              <div>
-                <strong>
-                  Run #{run.id} · {run.agent === "claude" ? "Claude Code" : "Codex"}
-                </strong>
-                <span>
-                  {run.execution_profile} ·{" "}
-                  {machines.find((machine) => machine.id === run.machine_id)?.name ??
-                    "Machine #" + run.machine_id}{" "}
-                  · {runStateLabel(run.state)}
-                </span>
-              </div>
-              <code>{run.working_directory}</code>
-              <span>
-                Session {run.session_name} · Pane {run.pane_id}
-              </span>
-              {findWorkset(view, run.workset_id) && (
-                <div className="run-history-actions">
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    onClick={() =>
-                      onOpenTerminal(run.workset_id, paneTabForRun(run))
-                    }
-                  >
-                    Open embedded terminal
-                  </button>
-                  <button
-                    type="button"
-                    className="secondary-button"
-                    disabled={isSaving}
-                    onClick={() =>
-                      void saveItem(() =>
-                        invoke("open_external_terminal", { runId: run.id }),
-                      )
-                    }
-                  >
-                    Open in Terminal
-                  </button>
+          {view.runs.map((run) => {
+            const runWorkset = findWorkset(view, run.workset_id);
+            return (
+              <article className="run-history-card" key={run.id}>
+                <div>
+                  <strong>
+                    Run #{run.id} · {run.agent === "claude" ? "Claude Code" : "Codex"}
+                  </strong>
+                  <span>
+                    {run.execution_profile} ·{" "}
+                    {machines.find((machine) => machine.id === run.machine_id)?.name ??
+                      "Machine #" + run.machine_id}{" "}
+                    · {runStateLabel(run.state)}
+                    {run.pane_status === "available" && " · Pane available"}
+                  </span>
                 </div>
-              )}
-            </article>
-          ))}
+                <code>{run.working_directory}</code>
+                <span>
+                  Session {run.session_name} · Pane {run.pane_id}
+                </span>
+                {run.pane_status === "missing" && (
+                  <span className="run-pane-missing">
+                    Pane missing. Decide whether to start another Run.
+                  </span>
+                )}
+                {run.pane_status === "unknown" && (
+                  <span className="run-pane-unknown">Pane status not confirmed.</span>
+                )}
+                {runWorkset && (
+                  <div className="run-history-actions">
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={isSaving || run.pane_status === "missing"}
+                      onClick={() =>
+                        onOpenTerminal(run.workset_id, paneTabForRun(run))
+                      }
+                    >
+                      Open embedded terminal
+                    </button>
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={isSaving || run.pane_status === "missing"}
+                      onClick={() =>
+                        void saveItem(() =>
+                          invoke("open_external_terminal", { runId: run.id }),
+                        )
+                      }
+                    >
+                      Open in Terminal
+                    </button>
+                    {run.pane_status === "missing" && !runWorkset.archived && (
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        disabled={isSaving}
+                        onClick={() => void openRunPreview(runWorkset)}
+                      >
+                        Start a new Run
+                      </button>
+                    )}
+                  </div>
+                )}
+              </article>
+            );
+          })}
         </div>
       )}
       <div className="worksets">
@@ -3065,7 +3123,7 @@ function paneTabForRun(run: Run): PaneTab {
     sessionName: run.session_name,
     runId: run.id,
     label: `Run #${run.id}`,
-    available: true,
+    available: run.pane_status === "available",
     paneIndex: 0,
     pid: 0,
     columns: 0,

@@ -141,6 +141,16 @@ pub enum RunState {
     Finished,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunPaneStatus {
+    #[serde(rename = "unknown")]
+    Unknown,
+    #[serde(rename = "available")]
+    Available,
+    #[serde(rename = "missing")]
+    Missing,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunPromptSelection {
@@ -163,6 +173,7 @@ pub struct Run {
     pub pane_id: String,
     pub started_at: i64,
     pub state: RunState,
+    pub pane_status: RunPaneStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -490,6 +501,10 @@ pub enum Event {
         run_id: i64,
         state: RunState,
     },
+    SetRunPaneStatus {
+        run_id: i64,
+        status: RunPaneStatus,
+    },
     SetItemStatus {
         item_id: i64,
         status: ItemStatus,
@@ -586,6 +601,9 @@ pub enum Effect {
         next_run_id: i64,
     },
     PersistRunState {
+        run: Run,
+    },
+    PersistRunPaneStatus {
         run: Run,
     },
     PersistItemUpdate {
@@ -1270,6 +1288,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 pane_id,
                 started_at,
                 state: RunState::Unknown,
+                pane_status: RunPaneStatus::Available,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -1293,6 +1312,20 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             Ok(Decision {
                 state,
                 effects: vec![Effect::PersistRunState { run }],
+            })
+        }
+        Event::SetRunPaneStatus { run_id, status } => {
+            let run = state
+                .runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
+                .ok_or(DomainError::RunNotFound { run_id })?;
+            run.pane_status = status;
+            let run = run.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRunPaneStatus { run }],
             })
         }
         Event::SetItemStatus { item_id, status } => {
@@ -3969,6 +4002,68 @@ mod tests {
             .attention_entries
             .is_empty());
         assert_eq!(finished.state.items[0].status, ItemStatus::Inbox);
+    }
+
+    #[test]
+    fn a_run_pane_can_be_marked_missing_without_changing_agent_state() {
+        let mut state = state_with_item(1, "Work");
+        state.worksets.push(Workset {
+            id: 1,
+            item_id: 1,
+            root_directory: "/tmp/workset".into(),
+            branch: "main".into(),
+            archived: false,
+            repositories: Vec::new(),
+        });
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: "mission-manager".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+        let started = decide(
+            state,
+            Event::StartRun {
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Claude,
+                execution_profile: ExecutionProfile::Implement,
+                prompt: "Do the work".into(),
+                working_directory: "/tmp/workset".into(),
+                session_name: "mission-item-1-run-1".into(),
+                pane_id: "%1".into(),
+                started_at: 10,
+                prompt_selection: RunPromptSelection {
+                    include_objective: true,
+                    include_notes: false,
+                    external_object_ids: Vec::new(),
+                },
+            },
+        )
+        .expect("Run should start");
+
+        assert_eq!(started.state.runs[0].pane_status, RunPaneStatus::Available);
+
+        let reconciled = decide(
+            started.state,
+            Event::SetRunPaneStatus {
+                run_id: 1,
+                status: RunPaneStatus::Missing,
+            },
+        )
+        .expect("Pane reconciliation should update the Run");
+
+        assert_eq!(reconciled.state.runs[0].pane_status, RunPaneStatus::Missing);
+        assert_eq!(reconciled.state.runs[0].state, RunState::Unknown);
+        assert!(matches!(
+            reconciled.effects.as_slice(),
+            [Effect::PersistRunPaneStatus { run }]
+                if run.id == 1 && run.pane_status == RunPaneStatus::Missing
+        ));
     }
 
     #[test]
