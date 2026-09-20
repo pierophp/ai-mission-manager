@@ -497,6 +497,29 @@ pub struct RepositoryDeletionPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineDeletionRun {
+    pub id: i64,
+    pub item_id: i64,
+    pub item_identifier: String,
+    pub item_title: String,
+    pub workset_id: i64,
+    pub state: RunState,
+    pub pane_status: RunPaneStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineDeletionPlan {
+    pub machine_id: i64,
+    pub name: String,
+    pub runs: Vec<MachineDeletionRun>,
+    pub active_run_ids: Vec<i64>,
+    #[serde(skip)]
+    pub state_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HomeView {
     pub needs_attention: Vec<ItemView>,
     pub attention_entries: Vec<AttentionEntry>,
@@ -557,6 +580,9 @@ pub enum AuditAction {
         machine_id: i64,
         observation: MachineObservation,
     },
+    MachineDeleted {
+        machine_id: i64,
+    },
     RunCreated {
         run_id: i64,
     },
@@ -567,6 +593,9 @@ pub enum AuditAction {
         run_id: i64,
         from: RunState,
         to: RunState,
+    },
+    RunDeleted {
+        run_id: i64,
     },
     RunPaneStatusChanged {
         run_id: i64,
@@ -652,6 +681,10 @@ pub enum Event {
         repository_id: i64,
         workset_ids: Vec<i64>,
     },
+    DeleteMachine {
+        machine_id: i64,
+        run_ids: Vec<i64>,
+    },
     CreateItem {
         title: String,
         context_id: i64,
@@ -694,6 +727,9 @@ pub enum Event {
     },
     DeleteItem {
         item_id: i64,
+    },
+    DeleteRun {
+        run_id: i64,
     },
     StartRun {
         item_id: i64,
@@ -813,6 +849,9 @@ pub enum Effect {
     RemoveRepository {
         repository_id: i64,
     },
+    RemoveMachine {
+        machine_id: i64,
+    },
     PersistMachine {
         machine: Machine,
         next_machine_id: i64,
@@ -829,6 +868,9 @@ pub enum Effect {
     },
     PersistRunPaneStatus {
         run: Run,
+    },
+    RemoveRun {
+        run_id: i64,
     },
     PersistItemUpdate {
         item: Item,
@@ -994,6 +1036,54 @@ pub fn plan_repository_deletion(
     })
 }
 
+pub fn plan_machine_deletion(
+    state: &DomainState,
+    machine_id: i64,
+) -> Result<MachineDeletionPlan, DomainError> {
+    let machine = state
+        .machines
+        .iter()
+        .find(|machine| machine.id == machine_id)
+        .ok_or(DomainError::MachineNotFound { machine_id })?;
+    let runs = state
+        .runs
+        .iter()
+        .filter(|run| run.machine_id == machine_id)
+        .map(|run| {
+            let item = state
+                .items
+                .iter()
+                .find(|item| item.id == run.item_id)
+                .ok_or(DomainError::ItemNotFound {
+                    item_id: run.item_id,
+                })?;
+            Ok(MachineDeletionRun {
+                id: run.id,
+                item_id: run.item_id,
+                item_identifier: item.human_identifier.clone(),
+                item_title: item.title.clone(),
+                workset_id: run.workset_id,
+                state: run.state,
+                pane_status: run.pane_status,
+            })
+        })
+        .collect::<Result<Vec<_>, DomainError>>()?;
+    let active_run_ids = runs
+        .iter()
+        .filter(|run| run.state != RunState::Finished)
+        .map(|run| run.id)
+        .collect();
+
+    Ok(MachineDeletionPlan {
+        machine_id,
+        name: machine.name.clone(),
+        runs,
+        active_run_ids,
+        state_fingerprint: serde_json::to_string(state)
+            .expect("DomainState should always be serializable"),
+    })
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DomainError {
     #[error("a Context name cannot be blank")]
@@ -1036,6 +1126,14 @@ pub enum DomainError {
         expected_workset_ids: Vec<i64>,
         provided_workset_ids: Vec<i64>,
     },
+    #[error(
+        "Machine {machine_id} deletion must include Runs {expected_run_ids:?}; received {provided_run_ids:?}"
+    )]
+    MachineRunsMismatch {
+        machine_id: i64,
+        expected_run_ids: Vec<i64>,
+        provided_run_ids: Vec<i64>,
+    },
     #[error("a Workset root directory cannot be blank")]
     EmptyWorksetRoot,
     #[error("a Workset branch cannot be blank")]
@@ -1056,6 +1154,8 @@ pub enum DomainError {
     MachineNotFound { machine_id: i64 },
     #[error("Machine {machine_id} belongs to another Context")]
     MachineContextMismatch { machine_id: i64, context_id: i64 },
+    #[error("Machine {machine_id} has active Runs: {run_ids:?}")]
+    MachineHasActiveRuns { machine_id: i64, run_ids: Vec<i64> },
     #[error("a remote Machine host cannot be blank")]
     EmptyMachineHost,
     #[error("a remote Machine host contains unsupported characters")]
@@ -1080,6 +1180,8 @@ pub enum DomainError {
     EmptyRunPaneId,
     #[error("Run {run_id} does not exist")]
     RunNotFound { run_id: i64 },
+    #[error("Run {run_id} is {state:?}; stop it and wait for Finished state before deleting")]
+    RunNotFinished { run_id: i64, state: RunState },
     #[error(
         "a Run is already attached to Machine {machine_id}, session {session_name}, Pane {pane_id}"
     )]
@@ -1290,6 +1392,40 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 })
                 .collect::<Vec<_>>();
             effects.push(Effect::RemoveRepository { repository_id });
+
+            Ok(Decision { state, effects })
+        }
+        Event::DeleteMachine {
+            machine_id,
+            run_ids,
+        } => {
+            let plan = plan_machine_deletion(&state, machine_id)?;
+            let mut expected_run_ids = plan.runs.iter().map(|run| run.id).collect::<Vec<_>>();
+            let mut provided_run_ids = run_ids;
+            expected_run_ids.sort_unstable();
+            provided_run_ids.sort_unstable();
+            if expected_run_ids != provided_run_ids {
+                return Err(DomainError::MachineRunsMismatch {
+                    machine_id,
+                    expected_run_ids,
+                    provided_run_ids,
+                });
+            }
+            if !plan.active_run_ids.is_empty() {
+                return Err(DomainError::MachineHasActiveRuns {
+                    machine_id,
+                    run_ids: plan.active_run_ids,
+                });
+            }
+
+            state.runs.retain(|run| run.machine_id != machine_id);
+            state.machines.retain(|machine| machine.id != machine_id);
+            let mut effects = plan
+                .runs
+                .iter()
+                .map(|run| Effect::RemoveRun { run_id: run.id })
+                .collect::<Vec<_>>();
+            effects.push(Effect::RemoveMachine { machine_id });
 
             Ok(Decision { state, effects })
         }
@@ -1670,6 +1806,26 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     orphaned_external_object_ids,
                     summary,
                 }],
+            })
+        }
+        Event::DeleteRun { run_id } => {
+            let position = state
+                .runs
+                .iter()
+                .position(|run| run.id == run_id)
+                .ok_or(DomainError::RunNotFound { run_id })?;
+            let run_state = state.runs[position].state;
+            if run_state != RunState::Finished {
+                return Err(DomainError::RunNotFinished {
+                    run_id,
+                    state: run_state,
+                });
+            }
+            state.runs.remove(position);
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::RemoveRun { run_id }],
             })
         }
         Event::StartRun {
@@ -3536,6 +3692,179 @@ mod tests {
             })
         );
         assert_eq!(state.items.len(), 1);
+    }
+
+    #[test]
+    fn finished_runs_can_be_deleted_but_active_runs_cannot() {
+        let mut state = state_with_item(7, "Work");
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 7,
+            name: "Local Mac".into(),
+            socket_name: "mission-manager".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Available,
+            last_observed_at: Some(1),
+        });
+        state.worksets.push(Workset {
+            id: 1,
+            item_id: 1,
+            root_directory: "/tmp/run-deletion".into(),
+            branch: "feature/run-deletion".into(),
+            archived: false,
+            repositories: Vec::new(),
+        });
+        state.runs = vec![
+            Run {
+                id: 1,
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Codex,
+                execution_profile: ExecutionProfile::Implement,
+                prompt: "finished prompt".into(),
+                working_directory: "/tmp/run-deletion".into(),
+                session_name: "finished-session".into(),
+                pane_id: "%1".into(),
+                started_at: 1,
+                state: RunState::Finished,
+                pane_status: RunPaneStatus::Missing,
+            },
+            Run {
+                id: 2,
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Claude,
+                execution_profile: ExecutionProfile::Review,
+                prompt: "active prompt".into(),
+                working_directory: "/tmp/run-deletion".into(),
+                session_name: "active-session".into(),
+                pane_id: "%2".into(),
+                started_at: 2,
+                state: RunState::Working,
+                pane_status: RunPaneStatus::Available,
+            },
+        ];
+
+        let deleted = decide(state.clone(), Event::DeleteRun { run_id: 1 })
+            .expect("a finished Run should be deletable");
+        assert!(deleted.state.runs.iter().all(|run| run.id != 1));
+        assert_eq!(deleted.state.runs.len(), 1);
+        assert_eq!(deleted.effects, vec![Effect::RemoveRun { run_id: 1 }]);
+
+        assert_eq!(
+            decide(state.clone(), Event::DeleteRun { run_id: 2 }),
+            Err(DomainError::RunNotFinished {
+                run_id: 2,
+                state: RunState::Working,
+            })
+        );
+        assert_eq!(state.runs.len(), 2);
+    }
+
+    #[test]
+    fn machine_deletion_lists_runs_and_blocks_until_every_run_is_finished() {
+        let mut state = state_with_item(7, "Work");
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 7,
+            name: "Local Mac".into(),
+            socket_name: "mission-manager".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+        state.worksets.push(Workset {
+            id: 1,
+            item_id: 1,
+            root_directory: "/tmp/machine-deletion".into(),
+            branch: "feature/machine-deletion".into(),
+            archived: false,
+            repositories: Vec::new(),
+        });
+        state.runs = vec![
+            Run {
+                id: 1,
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Codex,
+                execution_profile: ExecutionProfile::Implement,
+                prompt: "finished prompt".into(),
+                working_directory: "/tmp/machine-deletion".into(),
+                session_name: "finished-session".into(),
+                pane_id: "%1".into(),
+                started_at: 1,
+                state: RunState::Finished,
+                pane_status: RunPaneStatus::Missing,
+            },
+            Run {
+                id: 2,
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Claude,
+                execution_profile: ExecutionProfile::Review,
+                prompt: "blocked prompt".into(),
+                working_directory: "/tmp/machine-deletion".into(),
+                session_name: "blocked-session".into(),
+                pane_id: "%2".into(),
+                started_at: 2,
+                state: RunState::Blocked,
+                pane_status: RunPaneStatus::Available,
+            },
+        ];
+
+        let plan = plan_machine_deletion(&state, 1).expect("Machine should have a deletion plan");
+        assert_eq!(plan.machine_id, 1);
+        assert_eq!(plan.name, "Local Mac");
+        assert_eq!(plan.runs.len(), 2);
+        assert_eq!(plan.runs[0].item_identifier, "MC-1");
+        assert_eq!(plan.runs[0].state, RunState::Finished);
+        assert_eq!(plan.active_run_ids, vec![2]);
+
+        assert_eq!(
+            decide(
+                state.clone(),
+                Event::DeleteMachine {
+                    machine_id: 1,
+                    run_ids: vec![1, 2],
+                },
+            ),
+            Err(DomainError::MachineHasActiveRuns {
+                machine_id: 1,
+                run_ids: vec![2],
+            })
+        );
+
+        let finished = decide(
+            state,
+            Event::UpdateRunState {
+                run_id: 2,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the active Run should finish")
+        .state;
+        let deleted = decide(
+            finished,
+            Event::DeleteMachine {
+                machine_id: 1,
+                run_ids: vec![1, 2],
+            },
+        )
+        .expect("a Machine with only finished Runs should be deletable");
+        assert!(deleted.state.machines.is_empty());
+        assert!(deleted.state.runs.is_empty());
+        assert_eq!(
+            deleted.effects,
+            vec![
+                Effect::RemoveRun { run_id: 1 },
+                Effect::RemoveRun { run_id: 2 },
+                Effect::RemoveMachine { machine_id: 1 },
+            ]
+        );
     }
 
     #[test]

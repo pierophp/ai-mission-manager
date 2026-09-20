@@ -840,6 +840,13 @@ impl SqliteStore {
                         params![repository_id],
                     )?;
                 }
+                Effect::RemoveMachine { machine_id } => {
+                    transaction
+                        .execute("DELETE FROM machines WHERE id = ?1", params![machine_id])?;
+                }
+                Effect::RemoveRun { run_id } => {
+                    transaction.execute("DELETE FROM runs WHERE id = ?1", params![run_id])?;
+                }
                 Effect::RemoveItemCascade {
                     item_id,
                     orphaned_external_object_ids,
@@ -1621,9 +1628,9 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        decide, AgentKind, AuditAction, Event, ExternalChangePolicy, ExternalMetadata,
-        ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshotData,
-        MachineTransport, RunPaneStatus, RunState, WorksetRepositoryInput,
+        decide, AgentKind, AttachedRepositoryInput, AuditAction, Event, ExternalChangePolicy,
+        ExternalMetadata, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
+        ExternalSnapshotData, MachineTransport, RunPaneStatus, RunState, WorksetRepositoryInput,
     };
 
     #[test]
@@ -2040,6 +2047,115 @@ mod tests {
             entry.action,
             AuditAction::RepositoryDeleted { repository_id: 1 }
         )));
+    }
+
+    #[test]
+    fn machine_deletion_round_trip_removes_finished_runs_and_preserves_the_workset() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+
+        {
+            let mut store = SqliteStore::open(&path).expect("database should open");
+            let item = decide(
+                store.load_state().expect("state should load"),
+                Event::CreateItem {
+                    title: "Delete the old Machine".into(),
+                    context_id: 1,
+                    project_id: 1,
+                },
+            )
+            .expect("Item should be created");
+            store.apply(&item.effects).expect("Item should persist");
+            let workset = decide(
+                item.state,
+                Event::AttachWorkset {
+                    item_id: 1,
+                    root_directory: "/tmp/machine-round-trip".into(),
+                    repositories: vec![AttachedRepositoryInput {
+                        name: "service".into(),
+                        remote_url: "https://example.com/service.git".into(),
+                        current_branch: "main".into(),
+                        is_dirty: false,
+                    }],
+                },
+            )
+            .expect("Workset should attach");
+            store
+                .apply(&workset.effects)
+                .expect("Workset should persist");
+            let machine = decide(
+                workset.state,
+                Event::RegisterMachine {
+                    context_id: 1,
+                    name: "Old Machine".into(),
+                    socket_name: "old-machine".into(),
+                    transport: MachineTransport::Local,
+                },
+            )
+            .expect("Machine should register");
+            store
+                .apply(&machine.effects)
+                .expect("Machine should persist");
+            let run = decide(
+                machine.state,
+                Event::AttachRun {
+                    item_id: 1,
+                    workset_id: 1,
+                    machine_id: 1,
+                    agent: AgentKind::Codex,
+                    working_directory: "/tmp/machine-round-trip".into(),
+                    session_name: "old-machine-run".into(),
+                    pane_id: "%1".into(),
+                    attached_at: 1,
+                },
+            )
+            .expect("Run should attach");
+            store.apply(&run.effects).expect("Run should persist");
+            let finished = decide(
+                run.state,
+                Event::UpdateRunState {
+                    run_id: 1,
+                    state: RunState::Finished,
+                },
+            )
+            .expect("Run should finish");
+            store
+                .apply(&finished.effects)
+                .expect("finished state should persist");
+            let deletion = decide(
+                finished.state,
+                Event::DeleteMachine {
+                    machine_id: 1,
+                    run_ids: vec![1],
+                },
+            )
+            .expect("finished Machine Runs should be deletable");
+            store
+                .apply_with_audit(
+                    &deletion.effects,
+                    &[
+                        AuditAction::RunDeleted { run_id: 1 },
+                        AuditAction::MachineDeleted { machine_id: 1 },
+                    ],
+                )
+                .expect("Machine deletion should persist transactionally");
+        }
+
+        let reopened = SqliteStore::open(&path).expect("database should reopen");
+        let state = reopened.load_state().expect("state should reload");
+        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.worksets.len(), 1);
+        assert!(state.runs.is_empty());
+        assert!(state.machines.is_empty());
+        let history = reopened
+            .list_audit_history()
+            .expect("audit history should load");
+        assert!(history
+            .iter()
+            .any(|entry| matches!(entry.action, AuditAction::RunDeleted { run_id: 1 })));
+        assert!(history
+            .iter()
+            .any(|entry| matches!(entry.action, AuditAction::MachineDeleted { machine_id: 1 })));
     }
 
     #[test]

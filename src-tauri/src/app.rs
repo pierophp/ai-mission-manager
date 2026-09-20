@@ -13,15 +13,15 @@ use crate::{
     dependencies::{check_command, resolve_executable, DependencyState, DependencyStatus},
     domain::{
         compose_run_prompt as build_run_prompt, decide, external_link_view, home_view,
-        plan_item_deletion, plan_repository_deletion, search_items, suggest_untracked_runs,
-        AgentKind, AgentPaneObservation, AttachedRepositoryInput, AuditAction, AuditEntry, Context,
-        ContextAttentionDefault, DomainState, Effect, Event, ExecutionProfile,
-        ExternalChangePolicy, ExternalLinkView, ExternalObjectInput, ExternalObjectKind,
-        ExternalProvider, ExternalSnapshot, HomeView, Item, ItemDeletionPlan, ItemDeletionSummary,
-        ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine, MachineObservation,
-        MachineTransport, Project, ProjectDefaults, Repository, RepositoryDeletionPlan, Run,
-        RunPaneStatus, RunPromptSelection, RunState, RunSuggestion, Workset,
-        WorksetRepositoryInput,
+        plan_item_deletion, plan_machine_deletion, plan_repository_deletion, search_items,
+        suggest_untracked_runs, AgentKind, AgentPaneObservation, AttachedRepositoryInput,
+        AuditAction, AuditEntry, Context, ContextAttentionDefault, DomainState, Effect, Event,
+        ExecutionProfile, ExternalChangePolicy, ExternalLinkView, ExternalObjectInput,
+        ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView, Item, ItemDeletionPlan,
+        ItemDeletionSummary, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine,
+        MachineDeletionPlan, MachineObservation, MachineTransport, Project, ProjectDefaults,
+        Repository, RepositoryDeletionPlan, Run, RunPaneStatus, RunPromptSelection, RunState,
+        RunSuggestion, Workset, WorksetRepositoryInput,
     },
     git::GitCli,
     persistence::SqliteStore,
@@ -41,6 +41,7 @@ pub struct Runtime {
     pending_workset_removal: Option<WorksetRemovalReport>,
     pending_item_deletion: Option<ItemDeletionPreview>,
     pending_repository_deletion: Option<RepositoryDeletionPreview>,
+    pending_machine_deletion: Option<MachineDeletionPreview>,
     terminal_connections: HashMap<String, TmuxControlPane>,
     agent_state_directory: PathBuf,
 }
@@ -95,6 +96,7 @@ impl Runtime {
             pending_workset_removal: None,
             pending_item_deletion: None,
             pending_repository_deletion: None,
+            pending_machine_deletion: None,
             terminal_connections: HashMap::new(),
             agent_state_directory,
         };
@@ -1508,6 +1510,34 @@ impl Runtime {
         Ok(preview)
     }
 
+    fn build_machine_deletion_preview(
+        &self,
+        machine_id: i64,
+    ) -> Result<MachineDeletionPreview, String> {
+        let plan =
+            plan_machine_deletion(&self.state, machine_id).map_err(|error| error.to_string())?;
+        let blockers = plan
+            .active_run_ids
+            .iter()
+            .map(|run_id| {
+                format!(
+                    "Run #{run_id} is active on Machine {}; stop it before deleting the Machine.",
+                    plan.name
+                )
+            })
+            .collect();
+        Ok(MachineDeletionPreview { plan, blockers })
+    }
+
+    fn prepare_machine_deletion(
+        &mut self,
+        machine_id: i64,
+    ) -> Result<MachineDeletionPreview, String> {
+        let preview = self.build_machine_deletion_preview(machine_id)?;
+        self.pending_machine_deletion = Some(preview.clone());
+        Ok(preview)
+    }
+
     fn prepare_item_deletion(&mut self, item_id: i64) -> Result<ItemDeletionPreview, String> {
         let preview = self.build_item_deletion_preview(item_id)?;
         self.pending_item_deletion = Some(preview.clone());
@@ -1717,6 +1747,66 @@ impl Runtime {
             workset_directories_deleted: delete_workset_directories,
             physical_cleanup_warning,
         })
+    }
+
+    fn delete_machine(
+        &mut self,
+        machine_id: i64,
+        run_ids: Vec<i64>,
+        confirmed: bool,
+    ) -> Result<MachineDeletionResult, String> {
+        if !confirmed {
+            return Err(
+                "Machine deletion requires explicit confirmation after reviewing its deletion preview"
+                    .into(),
+            );
+        }
+        let pending = self
+            .pending_machine_deletion
+            .as_ref()
+            .filter(|preview| preview.plan.machine_id == machine_id)
+            .cloned()
+            .ok_or_else(|| "Review the Machine deletion preview before deleting it".to_owned())?;
+        let current = self.build_machine_deletion_preview(machine_id)?;
+        if current != pending {
+            return Err(
+                "The Machine or one of its Run states changed after the preview; review the updated deletion preview before deleting it"
+                    .into(),
+            );
+        }
+        if !current.blockers.is_empty() {
+            return Err(format!(
+                "Machine deletion is blocked:\n{}",
+                current.blockers.join("\n")
+            ));
+        }
+
+        let run_count = current.plan.runs.len();
+        let decision = decide(
+            self.state.clone(),
+            Event::DeleteMachine {
+                machine_id,
+                run_ids,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        self.commit(decision)?;
+        self.pending_machine_deletion = None;
+
+        Ok(MachineDeletionResult {
+            machine_id,
+            run_count,
+        })
+    }
+
+    fn delete_run(&mut self, run_id: i64, confirmed: bool) -> Result<RunDeletionResult, String> {
+        if !confirmed {
+            return Err("Run deletion requires explicit confirmation".into());
+        }
+        let decision = decide(self.state.clone(), Event::DeleteRun { run_id })
+            .map_err(|error| error.to_string())?;
+        self.commit(decision)?;
+        Ok(RunDeletionResult { run_id })
     }
 
     fn remove_workset(
@@ -2370,6 +2460,10 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
             Effect::RemoveRepository { repository_id } => Some(AuditAction::RepositoryDeleted {
                 repository_id: *repository_id,
             }),
+            Effect::RemoveMachine { machine_id } => Some(AuditAction::MachineDeleted {
+                machine_id: *machine_id,
+            }),
+            Effect::RemoveRun { run_id } => Some(AuditAction::RunDeleted { run_id: *run_id }),
             Effect::RemoveItemCascade { summary, .. } => Some(AuditAction::ItemDeleted {
                 summary: summary.clone(),
             }),
@@ -2608,6 +2702,26 @@ pub struct RepositoryDeletionPreview {
     pub plan: RepositoryDeletionPlan,
     pub worksets: Vec<WorksetDeletionPreview>,
     pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineDeletionPreview {
+    pub plan: MachineDeletionPlan,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineDeletionResult {
+    pub machine_id: i64,
+    pub run_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunDeletionResult {
+    pub run_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -3142,6 +3256,30 @@ pub fn delete_repository(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn prepare_machine_deletion(
+    machine_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<MachineDeletionPreview, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .prepare_machine_deletion(machine_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_machine(
+    machine_id: i64,
+    run_ids: Vec<i64>,
+    confirmed: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<MachineDeletionResult, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .delete_machine(machine_id, run_ids, confirmed)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn prepare_workset_removal(
     workset_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -3186,6 +3324,18 @@ pub fn delete_item(
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .delete_item(item_id, confirmed, delete_workset_directories)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_run(
+    run_id: i64,
+    confirmed: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<RunDeletionResult, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .delete_run(run_id, confirmed)
 }
 
 #[tauri::command]
@@ -4163,6 +4313,101 @@ fi
             .expect("audit history should load")
             .iter()
             .any(|entry| matches!(entry.action, AuditAction::ItemDeleted { .. })));
+    }
+
+    #[test]
+    fn machine_deletion_requires_finished_runs_and_a_fresh_preview() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .create_item("Delete the old Machine".into(), 1, 1)
+            .expect("Item should be created");
+        let workset = decide(
+            runtime.state.clone(),
+            Event::AttachWorkset {
+                item_id: 1,
+                root_directory: "/tmp/machine-app-deletion".into(),
+                repositories: vec![AttachedRepositoryInput {
+                    name: "service".into(),
+                    remote_url: "https://example.com/service.git".into(),
+                    current_branch: "main".into(),
+                    is_dirty: false,
+                }],
+            },
+        )
+        .expect("Workset should attach");
+        runtime.commit(workset).expect("Workset should persist");
+        let machine = decide(
+            runtime.state.clone(),
+            Event::RegisterMachine {
+                context_id: 1,
+                name: "Old Machine".into(),
+                socket_name: "old-machine".into(),
+                transport: MachineTransport::Local,
+            },
+        )
+        .expect("Machine should register");
+        runtime.commit(machine).expect("Machine should persist");
+        let run = decide(
+            runtime.state.clone(),
+            Event::AttachRun {
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Codex,
+                working_directory: "/tmp/machine-app-deletion".into(),
+                session_name: "old-machine-run".into(),
+                pane_id: "%1".into(),
+                attached_at: 1,
+            },
+        )
+        .expect("Run should attach");
+        runtime.commit(run).expect("Run should persist");
+
+        let blocked_preview = runtime
+            .prepare_machine_deletion(1)
+            .expect("Machine deletion preview should be available");
+        assert_eq!(blocked_preview.plan.runs.len(), 1);
+        assert_eq!(blocked_preview.plan.active_run_ids, vec![1]);
+        assert!(blocked_preview
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("stop it before deleting the Machine")));
+        assert!(runtime.delete_machine(1, vec![1], true).is_err());
+
+        let finished = decide(
+            runtime.state.clone(),
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("Run should finish");
+        runtime
+            .commit(finished)
+            .expect("finished state should persist");
+        assert!(runtime.delete_machine(1, vec![1], true).is_err());
+
+        let fresh_preview = runtime
+            .prepare_machine_deletion(1)
+            .expect("fresh Machine deletion preview should be available");
+        assert!(fresh_preview.blockers.is_empty());
+        let result = runtime
+            .delete_machine(1, vec![1], true)
+            .expect("Machine deletion should succeed after the Run finishes");
+        assert_eq!(result.run_count, 1);
+        assert!(runtime.state.machines.is_empty());
+        assert!(runtime.state.runs.is_empty());
+        let history = runtime
+            .list_audit_history()
+            .expect("audit history should load");
+        assert!(history
+            .iter()
+            .any(|entry| matches!(entry.action, AuditAction::RunDeleted { run_id: 1 })));
+        assert!(history
+            .iter()
+            .any(|entry| matches!(entry.action, AuditAction::MachineDeleted { machine_id: 1 })));
     }
 
     #[test]

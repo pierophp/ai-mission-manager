@@ -386,6 +386,35 @@ type RepositoryDeletionPreview = {
   blockers: string[];
 };
 
+type MachineDeletionRun = {
+  id: number;
+  itemId: number;
+  itemIdentifier: string;
+  itemTitle: string;
+  worksetId: number;
+  state: RunState;
+  paneStatus: RunPaneStatus;
+};
+
+type MachineDeletionPreview = {
+  plan: {
+    machineId: number;
+    name: string;
+    runs: MachineDeletionRun[];
+    activeRunIds: number[];
+  };
+  blockers: string[];
+};
+
+type MachineDeletionResult = {
+  machineId: number;
+  runCount: number;
+};
+
+type RunDeletionResult = {
+  runId: number;
+};
+
 type RepositoryDeletionResult = {
   repositoryId: number;
   worksetCount: number;
@@ -509,6 +538,8 @@ export function App() {
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [repositoryDeletionPreview, setRepositoryDeletionPreview] =
     useState<RepositoryDeletionPreview>();
+  const [machineDeletionPreview, setMachineDeletionPreview] =
+    useState<MachineDeletionPreview>();
   const [machines, setMachines] = useState<Machine[]>([]);
   const [attentionDefaults, setAttentionDefaults] = useState<
     ContextAttentionDefault[]
@@ -955,6 +986,79 @@ export function App() {
       }
     } catch (deleteError) {
       setRepositoryDeletionPreview(undefined);
+      window.alert(errorMessage(deleteError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handlePrepareMachineDeletion(machineId: number) {
+    setIsSaving(true);
+    try {
+      const preview = await invoke<MachineDeletionPreview>(
+        "prepare_machine_deletion",
+        { machineId },
+      );
+      setMachineDeletionPreview(preview);
+      setError(undefined);
+    } catch (previewError) {
+      window.alert(errorMessage(previewError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDeleteMachine(machineId: number) {
+    if (
+      !machineDeletionPreview ||
+      machineDeletionPreview.plan.machineId !== machineId ||
+      machineDeletionPreview.blockers.length > 0
+    ) {
+      return;
+    }
+    const { plan } = machineDeletionPreview;
+    if (
+      !window.confirm(
+        `Delete Machine ${plan.name} and its ${plan.runs.length} Run record${plan.runs.length === 1 ? "" : "s"}? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      const result = await invoke<MachineDeletionResult>("delete_machine", {
+        machineId,
+        runIds: plan.runs.map((run) => run.id),
+        confirmed: true,
+      });
+      setMachineDeletionPreview(undefined);
+      await updateHomeAfterEdit();
+      window.alert(
+        `Deleted Machine ${plan.name} and ${result.runCount} finished Run record${result.runCount === 1 ? "" : "s"}.`,
+      );
+    } catch (deleteError) {
+      setMachineDeletionPreview(undefined);
+      window.alert(errorMessage(deleteError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDeleteFinishedRunFromStructure(runId: number) {
+    if (!window.confirm(`Delete finished Run #${runId} from Run history? This cannot be undone.`)) {
+      return;
+    }
+    setIsSaving(true);
+    try {
+      await invoke<RunDeletionResult>("delete_run", {
+        runId,
+        confirmed: true,
+      });
+      setMachineDeletionPreview(undefined);
+      await updateHomeAfterEdit();
+    } catch (deleteError) {
+      setMachineDeletionPreview(undefined);
       window.alert(errorMessage(deleteError));
     } finally {
       setIsSaving(false);
@@ -1813,24 +1917,104 @@ export function App() {
                   .filter((machine) => machine.context_id === captureContextId)
                   .map((machine) => (
                     <li className="entity-row" key={machine.id}>
-                      <span>
-                        {machine.name} ·{" "}
-                        {machine.transport.kind === "ssh" ? "SSH" : "Local"}
-                      </span>
-                      <span className="entity-meta">
-                        Last observed: {machine.last_observed}
-                        {machine.last_observed_at
-                          ? " · " +
-                            new Date(machine.last_observed_at * 1000).toLocaleString()
-                          : ""}
+                      <div>
+                        <span>
+                          {machine.name} ·{" "}
+                          {machine.transport.kind === "ssh" ? "SSH" : "Local"}
+                        </span>
+                        <span className="entity-meta">
+                          Last observed: {machine.last_observed}
+                          {machine.last_observed_at
+                            ? " · " +
+                              new Date(machine.last_observed_at * 1000).toLocaleString()
+                            : ""}
+                        </span>
+                      </div>
+                      <div className="entity-actions">
                         <button
                           type="button"
                           className="text-button"
+                          disabled={isSaving}
                           onClick={() => void handleCheckMachine(machine.id)}
                         >
                           Check
                         </button>
-                      </span>
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={isSaving}
+                          onClick={() => void handlePrepareMachineDeletion(machine.id)}
+                        >
+                          Review deletion
+                        </button>
+                      </div>
+                      {machineDeletionPreview?.plan.machineId === machine.id && (
+                        <div className="deletion-preview" role="alert">
+                          <strong>Machine deletion preview</strong>
+                          <p>
+                            Deleting <b>{machine.name}</b> removes the Machine record and
+                            every finished Run that points to it. Panes are owned by the
+                            Terminal Runtime and are not parsed or removed here.
+                          </p>
+                          {machineDeletionPreview.plan.runs.length === 0 ? (
+                            <p>No Runs reference this Machine.</p>
+                          ) : (
+                            <div className="deletion-worksets">
+                              <span className="relationship-label">Runs to remove</span>
+                              {machineDeletionPreview.plan.runs.map((run) => (
+                                <div className="deletion-workset" key={run.id}>
+                                  <strong>
+                                    Run #{run.id} · {run.itemIdentifier} · {run.state}
+                                  </strong>
+                                  <span>{run.itemTitle} · Workset #{run.worksetId}</span>
+                                  <span>Pane state: {run.paneStatus}</span>
+                                  {run.state === "finished" && (
+                                    <button
+                                      type="button"
+                                      className="text-button"
+                                      disabled={isSaving}
+                                      onClick={() =>
+                                        void handleDeleteFinishedRunFromStructure(run.id)
+                                      }
+                                    >
+                                      Delete finished Run
+                                    </button>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                          {machineDeletionPreview.blockers.length > 0 && (
+                            <div className="deletion-blockers">
+                              <strong>Deletion blocked</strong>
+                              {machineDeletionPreview.blockers.map((blocker) => (
+                                <span key={blocker}>{blocker}</span>
+                              ))}
+                              <p>Stop each active Run, then create a fresh preview.</p>
+                            </div>
+                          )}
+                          <div className="deletion-preview-actions">
+                            <button
+                              type="button"
+                              className="danger-button"
+                              disabled={
+                                isSaving || machineDeletionPreview.blockers.length > 0
+                              }
+                              onClick={() => void handleDeleteMachine(machine.id)}
+                            >
+                              Confirm and delete Machine
+                            </button>
+                            <button
+                              type="button"
+                              className="text-button"
+                              disabled={isSaving}
+                              onClick={() => setMachineDeletionPreview(undefined)}
+                            >
+                              Cancel
+                            </button>
+                          </div>
+                        </div>
+                      )}
                     </li>
                   ))}
               </ul>
@@ -2514,6 +2698,23 @@ function ItemCard({
       return;
     }
     await saveItem(() => invoke<Run>("stop_run", { runId: run.id }));
+  }
+
+  async function handleDeleteRun(run: Run) {
+    if (run.state !== "finished") return;
+    if (
+      !window.confirm(
+        `Delete finished Run #${run.id} from Run history? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    await saveItem(async () => {
+      await invoke<RunDeletionResult>("delete_run", {
+        runId: run.id,
+        confirmed: true,
+      });
+    });
   }
 
   async function handlePrepareRemoval(worksetId: number) {
@@ -3306,6 +3507,16 @@ function ItemCard({
                         onClick={() => void handleStopRun(run)}
                       >
                         Stop Run
+                      </button>
+                    )}
+                    {run.state === "finished" && (
+                      <button
+                        type="button"
+                        className="danger-button"
+                        disabled={isSaving}
+                        onClick={() => void handleDeleteRun(run)}
+                      >
+                        Delete finished Run
                       </button>
                     )}
                     {run.pane_status === "missing" && !runWorkset.archived && (
@@ -4131,6 +4342,8 @@ function auditActionLabel(action: AuditAction): string {
       return `Created Run #${action.run_id}`;
     case "runStopped":
       return `Stopped Run #${action.run_id}`;
+    case "runDeleted":
+      return `Deleted Run #${action.run_id}`;
     case "runStateChanged":
       return `Run #${action.run_id} changed from ${action.from} to ${action.to}`;
     case "runPaneStatusChanged":
@@ -4155,6 +4368,8 @@ function auditActionLabel(action: AuditAction): string {
       return `Registered Machine #${action.machine_id}`;
     case "machineObserved":
       return `Observed Machine #${action.machine_id} as ${action.observation}`;
+    case "machineDeleted":
+      return `Deleted Machine #${action.machine_id}`;
     case "contextAttentionDefaultChanged":
       return `Updated attention defaults for Context #${action.context_id}`;
     default:
