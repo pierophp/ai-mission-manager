@@ -2,6 +2,7 @@ pub mod domain;
 mod git;
 pub mod persistence;
 mod provider;
+mod terminal;
 
 mod app;
 
@@ -21,6 +22,7 @@ pub fn run() {
             app::list_contexts,
             app::list_projects,
             app::list_repositories,
+            app::list_machines,
             app::list_context_attention_defaults,
             app::get_home,
             app::search_items_command,
@@ -35,6 +37,8 @@ pub fn run() {
             app::remove_workset,
             app::list_inbox_items,
             app::create_item,
+            app::compose_run_prompt,
+            app::start_run,
             app::set_item_status,
             app::set_item_notes,
             app::add_item_reminder,

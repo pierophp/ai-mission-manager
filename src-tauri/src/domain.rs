@@ -73,6 +73,57 @@ pub struct Workset {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Machine {
+    pub id: i64,
+    pub context_id: i64,
+    pub name: String,
+    pub socket_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentKind {
+    #[serde(rename = "claude")]
+    Claude,
+    #[serde(rename = "codex")]
+    Codex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ExecutionProfile {
+    #[serde(rename = "investigate")]
+    Investigate,
+    #[serde(rename = "implement")]
+    Implement,
+    #[serde(rename = "review")]
+    Review,
+    #[serde(rename = "custom")]
+    CustomPrompt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunPromptSelection {
+    pub include_objective: bool,
+    pub include_notes: bool,
+    pub external_object_ids: Vec<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Run {
+    pub id: i64,
+    pub item_id: i64,
+    pub workset_id: i64,
+    pub machine_id: i64,
+    pub agent: AgentKind,
+    pub execution_profile: ExecutionProfile,
+    pub prompt: String,
+    pub working_directory: String,
+    pub session_name: String,
+    pub pane_id: String,
+    pub started_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reminder {
     pub id: i64,
     pub remind_at: String,
@@ -278,6 +329,7 @@ pub struct ItemView {
     pub relationships: Vec<ItemRelation>,
     pub worksets: Vec<Workset>,
     pub archived_worksets: Vec<Workset>,
+    pub runs: Vec<Run>,
     pub links: Vec<ExternalLinkView>,
 }
 
@@ -299,6 +351,8 @@ pub struct DomainState {
     pub next_item_number: i64,
     pub next_repository_id: i64,
     pub next_workset_id: i64,
+    pub next_machine_id: i64,
+    pub next_run_id: i64,
     pub next_external_object_id: i64,
     pub next_link_id: i64,
     pub next_activity_id: i64,
@@ -308,6 +362,8 @@ pub struct DomainState {
     pub repositories: Vec<Repository>,
     pub items: Vec<Item>,
     pub worksets: Vec<Workset>,
+    pub machines: Vec<Machine>,
+    pub runs: Vec<Run>,
     pub relationships: Vec<ItemRelation>,
     pub external_objects: Vec<ExternalObject>,
     pub links: Vec<Link>,
@@ -347,6 +403,11 @@ pub enum Event {
         root_directory: String,
         repositories: Vec<AttachedRepositoryInput>,
     },
+    RegisterMachine {
+        context_id: i64,
+        name: String,
+        socket_name: String,
+    },
     AddRepositoryToWorkset {
         workset_id: i64,
         repository_id: i64,
@@ -359,6 +420,19 @@ pub enum Event {
     },
     RemoveWorkset {
         workset_id: i64,
+    },
+    StartRun {
+        item_id: i64,
+        workset_id: i64,
+        machine_id: i64,
+        agent: AgentKind,
+        execution_profile: ExecutionProfile,
+        prompt: String,
+        working_directory: String,
+        session_name: String,
+        pane_id: String,
+        started_at: i64,
+        prompt_selection: RunPromptSelection,
     },
     SetItemStatus {
         item_id: i64,
@@ -444,6 +518,14 @@ pub enum Effect {
     RemoveWorkset {
         workset_id: i64,
     },
+    PersistMachine {
+        machine: Machine,
+        next_machine_id: i64,
+    },
+    PersistRun {
+        run: Run,
+        next_run_id: i64,
+    },
     PersistItemUpdate {
         item: Item,
     },
@@ -525,6 +607,35 @@ pub enum DomainError {
     EmptyWorksetRepositories,
     #[error("Workset {workset_id} does not exist")]
     WorksetNotFound { workset_id: i64 },
+    #[error("Workset {workset_id} has Run history and cannot be removed")]
+    WorksetHasRuns { workset_id: i64 },
+    #[error("a Machine name cannot be blank")]
+    EmptyMachineName,
+    #[error("a Machine socket name cannot be blank")]
+    EmptyMachineSocketName,
+    #[error("Machine name already exists in Context {context_id}: {name}")]
+    MachineNameTaken { context_id: i64, name: String },
+    #[error("Machine {machine_id} does not exist")]
+    MachineNotFound { machine_id: i64 },
+    #[error("Machine {machine_id} belongs to another Context")]
+    MachineContextMismatch { machine_id: i64, context_id: i64 },
+    #[error("a Run prompt cannot be blank")]
+    EmptyRunPrompt,
+    #[error("a Run working directory cannot be blank")]
+    EmptyRunWorkingDirectory,
+    #[error("Run working directory does not match Workset {workset_id}")]
+    RunWorkingDirectoryMismatch { workset_id: i64 },
+    #[error("a Run session name cannot be blank")]
+    EmptyRunSessionName,
+    #[error("a Run Pane identity cannot be blank")]
+    EmptyRunPaneId,
+    #[error("Workset {workset_id} belongs to another Item")]
+    WorksetItemMismatch { workset_id: i64, item_id: i64 },
+    #[error("External Object {external_object_id} is not linked to Item {item_id}")]
+    RunPromptSourceNotLinked {
+        external_object_id: i64,
+        item_id: i64,
+    },
     #[error("Repository {repository_id} is already in Workset {workset_id}")]
     RepositoryAlreadyInWorkset { repository_id: i64, workset_id: i64 },
     #[error("Repository {repository_id} was selected more than once")]
@@ -866,6 +977,39 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             });
             Ok(Decision { state, effects })
         }
+        Event::RegisterMachine {
+            context_id,
+            name,
+            socket_name,
+        } => {
+            ensure_context(&state, context_id)?;
+            let name = clean_name(name, DomainError::EmptyMachineName)?;
+            let socket_name = clean_name(socket_name, DomainError::EmptyMachineSocketName)?;
+            if state
+                .machines
+                .iter()
+                .any(|machine| machine.context_id == context_id && machine.name == name)
+            {
+                return Err(DomainError::MachineNameTaken { context_id, name });
+            }
+            let id = state.next_machine_id;
+            let next_machine_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let machine = Machine {
+                id,
+                context_id,
+                name,
+                socket_name,
+            };
+            state.next_machine_id = next_machine_id;
+            state.machines.push(machine.clone());
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistMachine {
+                    machine,
+                    next_machine_id,
+                }],
+            })
+        }
         Event::AddRepositoryToWorkset {
             workset_id,
             repository_id,
@@ -948,11 +1092,90 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .iter()
                 .position(|workset| workset.id == workset_id)
                 .ok_or(DomainError::WorksetNotFound { workset_id })?;
+            if state.runs.iter().any(|run| run.workset_id == workset_id) {
+                return Err(DomainError::WorksetHasRuns { workset_id });
+            }
             state.worksets.remove(position);
 
             Ok(Decision {
                 state,
                 effects: vec![Effect::RemoveWorkset { workset_id }],
+            })
+        }
+        Event::StartRun {
+            item_id,
+            workset_id,
+            machine_id,
+            agent,
+            execution_profile,
+            prompt,
+            working_directory,
+            session_name,
+            pane_id,
+            started_at,
+            prompt_selection,
+        } => {
+            let context_id = item_context_id(&state, item_id)?;
+            let workset = state
+                .worksets
+                .iter()
+                .find(|workset| workset.id == workset_id)
+                .ok_or(DomainError::WorksetNotFound { workset_id })?;
+            if workset.item_id != item_id {
+                return Err(DomainError::WorksetItemMismatch {
+                    workset_id,
+                    item_id,
+                });
+            }
+            let machine = state
+                .machines
+                .iter()
+                .find(|machine| machine.id == machine_id)
+                .ok_or(DomainError::MachineNotFound { machine_id })?;
+            if machine.context_id != context_id {
+                return Err(DomainError::MachineContextMismatch {
+                    machine_id,
+                    context_id,
+                });
+            }
+            for external_object_id in prompt_selection.external_object_ids {
+                if !state.links.iter().any(|link| {
+                    link.item_id == item_id && link.external_object_id == external_object_id
+                }) {
+                    return Err(DomainError::RunPromptSourceNotLinked {
+                        external_object_id,
+                        item_id,
+                    });
+                }
+            }
+            let prompt = clean_name(prompt, DomainError::EmptyRunPrompt)?;
+            let working_directory =
+                clean_name(working_directory, DomainError::EmptyRunWorkingDirectory)?;
+            if working_directory != workset.root_directory {
+                return Err(DomainError::RunWorkingDirectoryMismatch { workset_id });
+            }
+            let session_name = clean_name(session_name, DomainError::EmptyRunSessionName)?;
+            let pane_id = clean_name(pane_id, DomainError::EmptyRunPaneId)?;
+            let id = state.next_run_id;
+            let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let run = Run {
+                id,
+                item_id,
+                workset_id,
+                machine_id,
+                agent,
+                execution_profile,
+                prompt,
+                working_directory,
+                session_name,
+                pane_id,
+                started_at,
+            };
+            state.next_run_id = next_run_id;
+            state.runs.push(run.clone());
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRun { run, next_run_id }],
             })
         }
         Event::SetItemStatus { item_id, status } => {
@@ -1532,6 +1755,12 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 .filter(|workset| workset.item_id == item.id)
                 .cloned()
                 .partition(|workset| !workset.archived);
+            let runs = state
+                .runs
+                .iter()
+                .filter(|run| run.item_id == item.id)
+                .cloned()
+                .collect();
             Some(ItemView {
                 item: item.clone(),
                 context_name: context.name.clone(),
@@ -1539,10 +1768,78 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 relationships,
                 worksets,
                 archived_worksets,
+                runs,
                 links,
             })
         })
         .collect()
+}
+
+pub fn compose_run_prompt(
+    state: &DomainState,
+    item_id: i64,
+    profile: ExecutionProfile,
+    selection: &RunPromptSelection,
+    custom_prompt: Option<&str>,
+) -> Result<String, DomainError> {
+    let item = state
+        .items
+        .iter()
+        .find(|item| item.id == item_id)
+        .ok_or(DomainError::ItemNotFound { item_id })?;
+    let mut sections = Vec::new();
+    if selection.include_objective {
+        sections.push(format!("Item objective:\n{}", item.title));
+    }
+    if selection.include_notes && !item.notes.trim().is_empty() {
+        sections.push(format!("Item notes:\n{}", item.notes.trim()));
+    }
+    for external_object_id in &selection.external_object_ids {
+        let link = state
+            .links
+            .iter()
+            .find(|link| link.item_id == item_id && link.external_object_id == *external_object_id)
+            .ok_or(DomainError::RunPromptSourceNotLinked {
+                external_object_id: *external_object_id,
+                item_id,
+            })?;
+        let object = state
+            .external_objects
+            .iter()
+            .find(|object| object.id == link.external_object_id)
+            .ok_or(DomainError::ExternalObjectNotFound {
+                external_object_id: *external_object_id,
+            })?;
+        let title = state
+            .snapshots
+            .iter()
+            .find(|snapshot| snapshot.external_object_id == object.id)
+            .map(|snapshot| snapshot.title.as_str())
+            .unwrap_or("Linked external object");
+        sections.push(format!("Linked source:\n{title}\n{}", object.canonical_url));
+    }
+
+    let instruction = match profile {
+        ExecutionProfile::Investigate => {
+            "Investigate this work, inspect the relevant code, and report findings before changing files."
+                .to_owned()
+        }
+        ExecutionProfile::Implement => {
+            "Implement this work in the Workset, run the relevant checks, and leave the changes ready for review."
+                .to_owned()
+        }
+        ExecutionProfile::Review => {
+            "Review the current Workset changes for correctness, regressions, and missing test coverage."
+                .to_owned()
+        }
+        ExecutionProfile::CustomPrompt => clean_name(
+            custom_prompt.unwrap_or_default().to_owned(),
+            DomainError::EmptyRunPrompt,
+        )?,
+    };
+    sections.insert(0, instruction);
+    let prompt = sections.join("\n\n");
+    clean_name(prompt, DomainError::EmptyRunPrompt)
 }
 
 fn clean_name<E>(name: String, empty_error: E) -> Result<String, E> {
@@ -3232,6 +3529,161 @@ mod tests {
         );
     }
 
+    #[test]
+    fn runs_keep_history_allow_repeated_workset_use_and_scope_prompt_sources() {
+        let mut state = state_with_item(1, "Work");
+        state.items[0].notes = "Check the importer boundary".into();
+        state.worksets.push(Workset {
+            id: 1,
+            item_id: 1,
+            root_directory: "/tmp/workset".into(),
+            branch: "feature/importer".into(),
+            archived: false,
+            repositories: Vec::new(),
+        });
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: "mission-manager".into(),
+        });
+        state.external_objects.push(ExternalObject {
+            id: 1,
+            provider: ExternalProvider::Generic,
+            kind: ExternalObjectKind::Generic,
+            external_key: "source-1".into(),
+            canonical_url: "https://example.com/source-1".into(),
+        });
+        state.links.push(Link {
+            id: 1,
+            item_id: 1,
+            external_object_id: 1,
+            reviewed_activity_id: 0,
+            attention_policy: None,
+            watch_until: None,
+            review_at: None,
+        });
+        state.snapshots.push(ExternalSnapshot {
+            external_object_id: 1,
+            title: "Importer contract".into(),
+            state: "OPEN".into(),
+            metadata: Vec::new(),
+            fetched_at: 1,
+        });
+
+        let selection = RunPromptSelection {
+            include_objective: true,
+            include_notes: false,
+            external_object_ids: vec![1],
+        };
+        let prompt = compose_run_prompt(&state, 1, ExecutionProfile::Implement, &selection, None)
+            .expect("the selected prompt sources should be valid");
+        assert!(prompt.contains("Existing Item"));
+        assert!(prompt.contains("Importer contract"));
+        assert!(!prompt.contains("Check the importer boundary"));
+
+        let first = decide(
+            state,
+            Event::StartRun {
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Claude,
+                execution_profile: ExecutionProfile::Implement,
+                prompt: prompt.clone(),
+                working_directory: "/tmp/workset".into(),
+                session_name: "mission-item-1-run-1".into(),
+                pane_id: "%1".into(),
+                started_at: 10,
+                prompt_selection: selection.clone(),
+            },
+        )
+        .expect("the first Run should start");
+        let second = decide(
+            first.state,
+            Event::StartRun {
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Codex,
+                execution_profile: ExecutionProfile::Review,
+                prompt,
+                working_directory: "/tmp/workset".into(),
+                session_name: "mission-item-1-run-2".into(),
+                pane_id: "%2".into(),
+                started_at: 11,
+                prompt_selection: selection,
+            },
+        )
+        .expect("a second Run may use the same Workset");
+
+        assert_eq!(second.state.runs.len(), 2);
+        assert_eq!(second.state.runs[0].workset_id, 1);
+        assert_eq!(second.state.runs[1].workset_id, 1);
+        assert_eq!(second.state.runs[1].agent, AgentKind::Codex);
+        assert!(matches!(
+            second.effects.as_slice(),
+            [Effect::PersistRun { run, next_run_id }] if run.id == 2 && *next_run_id == 3
+        ));
+    }
+
+    #[test]
+    fn a_run_cannot_use_a_machine_or_prompt_source_from_another_context() {
+        let mut state = state_with_contexts(&[(1, "Work"), (2, "Personal")]);
+        state.items.push(Item {
+            id: 1,
+            human_identifier: "MC-1".into(),
+            title: "Work item".into(),
+            project_id: 1,
+            status: ItemStatus::Inbox,
+            notes: String::new(),
+            reminders: Vec::new(),
+        });
+        state.worksets.push(Workset {
+            id: 1,
+            item_id: 1,
+            root_directory: "/tmp/workset".into(),
+            branch: "main".into(),
+            archived: false,
+            repositories: Vec::new(),
+        });
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 2,
+            name: "Personal Mac".into(),
+            socket_name: "personal".into(),
+        });
+
+        let error = decide(
+            state,
+            Event::StartRun {
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Claude,
+                execution_profile: ExecutionProfile::Investigate,
+                prompt: "Inspect the work".into(),
+                working_directory: "/tmp/workset".into(),
+                session_name: "mission-item-1-run-1".into(),
+                pane_id: "%1".into(),
+                started_at: 10,
+                prompt_selection: RunPromptSelection {
+                    include_objective: true,
+                    include_notes: false,
+                    external_object_ids: Vec::new(),
+                },
+            },
+        )
+        .expect_err("a Run must not cross Context boundaries");
+        assert_eq!(
+            error,
+            DomainError::MachineContextMismatch {
+                machine_id: 1,
+                context_id: 1,
+            }
+        );
+    }
+
     fn snapshot_data(title: &str, fetched_at: i64) -> ExternalSnapshotData {
         ExternalSnapshotData {
             title: title.into(),
@@ -3269,6 +3721,8 @@ mod tests {
             next_item_number: 1,
             next_repository_id: 1,
             next_workset_id: 1,
+            next_machine_id: 1,
+            next_run_id: 1,
             next_external_object_id: 1,
             next_link_id: 1,
             next_activity_id: 1,
@@ -3295,6 +3749,8 @@ mod tests {
             repositories: Vec::new(),
             items: Vec::new(),
             worksets: Vec::new(),
+            machines: Vec::new(),
+            runs: Vec::new(),
             relationships: Vec::new(),
             external_objects: Vec::new(),
             links: Vec::new(),
@@ -3312,6 +3768,8 @@ mod tests {
             next_item_number: 1,
             next_repository_id: 1,
             next_workset_id: 1,
+            next_machine_id: 1,
+            next_run_id: 1,
             next_external_object_id: 1,
             next_link_id: 1,
             next_activity_id: 1,
@@ -3321,6 +3779,8 @@ mod tests {
             repositories: Vec::new(),
             items: Vec::new(),
             worksets: Vec::new(),
+            machines: Vec::new(),
+            runs: Vec::new(),
             relationships: Vec::new(),
             external_objects: Vec::new(),
             links: Vec::new(),

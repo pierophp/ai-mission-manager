@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
@@ -9,15 +9,17 @@ use tauri::State;
 
 use crate::{
     domain::{
-        decide, external_link_view, home_view, search_items, AttachedRepositoryInput, Context,
-        ContextAttentionDefault, DomainState, Event, ExternalChangePolicy, ExternalLinkView,
+        compose_run_prompt as build_run_prompt, decide, external_link_view, home_view,
+        search_items, AgentKind, AttachedRepositoryInput, Context, ContextAttentionDefault,
+        DomainState, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
         ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView,
-        Item, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Project, ProjectDefaults,
-        Repository, Workset, WorksetRepositoryInput,
+        Item, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine, Project,
+        ProjectDefaults, Repository, Run, RunPromptSelection, Workset, WorksetRepositoryInput,
     },
     git::GitCli,
     persistence::SqliteStore,
     provider::{classify_url, resolve_gh_executable, GithubCli},
+    terminal::{TerminalRuntime, TmuxRuntime},
 };
 
 pub struct Runtime {
@@ -174,6 +176,138 @@ impl Runtime {
             .ok_or_else(|| "Workset attachment produced no Workset".to_owned())?;
         self.commit(decision)?;
         Ok(workset)
+    }
+
+    fn local_machine_for_item(&mut self, item_id: i64) -> Result<Machine, String> {
+        let context_id = self.item_context_id(item_id)?;
+        if let Some(machine) = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.context_id == context_id && machine.name == "Local Mac")
+            .cloned()
+        {
+            return Ok(machine);
+        }
+
+        let decision = decide(
+            self.state.clone(),
+            Event::RegisterMachine {
+                context_id,
+                name: "Local Mac".into(),
+                socket_name: "ai-mission-manager".into(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let machine = decision
+            .state
+            .machines
+            .last()
+            .cloned()
+            .ok_or_else(|| "Machine registration produced no Machine".to_owned())?;
+        self.commit(decision)?;
+        Ok(machine)
+    }
+
+    fn compose_run_prompt(
+        &self,
+        item_id: i64,
+        execution_profile: ExecutionProfile,
+        selection: RunPromptSelection,
+        custom_prompt: Option<String>,
+    ) -> Result<String, String> {
+        build_run_prompt(
+            &self.state,
+            item_id,
+            execution_profile,
+            &selection,
+            custom_prompt.as_deref(),
+        )
+        .map_err(|error| error.to_string())
+    }
+
+    fn start_run(
+        &mut self,
+        item_id: i64,
+        workset_id: i64,
+        agent: AgentKind,
+        execution_profile: ExecutionProfile,
+        prompt: String,
+        prompt_selection: RunPromptSelection,
+    ) -> Result<Run, String> {
+        let workset = self
+            .state
+            .worksets
+            .iter()
+            .find(|workset| workset.id == workset_id && workset.item_id == item_id)
+            .cloned()
+            .ok_or_else(|| format!("Workset {workset_id} does not belong to Item {item_id}"))?;
+        let root = Path::new(&workset.root_directory);
+        if !root.is_dir() {
+            return Err(format!(
+                "Workset root is not a directory: {}",
+                root.display()
+            ));
+        }
+
+        let machine = self.local_machine_for_item(item_id)?;
+        let run_id = self.state.next_run_id;
+        let session_name = format!("mission-item-{item_id}-run-{run_id}");
+        let executable = find_executable(agent_executable_name(agent)).ok_or_else(|| {
+            format!(
+                "{} is not installed on Local Mac",
+                agent_display_name(agent)
+            )
+        })?;
+        let terminal = TmuxRuntime;
+        let pane_id = terminal.launch_agent(&machine, &session_name, root, &executable, &prompt)?;
+        let decision = decide(
+            self.state.clone(),
+            Event::StartRun {
+                item_id,
+                workset_id,
+                machine_id: machine.id,
+                agent,
+                execution_profile,
+                prompt,
+                working_directory: workset.root_directory,
+                session_name: session_name.clone(),
+                pane_id,
+                started_at: current_unix_seconds(),
+                prompt_selection,
+            },
+        )
+        .map_err(|error| {
+            let cleanup =
+                terminal.kill_session(&machine, &format!("mission-item-{item_id}-run-{run_id}"));
+            format_commit_error(error.to_string(), cleanup.err())
+        })?;
+        let run = decision
+            .state
+            .runs
+            .last()
+            .cloned()
+            .ok_or_else(|| "Run creation produced no Run".to_owned())?;
+        if let Err(error) = self.commit(decision) {
+            let cleanup = terminal.kill_session(&machine, &run.session_name);
+            return Err(format_commit_error(error, cleanup.err()));
+        }
+        Ok(run)
+    }
+
+    fn item_context_id(&self, item_id: i64) -> Result<i64, String> {
+        let item = self
+            .state
+            .items
+            .iter()
+            .find(|item| item.id == item_id)
+            .ok_or_else(|| format!("Item {item_id} does not exist"))?;
+        self.state
+            .projects
+            .iter()
+            .find(|project| project.id == item.project_id)
+            .map(|project| project.context_id)
+            .ok_or_else(|| format!("Project {} does not exist", item.project_id))
     }
 
     fn add_repository_to_workset(
@@ -956,6 +1090,45 @@ fn current_unix_seconds() -> i64 {
         .unwrap_or_default()
 }
 
+fn agent_executable_name(agent: AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Claude => "claude",
+        AgentKind::Codex => "codex",
+    }
+}
+
+fn agent_display_name(agent: AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Claude => "Claude Code",
+        AgentKind::Codex => "Codex",
+    }
+}
+
+fn find_executable(name: &str) -> Option<PathBuf> {
+    let path = env::var_os("PATH")?;
+    env::split_paths(&path)
+        .map(|directory| directory.join(name))
+        .find(|candidate| is_executable(candidate))
+}
+
+fn is_executable(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        path.metadata()
+            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
 #[tauri::command]
 pub fn list_contexts(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Context>, String> {
     state
@@ -978,6 +1151,51 @@ pub fn list_repositories(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Reposit
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())
         .map(|runtime| runtime.state.repositories.clone())
+}
+
+#[tauri::command]
+pub fn list_machines(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Machine>, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())
+        .map(|runtime| runtime.state.machines.clone())
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn compose_run_prompt(
+    item_id: i64,
+    execution_profile: ExecutionProfile,
+    prompt_selection: RunPromptSelection,
+    custom_prompt: Option<String>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<String, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .compose_run_prompt(item_id, execution_profile, prompt_selection, custom_prompt)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn start_run(
+    item_id: i64,
+    workset_id: i64,
+    agent: AgentKind,
+    execution_profile: ExecutionProfile,
+    prompt: String,
+    prompt_selection: RunPromptSelection,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Run, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .start_run(
+            item_id,
+            workset_id,
+            agent,
+            execution_profile,
+            prompt,
+            prompt_selection,
+        )
 }
 
 #[tauri::command]

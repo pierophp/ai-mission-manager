@@ -52,6 +52,29 @@ type WorksetRepositoryInput = {
   baseBranchOverride: string | null;
 };
 
+type AgentKind = "claude" | "codex";
+type ExecutionProfile = "investigate" | "implement" | "review" | "custom";
+
+type Run = {
+  id: number;
+  item_id: number;
+  workset_id: number;
+  machine_id: number;
+  agent: AgentKind;
+  execution_profile: ExecutionProfile;
+  prompt: string;
+  working_directory: string;
+  session_name: string;
+  pane_id: string;
+  started_at: number;
+};
+
+type RunPromptSelection = {
+  includeObjective: boolean;
+  includeNotes: boolean;
+  externalObjectIds: number[];
+};
+
 type Item = {
   id: number;
   human_identifier: string;
@@ -157,6 +180,7 @@ type ItemView = {
   relationships: ItemRelation[];
   worksets: Workset[];
   archived_worksets: Workset[];
+  runs: Run[];
   links: ExternalLinkView[];
 };
 
@@ -1019,6 +1043,16 @@ function ItemCard({
   const [additionalBaseBranchOverride, setAdditionalBaseBranchOverride] =
     useState("");
   const [removalReport, setRemovalReport] = useState<WorksetRemovalReport>();
+  const [runPreviewWorksetId, setRunPreviewWorksetId] = useState<number>();
+  const [runAgent, setRunAgent] = useState<AgentKind>("claude");
+  const [runProfile, setRunProfile] = useState<ExecutionProfile>("implement");
+  const [includeRunObjective, setIncludeRunObjective] = useState(true);
+  const [includeRunNotes, setIncludeRunNotes] = useState(false);
+  const [selectedRunExternalObjectIds, setSelectedRunExternalObjectIds] =
+    useState<number[]>([]);
+  const [runCustomPrompt, setRunCustomPrompt] = useState("");
+  const [runPrompt, setRunPrompt] = useState("");
+  const [runPromptNeedsCompose, setRunPromptNeedsCompose] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
   const itemRepositories = repositories.filter(
@@ -1162,6 +1196,80 @@ function ItemCard({
     });
   }
 
+  function runPromptSelection(): RunPromptSelection {
+    return {
+      includeObjective: includeRunObjective,
+      includeNotes: includeRunNotes,
+      externalObjectIds: selectedRunExternalObjectIds,
+    };
+  }
+
+  async function composeRunPromptPreview() {
+    if (!runPreviewWorksetId) return;
+    setIsSaving(true);
+    try {
+      const composed = await invoke<string>("compose_run_prompt", {
+        itemId: view.item.id,
+        executionProfile: runProfile,
+        promptSelection: runPromptSelection(),
+        customPrompt: runProfile === "custom" ? runCustomPrompt : null,
+      });
+      setRunPrompt(composed);
+      setRunPromptNeedsCompose(false);
+    } catch (composeError) {
+      window.alert(errorMessage(composeError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function openRunPreview(workset: Workset) {
+    setRunPreviewWorksetId(workset.id);
+    setRunAgent("claude");
+    setRunProfile("implement");
+    setIncludeRunObjective(true);
+    setIncludeRunNotes(Boolean(view.item.notes.trim()));
+    setSelectedRunExternalObjectIds([]);
+    setRunCustomPrompt("");
+    setIsSaving(true);
+    try {
+      const composed = await invoke<string>("compose_run_prompt", {
+        itemId: view.item.id,
+        executionProfile: "implement",
+        promptSelection: {
+          includeObjective: true,
+          includeNotes: Boolean(view.item.notes.trim()),
+          externalObjectIds: [],
+        },
+        customPrompt: null,
+      });
+      setRunPrompt(composed);
+      setRunPromptNeedsCompose(false);
+    } catch (composeError) {
+      setRunPreviewWorksetId(undefined);
+      window.alert(errorMessage(composeError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleStartRun(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!runPreviewWorksetId || !runPrompt.trim() || runPromptNeedsCompose) return;
+    await saveItem(async () => {
+      await invoke<Run>("start_run", {
+        itemId: view.item.id,
+        worksetId: runPreviewWorksetId,
+        agent: runAgent,
+        executionProfile: runProfile,
+        prompt: runPrompt,
+        promptSelection: runPromptSelection(),
+      });
+      setRunPreviewWorksetId(undefined);
+      setRunPrompt("");
+    });
+  }
+
   async function refreshExternalObject(externalObjectId: number) {
     setIsSaving(true);
     try {
@@ -1251,6 +1359,15 @@ function ItemCard({
           ))}
         </div>
         <div className="workset-actions">
+          {!archived && (
+            <button
+              type="button"
+              disabled={isSaving}
+              onClick={() => void openRunPreview(workset)}
+            >
+              Start Run
+            </button>
+          )}
           <button
             type="button"
             className="secondary-button"
@@ -1310,6 +1427,150 @@ function ItemCard({
               </button>
             </div>
           </div>
+        )}
+        {runPreviewWorksetId === workset.id && (
+          <form className="run-preview" onSubmit={handleStartRun}>
+            <div className="run-preview-heading">
+              <div>
+                <strong>Confirm Run</strong>
+                <p>
+                  Context: {view.context_name} · Project: {view.project_name} · Workset: {workset.branch}
+                </p>
+              </div>
+              <span className="run-machine">Machine: Local Mac</span>
+            </div>
+            <p className="run-working-directory">
+              Working directory: <code>{workset.root_directory}</code>
+            </p>
+            <div className="run-options">
+              <label>
+                <span>Agent</span>
+                <select
+                  value={runAgent}
+                  onChange={(event) => setRunAgent(event.target.value as AgentKind)}
+                  disabled={isSaving}
+                >
+                  <option value="claude">Claude Code</option>
+                  <option value="codex">Codex</option>
+                </select>
+              </label>
+              <label>
+                <span>Execution Profile</span>
+                <select
+                  value={runProfile}
+                  onChange={(event) => {
+                    setRunProfile(event.target.value as ExecutionProfile);
+                    setRunPromptNeedsCompose(true);
+                  }}
+                  disabled={isSaving}
+                >
+                  <option value="investigate">Investigate</option>
+                  <option value="implement">Implement</option>
+                  <option value="review">Review</option>
+                  <option value="custom">Custom prompt</option>
+                </select>
+              </label>
+            </div>
+            {runProfile === "custom" && (
+              <label>
+                <span>Custom prompt source</span>
+                <textarea
+                  value={runCustomPrompt}
+                  onChange={(event) => {
+                    setRunCustomPrompt(event.target.value);
+                    setRunPromptNeedsCompose(true);
+                  }}
+                  rows={3}
+                  placeholder="Tell the agent exactly what to do"
+                  disabled={isSaving}
+                />
+              </label>
+            )}
+            <div className="run-content-selection">
+              <span className="relationship-label">Include explicitly selected content</span>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={includeRunObjective}
+                  onChange={(event) => {
+                    setIncludeRunObjective(event.target.checked);
+                    setRunPromptNeedsCompose(true);
+                  }}
+                  disabled={isSaving}
+                />
+                Item objective
+              </label>
+              {view.item.notes.trim() && (
+                <label>
+                  <input
+                    type="checkbox"
+                    checked={includeRunNotes}
+                    onChange={(event) => {
+                      setIncludeRunNotes(event.target.checked);
+                      setRunPromptNeedsCompose(true);
+                    }}
+                    disabled={isSaving}
+                  />
+                  Item notes
+                </label>
+              )}
+              {view.links.map((link) => (
+                <label key={link.object.id}>
+                  <input
+                    type="checkbox"
+                    checked={selectedRunExternalObjectIds.includes(link.object.id)}
+                    onChange={(event) => {
+                      setSelectedRunExternalObjectIds((current) =>
+                        event.target.checked
+                          ? [...current, link.object.id]
+                          : current.filter((id) => id !== link.object.id),
+                      );
+                      setRunPromptNeedsCompose(true);
+                    }}
+                    disabled={isSaving}
+                  />
+                  {link.snapshot?.title ?? link.object.canonical_url}
+                </label>
+              ))}
+            </div>
+            <label>
+              <span>Editable composed prompt</span>
+              <textarea
+                value={runPrompt}
+                onChange={(event) => setRunPrompt(event.target.value)}
+                rows={7}
+                disabled={isSaving}
+              />
+            </label>
+            <div className="run-preview-actions">
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={isSaving}
+                onClick={() => void composeRunPromptPreview()}
+              >
+                Compose from selection
+              </button>
+              <button
+                type="submit"
+                disabled={isSaving || !runPrompt.trim() || runPromptNeedsCompose}
+              >
+                {isSaving
+                  ? "Starting…"
+                  : runPromptNeedsCompose
+                    ? "Compose before starting"
+                    : "Confirm and start Run"}
+              </button>
+              <button
+                type="button"
+                className="text-button"
+                disabled={isSaving}
+                onClick={() => setRunPreviewWorksetId(undefined)}
+              >
+                Cancel
+              </button>
+            </div>
+          </form>
         )}
         {!archived && availableRepositories.length > 0 && (
           <div className="workset-add-repository">
@@ -1456,6 +1717,27 @@ function ItemCard({
                 Remove
               </button>
             </span>
+          ))}
+        </div>
+      )}
+      {view.runs.length > 0 && (
+        <div className="run-history">
+          <span className="relationship-label">Run history</span>
+          {view.runs.map((run) => (
+            <article className="run-history-card" key={run.id}>
+              <div>
+                <strong>
+                  Run #{run.id} · {run.agent === "claude" ? "Claude Code" : "Codex"}
+                </strong>
+                <span>
+                  {run.execution_profile} · Local Mac
+                </span>
+              </div>
+              <code>{run.working_directory}</code>
+              <span>
+                Session {run.session_name} · Pane {run.pane_id}
+              </span>
+            </article>
           ))}
         </div>
       )}

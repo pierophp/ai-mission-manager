@@ -4,10 +4,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 use thiserror::Error;
 
 use crate::domain::{
-    Activity, Context, ContextAttentionDefault, DomainState, Effect, ExternalChangePolicy,
-    ExternalMetadata, ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, Item,
-    ItemRelation, ItemRelationKind, ItemStatus, Link, Project, ProjectDefaults, Reminder,
-    Repository, Workset, WorksetRepository,
+    Activity, AgentKind, Context, ContextAttentionDefault, DomainState, Effect, ExecutionProfile,
+    ExternalChangePolicy, ExternalMetadata, ExternalObject, ExternalObjectKind, ExternalProvider,
+    ExternalSnapshot, Item, ItemRelation, ItemRelationKind, ItemStatus, Link, Machine, Project,
+    ProjectDefaults, Reminder, Repository, Run, Workset, WorksetRepository,
 };
 
 #[derive(Debug, Error)]
@@ -28,6 +28,10 @@ pub enum StoreError {
     InvalidExternalMetadata(String),
     #[error("invalid Activity changes in database: {0}")]
     InvalidActivityChanges(String),
+    #[error("invalid Agent kind in database: {0}")]
+    InvalidAgentKind(String),
+    #[error("invalid Execution Profile in database: {0}")]
+    InvalidExecutionProfile(String),
     #[error("invalid {key} value in database: {value}")]
     InvalidSequence { key: String, value: String },
     #[error("a database sequence is exhausted")]
@@ -90,6 +94,8 @@ impl SqliteStore {
         let next_item_number = self.sequence("next_item_number")?;
         let next_repository_id = self.sequence("next_repository_id")?;
         let next_workset_id = self.sequence("next_workset_id")?;
+        let next_machine_id = self.sequence("next_machine_id")?;
+        let next_run_id = self.sequence("next_run_id")?;
         let next_external_object_id = self.sequence("next_external_object_id")?;
         let next_link_id = self.sequence("next_link_id")?;
         let next_activity_id = self.sequence("next_activity_id")?;
@@ -143,6 +149,22 @@ impl SqliteStore {
                     project_id: row.get(1)?,
                     name: row.get(2)?,
                     remote_url: row.get(3)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let machines = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, context_id, name, socket_name
+                 FROM machines
+                 ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(Machine {
+                    id: row.get(0)?,
+                    context_id: row.get(1)?,
+                    name: row.get(2)?,
+                    socket_name: row.get(3)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -239,6 +261,46 @@ impl SqliteStore {
                 workset.repositories.push(repository);
             }
         }
+        let runs = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, item_id, workset_id, machine_id, agent, execution_profile,
+                        prompt, working_directory, session_name, pane_id, started_at
+                 FROM runs
+                 ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let agent: String = row.get(4)?;
+                let execution_profile: String = row.get(5)?;
+                Ok(Run {
+                    id: row.get(0)?,
+                    item_id: row.get(1)?,
+                    workset_id: row.get(2)?,
+                    machine_id: row.get(3)?,
+                    agent: parse_agent_kind(&agent).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            4,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    execution_profile: parse_execution_profile(&execution_profile).map_err(
+                        |error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                5,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        },
+                    )?,
+                    prompt: row.get(6)?,
+                    working_directory: row.get(7)?,
+                    session_name: row.get(8)?,
+                    pane_id: row.get(9)?,
+                    started_at: row.get(10)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
         let relationships = {
             let mut statement = self.connection.prepare(
                 "SELECT from_item_id, to_item_id, kind
@@ -414,6 +476,8 @@ impl SqliteStore {
             next_item_number,
             next_repository_id,
             next_workset_id,
+            next_machine_id,
+            next_run_id,
             next_external_object_id,
             next_link_id,
             next_activity_id,
@@ -423,6 +487,8 @@ impl SqliteStore {
             repositories,
             items,
             worksets,
+            machines,
+            runs,
             relationships,
             external_objects,
             links,
@@ -573,6 +639,50 @@ impl SqliteStore {
                         ],
                     )?;
                     persist_workset_repositories(&transaction, workset)?;
+                }
+                Effect::PersistMachine {
+                    machine,
+                    next_machine_id,
+                } => {
+                    transaction.execute(
+                        "INSERT INTO machines (id, context_id, name, socket_name)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            machine.id,
+                            machine.context_id,
+                            machine.name,
+                            machine.socket_name,
+                        ],
+                    )?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_machine_id'",
+                        params![next_machine_id],
+                    )?;
+                }
+                Effect::PersistRun { run, next_run_id } => {
+                    transaction.execute(
+                        "INSERT INTO runs
+                            (id, item_id, workset_id, machine_id, agent, execution_profile,
+                            prompt, working_directory, session_name, pane_id, started_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                        params![
+                            run.id,
+                            run.item_id,
+                            run.workset_id,
+                            run.machine_id,
+                            agent_kind_as_str(run.agent),
+                            execution_profile_as_str(run.execution_profile),
+                            run.prompt,
+                            run.working_directory,
+                            run.session_name,
+                            run.pane_id,
+                            run.started_at,
+                        ],
+                    )?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_run_id'",
+                        params![next_run_id],
+                    )?;
                 }
                 Effect::RemoveWorkset { workset_id } => {
                     transaction
@@ -762,6 +872,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_item_number', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_repository_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_workset_id', 1);
+         INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_machine_id', 1);
+         INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_run_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_external_object_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_link_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_activity_id', 1);
@@ -789,6 +901,15 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          );
          CREATE INDEX IF NOT EXISTS repositories_by_project
              ON repositories (project_id, id);
+         CREATE TABLE IF NOT EXISTS machines (
+             id INTEGER PRIMARY KEY NOT NULL,
+             context_id INTEGER NOT NULL REFERENCES contexts(id),
+             name TEXT NOT NULL,
+             socket_name TEXT NOT NULL,
+             UNIQUE (context_id, name)
+         );
+         CREATE INDEX IF NOT EXISTS machines_by_context
+             ON machines (context_id, id);
          CREATE TABLE IF NOT EXISTS worksets (
              id INTEGER PRIMARY KEY NOT NULL,
              item_id INTEGER NOT NULL REFERENCES items(id),
@@ -809,6 +930,24 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          );
          CREATE INDEX IF NOT EXISTS workset_repositories_by_repository
              ON workset_repositories (repository_id);
+         CREATE TABLE IF NOT EXISTS runs (
+             id INTEGER PRIMARY KEY NOT NULL,
+             item_id INTEGER NOT NULL REFERENCES items(id),
+             workset_id INTEGER NOT NULL REFERENCES worksets(id),
+             machine_id INTEGER NOT NULL REFERENCES machines(id),
+             agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
+             execution_profile TEXT NOT NULL
+                 CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom')),
+             prompt TEXT NOT NULL,
+             working_directory TEXT NOT NULL,
+             session_name TEXT NOT NULL,
+             pane_id TEXT NOT NULL,
+             started_at INTEGER NOT NULL
+         );
+         CREATE INDEX IF NOT EXISTS runs_by_item
+             ON runs (item_id, id);
+         CREATE INDEX IF NOT EXISTS runs_by_workset
+             ON runs (workset_id, id);
          CREATE TABLE IF NOT EXISTS reminders (
              id INTEGER PRIMARY KEY NOT NULL,
              item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
@@ -880,6 +1019,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     ensure_sequence_at_least(connection, "next_item_id", "items", "id")?;
     ensure_sequence_at_least(connection, "next_repository_id", "repositories", "id")?;
     ensure_sequence_at_least(connection, "next_workset_id", "worksets", "id")?;
+    ensure_sequence_at_least(connection, "next_machine_id", "machines", "id")?;
+    ensure_sequence_at_least(connection, "next_run_id", "runs", "id")?;
     ensure_sequence_at_least(
         connection,
         "next_external_object_id",
@@ -1057,6 +1198,40 @@ fn bool_as_i64(value: bool) -> i64 {
     i64::from(value)
 }
 
+fn agent_kind_as_str(agent: AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Claude => "claude",
+        AgentKind::Codex => "codex",
+    }
+}
+
+fn parse_agent_kind(agent: &str) -> Result<AgentKind, StoreError> {
+    match agent {
+        "claude" => Ok(AgentKind::Claude),
+        "codex" => Ok(AgentKind::Codex),
+        other => Err(StoreError::InvalidAgentKind(other.into())),
+    }
+}
+
+fn execution_profile_as_str(profile: ExecutionProfile) -> &'static str {
+    match profile {
+        ExecutionProfile::Investigate => "investigate",
+        ExecutionProfile::Implement => "implement",
+        ExecutionProfile::Review => "review",
+        ExecutionProfile::CustomPrompt => "custom",
+    }
+}
+
+fn parse_execution_profile(profile: &str) -> Result<ExecutionProfile, StoreError> {
+    match profile {
+        "investigate" => Ok(ExecutionProfile::Investigate),
+        "implement" => Ok(ExecutionProfile::Implement),
+        "review" => Ok(ExecutionProfile::Review),
+        "custom" => Ok(ExecutionProfile::CustomPrompt),
+        other => Err(StoreError::InvalidExecutionProfile(other.into())),
+    }
+}
+
 fn item_status_as_str(status: ItemStatus) -> &'static str {
     match status {
         ItemStatus::Inbox => "Inbox",
@@ -1139,8 +1314,9 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        decide, Event, ExternalChangePolicy, ExternalMetadata, ExternalObjectInput,
-        ExternalObjectKind, ExternalProvider, ExternalSnapshotData, WorksetRepositoryInput,
+        decide, AgentKind, Event, ExecutionProfile, ExternalChangePolicy, ExternalMetadata,
+        ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshotData,
+        RunPromptSelection, WorksetRepositoryInput,
     };
 
     #[test]
@@ -1326,6 +1502,40 @@ mod tests {
             store
                 .apply(&workset.effects)
                 .expect("Workset should persist");
+            let machine = decide(
+                workset.state,
+                Event::RegisterMachine {
+                    context_id: 1,
+                    name: "Local Mac".into(),
+                    socket_name: "ai-mission-manager".into(),
+                },
+            )
+            .expect("Machine should register");
+            store
+                .apply(&machine.effects)
+                .expect("Machine should persist");
+            let run = decide(
+                machine.state,
+                Event::StartRun {
+                    item_id: 1,
+                    workset_id: 1,
+                    machine_id: 1,
+                    agent: AgentKind::Codex,
+                    execution_profile: ExecutionProfile::Implement,
+                    prompt: "Implement the platform change".into(),
+                    working_directory: "/tmp/worksets/platform-change".into(),
+                    session_name: "mission-item-1-run-1".into(),
+                    pane_id: "%1".into(),
+                    started_at: 123,
+                    prompt_selection: RunPromptSelection {
+                        include_objective: true,
+                        include_notes: false,
+                        external_object_ids: Vec::new(),
+                    },
+                },
+            )
+            .expect("Run should start");
+            store.apply(&run.effects).expect("Run should persist");
         }
 
         let reopened = SqliteStore::open(&path).expect("database should reopen");
@@ -1354,6 +1564,14 @@ mod tests {
         );
         assert_eq!(state.next_repository_id, 2);
         assert_eq!(state.next_workset_id, 2);
+        assert_eq!(state.machines.len(), 1);
+        assert_eq!(state.machines[0].name, "Local Mac");
+        assert_eq!(state.runs.len(), 1);
+        assert_eq!(state.runs[0].agent, AgentKind::Codex);
+        assert_eq!(state.runs[0].session_name, "mission-item-1-run-1");
+        assert_eq!(state.runs[0].pane_id, "%1");
+        assert_eq!(state.next_machine_id, 2);
+        assert_eq!(state.next_run_id, 2);
     }
 
     #[test]
