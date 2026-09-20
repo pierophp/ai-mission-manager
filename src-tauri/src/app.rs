@@ -13,17 +13,17 @@ use crate::{
     dependencies::{check_command, resolve_executable, DependencyState, DependencyStatus},
     domain::{
         compose_run_prompt as build_run_prompt, decide, external_link_view, home_view,
-        plan_external_object_deletion, plan_item_deletion, plan_machine_deletion,
-        plan_repository_deletion, search_items, suggest_untracked_runs, AgentKind,
-        AgentPaneObservation, AttachedRepositoryInput, AuditAction, AuditEntry, Context,
-        ContextAttentionDefault, DomainState, Effect, Event, ExecutionProfile,
-        ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
+        plan_context_deletion, plan_external_object_deletion, plan_item_deletion,
+        plan_machine_deletion, plan_project_deletion, plan_repository_deletion, search_items,
+        suggest_untracked_runs, AgentKind, AgentPaneObservation, AttachedRepositoryInput,
+        AuditAction, AuditEntry, Context, ContextAttentionDefault, DomainState, Effect, Event,
+        ExecutionProfile, ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
         ExternalObjectDeletionSummary, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
         ExternalSnapshot, HomeView, Item, ItemDeletionPlan, ItemDeletionSummary, ItemRelation,
         ItemRelationKind, ItemStatus, ItemView, Machine, MachineDeletionPlan, MachineObservation,
-        MachineTransport, Project, ProjectDefaults, Repository, RepositoryDeletionPlan, Run,
-        RunPaneStatus, RunPromptSelection, RunState, RunSuggestion, Workset,
-        WorksetRepositoryInput,
+        MachineTransport, ParentDeletionPlan, Project, ProjectDefaults, Repository,
+        RepositoryDeletionPlan, Run, RunPaneStatus, RunPromptSelection, RunState, RunSuggestion,
+        Workset, WorksetRepositoryInput,
     },
     git::GitCli,
     persistence::SqliteStore,
@@ -45,6 +45,7 @@ pub struct Runtime {
     pending_external_object_deletion: Option<ExternalObjectDeletionPreview>,
     pending_repository_deletion: Option<RepositoryDeletionPreview>,
     pending_machine_deletion: Option<MachineDeletionPreview>,
+    pending_parent_deletion: Option<ParentDeletionPreview>,
     terminal_connections: HashMap<String, TmuxControlPane>,
     agent_state_directory: PathBuf,
 }
@@ -101,6 +102,7 @@ impl Runtime {
             pending_external_object_deletion: None,
             pending_repository_deletion: None,
             pending_machine_deletion: None,
+            pending_parent_deletion: None,
             terminal_connections: HashMap::new(),
             agent_state_directory,
         };
@@ -1430,6 +1432,238 @@ impl Runtime {
         })
     }
 
+    fn build_parent_deletion_preview(
+        &self,
+        target: ParentDeletionTarget,
+    ) -> Result<ParentDeletionPreview, String> {
+        let plan = match target {
+            ParentDeletionTarget::Project(project_id) => {
+                plan_project_deletion(&self.state, project_id)
+            }
+            ParentDeletionTarget::Context(context_id) => {
+                plan_context_deletion(&self.state, context_id)
+            }
+        }
+        .map_err(|error| error.to_string())?;
+        let mut blockers = plan
+            .active_run_ids
+            .iter()
+            .map(|run_id| {
+                format!(
+                    "Run #{run_id} is active; stop it before deleting this {}.",
+                    target.label()
+                )
+            })
+            .collect::<Vec<_>>();
+        if matches!(target, ParentDeletionTarget::Context(_)) && self.state.contexts.len() == 1 {
+            blockers.push(
+                "This is the last Context; create another Context before deleting it.".into(),
+            );
+        }
+        let worksets = plan
+            .worksets
+            .iter()
+            .map(|workset| {
+                let preview = self.build_workset_deletion_preview(
+                    workset.id,
+                    &workset.root_directory,
+                    &workset.branch,
+                    workset.archived,
+                );
+                blockers.extend(
+                    preview
+                        .blockers
+                        .iter()
+                        .map(|blocker| format!("Workset #{}: {blocker}", workset.id)),
+                );
+                preview
+            })
+            .collect();
+
+        Ok(ParentDeletionPreview {
+            plan,
+            worksets,
+            blockers,
+        })
+    }
+
+    fn prepare_project_deletion(
+        &mut self,
+        project_id: i64,
+    ) -> Result<ParentDeletionPreview, String> {
+        let preview =
+            self.build_parent_deletion_preview(ParentDeletionTarget::Project(project_id))?;
+        self.pending_parent_deletion = Some(preview.clone());
+        Ok(preview)
+    }
+
+    fn prepare_context_deletion(
+        &mut self,
+        context_id: i64,
+    ) -> Result<ParentDeletionPreview, String> {
+        let preview =
+            self.build_parent_deletion_preview(ParentDeletionTarget::Context(context_id))?;
+        self.pending_parent_deletion = Some(preview.clone());
+        Ok(preview)
+    }
+
+    fn delete_parent(
+        &mut self,
+        target: ParentDeletionTarget,
+        event: Event,
+        confirmed: bool,
+        delete_workset_directories: bool,
+    ) -> Result<ParentDeletionResult, String> {
+        if !confirmed {
+            return Err(format!(
+                "{} deletion requires explicit confirmation after reviewing its deletion preview",
+                target.label()
+            ));
+        }
+        let pending = self
+            .pending_parent_deletion
+            .as_ref()
+            .filter(|preview| target.matches(&preview.plan))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "Review the {} deletion preview before deleting it",
+                    target.label()
+                )
+            })?;
+        let current = self.build_parent_deletion_preview(target)?;
+        if current != pending {
+            return Err(format!(
+                "The {} or one of its Workset safety reports changed after the preview; review the updated deletion preview before deleting it",
+                target.label()
+            ));
+        }
+        if !current.blockers.is_empty() {
+            return Err(format!(
+                "{} deletion is blocked:\n{}",
+                target.label(),
+                current.blockers.join("\n")
+            ));
+        }
+
+        let mut staged = Vec::new();
+        if delete_workset_directories {
+            for workset in &current.plan.worksets {
+                let root = Path::new(&workset.root_directory);
+                let staging = match workset_removal_staging_path(root, workset.id) {
+                    Ok(staging) => staging,
+                    Err(error) => {
+                        let restore_error = restore_staged_directories(&staged);
+                        return Err(format_commit_error(error, restore_error));
+                    }
+                };
+                if let Err(error) = fs::rename(root, &staging) {
+                    let restore_error = restore_staged_directories(&staged);
+                    return Err(format_commit_error(
+                        format!(
+                            "Could not stage Workset directory for {} deletion: {error}",
+                            target.label()
+                        ),
+                        restore_error,
+                    ));
+                }
+                staged.push((root.to_owned(), staging));
+            }
+        }
+
+        let decision = match decide(self.state.clone(), event) {
+            Ok(decision) => decision,
+            Err(error) => {
+                let restore_error = restore_staged_directories(&staged);
+                return Err(format_commit_error(error.to_string(), restore_error));
+            }
+        };
+        let summary = current.plan.summary();
+        if let Err(error) = self.commit(decision) {
+            let restore_error = restore_staged_directories(&staged);
+            return Err(format_commit_error(error, restore_error));
+        }
+        self.pending_parent_deletion = None;
+
+        let physical_cleanup_warning = if delete_workset_directories {
+            let mut cleanup_errors = Vec::new();
+            for (_, staging) in staged {
+                if let Err(error) = fs::remove_dir_all(&staging) {
+                    cleanup_errors.push(format!("{}: {error}", staging.display()));
+                }
+            }
+            (!cleanup_errors.is_empty()).then(|| {
+                format!(
+                    "{} records were deleted, but some Workset directories could not be removed: {}",
+                    target.label(),
+                    cleanup_errors.join(", ")
+                )
+            })
+        } else if current.plan.worksets.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "{} records were deleted; Workset directories were left on disk by choice.",
+                target.label()
+            ))
+        };
+
+        Ok(ParentDeletionResult {
+            summary,
+            workset_directories_deleted: delete_workset_directories,
+            physical_cleanup_warning,
+        })
+    }
+
+    fn delete_project(
+        &mut self,
+        project_id: i64,
+        item_ids: Vec<i64>,
+        repository_ids: Vec<i64>,
+        workset_ids: Vec<i64>,
+        confirmed: bool,
+        delete_workset_directories: bool,
+    ) -> Result<ParentDeletionResult, String> {
+        self.delete_parent(
+            ParentDeletionTarget::Project(project_id),
+            Event::DeleteProject {
+                project_id,
+                item_ids,
+                repository_ids,
+                workset_ids,
+            },
+            confirmed,
+            delete_workset_directories,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn delete_context(
+        &mut self,
+        context_id: i64,
+        project_ids: Vec<i64>,
+        item_ids: Vec<i64>,
+        repository_ids: Vec<i64>,
+        workset_ids: Vec<i64>,
+        machine_ids: Vec<i64>,
+        confirmed: bool,
+        delete_workset_directories: bool,
+    ) -> Result<ParentDeletionResult, String> {
+        self.delete_parent(
+            ParentDeletionTarget::Context(context_id),
+            Event::DeleteContext {
+                context_id,
+                project_ids,
+                item_ids,
+                repository_ids,
+                workset_ids,
+                machine_ids,
+            },
+            confirmed,
+            delete_workset_directories,
+        )
+    }
+
     fn build_workset_deletion_preview(
         &self,
         workset_id: i64,
@@ -2594,6 +2828,12 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
             Effect::RemoveItemCascade { summary, .. } => Some(AuditAction::ItemDeleted {
                 summary: summary.clone(),
             }),
+            Effect::RemoveProjectCascade { summary, .. } => Some(AuditAction::ProjectDeleted {
+                summary: summary.clone(),
+            }),
+            Effect::RemoveContextCascade { summary, .. } => Some(AuditAction::ContextDeleted {
+                summary: summary.clone(),
+            }),
             Effect::PersistMachine { machine, .. } => Some(AuditAction::MachineRegistered {
                 machine_id: machine.id,
             }),
@@ -2775,6 +3015,28 @@ fn restore_staged_directories(staged: &[(PathBuf, PathBuf)]) -> Option<String> {
     (!errors.is_empty()).then(|| errors.join(", "))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ParentDeletionTarget {
+    Project(i64),
+    Context(i64),
+}
+
+impl ParentDeletionTarget {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Project(_) => "Project",
+            Self::Context(_) => "Context",
+        }
+    }
+
+    fn matches(self, plan: &ParentDeletionPlan) -> bool {
+        match self {
+            Self::Project(project_id) => plan.project_id == Some(project_id),
+            Self::Context(context_id) => plan.context_id == Some(context_id),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RepositoryRemovalReport {
     pub repository_id: i64,
@@ -2867,6 +3129,22 @@ pub struct RepositoryDeletionPreview {
 pub struct MachineDeletionPreview {
     pub plan: MachineDeletionPlan,
     pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentDeletionPreview {
+    pub plan: ParentDeletionPlan,
+    pub worksets: Vec<WorksetDeletionPreview>,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentDeletionResult {
+    pub summary: crate::domain::ParentDeletionSummary,
+    pub workset_directories_deleted: bool,
+    pub physical_cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -3324,6 +3602,79 @@ pub fn register_repository(
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .register_repository(project_id, name, remote_url)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn prepare_project_deletion(
+    project_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ParentDeletionPreview, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .prepare_project_deletion(project_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_project(
+    project_id: i64,
+    item_ids: Vec<i64>,
+    repository_ids: Vec<i64>,
+    workset_ids: Vec<i64>,
+    confirmed: bool,
+    delete_workset_directories: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ParentDeletionResult, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .delete_project(
+            project_id,
+            item_ids,
+            repository_ids,
+            workset_ids,
+            confirmed,
+            delete_workset_directories,
+        )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn prepare_context_deletion(
+    context_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ParentDeletionPreview, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .prepare_context_deletion(context_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
+pub fn delete_context(
+    context_id: i64,
+    project_ids: Vec<i64>,
+    item_ids: Vec<i64>,
+    repository_ids: Vec<i64>,
+    workset_ids: Vec<i64>,
+    machine_ids: Vec<i64>,
+    confirmed: bool,
+    delete_workset_directories: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ParentDeletionResult, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .delete_context(
+            context_id,
+            project_ids,
+            item_ids,
+            repository_ids,
+            workset_ids,
+            machine_ids,
+            confirmed,
+            delete_workset_directories,
+        )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4506,6 +4857,117 @@ fi
             .expect("audit history should load")
             .iter()
             .any(|entry| matches!(entry.action, AuditAction::ItemDeleted { .. })));
+    }
+
+    #[test]
+    fn parent_deletion_requires_a_fresh_preview_and_keeps_an_empty_context_usable() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .create_context("Work".into())
+            .expect("Context should be created");
+        runtime
+            .create_project(
+                "Billing".into(),
+                2,
+                ProjectDefaults {
+                    item_status: ItemStatus::Inbox,
+                },
+            )
+            .expect("Project should be created");
+        runtime
+            .create_item("Delete this Project graph".into(), 2, 3)
+            .expect("Item should be created");
+
+        let preview = runtime
+            .prepare_project_deletion(3)
+            .expect("Project deletion preview should be available");
+        assert_eq!(preview.plan.project_id, Some(3));
+        assert_eq!(preview.plan.items.len(), 1);
+        assert!(preview.blockers.is_empty());
+        runtime
+            .update_item(
+                Event::SetItemNotes {
+                    item_id: 1,
+                    notes: "changed after preview".into(),
+                },
+                1,
+            )
+            .expect("Item should update");
+        assert!(runtime
+            .delete_project(3, vec![1], Vec::new(), Vec::new(), true, false)
+            .is_err());
+        assert!(runtime.state.projects.iter().any(|project| project.id == 3));
+
+        runtime
+            .prepare_project_deletion(3)
+            .expect("fresh Project preview should be available");
+        let result = runtime
+            .delete_project(3, vec![1], Vec::new(), Vec::new(), true, false)
+            .expect("Project deletion should succeed");
+        assert_eq!(result.summary.item_count, 1);
+        assert!(runtime.state.items.is_empty());
+        assert!(runtime.state.projects.iter().all(|project| project.id != 3));
+        assert!(runtime.state.contexts.iter().any(|context| context.id == 2));
+
+        runtime
+            .prepare_project_deletion(2)
+            .expect("the remaining Project preview should be available");
+        runtime
+            .delete_project(2, Vec::new(), Vec::new(), Vec::new(), true, false)
+            .expect("the last Project in a Context should be deletable");
+        assert!(runtime
+            .state
+            .projects
+            .iter()
+            .all(|project| project.context_id != 2));
+
+        let empty_context = runtime
+            .prepare_context_deletion(2)
+            .expect("an empty Context should have a deletion preview");
+        assert!(empty_context.blockers.is_empty());
+        runtime
+            .delete_context(
+                2,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                false,
+            )
+            .expect("the non-last empty Context should be deletable");
+        let last_context = runtime
+            .prepare_context_deletion(1)
+            .expect("the last Context should still produce a preview");
+        assert!(last_context
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("last Context")));
+        assert!(runtime
+            .delete_context(
+                1,
+                vec![1],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                false,
+            )
+            .is_err());
+
+        let history = runtime
+            .list_audit_history()
+            .expect("audit history should load");
+        assert!(history
+            .iter()
+            .any(|entry| matches!(entry.action, AuditAction::ProjectDeleted { .. })));
+        assert!(history
+            .iter()
+            .any(|entry| matches!(entry.action, AuditAction::ContextDeleted { .. })));
     }
 
     #[test]

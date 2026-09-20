@@ -47,7 +47,7 @@ A persistent multi-repository working environment representing one logical line 
 _Avoid_: worktree, checkout, sandbox, workspace
 
 **Run**:
-One attempt at doing work inside a Workset by a single agent. Runs are historical — a Workset accumulates them and never loses one.
+One attempt at doing work inside a Workset by a single agent. Runs are historical records while they are retained, but finished Runs may be explicitly deleted as part of local cleanup; an active Run blocks deletion of its Item, Workset, Machine, Project, or Context.
 _Avoid_: session, job, execution, attempt
 
 **Pane**:

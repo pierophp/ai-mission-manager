@@ -448,6 +448,79 @@ type MachineDeletionResult = {
   runCount: number;
 };
 
+type ParentDeletionPlan = {
+  contextId: number | null;
+  projectId: number | null;
+  name: string;
+  projects: { id: number; name: string }[];
+  items: {
+    id: number;
+    humanIdentifier: string;
+    title: string;
+    projectId: number;
+  }[];
+  repositories: {
+    id: number;
+    name: string;
+    remoteUrl: string;
+    projectId: number;
+  }[];
+  machines: { id: number; name: string }[];
+  worksets: {
+    id: number;
+    itemId: number;
+    rootDirectory: string;
+    branch: string;
+    archived: boolean;
+  }[];
+  runs: {
+    id: number;
+    itemId: number;
+    itemIdentifier: string;
+    itemTitle: string;
+    worksetId: number;
+    machineId: number;
+    state: RunState;
+    paneStatus: RunPaneStatus;
+  }[];
+  activeRunIds: number[];
+  reminderCount: number;
+  relationshipCount: number;
+  linkIds: number[];
+  attentionDefaults: ContextAttentionDefault[];
+  orphanedExternalObjectIds: number[];
+  orphanedSnapshotCount: number;
+  orphanedActivityCount: number;
+};
+
+type ParentDeletionPreview = {
+  plan: ParentDeletionPlan;
+  worksets: WorksetDeletionPreview[];
+  blockers: string[];
+};
+
+type ParentDeletionResult = {
+  summary: {
+    contextId: number | null;
+    projectId: number | null;
+    projectCount: number;
+    itemCount: number;
+    repositoryCount: number;
+    machineCount: number;
+    worksetCount: number;
+    runCount: number;
+    reminderCount: number;
+    relationshipCount: number;
+    linkCount: number;
+    attentionDefaultCount: number;
+    externalObjectCount: number;
+    snapshotCount: number;
+    activityCount: number;
+  };
+  worksetDirectoriesDeleted: boolean;
+  physicalCleanupWarning: string | null;
+};
+
 type RunDeletionResult = {
   runId: number;
 };
@@ -496,7 +569,7 @@ type AuditAction = {
   link_id?: number;
   from_item_id?: number;
   to_item_id?: number;
-  summary?: ItemDeletionResult["summary"];
+  summary?: ItemDeletionResult["summary"] | ParentDeletionResult["summary"];
 };
 
 type AuditEntry = {
@@ -577,6 +650,8 @@ export function App() {
     useState<RepositoryDeletionPreview>();
   const [machineDeletionPreview, setMachineDeletionPreview] =
     useState<MachineDeletionPreview>();
+  const [parentDeletionPreview, setParentDeletionPreview] =
+    useState<ParentDeletionPreview>();
   const [machines, setMachines] = useState<Machine[]>([]);
   const [attentionDefaults, setAttentionDefaults] = useState<
     ContextAttentionDefault[]
@@ -838,9 +913,9 @@ export function App() {
     );
   }, [attentionDefaults, attentionObjectKind, captureContextId]);
 
-  async function refreshHome() {
+  async function refreshHome(nextContextFilterId = contextFilterId) {
     const loadedHome = await invoke<HomeView>("get_home", {
-      contextId: contextFilterId ?? null,
+      contextId: nextContextFilterId ?? null,
       now: currentMinute(),
     });
     setHome(loadedHome);
@@ -941,6 +1016,142 @@ export function App() {
       setError(errorMessage(saveError));
     } finally {
       setIsSaving(false);
+    }
+  }
+
+  async function handlePrepareProjectDeletion(projectId: number) {
+    setIsSaving(true);
+    try {
+      const preview = await invoke<ParentDeletionPreview>(
+        "prepare_project_deletion",
+        { projectId },
+      );
+      setParentDeletionPreview(preview);
+      setError(undefined);
+    } catch (previewError) {
+      window.alert(errorMessage(previewError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handlePrepareContextDeletion(contextId: number) {
+    setIsSaving(true);
+    try {
+      const preview = await invoke<ParentDeletionPreview>(
+        "prepare_context_deletion",
+        { contextId },
+      );
+      setParentDeletionPreview(preview);
+      setError(undefined);
+    } catch (previewError) {
+      window.alert(errorMessage(previewError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDeleteProject(projectId: number) {
+    if (
+      !parentDeletionPreview ||
+      parentDeletionPreview.plan.projectId !== projectId ||
+      parentDeletionPreview.blockers.length > 0
+    ) {
+      return;
+    }
+    const { plan } = parentDeletionPreview;
+    if (
+      !window.confirm(
+        `Delete Project ${plan.name} and all of its local records? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    const deleteWorksetDirectories =
+      plan.worksets.length > 0 &&
+      window.confirm(
+        `Permanently delete these ${plan.worksets.length} Workset director${plan.worksets.length === 1 ? "y" : "ies"} from disk too? Choose Cancel to keep the directories while removing their records.`,
+      );
+
+    setIsSaving(true);
+    try {
+      const result = await invoke<ParentDeletionResult>("delete_project", {
+        projectId,
+        itemIds: plan.items.map((item) => item.id),
+        repositoryIds: plan.repositories.map((repository) => repository.id),
+        worksetIds: plan.worksets.map((workset) => workset.id),
+        confirmed: true,
+        deleteWorksetDirectories,
+      });
+      setParentDeletionPreview(undefined);
+      await updateHomeAfterEdit();
+      showParentDeletionResult("Project", result);
+    } catch (deleteError) {
+      setParentDeletionPreview(undefined);
+      window.alert(errorMessage(deleteError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDeleteContext(contextId: number) {
+    if (
+      !parentDeletionPreview ||
+      parentDeletionPreview.plan.contextId !== contextId ||
+      parentDeletionPreview.blockers.length > 0
+    ) {
+      return;
+    }
+    const { plan } = parentDeletionPreview;
+    if (
+      !window.confirm(
+        `Delete Context ${plan.name} and all of its local records? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    const deleteWorksetDirectories =
+      plan.worksets.length > 0 &&
+      window.confirm(
+        `Permanently delete these ${plan.worksets.length} Workset director${plan.worksets.length === 1 ? "y" : "ies"} from disk too? Choose Cancel to keep the directories while removing their records.`,
+      );
+
+    setIsSaving(true);
+    try {
+      const result = await invoke<ParentDeletionResult>("delete_context", {
+        contextId,
+        projectIds: plan.projects.map((project) => project.id),
+        itemIds: plan.items.map((item) => item.id),
+        repositoryIds: plan.repositories.map((repository) => repository.id),
+        worksetIds: plan.worksets.map((workset) => workset.id),
+        machineIds: plan.machines.map((machine) => machine.id),
+        confirmed: true,
+        deleteWorksetDirectories,
+      });
+      if (contextFilterId === contextId) {
+        setContextFilterId(undefined);
+      }
+      setParentDeletionPreview(undefined);
+      await updateHomeAfterEdit(contextFilterId === contextId ? undefined : contextFilterId);
+      showParentDeletionResult("Context", result);
+    } catch (deleteError) {
+      setParentDeletionPreview(undefined);
+      window.alert(errorMessage(deleteError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  function showParentDeletionResult(
+    kind: "Project" | "Context",
+    result: ParentDeletionResult,
+  ) {
+    const { summary } = result;
+    window.alert(
+      `Deleted ${kind}: ${summary.projectCount} Project(s), ${summary.itemCount} Item(s), ${summary.repositoryCount} Repository record(s), ${summary.machineCount} Machine(s), ${summary.worksetCount} Workset(s), ${summary.runCount} Run(s), ${summary.linkCount} Link(s), and ${summary.externalObjectCount} orphaned External Object(s).`,
+    );
+    if (result.physicalCleanupWarning) {
+      window.alert(result.physicalCleanupWarning);
     }
   }
 
@@ -1242,17 +1453,36 @@ export function App() {
     }
   }
 
-  async function updateHomeAfterEdit() {
-    const [loadedRepositories, loadedMachines] = await Promise.all([
+  async function updateHomeAfterEdit(nextContextFilterId = contextFilterId) {
+    const [loadedContexts, loadedProjects, loadedAttentionDefaults, loadedRepositories, loadedMachines] =
+      await Promise.all([
+      invoke<Context[]>("list_contexts"),
+      invoke<Project[]>("list_projects"),
+      invoke<ContextAttentionDefault[]>("list_context_attention_defaults"),
       invoke<Repository[]>("list_repositories"),
       invoke<Machine[]>("list_machines"),
-      refreshHome(),
+      refreshHome(nextContextFilterId),
       refreshSearch(),
       refreshRunSuggestions(),
       refreshAuditHistory(),
-    ]);
+      ]);
+    setContexts(loadedContexts);
+    setProjects(loadedProjects);
+    setAttentionDefaults(loadedAttentionDefaults);
     setRepositories(loadedRepositories);
     setMachines(loadedMachines);
+    const nextCaptureContextId =
+      loadedContexts.find((context) => context.id === captureContextId)?.id ??
+      loadedContexts[0]?.id;
+    const nextCaptureProjectId = loadedProjects.find(
+      (project) =>
+        project.id === captureProjectId &&
+        project.context_id === nextCaptureContextId,
+    )?.id ?? loadedProjects.find(
+      (project) => project.context_id === nextCaptureContextId,
+    )?.id;
+    setCaptureContextId(nextCaptureContextId);
+    setCaptureProjectId(nextCaptureProjectId);
   }
 
   return (
@@ -1613,11 +1843,32 @@ export function App() {
             <ul className="entity-list">
               {contexts.map((context) => (
                 <li className="entity-row" key={context.id}>
-                  <span>{context.name}</span>
-                  <span className="entity-meta">
-                    {projects.filter((project) => project.context_id === context.id).length}{" "}
-                    Projects
-                  </span>
+                  <div>
+                    <span>{context.name}</span>
+                    <span className="entity-meta">
+                      {projects.filter((project) => project.context_id === context.id).length}{" "}
+                      Projects
+                    </span>
+                  </div>
+                  <div className="entity-actions">
+                    <button
+                      type="button"
+                      className="secondary-button"
+                      disabled={isSaving}
+                      onClick={() => void handlePrepareContextDeletion(context.id)}
+                    >
+                      Review deletion
+                    </button>
+                  </div>
+                  {parentDeletionPreview?.plan.contextId === context.id && (
+                    <ParentDeletionPreviewCard
+                      preview={parentDeletionPreview}
+                      kind="Context"
+                      disabled={isSaving}
+                      onConfirm={() => void handleDeleteContext(context.id)}
+                      onCancel={() => setParentDeletionPreview(undefined)}
+                    />
+                  )}
                 </li>
               ))}
             </ul>
@@ -1673,6 +1924,44 @@ export function App() {
                 Add Project
               </button>
               </form>
+              <ul className="entity-list">
+                {captureProjects.length === 0 ? (
+                  <li className="empty-state">
+                    No Projects remain in this Context. Create one above to add Items here.
+                  </li>
+                ) : (
+                  captureProjects.map((project) => (
+                    <li className="entity-row" key={project.id}>
+                      <div>
+                        <span>{project.name}</span>
+                        <span className="entity-meta">
+                          {allItems.filter((item) => item.item.project_id === project.id).length} Items ·
+                          starts {project.defaults.item_status}
+                        </span>
+                      </div>
+                      <div className="entity-actions">
+                        <button
+                          type="button"
+                          className="secondary-button"
+                          disabled={isSaving}
+                          onClick={() => void handlePrepareProjectDeletion(project.id)}
+                        >
+                          Review deletion
+                        </button>
+                      </div>
+                      {parentDeletionPreview?.plan.projectId === project.id && (
+                        <ParentDeletionPreviewCard
+                          preview={parentDeletionPreview}
+                          kind="Project"
+                          disabled={isSaving}
+                          onConfirm={() => void handleDeleteProject(project.id)}
+                          onCancel={() => setParentDeletionPreview(undefined)}
+                        />
+                      )}
+                    </li>
+                  ))
+                )}
+              </ul>
             </div>
             <div>
               <h3>Repositories</h3>
@@ -2147,6 +2436,118 @@ function TabNavigation({
         ))}
       </div>
     </nav>
+  );
+}
+
+function ParentDeletionPreviewCard({
+  preview,
+  kind,
+  disabled,
+  onConfirm,
+  onCancel,
+}: {
+  preview: ParentDeletionPreview;
+  kind: "Project" | "Context";
+  disabled: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const { plan } = preview;
+  return (
+    <div className="deletion-preview parent-deletion-preview" role="alert">
+      <strong>{kind} deletion preview</strong>
+      <p>
+        Deleting <b>{plan.name}</b> removes the complete local dependency graph below. Provider-owned
+        Issues and pull requests are never deleted.
+      </p>
+      <div className="parent-deletion-summary">
+        <span><strong>{plan.projects.length}</strong> Projects</span>
+        <span><strong>{plan.items.length}</strong> Items</span>
+        <span><strong>{plan.repositories.length}</strong> Repositories</span>
+        <span><strong>{plan.machines.length}</strong> Machines</span>
+        <span><strong>{plan.worksets.length}</strong> Worksets</span>
+        <span><strong>{plan.runs.length}</strong> Runs</span>
+        <span><strong>{plan.reminderCount}</strong> reminders</span>
+        <span><strong>{plan.relationshipCount}</strong> relationships</span>
+        <span><strong>{plan.linkIds.length}</strong> Links</span>
+        <span><strong>{plan.attentionDefaults.length}</strong> attention defaults</span>
+        <span><strong>{plan.orphanedExternalObjectIds.length}</strong> orphaned External Objects</span>
+      </div>
+      {plan.projects.length > 0 && (
+        <div className="deletion-worksets">
+          <span className="relationship-label">Projects</span>
+          {plan.projects.map((project) => <span key={project.id}>#{project.id} · {project.name}</span>)}
+        </div>
+      )}
+      {plan.items.length > 0 && (
+        <div className="deletion-worksets">
+          <span className="relationship-label">Items</span>
+          {plan.items.map((item) => <span key={item.id}>{item.humanIdentifier} · {item.title}</span>)}
+        </div>
+      )}
+      {plan.repositories.length > 0 && (
+        <div className="deletion-worksets">
+          <span className="relationship-label">Repositories</span>
+          {plan.repositories.map((repository) => <span key={repository.id}>#{repository.id} · {repository.name}</span>)}
+        </div>
+      )}
+      {plan.machines.length > 0 && (
+        <div className="deletion-worksets">
+          <span className="relationship-label">Machines</span>
+          {plan.machines.map((machine) => <span key={machine.id}>#{machine.id} · {machine.name}</span>)}
+        </div>
+      )}
+      {plan.worksets.length > 0 && (
+        <div className="deletion-worksets">
+          <span className="relationship-label">Worksets and physical roots</span>
+          {plan.worksets.map((workset) => (
+            <div className="deletion-workset" key={workset.id}>
+              <strong>#{workset.id} · {workset.branch} {workset.archived ? "· Archived" : ""}</strong>
+              <code>{workset.rootDirectory}</code>
+            </div>
+          ))}
+        </div>
+      )}
+      {plan.runs.length > 0 && (
+        <div className="deletion-worksets">
+          <span className="relationship-label">Runs</span>
+          {plan.runs.map((run) => (
+            <span key={run.id}>
+              #{run.id} · {run.itemIdentifier} · {run.state} · Workset #{run.worksetId}
+            </span>
+          ))}
+        </div>
+      )}
+      {plan.linkIds.length > 0 && (
+        <p className="column-hint">Links removed: {plan.linkIds.map((linkId) => `#${linkId}`).join(", ")}.</p>
+      )}
+      {plan.orphanedExternalObjectIds.length > 0 && (
+        <p className="column-hint">
+          Eligible local External Objects: {plan.orphanedExternalObjectIds.map((id) => `#${id}`).join(", ")}.
+          Their {plan.orphanedSnapshotCount} snapshot(s) and {plan.orphanedActivityCount} Activity record(s) will also be removed.
+        </p>
+      )}
+      {preview.blockers.length > 0 && (
+        <div className="deletion-blockers">
+          <strong>Deletion blocked</strong>
+          {preview.blockers.map((blocker) => <span key={blocker}>{blocker}</span>)}
+          <p>Resolve every finding, then create a fresh preview.</p>
+        </div>
+      )}
+      <div className="deletion-preview-actions">
+        <button
+          type="button"
+          className="danger-button"
+          disabled={disabled || preview.blockers.length > 0}
+          onClick={onConfirm}
+        >
+          Confirm and delete {kind}
+        </button>
+        <button type="button" className="text-button" disabled={disabled} onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -4501,7 +4902,23 @@ function auditActionLabel(action: AuditAction): string {
     case "itemRemindersChanged":
       return `Updated reminders on Item #${action.item_id}`;
     case "itemDeleted":
-      return `Deleted Item #${action.summary?.itemId ?? action.item_id}`;
+      return `Deleted Item #${
+        action.summary && "itemId" in action.summary
+          ? action.summary.itemId
+          : action.item_id
+      }`;
+    case "projectDeleted":
+      return `Deleted Project #${
+        action.summary && "projectId" in action.summary
+          ? action.summary.projectId
+          : action.project_id
+      }`;
+    case "contextDeleted":
+      return `Deleted Context #${
+        action.summary && "contextId" in action.summary
+          ? action.summary.contextId
+          : action.context_id
+      }`;
     case "itemRelationChanged":
       return `Updated the relationship between Items #${action.from_item_id} and #${action.to_item_id}`;
     case "worksetCreated":

@@ -422,6 +422,7 @@ pub struct ItemView {
 #[serde(rename_all = "camelCase")]
 pub struct ItemDeletionWorkset {
     pub id: i64,
+    pub item_id: i64,
     pub root_directory: String,
     pub branch: String,
     pub archived: bool,
@@ -555,6 +556,117 @@ pub struct MachineDeletionPlan {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentDeletionProject {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentDeletionItem {
+    pub id: i64,
+    pub human_identifier: String,
+    pub title: String,
+    pub project_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentDeletionRepository {
+    pub id: i64,
+    pub name: String,
+    pub remote_url: String,
+    pub project_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentDeletionMachine {
+    pub id: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentDeletionRun {
+    pub id: i64,
+    pub item_id: i64,
+    pub item_identifier: String,
+    pub item_title: String,
+    pub workset_id: i64,
+    pub machine_id: i64,
+    pub state: RunState,
+    pub pane_status: RunPaneStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentDeletionSummary {
+    pub context_id: Option<i64>,
+    pub project_id: Option<i64>,
+    pub project_count: usize,
+    pub item_count: usize,
+    pub repository_count: usize,
+    pub machine_count: usize,
+    pub workset_count: usize,
+    pub run_count: usize,
+    pub reminder_count: usize,
+    pub relationship_count: usize,
+    pub link_count: usize,
+    pub attention_default_count: usize,
+    pub external_object_count: usize,
+    pub snapshot_count: usize,
+    pub activity_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ParentDeletionPlan {
+    pub context_id: Option<i64>,
+    pub project_id: Option<i64>,
+    pub name: String,
+    pub projects: Vec<ParentDeletionProject>,
+    pub items: Vec<ParentDeletionItem>,
+    pub repositories: Vec<ParentDeletionRepository>,
+    pub machines: Vec<ParentDeletionMachine>,
+    pub worksets: Vec<ItemDeletionWorkset>,
+    pub runs: Vec<ParentDeletionRun>,
+    pub active_run_ids: Vec<i64>,
+    pub reminder_count: usize,
+    pub relationship_count: usize,
+    pub link_ids: Vec<i64>,
+    pub attention_defaults: Vec<ContextAttentionDefault>,
+    pub orphaned_external_object_ids: Vec<i64>,
+    pub orphaned_snapshot_count: usize,
+    pub orphaned_activity_count: usize,
+    #[serde(skip)]
+    pub state_fingerprint: String,
+}
+
+impl ParentDeletionPlan {
+    pub fn summary(&self) -> ParentDeletionSummary {
+        ParentDeletionSummary {
+            context_id: self.context_id,
+            project_id: self.project_id,
+            project_count: self.projects.len(),
+            item_count: self.items.len(),
+            repository_count: self.repositories.len(),
+            machine_count: self.machines.len(),
+            workset_count: self.worksets.len(),
+            run_count: self.runs.len(),
+            reminder_count: self.reminder_count,
+            relationship_count: self.relationship_count,
+            link_count: self.link_ids.len(),
+            attention_default_count: self.attention_defaults.len(),
+            external_object_count: self.orphaned_external_object_ids.len(),
+            snapshot_count: self.orphaned_snapshot_count,
+            activity_count: self.orphaned_activity_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HomeView {
     pub needs_attention: Vec<ItemView>,
     pub attention_entries: Vec<AttentionEntry>,
@@ -665,6 +777,12 @@ pub enum AuditAction {
     RepositoryDeleted {
         repository_id: i64,
     },
+    ProjectDeleted {
+        summary: ParentDeletionSummary,
+    },
+    ContextDeleted {
+        summary: ParentDeletionSummary,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -721,6 +839,20 @@ pub enum Event {
     DeleteRepository {
         repository_id: i64,
         workset_ids: Vec<i64>,
+    },
+    DeleteProject {
+        project_id: i64,
+        item_ids: Vec<i64>,
+        repository_ids: Vec<i64>,
+        workset_ids: Vec<i64>,
+    },
+    DeleteContext {
+        context_id: i64,
+        project_ids: Vec<i64>,
+        item_ids: Vec<i64>,
+        repository_ids: Vec<i64>,
+        workset_ids: Vec<i64>,
+        machine_ids: Vec<i64>,
     },
     DeleteMachine {
         machine_id: i64,
@@ -955,6 +1087,24 @@ pub enum Effect {
         orphaned_external_object_ids: Vec<i64>,
         summary: ItemDeletionSummary,
     },
+    RemoveProjectCascade {
+        project_id: i64,
+        item_ids: Vec<i64>,
+        repository_ids: Vec<i64>,
+        workset_ids: Vec<i64>,
+        orphaned_external_object_ids: Vec<i64>,
+        summary: ParentDeletionSummary,
+    },
+    RemoveContextCascade {
+        context_id: i64,
+        project_ids: Vec<i64>,
+        item_ids: Vec<i64>,
+        repository_ids: Vec<i64>,
+        workset_ids: Vec<i64>,
+        machine_ids: Vec<i64>,
+        orphaned_external_object_ids: Vec<i64>,
+        summary: ParentDeletionSummary,
+    },
     RemoveLink {
         link_id: i64,
         external_object_id: i64,
@@ -985,6 +1135,7 @@ pub fn plan_item_deletion(
         .filter(|workset| workset.item_id == item_id)
         .map(|workset| ItemDeletionWorkset {
             id: workset.id,
+            item_id: workset.item_id,
             root_directory: workset.root_directory.clone(),
             branch: workset.branch.clone(),
             archived: workset.archived,
@@ -1176,6 +1327,232 @@ pub fn plan_machine_deletion(
     })
 }
 
+pub fn plan_project_deletion(
+    state: &DomainState,
+    project_id: i64,
+) -> Result<ParentDeletionPlan, DomainError> {
+    let project = state
+        .projects
+        .iter()
+        .find(|project| project.id == project_id)
+        .ok_or(DomainError::ProjectNotFound { project_id })?;
+    plan_parent_deletion(
+        state,
+        None,
+        Some(project_id),
+        vec![project_id],
+        project.name.clone(),
+    )
+}
+
+pub fn plan_context_deletion(
+    state: &DomainState,
+    context_id: i64,
+) -> Result<ParentDeletionPlan, DomainError> {
+    let context = state
+        .contexts
+        .iter()
+        .find(|context| context.id == context_id)
+        .ok_or(DomainError::ContextNotFound { context_id })?;
+    let project_ids = state
+        .projects
+        .iter()
+        .filter(|project| project.context_id == context_id)
+        .map(|project| project.id)
+        .collect();
+    plan_parent_deletion(
+        state,
+        Some(context_id),
+        None,
+        project_ids,
+        context.name.clone(),
+    )
+}
+
+fn plan_parent_deletion(
+    state: &DomainState,
+    context_id: Option<i64>,
+    project_id: Option<i64>,
+    project_ids: Vec<i64>,
+    name: String,
+) -> Result<ParentDeletionPlan, DomainError> {
+    let projects = state
+        .projects
+        .iter()
+        .filter(|project| project_ids.contains(&project.id))
+        .map(|project| ParentDeletionProject {
+            id: project.id,
+            name: project.name.clone(),
+        })
+        .collect::<Vec<_>>();
+    let items = state
+        .items
+        .iter()
+        .filter(|item| project_ids.contains(&item.project_id))
+        .map(|item| ParentDeletionItem {
+            id: item.id,
+            human_identifier: item.human_identifier.clone(),
+            title: item.title.clone(),
+            project_id: item.project_id,
+        })
+        .collect::<Vec<_>>();
+    let item_ids = items.iter().map(|item| item.id).collect::<Vec<_>>();
+    let repositories = state
+        .repositories
+        .iter()
+        .filter(|repository| project_ids.contains(&repository.project_id))
+        .map(|repository| ParentDeletionRepository {
+            id: repository.id,
+            name: repository.name.clone(),
+            remote_url: repository.remote_url.clone(),
+            project_id: repository.project_id,
+        })
+        .collect::<Vec<_>>();
+    let worksets = state
+        .worksets
+        .iter()
+        .filter(|workset| item_ids.contains(&workset.item_id))
+        .map(|workset| ItemDeletionWorkset {
+            id: workset.id,
+            item_id: workset.item_id,
+            root_directory: workset.root_directory.clone(),
+            branch: workset.branch.clone(),
+            archived: workset.archived,
+        })
+        .collect::<Vec<_>>();
+    let machines = context_id
+        .map(|context_id| {
+            state
+                .machines
+                .iter()
+                .filter(|machine| machine.context_id == context_id)
+                .map(|machine| ParentDeletionMachine {
+                    id: machine.id,
+                    name: machine.name.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let machine_ids = machines
+        .iter()
+        .map(|machine| machine.id)
+        .collect::<Vec<_>>();
+    let runs = state
+        .runs
+        .iter()
+        .filter(|run| item_ids.contains(&run.item_id) || machine_ids.contains(&run.machine_id))
+        .map(|run| {
+            let item = state
+                .items
+                .iter()
+                .find(|item| item.id == run.item_id)
+                .ok_or(DomainError::ItemNotFound {
+                    item_id: run.item_id,
+                })?;
+            Ok(ParentDeletionRun {
+                id: run.id,
+                item_id: run.item_id,
+                item_identifier: item.human_identifier.clone(),
+                item_title: item.title.clone(),
+                workset_id: run.workset_id,
+                machine_id: run.machine_id,
+                state: run.state,
+                pane_status: run.pane_status,
+            })
+        })
+        .collect::<Result<Vec<_>, DomainError>>()?;
+    let active_run_ids = runs
+        .iter()
+        .filter(|run| run.state != RunState::Finished)
+        .map(|run| run.id)
+        .collect::<Vec<_>>();
+    let link_ids = state
+        .links
+        .iter()
+        .filter(|link| item_ids.contains(&link.item_id))
+        .map(|link| link.id)
+        .collect::<Vec<_>>();
+    let linked_external_object_ids = state
+        .links
+        .iter()
+        .filter(|link| item_ids.contains(&link.item_id))
+        .map(|link| link.external_object_id)
+        .collect::<Vec<_>>();
+    let orphaned_external_object_ids = linked_external_object_ids
+        .iter()
+        .copied()
+        .filter(|external_object_id| {
+            !state.links.iter().any(|link| {
+                link.external_object_id == *external_object_id && !item_ids.contains(&link.item_id)
+            })
+        })
+        .fold(Vec::new(), |mut ids, external_object_id| {
+            if !ids.contains(&external_object_id) {
+                ids.push(external_object_id);
+            }
+            ids
+        });
+    let attention_defaults = context_id
+        .map(|context_id| {
+            state
+                .attention_defaults
+                .iter()
+                .filter(|attention_default| attention_default.context_id == context_id)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(ParentDeletionPlan {
+        context_id,
+        project_id,
+        name,
+        projects,
+        items: items.clone(),
+        repositories,
+        machines,
+        worksets,
+        runs,
+        active_run_ids,
+        reminder_count: items
+            .iter()
+            .filter_map(|parent_item| state.items.iter().find(|item| item.id == parent_item.id))
+            .map(|item| item.reminders.len())
+            .sum(),
+        relationship_count: state
+            .relationships
+            .iter()
+            .filter(|relation| {
+                item_ids.contains(&relation.from_item_id) || item_ids.contains(&relation.to_item_id)
+            })
+            .count(),
+        link_ids,
+        attention_defaults,
+        orphaned_snapshot_count: state
+            .snapshots
+            .iter()
+            .filter(|snapshot| orphaned_external_object_ids.contains(&snapshot.external_object_id))
+            .count(),
+        orphaned_activity_count: state
+            .activities
+            .iter()
+            .filter(|activity| orphaned_external_object_ids.contains(&activity.external_object_id))
+            .count(),
+        orphaned_external_object_ids,
+        state_fingerprint: serde_json::to_string(state)
+            .expect("DomainState should always be serializable"),
+    })
+}
+
+fn sorted_ids(mut ids: Vec<i64>) -> Vec<i64> {
+    ids.sort_unstable();
+    ids
+}
+
+fn parent_selection_matches(expected: &[i64], provided: Vec<i64>) -> bool {
+    sorted_ids(expected.to_vec()) == sorted_ids(provided)
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DomainError {
     #[error("a Context name cannot be blank")]
@@ -1194,6 +1571,16 @@ pub enum DomainError {
     ContextNotFound { context_id: i64 },
     #[error("Project {project_id} does not exist")]
     ProjectNotFound { project_id: i64 },
+    #[error("Project {project_id} deletion selection changed; review the deletion preview again")]
+    ProjectDeletionPlanMismatch { project_id: i64 },
+    #[error("Project {project_id} has active Runs: {run_ids:?}")]
+    ProjectHasActiveRuns { project_id: i64, run_ids: Vec<i64> },
+    #[error("Context {context_id} deletion selection changed; review the deletion preview again")]
+    ContextDeletionPlanMismatch { context_id: i64 },
+    #[error("Context {context_id} has active Runs: {run_ids:?}")]
+    ContextHasActiveRuns { context_id: i64, run_ids: Vec<i64> },
+    #[error("the last Context cannot be deleted")]
+    CannotDeleteLastContext,
     #[error("Project {project_id} belongs to another Context")]
     ProjectContextMismatch { project_id: i64, context_id: i64 },
     #[error("a Repository name cannot be blank")]
@@ -1486,6 +1873,224 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             effects.push(Effect::RemoveRepository { repository_id });
 
             Ok(Decision { state, effects })
+        }
+        Event::DeleteProject {
+            project_id,
+            item_ids,
+            repository_ids,
+            workset_ids,
+        } => {
+            let plan = plan_project_deletion(&state, project_id)?;
+            if !parent_selection_matches(
+                &plan.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+                item_ids,
+            ) || !parent_selection_matches(
+                &plan
+                    .repositories
+                    .iter()
+                    .map(|repository| repository.id)
+                    .collect::<Vec<_>>(),
+                repository_ids,
+            ) || !parent_selection_matches(
+                &plan
+                    .worksets
+                    .iter()
+                    .map(|workset| workset.id)
+                    .collect::<Vec<_>>(),
+                workset_ids,
+            ) {
+                return Err(DomainError::ProjectDeletionPlanMismatch { project_id });
+            }
+            if !plan.active_run_ids.is_empty() {
+                return Err(DomainError::ProjectHasActiveRuns {
+                    project_id,
+                    run_ids: plan.active_run_ids.clone(),
+                });
+            }
+
+            let summary = plan.summary();
+            let orphaned_external_object_ids = plan.orphaned_external_object_ids.clone();
+            let item_ids = plan.items.iter().map(|item| item.id).collect::<Vec<_>>();
+            state.items.retain(|item| !item_ids.contains(&item.id));
+            state.worksets.retain(|workset| {
+                !plan
+                    .worksets
+                    .iter()
+                    .any(|candidate| candidate.id == workset.id)
+            });
+            state
+                .runs
+                .retain(|run| !plan.runs.iter().any(|candidate| candidate.id == run.id));
+            state.relationships.retain(|relation| {
+                !item_ids.contains(&relation.from_item_id)
+                    && !item_ids.contains(&relation.to_item_id)
+            });
+            state.links.retain(|link| !item_ids.contains(&link.item_id));
+            state
+                .external_objects
+                .retain(|object| !plan.orphaned_external_object_ids.contains(&object.id));
+            state.snapshots.retain(|snapshot| {
+                !plan
+                    .orphaned_external_object_ids
+                    .contains(&snapshot.external_object_id)
+            });
+            state.activities.retain(|activity| {
+                !plan
+                    .orphaned_external_object_ids
+                    .contains(&activity.external_object_id)
+            });
+            state.repositories.retain(|repository| {
+                !plan
+                    .repositories
+                    .iter()
+                    .any(|candidate| candidate.id == repository.id)
+            });
+            state.projects.retain(|project| project.id != project_id);
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::RemoveProjectCascade {
+                    project_id,
+                    item_ids,
+                    repository_ids: plan
+                        .repositories
+                        .iter()
+                        .map(|repository| repository.id)
+                        .collect(),
+                    workset_ids: plan.worksets.iter().map(|workset| workset.id).collect(),
+                    orphaned_external_object_ids,
+                    summary,
+                }],
+            })
+        }
+        Event::DeleteContext {
+            context_id,
+            project_ids,
+            item_ids,
+            repository_ids,
+            workset_ids,
+            machine_ids,
+        } => {
+            let plan = plan_context_deletion(&state, context_id)?;
+            if state.contexts.len() == 1 {
+                return Err(DomainError::CannotDeleteLastContext);
+            }
+            if !parent_selection_matches(
+                &plan
+                    .projects
+                    .iter()
+                    .map(|project| project.id)
+                    .collect::<Vec<_>>(),
+                project_ids,
+            ) || !parent_selection_matches(
+                &plan.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+                item_ids,
+            ) || !parent_selection_matches(
+                &plan
+                    .repositories
+                    .iter()
+                    .map(|repository| repository.id)
+                    .collect::<Vec<_>>(),
+                repository_ids,
+            ) || !parent_selection_matches(
+                &plan
+                    .worksets
+                    .iter()
+                    .map(|workset| workset.id)
+                    .collect::<Vec<_>>(),
+                workset_ids,
+            ) || !parent_selection_matches(
+                &plan
+                    .machines
+                    .iter()
+                    .map(|machine| machine.id)
+                    .collect::<Vec<_>>(),
+                machine_ids,
+            ) {
+                return Err(DomainError::ContextDeletionPlanMismatch { context_id });
+            }
+            if !plan.active_run_ids.is_empty() {
+                return Err(DomainError::ContextHasActiveRuns {
+                    context_id,
+                    run_ids: plan.active_run_ids.clone(),
+                });
+            }
+
+            let summary = plan.summary();
+            let orphaned_external_object_ids = plan.orphaned_external_object_ids.clone();
+            let item_ids = plan.items.iter().map(|item| item.id).collect::<Vec<_>>();
+            let project_ids = plan
+                .projects
+                .iter()
+                .map(|project| project.id)
+                .collect::<Vec<_>>();
+            let machine_ids = plan
+                .machines
+                .iter()
+                .map(|machine| machine.id)
+                .collect::<Vec<_>>();
+            state.contexts.retain(|context| context.id != context_id);
+            state
+                .projects
+                .retain(|project| !project_ids.contains(&project.id));
+            state.items.retain(|item| !item_ids.contains(&item.id));
+            state.repositories.retain(|repository| {
+                !plan
+                    .repositories
+                    .iter()
+                    .any(|candidate| candidate.id == repository.id)
+            });
+            state.worksets.retain(|workset| {
+                !plan
+                    .worksets
+                    .iter()
+                    .any(|candidate| candidate.id == workset.id)
+            });
+            state
+                .runs
+                .retain(|run| !plan.runs.iter().any(|candidate| candidate.id == run.id));
+            state
+                .machines
+                .retain(|machine| !machine_ids.contains(&machine.id));
+            state.relationships.retain(|relation| {
+                !item_ids.contains(&relation.from_item_id)
+                    && !item_ids.contains(&relation.to_item_id)
+            });
+            state.links.retain(|link| !item_ids.contains(&link.item_id));
+            state
+                .external_objects
+                .retain(|object| !plan.orphaned_external_object_ids.contains(&object.id));
+            state.snapshots.retain(|snapshot| {
+                !plan
+                    .orphaned_external_object_ids
+                    .contains(&snapshot.external_object_id)
+            });
+            state.activities.retain(|activity| {
+                !plan
+                    .orphaned_external_object_ids
+                    .contains(&activity.external_object_id)
+            });
+            state
+                .attention_defaults
+                .retain(|attention_default| attention_default.context_id != context_id);
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::RemoveContextCascade {
+                    context_id,
+                    project_ids,
+                    item_ids,
+                    repository_ids: plan
+                        .repositories
+                        .iter()
+                        .map(|repository| repository.id)
+                        .collect(),
+                    workset_ids: plan.worksets.iter().map(|workset| workset.id).collect(),
+                    machine_ids,
+                    orphaned_external_object_ids,
+                    summary,
+                }],
+            })
         }
         Event::DeleteMachine {
             machine_id,
@@ -3812,6 +4417,462 @@ mod tests {
     }
 
     #[test]
+    fn project_deletion_plan_describes_and_removes_its_complete_local_graph() {
+        let mut state = parent_deletion_state();
+        state.projects.push(Project {
+            id: 3,
+            context_id: 7,
+            name: "Billing".into(),
+            defaults: ProjectDefaults {
+                item_status: ItemStatus::Active,
+            },
+        });
+        state.next_project_id = 4;
+        state.items = vec![
+            Item {
+                id: 1,
+                human_identifier: "MC-1".into(),
+                title: "Delete from Billing".into(),
+                project_id: 3,
+                status: ItemStatus::Done,
+                notes: String::new(),
+                reminders: vec![Reminder {
+                    id: 1,
+                    remind_at: "2026-09-20T09:00".into(),
+                }],
+            },
+            Item {
+                id: 2,
+                human_identifier: "MC-2".into(),
+                title: "Also delete from Billing".into(),
+                project_id: 3,
+                status: ItemStatus::Inbox,
+                notes: String::new(),
+                reminders: Vec::new(),
+            },
+            Item {
+                id: 3,
+                human_identifier: "MC-3".into(),
+                title: "Keep in Work".into(),
+                project_id: 1,
+                status: ItemStatus::Inbox,
+                notes: String::new(),
+                reminders: Vec::new(),
+            },
+        ];
+        state.next_item_id = 4;
+        state.next_item_number = 4;
+        state.repositories = vec![
+            Repository {
+                id: 1,
+                project_id: 3,
+                name: "billing-api".into(),
+                remote_url: "https://example.com/billing-api.git".into(),
+            },
+            Repository {
+                id: 2,
+                project_id: 3,
+                name: "billing-web".into(),
+                remote_url: "https://example.com/billing-web.git".into(),
+            },
+            Repository {
+                id: 3,
+                project_id: 1,
+                name: "platform".into(),
+                remote_url: "https://example.com/platform.git".into(),
+            },
+        ];
+        state.next_repository_id = 4;
+        state.worksets = vec![
+            Workset {
+                id: 1,
+                item_id: 1,
+                root_directory: "/tmp/billing-api".into(),
+                branch: "feature/billing-api".into(),
+                archived: true,
+                repositories: vec![WorksetRepository {
+                    repository_id: 1,
+                    branch_override: None,
+                    base_branch_override: None,
+                    current_branch: "feature/billing-api".into(),
+                    is_dirty: false,
+                }],
+            },
+            Workset {
+                id: 2,
+                item_id: 2,
+                root_directory: "/tmp/billing-web".into(),
+                branch: "feature/billing-web".into(),
+                archived: false,
+                repositories: vec![WorksetRepository {
+                    repository_id: 2,
+                    branch_override: None,
+                    base_branch_override: None,
+                    current_branch: "feature/billing-web".into(),
+                    is_dirty: false,
+                }],
+            },
+        ];
+        state.next_workset_id = 3;
+        state.machines = vec![Machine {
+            id: 1,
+            context_id: 7,
+            name: "Work Mac".into(),
+            socket_name: "work".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        }];
+        state.next_machine_id = 2;
+        state.runs = vec![Run {
+            id: 1,
+            item_id: 1,
+            workset_id: 1,
+            machine_id: 1,
+            agent: AgentKind::Codex,
+            execution_profile: ExecutionProfile::Implement,
+            prompt: "private prompt".into(),
+            working_directory: "/tmp/billing-api".into(),
+            session_name: "billing".into(),
+            pane_id: "%1".into(),
+            started_at: 1,
+            state: RunState::Finished,
+            pane_status: RunPaneStatus::Missing,
+        }];
+        state.next_run_id = 2;
+        state.relationships.push(ItemRelation {
+            from_item_id: 1,
+            to_item_id: 3,
+            kind: ItemRelationKind::Blocks,
+        });
+        state.external_objects = vec![
+            ExternalObject {
+                id: 1,
+                provider: ExternalProvider::Generic,
+                kind: ExternalObjectKind::Generic,
+                external_key: "shared".into(),
+                canonical_url: "https://example.com/shared".into(),
+            },
+            ExternalObject {
+                id: 2,
+                provider: ExternalProvider::Generic,
+                kind: ExternalObjectKind::Generic,
+                external_key: "orphan".into(),
+                canonical_url: "https://example.com/orphan".into(),
+            },
+        ];
+        state.links = vec![
+            Link {
+                id: 1,
+                item_id: 1,
+                external_object_id: 1,
+                reviewed_activity_id: 0,
+                attention_policy: None,
+                watch_until: None,
+                review_at: None,
+            },
+            Link {
+                id: 2,
+                item_id: 3,
+                external_object_id: 1,
+                reviewed_activity_id: 0,
+                attention_policy: None,
+                watch_until: None,
+                review_at: None,
+            },
+            Link {
+                id: 3,
+                item_id: 2,
+                external_object_id: 2,
+                reviewed_activity_id: 0,
+                attention_policy: None,
+                watch_until: None,
+                review_at: None,
+            },
+        ];
+        state.snapshots.push(ExternalSnapshot {
+            external_object_id: 2,
+            title: "Orphan".into(),
+            state: "OPEN".into(),
+            metadata: Vec::new(),
+            fetched_at: 1,
+        });
+        state.activities.push(Activity {
+            id: 1,
+            external_object_id: 2,
+            observed_at: 1,
+            changes: Vec::new(),
+        });
+        state.attention_defaults = vec![
+            ContextAttentionDefault {
+                context_id: 7,
+                object_kind: ExternalObjectKind::Issue,
+                policy: ExternalChangePolicy::all(),
+            },
+            ContextAttentionDefault {
+                context_id: 8,
+                object_kind: ExternalObjectKind::Issue,
+                policy: ExternalChangePolicy::all(),
+            },
+        ];
+
+        let plan = plan_project_deletion(&state, 3).expect("Project should have a deletion plan");
+        assert_eq!(plan.project_id, Some(3));
+        assert_eq!(plan.context_id, None);
+        assert_eq!(plan.projects[0].name, "Billing");
+        assert_eq!(
+            plan.items.iter().map(|item| item.id).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            plan.repositories
+                .iter()
+                .map(|repository| repository.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            plan.worksets
+                .iter()
+                .map(|workset| workset.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            plan.runs.iter().map(|run| run.id).collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(plan.reminder_count, 1);
+        assert_eq!(plan.relationship_count, 1);
+        assert_eq!(plan.link_ids, vec![1, 3]);
+        assert_eq!(plan.attention_defaults.len(), 0);
+        assert_eq!(plan.orphaned_external_object_ids, vec![2]);
+        assert_eq!(plan.orphaned_snapshot_count, 1);
+        assert_eq!(plan.orphaned_activity_count, 1);
+
+        let deleted = decide(
+            state,
+            Event::DeleteProject {
+                project_id: 3,
+                item_ids: vec![1, 2],
+                repository_ids: vec![1, 2],
+                workset_ids: vec![1, 2],
+            },
+        )
+        .expect("Project deletion should succeed");
+        assert_eq!(
+            deleted
+                .state
+                .projects
+                .iter()
+                .map(|project| project.id)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(
+            deleted
+                .state
+                .items
+                .iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(
+            deleted
+                .state
+                .repositories
+                .iter()
+                .map(|repository| repository.id)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert!(deleted.state.worksets.is_empty());
+        assert!(deleted.state.runs.is_empty());
+        assert!(deleted.state.relationships.is_empty());
+        assert_eq!(
+            deleted
+                .state
+                .links
+                .iter()
+                .map(|link| link.id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(
+            deleted
+                .state
+                .external_objects
+                .iter()
+                .map(|object| object.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(deleted.state.attention_defaults.len(), 2);
+        assert!(matches!(
+            deleted.effects.as_slice(),
+            [Effect::RemoveProjectCascade { summary, .. }] if summary.project_count == 1
+                && summary.item_count == 2
+                && summary.repository_count == 2
+                && summary.workset_count == 2
+                && summary.run_count == 1
+                && summary.external_object_count == 1
+        ));
+    }
+
+    #[test]
+    fn context_deletion_blocks_active_runs_and_refuses_the_last_context() {
+        let mut state = state_with_contexts(&[(7, "Work"), (8, "Personal")]);
+        state.items.push(Item {
+            id: 1,
+            human_identifier: "MC-1".into(),
+            title: "Running work".into(),
+            project_id: 1,
+            status: ItemStatus::Active,
+            notes: String::new(),
+            reminders: Vec::new(),
+        });
+        state.next_item_id = 2;
+        state.next_item_number = 2;
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 7,
+            name: "Work Mac".into(),
+            socket_name: "work".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+        state.runs.push(Run {
+            id: 1,
+            item_id: 1,
+            workset_id: 1,
+            machine_id: 1,
+            agent: AgentKind::Claude,
+            execution_profile: ExecutionProfile::Implement,
+            prompt: "prompt".into(),
+            working_directory: "/tmp/work".into(),
+            session_name: "work".into(),
+            pane_id: "%1".into(),
+            started_at: 1,
+            state: RunState::Working,
+            pane_status: RunPaneStatus::Available,
+        });
+
+        let plan = plan_context_deletion(&state, 7).expect("Context should have a deletion plan");
+        assert_eq!(plan.context_id, Some(7));
+        assert_eq!(
+            plan.projects
+                .iter()
+                .map(|project| project.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(
+            plan.machines
+                .iter()
+                .map(|machine| machine.id)
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        assert_eq!(plan.active_run_ids, vec![1]);
+        assert_eq!(
+            decide(
+                state.clone(),
+                Event::DeleteContext {
+                    context_id: 7,
+                    project_ids: vec![1],
+                    item_ids: vec![1],
+                    repository_ids: Vec::new(),
+                    workset_ids: Vec::new(),
+                    machine_ids: vec![1],
+                },
+            ),
+            Err(DomainError::ContextHasActiveRuns {
+                context_id: 7,
+                run_ids: vec![1],
+            })
+        );
+        assert_eq!(state.contexts.len(), 2);
+        assert_eq!(state.items.len(), 1);
+
+        let mut no_runs = state;
+        no_runs.runs.clear();
+        let deleted = decide(
+            no_runs,
+            Event::DeleteContext {
+                context_id: 7,
+                project_ids: vec![1],
+                item_ids: vec![1],
+                repository_ids: Vec::new(),
+                workset_ids: Vec::new(),
+                machine_ids: vec![1],
+            },
+        )
+        .expect("a non-last Context should be deletable");
+        assert_eq!(
+            deleted
+                .state
+                .contexts
+                .iter()
+                .map(|context| context.id)
+                .collect::<Vec<_>>(),
+            vec![8]
+        );
+        assert_eq!(
+            deleted
+                .state
+                .projects
+                .iter()
+                .map(|project| project.id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert!(deleted.state.items.is_empty());
+
+        assert_eq!(
+            decide(
+                deleted.state,
+                Event::DeleteContext {
+                    context_id: 8,
+                    project_ids: vec![2],
+                    item_ids: Vec::new(),
+                    repository_ids: Vec::new(),
+                    workset_ids: Vec::new(),
+                    machine_ids: Vec::new(),
+                },
+            ),
+            Err(DomainError::CannotDeleteLastContext)
+        );
+    }
+
+    #[test]
+    fn deleting_the_only_project_leaves_its_context_ready_for_a_new_project() {
+        let state = state_with_context(7, "Work");
+        let deleted = decide(
+            state,
+            Event::DeleteProject {
+                project_id: 1,
+                item_ids: Vec::new(),
+                repository_ids: Vec::new(),
+                workset_ids: Vec::new(),
+            },
+        )
+        .expect("the only Project may be deleted");
+        assert!(deleted.state.projects.is_empty());
+        let recreated = decide(
+            deleted.state,
+            Event::CreateProject {
+                context_id: 7,
+                name: "Replacement".into(),
+                defaults: ProjectDefaults::default(),
+            },
+        )
+        .expect("a Project should be creatable in an empty Context");
+        assert_eq!(recreated.state.projects[0].name, "Replacement");
+    }
+
+    #[test]
     fn active_runs_block_item_deletion_before_any_state_changes() {
         let mut state = state_with_item(7, "Work");
         state.runs.push(Run {
@@ -5896,6 +6957,10 @@ mod tests {
         state.next_item_id = 2;
         state.next_item_number = 2;
         state
+    }
+
+    fn parent_deletion_state() -> DomainState {
+        state_with_contexts(&[(7, "Work"), (8, "Personal")])
     }
 
     fn state_with_contexts(contexts: &[(i64, &str)]) -> DomainState {

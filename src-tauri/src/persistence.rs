@@ -894,6 +894,196 @@ impl SqliteStore {
                     }
                     transaction.execute("DELETE FROM items WHERE id = ?1", params![item_id])?;
                 }
+                Effect::RemoveProjectCascade {
+                    project_id,
+                    orphaned_external_object_ids,
+                    ..
+                } => {
+                    transaction.execute(
+                        "DELETE FROM runs
+                         WHERE item_id IN (
+                             SELECT id FROM items WHERE project_id = ?1
+                         )",
+                        params![project_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM workset_repositories
+                         WHERE workset_id IN (
+                             SELECT id FROM worksets
+                             WHERE item_id IN (
+                                 SELECT id FROM items WHERE project_id = ?1
+                             )
+                         )",
+                        params![project_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM worksets
+                         WHERE item_id IN (
+                             SELECT id FROM items WHERE project_id = ?1
+                         )",
+                        params![project_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM reminders
+                         WHERE item_id IN (
+                             SELECT id FROM items WHERE project_id = ?1
+                         )",
+                        params![project_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM item_relationships
+                         WHERE from_item_id IN (
+                             SELECT id FROM items WHERE project_id = ?1
+                         )
+                            OR to_item_id IN (
+                             SELECT id FROM items WHERE project_id = ?1
+                         )",
+                        params![project_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM external_links
+                         WHERE item_id IN (
+                             SELECT id FROM items WHERE project_id = ?1
+                         )",
+                        params![project_id],
+                    )?;
+                    for external_object_id in orphaned_external_object_ids {
+                        transaction.execute(
+                            "DELETE FROM external_objects
+                             WHERE id = ?1
+                               AND NOT EXISTS (
+                                   SELECT 1 FROM external_links
+                                   WHERE external_object_id = external_objects.id
+                               )",
+                            params![external_object_id],
+                        )?;
+                    }
+                    transaction.execute(
+                        "DELETE FROM items WHERE project_id = ?1",
+                        params![project_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM repositories WHERE project_id = ?1",
+                        params![project_id],
+                    )?;
+                    transaction
+                        .execute("DELETE FROM projects WHERE id = ?1", params![project_id])?;
+                }
+                Effect::RemoveContextCascade {
+                    context_id,
+                    orphaned_external_object_ids,
+                    ..
+                } => {
+                    transaction.execute(
+                        "DELETE FROM runs
+                         WHERE machine_id IN (
+                             SELECT id FROM machines WHERE context_id = ?1
+                         )
+                            OR item_id IN (
+                             SELECT items.id
+                             FROM items
+                             JOIN projects ON projects.id = items.project_id
+                             WHERE projects.context_id = ?1
+                         )",
+                        params![context_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM workset_repositories
+                         WHERE workset_id IN (
+                             SELECT worksets.id
+                             FROM worksets
+                             JOIN items ON items.id = worksets.item_id
+                             JOIN projects ON projects.id = items.project_id
+                             WHERE projects.context_id = ?1
+                         )",
+                        params![context_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM worksets
+                         WHERE item_id IN (
+                             SELECT items.id
+                             FROM items
+                             JOIN projects ON projects.id = items.project_id
+                             WHERE projects.context_id = ?1
+                         )",
+                        params![context_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM reminders
+                         WHERE item_id IN (
+                             SELECT items.id
+                             FROM items
+                             JOIN projects ON projects.id = items.project_id
+                             WHERE projects.context_id = ?1
+                         )",
+                        params![context_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM item_relationships
+                         WHERE from_item_id IN (
+                             SELECT items.id
+                             FROM items
+                             JOIN projects ON projects.id = items.project_id
+                             WHERE projects.context_id = ?1
+                         )
+                            OR to_item_id IN (
+                             SELECT items.id
+                             FROM items
+                             JOIN projects ON projects.id = items.project_id
+                             WHERE projects.context_id = ?1
+                         )",
+                        params![context_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM external_links
+                         WHERE item_id IN (
+                             SELECT items.id
+                             FROM items
+                             JOIN projects ON projects.id = items.project_id
+                             WHERE projects.context_id = ?1
+                         )",
+                        params![context_id],
+                    )?;
+                    for external_object_id in orphaned_external_object_ids {
+                        transaction.execute(
+                            "DELETE FROM external_objects
+                             WHERE id = ?1
+                               AND NOT EXISTS (
+                                   SELECT 1 FROM external_links
+                                   WHERE external_object_id = external_objects.id
+                               )",
+                            params![external_object_id],
+                        )?;
+                    }
+                    transaction.execute(
+                        "DELETE FROM items
+                         WHERE project_id IN (
+                             SELECT id FROM projects WHERE context_id = ?1
+                         )",
+                        params![context_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM repositories
+                         WHERE project_id IN (
+                             SELECT id FROM projects WHERE context_id = ?1
+                         )",
+                        params![context_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM machines WHERE context_id = ?1",
+                        params![context_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM context_attention_defaults WHERE context_id = ?1",
+                        params![context_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM projects WHERE context_id = ?1",
+                        params![context_id],
+                    )?;
+                    transaction
+                        .execute("DELETE FROM contexts WHERE id = ?1", params![context_id])?;
+                }
                 Effect::PersistItemRelation { relation } => {
                     transaction.execute(
                         "INSERT INTO item_relationships (from_item_id, to_item_id, kind)
@@ -1089,6 +1279,7 @@ impl SqliteStore {
 }
 
 fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
+    let projects_table_existed = !table_columns(connection, "projects")?.is_empty();
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS metadata (
              key TEXT PRIMARY KEY NOT NULL,
@@ -1126,7 +1317,9 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          INSERT OR IGNORE INTO contexts (id, name) VALUES (1, 'Personal');",
     )?;
 
-    ensure_default_projects(connection)?;
+    if !projects_table_existed {
+        ensure_default_projects(connection)?;
+    }
 
     if table_columns(connection, "items")?.is_empty() {
         create_items_table(connection)?;
@@ -1686,6 +1879,244 @@ mod tests {
             .expect("audit history should survive reopening");
         assert_eq!(history.len(), 2);
         assert!(history.iter().all(|entry| entry.recorded_at > 0));
+    }
+
+    #[test]
+    fn parent_deletion_cascades_survive_reopening_and_keep_context_lifecycle_valid() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+
+        {
+            let mut store = SqliteStore::open(&path).expect("database should open");
+            let context = decide(
+                store.load_state().expect("state should load"),
+                Event::CreateContext {
+                    name: "Work".into(),
+                },
+            )
+            .expect("Context should be created");
+            store
+                .apply(&context.effects)
+                .expect("Context should persist");
+            let project = decide(
+                context.state,
+                Event::CreateProject {
+                    context_id: 2,
+                    name: "Billing".into(),
+                    defaults: ProjectDefaults::default(),
+                },
+            )
+            .expect("Project should be created");
+            store
+                .apply(&project.effects)
+                .expect("Project should persist");
+            let repository = decide(
+                project.state,
+                Event::RegisterRepository {
+                    project_id: 3,
+                    name: "billing".into(),
+                    remote_url: "https://example.com/billing.git".into(),
+                },
+            )
+            .expect("Repository should be registered");
+            store
+                .apply(&repository.effects)
+                .expect("Repository should persist");
+            let item = decide(
+                repository.state,
+                Event::CreateItem {
+                    title: "Delete this graph".into(),
+                    context_id: 2,
+                    project_id: 3,
+                },
+            )
+            .expect("Item should be created");
+            store.apply(&item.effects).expect("Item should persist");
+            let workset = decide(
+                item.state,
+                Event::CreateWorkset {
+                    item_id: 1,
+                    root_directory: "/tmp/parent-deletion-round-trip".into(),
+                    branch: "feature/parent-deletion".into(),
+                    repositories: vec![WorksetRepositoryInput {
+                        repository_id: 1,
+                        branch_override: None,
+                        base_branch_override: None,
+                    }],
+                },
+            )
+            .expect("Workset should be created");
+            store
+                .apply(&workset.effects)
+                .expect("Workset should persist");
+            let machine = decide(
+                workset.state,
+                Event::RegisterMachine {
+                    context_id: 2,
+                    name: "Work Mac".into(),
+                    socket_name: "work".into(),
+                    transport: MachineTransport::Local,
+                },
+            )
+            .expect("Machine should be registered");
+            store
+                .apply(&machine.effects)
+                .expect("Machine should persist");
+            let run = decide(
+                machine.state,
+                Event::AttachRun {
+                    item_id: 1,
+                    workset_id: 1,
+                    machine_id: 1,
+                    agent: AgentKind::Codex,
+                    working_directory: "/tmp/parent-deletion-round-trip".into(),
+                    session_name: "parent-deletion".into(),
+                    pane_id: "%1".into(),
+                    attached_at: 1,
+                },
+            )
+            .expect("Run should attach");
+            store.apply(&run.effects).expect("Run should persist");
+            let finished = decide(
+                run.state,
+                Event::UpdateRunState {
+                    run_id: 1,
+                    state: RunState::Finished,
+                },
+            )
+            .expect("Run should finish");
+            store.apply(&finished.effects).expect("Run should persist");
+            let reminded = decide(
+                finished.state,
+                Event::AddItemReminder {
+                    item_id: 1,
+                    remind_at: "2026-09-20T09:00".into(),
+                },
+            )
+            .expect("Reminder should be added");
+            store
+                .apply(&reminded.effects)
+                .expect("Reminder should persist");
+            let linked = decide(
+                reminded.state,
+                Event::LinkExternalObject {
+                    item_id: 1,
+                    object: ExternalObjectInput {
+                        provider: ExternalProvider::Generic,
+                        kind: ExternalObjectKind::Generic,
+                        external_key: "parent-deletion-object".into(),
+                        canonical_url: "https://example.com/parent-deletion".into(),
+                    },
+                    snapshot: Some(ExternalSnapshotData {
+                        title: "Local object".into(),
+                        state: "OPEN".into(),
+                        metadata: Vec::new(),
+                        fetched_at: 1,
+                    }),
+                },
+            )
+            .expect("External Object should link");
+            store.apply(&linked.effects).expect("Link should persist");
+
+            let plan = crate::domain::plan_project_deletion(&linked.state, 3)
+                .expect("Project deletion plan should load");
+            let deletion = decide(
+                linked.state,
+                Event::DeleteProject {
+                    project_id: 3,
+                    item_ids: plan.items.iter().map(|item| item.id).collect(),
+                    repository_ids: plan
+                        .repositories
+                        .iter()
+                        .map(|repository| repository.id)
+                        .collect(),
+                    workset_ids: plan.worksets.iter().map(|workset| workset.id).collect(),
+                },
+            )
+            .expect("Project cascade should decide");
+            store
+                .apply_with_audit(
+                    &deletion.effects,
+                    &[AuditAction::ProjectDeleted {
+                        summary: plan.summary(),
+                    }],
+                )
+                .expect("Project cascade should persist transactionally");
+        }
+
+        {
+            let store = SqliteStore::open(&path).expect("database should reopen");
+            let state = store.load_state().expect("state should reload");
+            assert!(state.projects.iter().all(|project| project.id != 3));
+            assert!(state.items.is_empty());
+            assert!(state.repositories.is_empty());
+            assert!(state.worksets.is_empty());
+            assert!(state.runs.is_empty());
+            assert!(state.machines.len() == 1);
+            assert!(state.external_objects.is_empty());
+            assert!(state.snapshots.is_empty());
+            assert!(state.links.is_empty());
+            assert_eq!(state.next_item_id, 2);
+            assert_eq!(state.next_repository_id, 2);
+            assert_eq!(state.next_workset_id, 2);
+            assert_eq!(state.next_run_id, 2);
+            assert!(store
+                .list_audit_history()
+                .expect("audit history should load")
+                .iter()
+                .any(|entry| matches!(entry.action, AuditAction::ProjectDeleted { .. })));
+        }
+
+        {
+            let mut store = SqliteStore::open(&path).expect("database should reopen");
+            let state = store.load_state().expect("state should load");
+            let remove_default = decide(
+                state,
+                Event::DeleteProject {
+                    project_id: 2,
+                    item_ids: Vec::new(),
+                    repository_ids: Vec::new(),
+                    workset_ids: Vec::new(),
+                },
+            )
+            .expect("the last Project in a Context may be removed");
+            store
+                .apply(&remove_default.effects)
+                .expect("empty Project deletion should persist");
+            let state = store.load_state().expect("state should load after cleanup");
+            assert!(state.contexts.iter().any(|context| context.id == 2));
+            assert!(state.projects.iter().all(|project| project.context_id != 2));
+
+            let plan = crate::domain::plan_context_deletion(&state, 2)
+                .expect("Context deletion plan should load");
+            let remove_context = decide(
+                state,
+                Event::DeleteContext {
+                    context_id: 2,
+                    project_ids: plan.projects.iter().map(|project| project.id).collect(),
+                    item_ids: plan.items.iter().map(|item| item.id).collect(),
+                    repository_ids: plan
+                        .repositories
+                        .iter()
+                        .map(|repository| repository.id)
+                        .collect(),
+                    workset_ids: plan.worksets.iter().map(|workset| workset.id).collect(),
+                    machine_ids: plan.machines.iter().map(|machine| machine.id).collect(),
+                },
+            )
+            .expect("a non-last Context should be deletable");
+            store
+                .apply(&remove_context.effects)
+                .expect("Context cascade should persist");
+        }
+
+        let reopened = SqliteStore::open(&path).expect("database should reopen after cascades");
+        let state = reopened
+            .load_state()
+            .expect("state should reload after cascades");
+        assert_eq!(state.contexts.len(), 1);
+        assert_eq!(state.contexts[0].name, "Personal");
+        assert!(state.projects.iter().all(|project| project.context_id == 1));
     }
 
     #[test]
