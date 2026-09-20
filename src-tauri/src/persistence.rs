@@ -847,6 +847,16 @@ impl SqliteStore {
                 Effect::RemoveRun { run_id } => {
                     transaction.execute("DELETE FROM runs WHERE id = ?1", params![run_id])?;
                 }
+                Effect::RemoveLink { link_id, .. } => {
+                    transaction
+                        .execute("DELETE FROM external_links WHERE id = ?1", params![link_id])?;
+                }
+                Effect::RemoveExternalObject { external_object_id } => {
+                    transaction.execute(
+                        "DELETE FROM external_objects WHERE id = ?1",
+                        params![external_object_id],
+                    )?;
+                }
                 Effect::RemoveItemCascade {
                     item_id,
                     orphaned_external_object_ids,
@@ -2594,5 +2604,166 @@ mod tests {
         assert_eq!(state.next_external_object_id, 2);
         assert_eq!(state.next_link_id, 2);
         assert_eq!(state.next_activity_id, 2);
+    }
+
+    #[test]
+    fn link_and_external_object_deletion_round_trip_cleans_local_data() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+
+        {
+            let mut store = SqliteStore::open(&path).expect("database should open");
+            let first_item = decide(
+                store.load_state().expect("state should load"),
+                Event::CreateItem {
+                    title: "First commitment".into(),
+                    context_id: 1,
+                    project_id: 1,
+                },
+            )
+            .expect("first Item should be created");
+            store
+                .apply(&first_item.effects)
+                .expect("first Item should persist");
+            let second_item = decide(
+                first_item.state,
+                Event::CreateItem {
+                    title: "Second commitment".into(),
+                    context_id: 1,
+                    project_id: 1,
+                },
+            )
+            .expect("second Item should be created");
+            store
+                .apply(&second_item.effects)
+                .expect("second Item should persist");
+            let first_link = decide(
+                second_item.state,
+                Event::LinkExternalObject {
+                    item_id: 1,
+                    object: ExternalObjectInput {
+                        provider: ExternalProvider::GitHub,
+                        kind: ExternalObjectKind::Issue,
+                        external_key: "issue:shared-lifecycle".into(),
+                        canonical_url: "https://github.com/acme/app/issues/9".into(),
+                    },
+                    snapshot: Some(ExternalSnapshotData {
+                        title: "Shared issue".into(),
+                        state: "OPEN".into(),
+                        metadata: vec![ExternalMetadata {
+                            key: "author".into(),
+                            value: "octocat".into(),
+                        }],
+                        fetched_at: 10,
+                    }),
+                },
+            )
+            .expect("first Link should be created");
+            store
+                .apply(&first_link.effects)
+                .expect("first Link should persist");
+            let second_link = decide(
+                first_link.state,
+                Event::LinkExternalObject {
+                    item_id: 2,
+                    object: ExternalObjectInput {
+                        provider: ExternalProvider::GitHub,
+                        kind: ExternalObjectKind::Issue,
+                        external_key: "issue:shared-lifecycle".into(),
+                        canonical_url: "https://github.com/acme/app/issues/9".into(),
+                    },
+                    snapshot: None,
+                },
+            )
+            .expect("second Link should be created");
+            store
+                .apply(&second_link.effects)
+                .expect("second Link should persist");
+            let configured = decide(
+                second_link.state,
+                Event::SetLinkAttentionPolicy {
+                    link_id: 2,
+                    policy: Some(ExternalChangePolicy {
+                        title: true,
+                        state: false,
+                        metadata: true,
+                    }),
+                },
+            )
+            .expect("the remaining Link attention state should be configurable");
+            store
+                .apply(&configured.effects)
+                .expect("the remaining Link attention state should persist");
+            let refreshed = decide(
+                configured.state,
+                Event::RefreshExternalObject {
+                    external_object_id: 1,
+                    snapshot: ExternalSnapshotData {
+                        title: "Updated shared issue".into(),
+                        state: "OPEN".into(),
+                        metadata: vec![ExternalMetadata {
+                            key: "author".into(),
+                            value: "octocat".into(),
+                        }],
+                        fetched_at: 20,
+                    },
+                },
+            )
+            .expect("the changed snapshot should create an Activity");
+            store
+                .apply(&refreshed.effects)
+                .expect("refresh should persist");
+
+            let unlinked = decide(refreshed.state, Event::DeleteLink { link_id: 1 })
+                .expect("the first Link should be removable");
+            store
+                .apply(&unlinked.effects)
+                .expect("unlink should persist");
+        }
+
+        {
+            let mut store = SqliteStore::open(&path).expect("database should reopen");
+            let state = store.load_state().expect("shared state should reload");
+            assert_eq!(state.links.len(), 1);
+            assert_eq!(state.links[0].item_id, 2);
+            assert_eq!(state.external_objects.len(), 1);
+            assert_eq!(state.snapshots.len(), 1);
+            assert_eq!(state.activities.len(), 1);
+            assert_eq!(
+                state.links[0].attention_policy,
+                Some(ExternalChangePolicy {
+                    title: true,
+                    state: false,
+                    metadata: true,
+                })
+            );
+            let attention_rows: i64 = store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM link_attention_state WHERE link_id = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("Link attention state should be queryable");
+            assert_eq!(attention_rows, 0);
+
+            let deleted = decide(
+                state,
+                Event::DeleteExternalObject {
+                    external_object_id: 1,
+                },
+            )
+            .expect("the shared External Object should be removable locally");
+            store
+                .apply(&deleted.effects)
+                .expect("External Object deletion should persist");
+        }
+
+        let reopened = SqliteStore::open(&path).expect("database should reopen after deletion");
+        let state = reopened.load_state().expect("deleted state should load");
+        assert!(state.links.is_empty());
+        assert!(state.external_objects.is_empty());
+        assert!(state.snapshots.is_empty());
+        assert!(state.activities.is_empty());
     }
 }

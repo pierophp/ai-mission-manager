@@ -478,6 +478,41 @@ pub struct ItemDeletionSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ExternalObjectDeletionPlan {
+    pub external_object_id: i64,
+    pub provider: ExternalProvider,
+    pub kind: ExternalObjectKind,
+    pub external_key: String,
+    pub canonical_url: String,
+    pub link_ids: Vec<i64>,
+    pub snapshot_count: usize,
+    pub activity_count: usize,
+    #[serde(skip)]
+    pub state_fingerprint: String,
+}
+
+impl ExternalObjectDeletionPlan {
+    pub fn summary(&self) -> ExternalObjectDeletionSummary {
+        ExternalObjectDeletionSummary {
+            external_object_id: self.external_object_id,
+            link_count: self.link_ids.len(),
+            snapshot_count: self.snapshot_count,
+            activity_count: self.activity_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalObjectDeletionSummary {
+    pub external_object_id: i64,
+    pub link_count: usize,
+    pub snapshot_count: usize,
+    pub activity_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RepositoryDeletionWorkset {
     pub id: i64,
     pub root_directory: String,
@@ -614,6 +649,12 @@ pub enum AuditAction {
     LinkUpdated {
         link_id: i64,
     },
+    LinkDeleted {
+        link_id: i64,
+    },
+    ExternalObjectDeleted {
+        external_object_id: i64,
+    },
     ContextAttentionDefaultChanged {
         context_id: i64,
         object_kind: ExternalObjectKind,
@@ -727,6 +768,12 @@ pub enum Event {
     },
     DeleteItem {
         item_id: i64,
+    },
+    DeleteLink {
+        link_id: i64,
+    },
+    DeleteExternalObject {
+        external_object_id: i64,
     },
     DeleteRun {
         run_id: i64,
@@ -908,6 +955,13 @@ pub enum Effect {
         orphaned_external_object_ids: Vec<i64>,
         summary: ItemDeletionSummary,
     },
+    RemoveLink {
+        link_id: i64,
+        external_object_id: i64,
+    },
+    RemoveExternalObject {
+        external_object_id: i64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -995,6 +1049,44 @@ pub fn plan_item_deletion(
             .filter(|activity| orphaned_external_object_ids.contains(&activity.external_object_id))
             .count(),
         orphaned_external_object_ids,
+        state_fingerprint: serde_json::to_string(state)
+            .expect("DomainState should always be serializable"),
+    })
+}
+
+pub fn plan_external_object_deletion(
+    state: &DomainState,
+    external_object_id: i64,
+) -> Result<ExternalObjectDeletionPlan, DomainError> {
+    let object = state
+        .external_objects
+        .iter()
+        .find(|object| object.id == external_object_id)
+        .ok_or(DomainError::ExternalObjectNotFound { external_object_id })?;
+    let link_ids = state
+        .links
+        .iter()
+        .filter(|link| link.external_object_id == external_object_id)
+        .map(|link| link.id)
+        .collect::<Vec<_>>();
+
+    Ok(ExternalObjectDeletionPlan {
+        external_object_id,
+        provider: object.provider,
+        kind: object.kind,
+        external_key: object.external_key.clone(),
+        canonical_url: object.canonical_url.clone(),
+        link_ids,
+        snapshot_count: state
+            .snapshots
+            .iter()
+            .filter(|snapshot| snapshot.external_object_id == external_object_id)
+            .count(),
+        activity_count: state
+            .activities
+            .iter()
+            .filter(|activity| activity.external_object_id == external_object_id)
+            .count(),
         state_fingerprint: serde_json::to_string(state)
             .expect("DomainState should always be serializable"),
     })
@@ -1806,6 +1898,60 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     orphaned_external_object_ids,
                     summary,
                 }],
+            })
+        }
+        Event::DeleteLink { link_id } => {
+            let link = state
+                .links
+                .iter()
+                .find(|link| link.id == link_id)
+                .cloned()
+                .ok_or(DomainError::LinkNotFound { link_id })?;
+            let external_object_id = link.external_object_id;
+            state.links.retain(|candidate| candidate.id != link_id);
+            let orphaned = !state
+                .links
+                .iter()
+                .any(|candidate| candidate.external_object_id == external_object_id);
+            if orphaned {
+                state
+                    .external_objects
+                    .retain(|object| object.id != external_object_id);
+                state
+                    .snapshots
+                    .retain(|snapshot| snapshot.external_object_id != external_object_id);
+                state
+                    .activities
+                    .retain(|activity| activity.external_object_id != external_object_id);
+            }
+
+            let mut effects = vec![Effect::RemoveLink {
+                link_id,
+                external_object_id,
+            }];
+            if orphaned {
+                effects.push(Effect::RemoveExternalObject { external_object_id });
+            }
+            Ok(Decision { state, effects })
+        }
+        Event::DeleteExternalObject { external_object_id } => {
+            plan_external_object_deletion(&state, external_object_id)?;
+            state
+                .links
+                .retain(|link| link.external_object_id != external_object_id);
+            state
+                .external_objects
+                .retain(|object| object.id != external_object_id);
+            state
+                .snapshots
+                .retain(|snapshot| snapshot.external_object_id != external_object_id);
+            state
+                .activities
+                .retain(|activity| activity.external_object_id != external_object_id);
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::RemoveExternalObject { external_object_id }],
             })
         }
         Event::DeleteRun { run_id } => {
@@ -4000,6 +4146,251 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn deleting_one_link_keeps_shared_object_and_other_link_attention_isolated() {
+        let mut state = state_with_context(1, "Work");
+        state.items = vec![
+            Item {
+                id: 1,
+                human_identifier: "MC-1".into(),
+                title: "First commitment".into(),
+                project_id: 1,
+                status: ItemStatus::Inbox,
+                notes: String::new(),
+                reminders: Vec::new(),
+            },
+            Item {
+                id: 2,
+                human_identifier: "MC-2".into(),
+                title: "Second commitment".into(),
+                project_id: 1,
+                status: ItemStatus::Inbox,
+                notes: String::new(),
+                reminders: Vec::new(),
+            },
+        ];
+        state.external_objects.push(ExternalObject {
+            id: 1,
+            provider: ExternalProvider::GitHub,
+            kind: ExternalObjectKind::Issue,
+            external_key: "issue:shared".into(),
+            canonical_url: "https://github.com/acme/app/issues/7".into(),
+        });
+        state.links = vec![
+            Link {
+                id: 1,
+                item_id: 1,
+                external_object_id: 1,
+                reviewed_activity_id: 0,
+                attention_policy: Some(ExternalChangePolicy::all()),
+                watch_until: None,
+                review_at: None,
+            },
+            Link {
+                id: 2,
+                item_id: 2,
+                external_object_id: 1,
+                reviewed_activity_id: 0,
+                attention_policy: Some(ExternalChangePolicy::all()),
+                watch_until: None,
+                review_at: None,
+            },
+        ];
+        state.snapshots.push(ExternalSnapshot {
+            external_object_id: 1,
+            title: "Shared issue".into(),
+            state: "OPEN".into(),
+            metadata: Vec::new(),
+            fetched_at: 10,
+        });
+        state.activities.push(Activity {
+            id: 1,
+            external_object_id: 1,
+            observed_at: 20,
+            changes: vec![ExternalChange {
+                kind: ExternalChangeKind::State,
+                key: None,
+                previous: Some("OPEN".into()),
+                current: Some("CLOSED".into()),
+            }],
+        });
+        state.next_link_id = 3;
+        state.next_activity_id = 2;
+
+        let decision = decide(state, Event::DeleteLink { link_id: 1 })
+            .expect("unlinking one Item should succeed");
+
+        assert_eq!(
+            decision
+                .state
+                .links
+                .iter()
+                .map(|link| link.id)
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+        assert_eq!(decision.state.external_objects.len(), 1);
+        assert_eq!(decision.state.snapshots.len(), 1);
+        assert_eq!(decision.state.activities.len(), 1);
+        assert!(matches!(
+            decision.effects.as_slice(),
+            [Effect::RemoveLink {
+                link_id: 1,
+                external_object_id: 1
+            }]
+        ));
+
+        let remaining_link = &decision.state.links[0];
+        let remaining_view = external_link_view(&decision.state, remaining_link)
+            .expect("the remaining Link should still resolve");
+        assert!(remaining_view.attention_entry.is_some());
+        assert_eq!(remaining_view.attention_entry.unwrap().item_id, 2);
+    }
+
+    #[test]
+    fn deleting_the_last_link_cleans_up_its_orphaned_external_object() {
+        let mut state = state_with_item(1, "Work");
+        state.external_objects.push(ExternalObject {
+            id: 1,
+            provider: ExternalProvider::Generic,
+            kind: ExternalObjectKind::Generic,
+            external_key: "url:local".into(),
+            canonical_url: "https://example.com/local".into(),
+        });
+        state.links.push(Link {
+            id: 1,
+            item_id: 1,
+            external_object_id: 1,
+            reviewed_activity_id: 0,
+            attention_policy: None,
+            watch_until: None,
+            review_at: None,
+        });
+        state.snapshots.push(ExternalSnapshot {
+            external_object_id: 1,
+            title: "Local object".into(),
+            state: "OPEN".into(),
+            metadata: Vec::new(),
+            fetched_at: 1,
+        });
+        state.activities.push(Activity {
+            id: 1,
+            external_object_id: 1,
+            observed_at: 2,
+            changes: Vec::new(),
+        });
+
+        let decision = decide(state, Event::DeleteLink { link_id: 1 })
+            .expect("unlinking the last Link should succeed");
+
+        assert!(decision.state.links.is_empty());
+        assert!(decision.state.external_objects.is_empty());
+        assert!(decision.state.snapshots.is_empty());
+        assert!(decision.state.activities.is_empty());
+        assert!(matches!(
+            decision.effects.as_slice(),
+            [
+                Effect::RemoveLink {
+                    link_id: 1,
+                    external_object_id: 1
+                },
+                Effect::RemoveExternalObject {
+                    external_object_id: 1
+                }
+            ]
+        ));
+    }
+
+    #[test]
+    fn deleting_an_external_object_removes_all_local_links_and_cached_data() {
+        let mut state = state_with_context(1, "Work");
+        state.items = vec![
+            Item {
+                id: 1,
+                human_identifier: "MC-1".into(),
+                title: "First commitment".into(),
+                project_id: 1,
+                status: ItemStatus::Inbox,
+                notes: String::new(),
+                reminders: Vec::new(),
+            },
+            Item {
+                id: 2,
+                human_identifier: "MC-2".into(),
+                title: "Second commitment".into(),
+                project_id: 1,
+                status: ItemStatus::Inbox,
+                notes: String::new(),
+                reminders: Vec::new(),
+            },
+        ];
+        state.external_objects.push(ExternalObject {
+            id: 1,
+            provider: ExternalProvider::GitHub,
+            kind: ExternalObjectKind::PullRequest,
+            external_key: "pr:shared".into(),
+            canonical_url: "https://github.com/acme/app/pull/8".into(),
+        });
+        state.links = vec![
+            Link {
+                id: 1,
+                item_id: 1,
+                external_object_id: 1,
+                reviewed_activity_id: 1,
+                attention_policy: Some(ExternalChangePolicy::all()),
+                watch_until: Some("2026-09-21T09:00".into()),
+                review_at: Some("2026-09-22T09:00".into()),
+            },
+            Link {
+                id: 2,
+                item_id: 2,
+                external_object_id: 1,
+                reviewed_activity_id: 0,
+                attention_policy: None,
+                watch_until: None,
+                review_at: None,
+            },
+        ];
+        state.snapshots.push(ExternalSnapshot {
+            external_object_id: 1,
+            title: "Shared pull request".into(),
+            state: "OPEN".into(),
+            metadata: Vec::new(),
+            fetched_at: 10,
+        });
+        state.activities.push(Activity {
+            id: 1,
+            external_object_id: 1,
+            observed_at: 20,
+            changes: Vec::new(),
+        });
+
+        let plan = plan_external_object_deletion(&state, 1)
+            .expect("the External Object deletion plan should be available");
+        assert_eq!(plan.link_ids, vec![1, 2]);
+        assert_eq!(plan.snapshot_count, 1);
+        assert_eq!(plan.activity_count, 1);
+
+        let decision = decide(
+            state,
+            Event::DeleteExternalObject {
+                external_object_id: 1,
+            },
+        )
+        .expect("local External Object deletion should succeed");
+
+        assert!(decision.state.links.is_empty());
+        assert!(decision.state.external_objects.is_empty());
+        assert!(decision.state.snapshots.is_empty());
+        assert!(decision.state.activities.is_empty());
+        assert!(matches!(
+            decision.effects.as_slice(),
+            [Effect::RemoveExternalObject {
+                external_object_id: 1
+            }]
+        ));
     }
 
     #[test]

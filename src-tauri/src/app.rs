@@ -13,15 +13,17 @@ use crate::{
     dependencies::{check_command, resolve_executable, DependencyState, DependencyStatus},
     domain::{
         compose_run_prompt as build_run_prompt, decide, external_link_view, home_view,
-        plan_item_deletion, plan_machine_deletion, plan_repository_deletion, search_items,
-        suggest_untracked_runs, AgentKind, AgentPaneObservation, AttachedRepositoryInput,
-        AuditAction, AuditEntry, Context, ContextAttentionDefault, DomainState, Effect, Event,
-        ExecutionProfile, ExternalChangePolicy, ExternalLinkView, ExternalObjectInput,
-        ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView, Item, ItemDeletionPlan,
-        ItemDeletionSummary, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine,
-        MachineDeletionPlan, MachineObservation, MachineTransport, Project, ProjectDefaults,
-        Repository, RepositoryDeletionPlan, Run, RunPaneStatus, RunPromptSelection, RunState,
-        RunSuggestion, Workset, WorksetRepositoryInput,
+        plan_external_object_deletion, plan_item_deletion, plan_machine_deletion,
+        plan_repository_deletion, search_items, suggest_untracked_runs, AgentKind,
+        AgentPaneObservation, AttachedRepositoryInput, AuditAction, AuditEntry, Context,
+        ContextAttentionDefault, DomainState, Effect, Event, ExecutionProfile,
+        ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
+        ExternalObjectDeletionSummary, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
+        ExternalSnapshot, HomeView, Item, ItemDeletionPlan, ItemDeletionSummary, ItemRelation,
+        ItemRelationKind, ItemStatus, ItemView, Machine, MachineDeletionPlan, MachineObservation,
+        MachineTransport, Project, ProjectDefaults, Repository, RepositoryDeletionPlan, Run,
+        RunPaneStatus, RunPromptSelection, RunState, RunSuggestion, Workset,
+        WorksetRepositoryInput,
     },
     git::GitCli,
     persistence::SqliteStore,
@@ -40,6 +42,7 @@ pub struct Runtime {
     gh_executable_path: Option<PathBuf>,
     pending_workset_removal: Option<WorksetRemovalReport>,
     pending_item_deletion: Option<ItemDeletionPreview>,
+    pending_external_object_deletion: Option<ExternalObjectDeletionPreview>,
     pending_repository_deletion: Option<RepositoryDeletionPreview>,
     pending_machine_deletion: Option<MachineDeletionPreview>,
     terminal_connections: HashMap<String, TmuxControlPane>,
@@ -95,6 +98,7 @@ impl Runtime {
             gh_executable_path,
             pending_workset_removal: None,
             pending_item_deletion: None,
+            pending_external_object_deletion: None,
             pending_repository_deletion: None,
             pending_machine_deletion: None,
             terminal_connections: HashMap::new(),
@@ -1544,6 +1548,121 @@ impl Runtime {
         Ok(preview)
     }
 
+    fn build_external_object_deletion_preview(
+        &self,
+        external_object_id: i64,
+    ) -> Result<ExternalObjectDeletionPreview, String> {
+        let plan = plan_external_object_deletion(&self.state, external_object_id)
+            .map_err(|error| error.to_string())?;
+        let links = plan
+            .link_ids
+            .iter()
+            .map(|link_id| {
+                let link = self
+                    .state
+                    .links
+                    .iter()
+                    .find(|link| link.id == *link_id)
+                    .ok_or_else(|| format!("Link {link_id} disappeared while building preview"))?;
+                let item = self
+                    .state
+                    .items
+                    .iter()
+                    .find(|item| item.id == link.item_id)
+                    .ok_or_else(|| {
+                        format!("Item {} disappeared while building preview", link.item_id)
+                    })?;
+                Ok(ExternalObjectLinkDeletionPreview {
+                    link_id: link.id,
+                    item_id: item.id,
+                    item_identifier: item.human_identifier.clone(),
+                    item_title: item.title.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+
+        Ok(ExternalObjectDeletionPreview {
+            plan,
+            links,
+            provider_warning: "This only removes local Mission Manager data. GitHub Issues, pull requests, and other provider-owned objects are never deleted.".into(),
+        })
+    }
+
+    fn prepare_external_object_deletion(
+        &mut self,
+        external_object_id: i64,
+    ) -> Result<ExternalObjectDeletionPreview, String> {
+        let preview = self.build_external_object_deletion_preview(external_object_id)?;
+        self.pending_external_object_deletion = Some(preview.clone());
+        Ok(preview)
+    }
+
+    fn delete_external_object(
+        &mut self,
+        external_object_id: i64,
+        confirmed: bool,
+    ) -> Result<ExternalObjectDeletionResult, String> {
+        if !confirmed {
+            return Err(
+                "External Object deletion requires explicit confirmation after reviewing its local deletion preview".into(),
+            );
+        }
+        let pending = self
+            .pending_external_object_deletion
+            .as_ref()
+            .filter(|preview| preview.plan.external_object_id == external_object_id)
+            .cloned()
+            .ok_or_else(|| {
+                "Review the External Object deletion preview before deleting it".to_owned()
+            })?;
+        let current = self.build_external_object_deletion_preview(external_object_id)?;
+        if current != pending {
+            return Err(
+                "The External Object or one of its Links changed after the preview; review the updated local deletion preview before deleting it".into(),
+            );
+        }
+
+        let summary = current.plan.summary();
+        let decision = decide(
+            self.state.clone(),
+            Event::DeleteExternalObject { external_object_id },
+        )
+        .map_err(|error| error.to_string())?;
+        self.commit(decision)?;
+        self.pending_external_object_deletion = None;
+        Ok(ExternalObjectDeletionResult { summary })
+    }
+
+    fn unlink_external_link(
+        &mut self,
+        link_id: i64,
+        confirmed: bool,
+    ) -> Result<ExternalLinkDeletionResult, String> {
+        if !confirmed {
+            return Err("Unlinking an Item requires explicit confirmation".into());
+        }
+        let external_object_id = self
+            .state
+            .links
+            .iter()
+            .find(|link| link.id == link_id)
+            .map(|link| link.external_object_id)
+            .ok_or_else(|| format!("Link {link_id} does not exist"))?;
+        let decision = decide(self.state.clone(), Event::DeleteLink { link_id })
+            .map_err(|error| error.to_string())?;
+        let external_object_deleted = !decision
+            .state
+            .external_objects
+            .iter()
+            .any(|object| object.id == external_object_id);
+        self.commit(decision)?;
+        Ok(ExternalLinkDeletionResult {
+            link_id,
+            external_object_id,
+            external_object_deleted,
+        })
+    }
+
     fn delete_item(
         &mut self,
         item_id: i64,
@@ -2464,6 +2583,14 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
                 machine_id: *machine_id,
             }),
             Effect::RemoveRun { run_id } => Some(AuditAction::RunDeleted { run_id: *run_id }),
+            Effect::RemoveLink { link_id, .. } => {
+                Some(AuditAction::LinkDeleted { link_id: *link_id })
+            }
+            Effect::RemoveExternalObject { external_object_id } => {
+                Some(AuditAction::ExternalObjectDeleted {
+                    external_object_id: *external_object_id,
+                })
+            }
             Effect::RemoveItemCascade { summary, .. } => Some(AuditAction::ItemDeleted {
                 summary: summary.clone(),
             }),
@@ -2694,6 +2821,37 @@ pub struct ItemDeletionResult {
     pub summary: ItemDeletionSummary,
     pub workset_directories_deleted: bool,
     pub physical_cleanup_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalObjectLinkDeletionPreview {
+    pub link_id: i64,
+    pub item_id: i64,
+    pub item_identifier: String,
+    pub item_title: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalObjectDeletionPreview {
+    pub plan: ExternalObjectDeletionPlan,
+    pub links: Vec<ExternalObjectLinkDeletionPreview>,
+    pub provider_warning: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalObjectDeletionResult {
+    pub summary: ExternalObjectDeletionSummary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalLinkDeletionResult {
+    pub link_id: i64,
+    pub external_object_id: i64,
+    pub external_object_deleted: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -3324,6 +3482,41 @@ pub fn delete_item(
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .delete_item(item_id, confirmed, delete_workset_directories)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn prepare_external_object_deletion(
+    external_object_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ExternalObjectDeletionPreview, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .prepare_external_object_deletion(external_object_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_external_object(
+    external_object_id: i64,
+    confirmed: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ExternalObjectDeletionResult, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .delete_external_object(external_object_id, confirmed)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn unlink_external_link(
+    link_id: i64,
+    confirmed: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ExternalLinkDeletionResult, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .unlink_external_link(link_id, confirmed)
 }
 
 #[tauri::command(rename_all = "camelCase")]

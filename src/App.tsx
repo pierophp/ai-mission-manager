@@ -368,6 +368,43 @@ type ItemDeletionResult = {
   physicalCleanupWarning: string | null;
 };
 
+type ExternalObjectDeletionPlan = {
+  externalObjectId: number;
+  provider: ExternalObject["provider"];
+  kind: ExternalObject["kind"];
+  externalKey: string;
+  canonicalUrl: string;
+  linkIds: number[];
+  snapshotCount: number;
+  activityCount: number;
+};
+
+type ExternalObjectDeletionPreview = {
+  plan: ExternalObjectDeletionPlan;
+  links: {
+    linkId: number;
+    itemId: number;
+    itemIdentifier: string;
+    itemTitle: string;
+  }[];
+  providerWarning: string;
+};
+
+type ExternalObjectDeletionResult = {
+  summary: {
+    externalObjectId: number;
+    linkCount: number;
+    snapshotCount: number;
+    activityCount: number;
+  };
+};
+
+type ExternalLinkDeletionResult = {
+  linkId: number;
+  externalObjectId: number;
+  externalObjectDeleted: boolean;
+};
+
 type RepositoryDeletionPlan = {
   repositoryId: number;
   name: string;
@@ -2558,6 +2595,8 @@ function ItemCard({
     useState("");
   const [removalReport, setRemovalReport] = useState<WorksetRemovalReport>();
   const [deletionPreview, setDeletionPreview] = useState<ItemDeletionPreview>();
+  const [externalObjectDeletionPreview, setExternalObjectDeletionPreview] =
+    useState<ExternalObjectDeletionPreview>();
   const [runPreviewWorksetId, setRunPreviewWorksetId] = useState<number>();
   const [runMachineId, setRunMachineId] = useState<number>();
   const [runAgent, setRunAgent] = useState<AgentKind>("claude");
@@ -2793,6 +2832,74 @@ function ItemCard({
       );
     } catch (deleteError) {
       setDeletionPreview(undefined);
+      window.alert(errorMessage(deleteError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleUnlinkExternalLink(linkId: number) {
+    if (
+      !window.confirm(
+        "Remove this Link from the Item? Its Link-scoped attention state will be removed. The GitHub Issue, pull request, or other provider-owned object will not be deleted.",
+      )
+    ) {
+      return;
+    }
+    await saveItem(async () => {
+      const result = await invoke<ExternalLinkDeletionResult>("unlink_external_link", {
+        linkId,
+        confirmed: true,
+      });
+      if (result.externalObjectDeleted) {
+        window.alert(
+          "The Link was removed. It was the last Link, so its local External Object snapshot and Activity cache were also removed. The provider-owned object was not deleted.",
+        );
+      }
+    });
+  }
+
+  async function handlePrepareExternalObjectDeletion(externalObjectId: number) {
+    setIsSaving(true);
+    try {
+      const preview = await invoke<ExternalObjectDeletionPreview>(
+        "prepare_external_object_deletion",
+        { externalObjectId },
+      );
+      setExternalObjectDeletionPreview(preview);
+    } catch (previewError) {
+      window.alert(errorMessage(previewError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDeleteExternalObject() {
+    if (!externalObjectDeletionPreview) return;
+    const { plan } = externalObjectDeletionPreview;
+    if (
+      !window.confirm(
+        `Remove this ${externalObjectKindLabel(plan.kind)} and its local records from Mission Manager? This will remove ${plan.linkIds.length} Link(s), ${plan.snapshotCount} snapshot(s), and ${plan.activityCount} Activity record(s). Provider-owned objects are never deleted.`,
+      )
+    ) {
+      return;
+    }
+    setIsSaving(true);
+    try {
+      const result = await invoke<ExternalObjectDeletionResult>(
+        "delete_external_object",
+        {
+          externalObjectId: plan.externalObjectId,
+          confirmed: true,
+        },
+      );
+      setExternalObjectDeletionPreview(undefined);
+      await onChanged();
+      window.alert(
+        `Removed the External Object from Mission Manager. Removed ${result.summary.linkCount} Link(s), ${result.summary.snapshotCount} snapshot(s), and ${result.summary.activityCount} Activity record(s). Provider-owned objects were not deleted.`,
+      );
+    } catch (deleteError) {
+      setExternalObjectDeletionPreview(undefined);
       window.alert(errorMessage(deleteError));
     } finally {
       setIsSaving(false);
@@ -3663,6 +3770,10 @@ function ItemCard({
             externalLink={externalLink}
             isSaving={isSaving}
             onRefresh={() => refreshExternalObject(externalLink.object.id)}
+            onUnlink={() => handleUnlinkExternalLink(externalLink.link.id)}
+            onPrepareDeleteObject={() =>
+              handlePrepareExternalObjectDeletion(externalLink.object.id)
+            }
             onSavePolicy={(policy) =>
               saveItem(() =>
                 invoke("set_link_attention_policy", {
@@ -3711,6 +3822,47 @@ function ItemCard({
             }
           />
         ))}
+        {externalObjectDeletionPreview && (
+          <div className="deletion-preview external-object-deletion-preview" role="alert">
+            <strong>Remove External Object locally</strong>
+            <p>
+              This removes the local External Object record and every Link to it. It does not
+              call GitHub or any other provider, so provider-owned Issues, pull requests, and
+              other objects are never deleted.
+            </p>
+            <ul>
+              <li>{externalObjectDeletionPreview.plan.linkIds.length} Link(s)</li>
+              <li>{externalObjectDeletionPreview.plan.snapshotCount} snapshot(s)</li>
+              <li>{externalObjectDeletionPreview.plan.activityCount} Activity record(s)</li>
+            </ul>
+            <div className="external-object-deletion-links">
+              <strong>Items affected</strong>
+              {externalObjectDeletionPreview.links.map((link) => (
+                <span key={link.linkId}>
+                  {link.itemIdentifier} · {link.itemTitle}
+                </span>
+              ))}
+            </div>
+            <p className="provider-warning">{externalObjectDeletionPreview.providerWarning}</p>
+            <div className="deletion-preview-actions">
+              <button
+                type="button"
+                disabled={isSaving}
+                onClick={() => void handleDeleteExternalObject()}
+              >
+                Confirm local removal
+              </button>
+              <button
+                type="button"
+                className="text-button"
+                disabled={isSaving}
+                onClick={() => setExternalObjectDeletionPreview(undefined)}
+              >
+                Keep local records
+              </button>
+            </div>
+          </div>
+        )}
         <form className="external-link-form" onSubmit={handleExternalLink}>
           <input
             aria-label={`External URL for ${view.item.human_identifier}`}
@@ -3858,6 +4010,8 @@ function ExternalLinkCard({
   externalLink,
   isSaving,
   onRefresh,
+  onUnlink,
+  onPrepareDeleteObject,
   onSavePolicy,
   onMarkReviewed,
   onSaveWatchUntil,
@@ -3868,6 +4022,8 @@ function ExternalLinkCard({
   externalLink: ExternalLinkView;
   isSaving: boolean;
   onRefresh: () => Promise<void>;
+  onUnlink: () => Promise<void>;
+  onPrepareDeleteObject: () => Promise<void>;
   onSavePolicy: (policy: ExternalChangePolicy | null) => Promise<void>;
   onMarkReviewed: () => Promise<void>;
   onSaveWatchUntil: (watchUntil: string | null) => Promise<void>;
@@ -3918,16 +4074,34 @@ function ExternalLinkCard({
             {externalObjectKindLabel(object.kind)} · {snapshot?.state ?? "Not fetched"}
           </span>
         </div>
-        {object.provider === "github" && (
+        <div className="external-link-actions">
+          {object.provider === "github" && (
+            <button
+              type="button"
+              className="secondary-button"
+              disabled={isSaving}
+              onClick={() => void onRefresh()}
+            >
+              Refresh
+            </button>
+          )}
           <button
             type="button"
-            className="secondary-button"
+            className="text-button"
             disabled={isSaving}
-            onClick={() => void onRefresh()}
+            onClick={() => void onUnlink()}
           >
-            Refresh
+            Unlink this Item
           </button>
-        )}
+          <button
+            type="button"
+            className="text-button danger-text-button"
+            disabled={isSaving}
+            onClick={() => void onPrepareDeleteObject()}
+          >
+            Remove local object…
+          </button>
+        </div>
       </div>
       <a href={object.canonical_url} target="_blank" rel="noreferrer">
         {object.canonical_url}
@@ -4356,6 +4530,10 @@ function auditActionLabel(action: AuditAction): string {
       return `Linked External Object through Link #${action.link_id}`;
     case "linkUpdated":
       return `Updated Link #${action.link_id}`;
+    case "linkDeleted":
+      return `Removed Link #${action.link_id}`;
+    case "externalObjectDeleted":
+      return `Removed External Object #${action.external_object_id} locally`;
     case "contextCreated":
       return `Created Context #${action.context_id}`;
     case "projectCreated":
