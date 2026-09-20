@@ -16,6 +16,35 @@ type Context = {
   name: string;
 };
 
+type TrackerChoice = "github" | "none";
+type DependencyState =
+  | "available"
+  | "missing"
+  | "unauthenticated"
+  | "notConfigured"
+  | "unavailable";
+
+type SetupState = {
+  completed: boolean;
+  tracker: TrackerChoice;
+};
+
+type DependencyStatus = {
+  key: string;
+  label: string;
+  state: DependencyState;
+  executablePath: string | null;
+  message: string;
+  action: string | null;
+};
+
+type HealthStatus = {
+  runtime: DependencyStatus;
+  provider: DependencyStatus;
+  agents: DependencyStatus[];
+  checkedAt: number;
+};
+
 type ItemStatus = "Inbox" | "Active" | "Waiting" | "Done";
 
 type Project = {
@@ -339,6 +368,8 @@ const relationKinds: ItemRelationKind[] = [
 
 export function App() {
   const [contexts, setContexts] = useState<Context[]>([]);
+  const [setupState, setSetupState] = useState<SetupState>();
+  const [healthStatus, setHealthStatus] = useState<HealthStatus>();
   const [projects, setProjects] = useState<Project[]>([]);
   const [repositories, setRepositories] = useState<Repository[]>([]);
   const [machines, setMachines] = useState<Machine[]>([]);
@@ -369,6 +400,8 @@ export function App() {
   const [machineKnownHostsFile, setMachineKnownHostsFile] = useState("");
   const [machineStrictHostKeyChecking, setMachineStrictHostKeyChecking] =
     useState("accept-new");
+  const [setupContextName, setSetupContextName] = useState("Personal");
+  const [setupTracker, setSetupTracker] = useState<TrackerChoice>("github");
   const [attentionObjectKind, setAttentionObjectKind] =
     useState<ExternalObjectKind>("pull_request");
   const [attentionDefaultPolicy, setAttentionDefaultPolicy] =
@@ -377,6 +410,7 @@ export function App() {
   const [error, setError] = useState<string>();
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
+  const [isCheckingDependencies, setIsCheckingDependencies] = useState(false);
   const [initialStateLoaded, setInitialStateLoaded] = useState(false);
   const [terminalRequest, setTerminalRequest] = useState<{
     worksetId: number;
@@ -484,6 +518,8 @@ export function App() {
       const [
         loadedContexts,
         loadedProjects,
+        loadedSetupState,
+        loadedHealthStatus,
         loadedAttentionDefaults,
         loadedMachines,
         loadedRepositories,
@@ -493,6 +529,8 @@ export function App() {
       ] = await Promise.all([
         invoke<Context[]>("list_contexts"),
         invoke<Project[]>("list_projects"),
+        invoke<SetupState>("get_setup_state"),
+        invoke<HealthStatus>("get_health_status"),
         invoke<ContextAttentionDefault[]>("list_context_attention_defaults"),
         invoke<Machine[]>("list_machines"),
         invoke<Repository[]>("list_repositories"),
@@ -517,6 +555,12 @@ export function App() {
         )?.id;
       setContexts(loadedContexts);
       setProjects(loadedProjects);
+      setSetupState(loadedSetupState);
+      setHealthStatus(loadedHealthStatus);
+      if (!setupContextName.trim() || setupContextName === "Personal") {
+        setSetupContextName(loadedContexts[0]?.name ?? "Personal");
+      }
+      setSetupTracker(loadedSetupState.tracker);
       setRepositories(loadedRepositories);
       setMachines(loadedMachines);
       setAttentionDefaults(loadedAttentionDefaults);
@@ -534,6 +578,37 @@ export function App() {
       setError(errorMessage(loadError));
     } finally {
       setIsLoading(false);
+    }
+  }
+
+  async function refreshHealthStatus() {
+    setIsCheckingDependencies(true);
+    try {
+      const loadedHealthStatus = await invoke<HealthStatus>("get_health_status");
+      setHealthStatus(loadedHealthStatus);
+      setError(undefined);
+    } catch (healthError) {
+      setError(errorMessage(healthError));
+    } finally {
+      setIsCheckingDependencies(false);
+    }
+  }
+
+  async function handleCompleteSetup(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setIsSaving(true);
+    try {
+      const completed = await invoke<SetupState>("complete_setup", {
+        contextName: setupContextName,
+        tracker: setupTracker,
+      });
+      setSetupState(completed);
+      await loadAppState();
+      setError(undefined);
+    } catch (setupError) {
+      setError(errorMessage(setupError));
+    } finally {
+      setIsSaving(false);
     }
   }
 

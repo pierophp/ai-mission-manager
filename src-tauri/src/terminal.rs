@@ -619,6 +619,7 @@ pub fn find_agent_executable(machine: &Machine, name: &str) -> Result<PathBuf, S
             .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
             .map(|directory| directory.join(name))
             .find(|candidate| is_executable(candidate))
+            .and_then(|candidate| candidate.canonicalize().ok().or(Some(candidate)))
             .ok_or_else(|| format!("{name} is not installed on Machine {}", machine.name)),
         MachineTransport::Ssh { .. } => {
             let output = run_machine_shell(machine, &format!("command -v {}", shell_quote(name)))?;

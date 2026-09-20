@@ -10,6 +10,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
     agent_state::{provision_hooks, read_state_file, state_file_path, AgentStateRecord},
+    dependencies::{check_command, resolve_executable, DependencyState, DependencyStatus},
     domain::{
         compose_run_prompt as build_run_prompt, decide, external_link_view, home_view,
         search_items, suggest_untracked_runs, AgentKind, AgentPaneObservation,
@@ -37,6 +38,29 @@ pub struct Runtime {
     pending_workset_removal: Option<WorksetRemovalReport>,
     terminal_connections: HashMap<String, TmuxControlPane>,
     agent_state_directory: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TrackerChoice {
+    GitHub,
+    None,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetupState {
+    pub completed: bool,
+    pub tracker: TrackerChoice,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HealthStatus {
+    pub runtime: DependencyStatus,
+    pub provider: DependencyStatus,
+    pub agents: Vec<DependencyStatus>,
+    pub checked_at: i64,
 }
 
 impl Runtime {
@@ -82,6 +106,209 @@ impl Runtime {
             .ok_or_else(|| "Context creation produced no Context".to_owned())?;
         self.commit(decision)?;
         Ok(context)
+    }
+
+    fn setup_state(&self) -> Result<SetupState, String> {
+        let completed = self
+            .store
+            .setting("setup_completed")
+            .map_err(|error| error.to_string())?
+            .as_deref()
+            == Some("true");
+        let tracker = match self
+            .store
+            .setting("tracker_provider")
+            .map_err(|error| error.to_string())?
+            .as_deref()
+        {
+            Some("github") => TrackerChoice::GitHub,
+            Some("none") | None => TrackerChoice::None,
+            Some(other) => return Err(format!("Unknown tracker choice: {other}")),
+        };
+        Ok(SetupState { completed, tracker })
+    }
+
+    fn complete_setup(
+        &mut self,
+        context_name: String,
+        tracker: TrackerChoice,
+    ) -> Result<SetupState, String> {
+        let context_name = context_name.trim();
+        if context_name.is_empty() {
+            return Err("A Context name is required to finish setup".into());
+        }
+        if !self
+            .state
+            .contexts
+            .iter()
+            .any(|context| context.name == context_name)
+        {
+            self.create_context(context_name.to_owned())?;
+        }
+        self.store
+            .set_setting("setup_completed", "true")
+            .and_then(|_| {
+                self.store.set_setting(
+                    "tracker_provider",
+                    match tracker {
+                        TrackerChoice::GitHub => "github",
+                        TrackerChoice::None => "none",
+                    },
+                )
+            })
+            .map_err(|error| error.to_string())?;
+        Ok(SetupState {
+            completed: true,
+            tracker,
+        })
+    }
+
+    fn health_status(&mut self) -> Result<HealthStatus, String> {
+        let runtime = self.check_local_dependency(
+            "tmux",
+            "tmux",
+            "tmux_executable_path",
+            &["-V"],
+            "Install tmux (for example, with `brew install tmux`) and check again.",
+        )?;
+        let setup = self.setup_state()?;
+        let provider = match setup.tracker {
+            TrackerChoice::GitHub => self.check_github_dependency()?,
+            TrackerChoice::None => DependencyStatus {
+                key: "github".into(),
+                label: "GitHub tracker".into(),
+                state: DependencyState::NotConfigured,
+                executable_path: None,
+                message: "No tracker selected; local Items remain available.".into(),
+                action: Some(
+                    "Choose GitHub in setup when you are ready to link tracked work.".into(),
+                ),
+            },
+        };
+        let agents = [
+            ("claude", "Claude Code", "claude_executable_path"),
+            ("codex", "Codex", "codex_executable_path"),
+        ]
+        .into_iter()
+        .map(|(key, label, setting_key)| {
+            self.check_local_dependency(
+                key,
+                label,
+                setting_key,
+                &[],
+                &format!("Install {label} before starting a Run with it."),
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+        Ok(HealthStatus {
+            runtime,
+            provider,
+            agents,
+            checked_at: current_unix_seconds(),
+        })
+    }
+
+    fn check_github_dependency(&mut self) -> Result<DependencyStatus, String> {
+        let path = self.resolve_and_store_executable("gh", "gh_executable_path")?;
+        let Some(path) = path else {
+            return Ok(DependencyStatus {
+                key: "github".into(),
+                label: "GitHub tracker".into(),
+                state: DependencyState::Missing,
+                executable_path: None,
+                message: "GitHub CLI (`gh`) was not found.".into(),
+                action: Some(
+                    "Install GitHub CLI, then authenticate it with `gh auth login`.".into(),
+                ),
+            });
+        };
+        match check_command(&path, &["auth", "status", "--hostname", "github.com"]) {
+            Ok(()) => Ok(DependencyStatus {
+                key: "github".into(),
+                label: "GitHub tracker".into(),
+                state: DependencyState::Available,
+                executable_path: Some(path.to_string_lossy().into_owned()),
+                message: "GitHub CLI is installed and authenticated.".into(),
+                action: None,
+            }),
+            Err(detail) => Ok(DependencyStatus {
+                key: "github".into(),
+                label: "GitHub tracker".into(),
+                state: DependencyState::Unauthenticated,
+                executable_path: Some(path.to_string_lossy().into_owned()),
+                message: format!("GitHub CLI is not authenticated: {detail}"),
+                action: Some("Run `gh auth login` in your terminal; Mission Manager will not log in for you.".into()),
+            }),
+        }
+    }
+
+    fn check_local_dependency(
+        &mut self,
+        key: &str,
+        label: &str,
+        setting_key: &str,
+        args: &[&str],
+        missing_action: &str,
+    ) -> Result<DependencyStatus, String> {
+        let path = self.resolve_and_store_executable(key, setting_key)?;
+        let Some(path) = path else {
+            return Ok(DependencyStatus {
+                key: key.into(),
+                label: label.into(),
+                state: DependencyState::Missing,
+                executable_path: None,
+                message: format!("{label} was not found."),
+                action: Some(missing_action.into()),
+            });
+        };
+        if args.is_empty() {
+            return Ok(DependencyStatus {
+                key: key.into(),
+                label: label.into(),
+                state: DependencyState::Available,
+                executable_path: Some(path.to_string_lossy().into_owned()),
+                message: format!("{label} is installed."),
+                action: None,
+            });
+        }
+        match check_command(&path, args) {
+            Ok(()) => Ok(DependencyStatus {
+                key: key.into(),
+                label: label.into(),
+                state: DependencyState::Available,
+                executable_path: Some(path.to_string_lossy().into_owned()),
+                message: format!("{label} is ready."),
+                action: None,
+            }),
+            Err(detail) => Ok(DependencyStatus {
+                key: key.into(),
+                label: label.into(),
+                state: DependencyState::Unavailable,
+                executable_path: Some(path.to_string_lossy().into_owned()),
+                message: format!("{label} could not be checked: {detail}"),
+                action: Some(missing_action.into()),
+            }),
+        }
+    }
+
+    fn resolve_and_store_executable(
+        &mut self,
+        name: &str,
+        setting_key: &str,
+    ) -> Result<Option<PathBuf>, String> {
+        let stored = self
+            .store
+            .executable_path(setting_key)
+            .map_err(|error| error.to_string())?;
+        let path = resolve_executable(name, stored.as_deref());
+        if let Some(path) = path.as_deref() {
+            if stored.as_deref() != Some(path) {
+                self.store
+                    .set_executable_path(setting_key, path)
+                    .map_err(|error| error.to_string())?;
+            }
+        }
+        Ok(path)
     }
 
     fn create_project(
@@ -1965,6 +2192,34 @@ pub fn list_machines(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Machine>, S
         .map(|runtime| runtime.state.machines.clone())
 }
 
+#[tauri::command]
+pub fn get_setup_state(state: State<'_, Mutex<Runtime>>) -> Result<SetupState, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .setup_state()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn complete_setup(
+    context_name: String,
+    tracker: TrackerChoice,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<SetupState, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .complete_setup(context_name, tracker)
+}
+
+#[tauri::command]
+pub fn get_health_status(state: State<'_, Mutex<Runtime>>) -> Result<HealthStatus, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .health_status()
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn compose_run_prompt(
     item_id: i64,
@@ -2543,6 +2798,36 @@ mod tests {
 
     use super::*;
     use crate::persistence::SqliteStore;
+
+    #[test]
+    fn setup_completion_reuses_the_default_context_and_survives_reopening() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+
+        assert!(
+            !runtime
+                .setup_state()
+                .expect("setup state should be readable")
+                .completed
+        );
+        let setup = runtime
+            .complete_setup("Personal".into(), TrackerChoice::GitHub)
+            .expect("setup should complete");
+
+        assert!(setup.completed);
+        assert_eq!(setup.tracker, TrackerChoice::GitHub);
+        assert_eq!(runtime.state.contexts.len(), 1);
+
+        let reopened = Runtime::open(&database).expect("runtime should reopen");
+        assert_eq!(
+            reopened
+                .setup_state()
+                .expect("setup state should survive reopening"),
+            setup
+        );
+        assert_eq!(reopened.state.contexts.len(), 1);
+    }
 
     #[test]
     fn completing_an_item_leaves_active_runs_running_and_records_the_action() {

@@ -1,33 +1,138 @@
 # AI Mission Manager
 
-The first end-to-end slice of a personal control plane for work delegated to people and agents. It is a Tauri 2 desktop app with a React/TypeScript view, a Rust domain core, and SQLite persistence.
+AI Mission Manager is a personal macOS control plane for work done by people and AI agents.
+
+Work often spans a thought, a GitHub issue, several repositories, agent sessions, pull requests, and someone else's review. Each tool owns one part of that workflow, but none of them owns the relationships between the parts. AI Mission Manager keeps those relationships together so you can answer:
+
+- Where is this work running, and on which Machine?
+- Is the agent working, blocked, finished, or no longer reachable?
+- What changed since I last reviewed it?
+- What needs my attention now?
+
+The project is in active v0 development and is intended for personal use on macOS.
+
+## How it works
+
+The central entity is an **Item**: something you have decided to do, delegate, or keep on your radar. An Item can remain a simple note, or grow into tracked external work and delegated execution:
+
+~~~text
+Item
+├── Links to GitHub Issues, pull requests, or other URLs
+├── Worksets containing one or more repositories
+└── Runs of Claude Code or Codex inside a terminal Pane
+~~~
+
+The app also brings external changes, blocked Runs, due Reminders, and review dates into one **Needs Attention** view. An external signal is evidence for you to consider; it never silently completes work or changes your intent.
+
+## Initial scope
+
+The first vertical slice covers:
+
+- **Capture and organisation** — Contexts, Projects, stable MC-* Item identifiers, Inbox/Active/Waiting/Done states, notes, relationships, and cross-Context search.
+- **GitHub tracking** — paste a GitHub Issue or pull request URL, keep a cached snapshot, deduplicate External Objects, create an Issue from an editable preview, add comments, and refresh manually. Unrecognised URLs remain generic Links.
+- **Attention management** — Activity history, per-Link review watermarks, Context and Link attention policies, Watch dates, Item Reminders, and grouped Attention Entries.
+- **Worksets** — combine repositories under one working directory, configure branches, attach an existing directory without changing Git state, archive safely, and inspect uncommitted or unpushed work before removal.
+- **Agent Runs** — launch Claude Code or Codex with an explicit Execution Profile and reviewed prompt, keep Run history, attach a manually started agent only after approval, and report unknown, working, blocked, or finished state.
+- **Terminal access** — embed the real tmux Pane, send input and resize it, open the exact Pane in macOS Terminal, and recover Run associations after an app or connection restart.
+- **Remote execution** — run the same terminal flow on a remote Machine over SSH, without silently falling back to local execution.
+
+## Domain model
+
+The project uses a small, deliberate vocabulary:
+
+| Concept | Meaning |
+| --- | --- |
+| **Context** | A boundary that isolates an area of work, its providers, repositories, and Machines. |
+| **Project** | A container for Items inside a Context and the source of their defaults. |
+| **Item** | The user's durable unit of intent. |
+| **External Object** | A provider-owned object such as a GitHub Issue or pull request. |
+| **Link** | One Item's relationship with one External Object, including its own watch and review state. |
+| **Workset** | A persistent working directory containing one checkout per selected Repository. |
+| **Run** | One historical attempt by one agent inside a Workset. |
+| **Pane** | A terminal owned by the Terminal Runtime and associated with a Run when an agent is running there. |
+| **Needs Attention** | The unified view of changes and situations that currently require the user's involvement. |
+
+See [CONTEXT.md](CONTEXT.md) for the complete glossary.
+
+## Design principles
+
+- **The user remains in control.** Only an explicit action completes an Item, starts or stops a Run, publishes work, or removes files.
+- **Relationships are first-class.** The app connects intent, external work, repositories, execution context, and history without replacing the systems that own them.
+- **No guessing.** Missing connectivity, failed fetches, and unsupported agent states preserve the last known truth or show unknown; they do not become false state changes.
+- **Isolation is a domain rule.** Context boundaries apply to repositories, Machines, provider configuration, actions, and prompt content—not just to the UI.
+- **The runtime is an adapter.** tmux owns sessions, Panes, PTYs, and terminal persistence. AI Mission Manager directs it rather than reimplementing it.
+- **Archiving is not deletion.** Cleanup is a separate, explicit action with a safety report.
+
+## Architecture
+
+~~~text
+React + TypeScript UI
+          │ Tauri commands
+          ▼
+Rust application shell ───── SQLite persistence
+          │
+          ├── pure domain core: (state, event) → (state, effects)
+          ├── GitHub adapter through the authenticated gh CLI
+          └── Terminal Runtime adapter
+                    └── tmux control mode → local or SSH Machine
+~~~
+
+The v0 application is one Tauri process. There is no separate daemon, custom IPC protocol, scheduler, retry loop, or supervising agent. Agent state comes from hooks installed by the app for Runs it starts; state is persisted and recovered when a terminal connection returns.
+
+The initial provider is GitHub. The initial Terminal Runtime is tmux. Both are behind boundaries so additional providers or runtimes can be added when there is a concrete need.
+
+## Requirements
+
+- macOS
+- Node.js and npm
+- Rust and Cargo
+- tmux
+- GitHub CLI (gh), authenticated with gh auth login for GitHub integration
+- Claude Code and/or Codex for agent Runs
+- SSH access to a remote Machine for remote execution
+
+The last three are optional depending on which parts of the application you want to use. Tauri development also requires the usual macOS developer tools; install them with xcode-select --install if they are not already present.
+
+Check the local integrations before launching:
+
+~~~sh
+tmux -V
+gh auth status
+~~~
+
+AI Mission Manager does not install or authenticate third-party tools on your behalf.
 
 ## Run locally
 
-```sh
+~~~sh
 npm install
 npm run tauri -- dev
-```
+~~~
 
-The app creates a local `Personal` Context with a `Default` Project on first launch. Create additional Contexts and Projects as needed; each Project can provide the default state for new Items. Capture an Item with a title, Context, and Project; it receives a stable `MC-*` identifier and is stored in the app data directory.
+On first launch, the app creates a Personal Context with a Default Project. From there, capture an Item, add external work or a Workset when needed, and start a Run explicitly.
 
-Paste a GitHub Issue or pull request URL into an Item to create a Link. GitHub data is fetched through the authenticated `gh` CLI and cached once per External Object, so multiple Items share one snapshot while keeping separate Links. Other URLs are kept as generic Links, and every snapshot shows its age.
+npm run dev starts only the Vite front end. Use the Tauri command above for the complete desktop application and its Rust backend.
 
-Linked GitHub Objects are polled when the app opens and while it remains open. Changed titles, states, and metadata are recorded as Activity; each Link has its own review watermark, so shared Objects produce separate Attention Entries. Use the refresh action for an immediate poll, configure attention defaults per Context and object type, and override them on an individual Link.
+## Verify changes
 
-From any Item, use Create GitHub Issue to edit a repository, public title, and public body in a preview. The Issue is created only when you confirm, then linked to that unchanged Item. GitHub Issue and pull-request Links also provide an explicit comment form; no provider write happens while merely viewing or editing the preview.
-
-The home view separates Items needing attention, running, waiting, due for a reminder, and completed. Statuses can move in any order. Each Item can carry notes and several independent Reminders, and can be linked to other Items as `blocks`, `blocked_by`, or `related_to`. A Link can also be watched until a chosen date and given an independent review date; either a due Reminder or reached review date creates Attention without changing Item status. Use the Context filter to focus the home view; search always spans every Context and labels each result with its Context.
-
-Runs report `unknown`, `working`, `blocked`, or `finished` from provider lifecycle hooks. Starting the first Run provisions the app-owned hooks in Claude Code and Codex configuration, injects the Run identity and durable state-file path into the agent Pane, and subscribes to state notifications through the existing tmux control connection. The state file is reread when the app or terminal connection returns, so a disconnected transition is recovered; missing or unsupported reports remain `unknown`, and terminal output is never parsed as agent state. A blocked Run creates an Attention Entry without changing its Item status.
-
-## Verify
-
-```sh
+~~~sh
 npm run typecheck
 npm run build
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
-```
+~~~
 
-The domain tests exercise Context and Project ownership, Project defaults, Item creation, status transitions, notes, multiple Reminders, independent Link watch/review dates, relationships, search, home projections, Run state transitions, isolation rejection, and requested persistence effects in memory. The persistence and app tests close and reopen real state to verify the organisation hierarchy, inherited Item defaults, notes, Reminders, Link schedules, relationships, Run state, and global identifier sequences survive restart. The tmux test exercises state notifications separately from terminal output.
+The test suite focuses on observable behaviour in the pure domain core, with targeted persistence, provider, agent-hook, and live tmux coverage. The tmux and remote execution tests require the corresponding local tools.
+
+## Deliberately out of scope for v0
+
+The initial release does not include Jira, Azure DevOps, or Bitbucket integrations; a runtime other than tmux; webhooks; an autonomous scheduler, retry, or dispatch loop; mobile or multi-user collaboration; an MCP server; an embedded diff viewer; automatic branch publishing or pull-request creation; or automatic destructive cleanup.
+
+There is no signed distribution, updater, migration guarantee, or backwards-compatibility promise yet. This is personal software optimized for a fast local development cycle.
+
+## Project documentation
+
+- [Initial product specification](https://github.com/pierophp/ai-mission-manager/issues/1) — problem statement, user stories, implementation decisions, and v0 boundaries.
+- [CONTEXT.md](CONTEXT.md) — domain vocabulary and modelling guidance.
+- [docs/adr/](docs/adr/) — architecture decisions and their consequences.
+- [spikes/tmux-control-mode/](spikes/tmux-control-mode/) — disposable proofs for local/remote tmux control mode and agent lifecycle reporting.

@@ -1,5 +1,4 @@
 use std::{
-    env,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -7,6 +6,7 @@ use std::{
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::dependencies::resolve_executable;
 use crate::domain::{
     ExternalMetadata, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
     ExternalSnapshotData,
@@ -198,35 +198,7 @@ fn ensure_success(output: &std::process::Output) -> Result<(), ProviderError> {
 }
 
 pub fn resolve_gh_executable(stored_path: Option<&Path>) -> Result<PathBuf, ProviderError> {
-    if let Some(path) = stored_path.filter(|path| path.is_absolute() && is_executable(path)) {
-        return Ok(path.to_path_buf());
-    }
-
-    let path_variable = env::var_os("PATH").ok_or(ProviderError::GhNotFound)?;
-    for directory in env::split_paths(&path_variable) {
-        let candidate = directory.join("gh");
-        if is_executable(&candidate) {
-            return candidate.canonicalize().or(Ok(candidate));
-        }
-    }
-    Err(ProviderError::GhNotFound)
-}
-
-fn is_executable(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        path.metadata()
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
+    resolve_executable("gh", stored_path).ok_or(ProviderError::GhNotFound)
 }
 
 #[derive(Debug, Deserialize)]

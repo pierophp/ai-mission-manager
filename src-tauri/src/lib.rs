@@ -1,4 +1,5 @@
 mod agent_state;
+mod dependencies;
 pub mod domain;
 mod git;
 pub mod persistence;
@@ -24,6 +25,9 @@ pub fn run() {
             app::list_projects,
             app::list_repositories,
             app::list_machines,
+            app::get_setup_state,
+            app::complete_setup,
+            app::get_health_status,
             app::list_context_attention_defaults,
             app::get_home,
             app::reconcile_runs,
