@@ -71,6 +71,7 @@ pub fn run() {
             app::open_external_terminal,
             app::stop_run,
             app::list_audit_history,
+            app::get_activity_tab,
             app::set_item_status,
             app::set_item_notes,
             app::add_item_reminder,

@@ -244,6 +244,16 @@ type Activity = {
   changes: ExternalChange[];
 };
 
+type ObservedActivity = {
+  activity: Activity;
+  object: ExternalObject;
+};
+
+type ActivityTabView = {
+  audit_entries: AuditEntry[];
+  activities: ObservedActivity[];
+};
+
 type ExternalChangePolicy = {
   title: boolean;
   state: boolean;
@@ -561,15 +571,24 @@ type AuditAction = {
   from?: string;
   to?: string;
   workset_id?: number;
+  repository_count?: number | null;
+  workset_count?: number | null;
   archived?: boolean;
   machine_id?: number;
+  run_count?: number | null;
   observation?: string;
   run_id?: number;
-  external_object_id?: number;
+  external_object_id?: number | null;
   link_id?: number;
+  external_object_deleted?: boolean | null;
+  link_count?: number | null;
+  snapshot_count?: number | null;
+  activity_count?: number | null;
   from_item_id?: number;
   to_item_id?: number;
-  summary?: ItemDeletionResult["summary"] | ParentDeletionResult["summary"];
+  summary?:
+    | ItemDeletionResult["summary"]
+    | ParentDeletionResult["summary"];
 };
 
 type AuditEntry = {
@@ -659,6 +678,7 @@ export function App() {
   const [home, setHome] = useState<HomeView>();
   const [runSuggestions, setRunSuggestions] = useState<RunSuggestion[]>([]);
   const [auditHistory, setAuditHistory] = useState<AuditEntry[]>([]);
+  const [observedActivities, setObservedActivities] = useState<ObservedActivity[]>([]);
   const [searchResults, setSearchResults] = useState<ItemView[]>([]);
   const [contextFilterId, setContextFilterId] = useState<number>();
   const [captureContextId, setCaptureContextId] = useState<number>();
@@ -813,7 +833,7 @@ export function App() {
         loadedRepositories,
         loadedHome,
         loadedRunSuggestions,
-        loadedAuditHistory,
+        loadedActivityTab,
       ] = await Promise.all([
         invoke<Context[]>("list_contexts"),
         invoke<Project[]>("list_projects"),
@@ -827,7 +847,7 @@ export function App() {
           now: currentMinute(),
         }),
         invoke<RunSuggestion[]>("list_run_suggestions"),
-        invoke<AuditEntry[]>("list_audit_history"),
+        invoke<ActivityTabView>("get_activity_tab"),
       ]);
       const nextCaptureContextId =
         loadedContexts.find((context) => context.id === captureContextId)?.id ??
@@ -853,7 +873,8 @@ export function App() {
       setMachines(loadedMachines);
       setAttentionDefaults(loadedAttentionDefaults);
       setRunSuggestions(loadedRunSuggestions);
-      setAuditHistory(loadedAuditHistory);
+      setAuditHistory(loadedActivityTab.audit_entries);
+      setObservedActivities(loadedActivityTab.activities);
       setCaptureContextId(nextCaptureContextId);
       setCaptureProjectId(nextCaptureProjectId);
       setHome(loadedHome);
@@ -927,8 +948,9 @@ export function App() {
   }
 
   async function refreshAuditHistory() {
-    const history = await invoke<AuditEntry[]>("list_audit_history");
-    setAuditHistory(history);
+    const activityTab = await invoke<ActivityTabView>("get_activity_tab");
+    setAuditHistory(activityTab.audit_entries);
+    setObservedActivities(activityTab.activities);
   }
 
   async function refreshSearch() {
@@ -1630,28 +1652,49 @@ export function App() {
       )}
 
       {selectedTab === "activity" && (
-        <section className="audit-history" aria-labelledby="audit-history-heading">
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">Append-only record</p>
-              <h2 id="audit-history-heading">Recent actions</h2>
+        <section className="activity-page" aria-labelledby="activity-heading">
+          <section className="activity-section audit-record">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Append-only record</p>
+                <h2 id="activity-heading">Recent actions</h2>
+              </div>
+              <span className="item-count">{auditHistory.length} entries</span>
             </div>
-            <span className="item-count">No prompts or terminal content</span>
-          </div>
-          {auditHistory.length === 0 ? (
-            <p className="empty-state">No actions have been recorded yet.</p>
-          ) : (
-            <ol className="audit-history-list">
-              {auditHistory.slice(0, 12).map((entry) => (
-                <li key={entry.id}>
-                  <span>{auditActionLabel(entry.action)}</span>
-                  <time dateTime={new Date(entry.recorded_at * 1000).toISOString()}>
-                    {new Date(entry.recorded_at * 1000).toLocaleString()}
-                  </time>
-                </li>
-              ))}
-            </ol>
-          )}
+            {auditHistory.length === 0 ? (
+              <p className="empty-state">No actions have been recorded yet.</p>
+            ) : (
+              <ol className="audit-record-list">
+                {auditHistory.slice(0, 50).map((entry) => (
+                  <li key={entry.id}>
+                    <span>{auditActionLabel(entry.action)}</span>
+                    <time dateTime={new Date(entry.recorded_at * 1000).toISOString()}>
+                      {new Date(entry.recorded_at * 1000).toLocaleString()}
+                    </time>
+                  </li>
+                ))}
+              </ol>
+            )}
+          </section>
+
+          <section className="activity-section observed-activity" aria-labelledby="observed-activity-heading">
+            <div className="section-heading">
+              <div>
+                <p className="eyebrow">Observed External Objects</p>
+                <h2 id="observed-activity-heading">Activity</h2>
+              </div>
+              <span className="item-count">{observedActivities.length} observations</span>
+            </div>
+            {observedActivities.length === 0 ? (
+              <p className="empty-state">No External Object changes have been observed yet.</p>
+            ) : (
+              <div className="observed-activity-list">
+                {observedActivities.slice(0, 50).map((entry) => (
+                  <ObservedActivityCard key={entry.activity.id} entry={entry} />
+                ))}
+              </div>
+            )}
+          </section>
         </section>
       )}
 
@@ -4839,6 +4882,57 @@ function SearchResult({ view }: { view: ItemView }) {
   );
 }
 
+function ObservedActivityCard({ entry }: { entry: ObservedActivity }) {
+  const titleChange = entry.activity.changes.find((change) => change.kind === "title");
+  const stateChange = entry.activity.changes.find((change) => change.kind === "state");
+  const title = titleChange?.current ?? titleChange?.previous ?? entry.object.external_key;
+  const state = stateChange?.current ?? stateChange?.previous;
+
+  return (
+    <details className="observed-activity-card">
+      <summary>
+        <div>
+          <strong>{title}</strong>
+          <span>
+            Observed at this change · {externalObjectKindLabel(entry.object.kind)} · {entry.object.external_key}
+            {state ? ` · observed state ${state}` : ""}
+          </span>
+        </div>
+        <time dateTime={new Date(entry.activity.observed_at * 1000).toISOString()}>
+          {new Date(entry.activity.observed_at * 1000).toLocaleString()}
+        </time>
+      </summary>
+      <div className="observed-activity-details">
+        <a href={entry.object.canonical_url} target="_blank" rel="noreferrer">
+          {entry.object.canonical_url}
+        </a>
+        <ul>
+          {entry.activity.changes.map((change, index) => (
+            <li key={`${change.kind}-${change.key ?? ""}-${index}`}>
+              {externalChangeDescription(change)}
+            </li>
+          ))}
+        </ul>
+      </div>
+    </details>
+  );
+}
+
+function externalChangeDescription(change: ExternalChange): string {
+  const label =
+    change.kind === "title"
+      ? "Title"
+      : change.kind === "state"
+        ? "State"
+        : `Metadata ${change.key ?? "value"}`;
+  if (change.previous !== null && change.current !== null) {
+    return `${label} changed from ${change.previous} to ${change.current}`;
+  }
+  if (change.current !== null) return `${label} added as ${change.current}`;
+  if (change.previous !== null) return `${label} removed (was ${change.previous})`;
+  return `${label} changed`;
+}
+
 function externalObjectKindLabel(kind: ExternalObject["kind"]): string {
   if (kind === "pull_request") return "Pull request";
   if (kind === "issue") return "Issue";
@@ -4906,18 +5000,30 @@ function auditActionLabel(action: AuditAction): string {
         action.summary && "itemId" in action.summary
           ? action.summary.itemId
           : action.item_id
+      }${
+        action.summary && "itemId" in action.summary
+          ? ` · ${itemDeletionSummary(action.summary)}`
+          : ""
       }`;
     case "projectDeleted":
       return `Deleted Project #${
         action.summary && "projectId" in action.summary
           ? action.summary.projectId
           : action.project_id
+      }${
+        action.summary && "projectId" in action.summary
+          ? ` · ${parentDeletionSummary(action.summary)}`
+          : ""
       }`;
     case "contextDeleted":
       return `Deleted Context #${
         action.summary && "contextId" in action.summary
           ? action.summary.contextId
           : action.context_id
+      }${
+        action.summary && "contextId" in action.summary
+          ? ` · ${parentDeletionSummary(action.summary)}`
+          : ""
       }`;
     case "itemRelationChanged":
       return `Updated the relationship between Items #${action.from_item_id} and #${action.to_item_id}`;
@@ -4926,7 +5032,10 @@ function auditActionLabel(action: AuditAction): string {
     case "worksetArchived":
       return `${action.archived ? "Archived" : "Restored"} Workset #${action.workset_id}`;
     case "worksetRemoved":
-      return `Removed Workset #${action.workset_id}`;
+      return `Removed Workset #${action.workset_id} · ${countLabel(
+        action.repository_count,
+        "Repository",
+      )}`;
     case "worksetUpdated":
       return `Updated Workset #${action.workset_id}`;
     case "runCreated":
@@ -4934,7 +5043,7 @@ function auditActionLabel(action: AuditAction): string {
     case "runStopped":
       return `Stopped Run #${action.run_id}`;
     case "runDeleted":
-      return `Deleted Run #${action.run_id}`;
+      return `Deleted Run #${action.run_id} · no local descendants`;
     case "runStateChanged":
       return `Run #${action.run_id} changed from ${action.from} to ${action.to}`;
     case "runPaneStatusChanged":
@@ -4948,9 +5057,15 @@ function auditActionLabel(action: AuditAction): string {
     case "linkUpdated":
       return `Updated Link #${action.link_id}`;
     case "linkDeleted":
-      return `Removed Link #${action.link_id}`;
+      return `Removed Link #${action.link_id} · ${
+        action.external_object_deleted === true
+          ? `orphaned External Object #${action.external_object_id ?? "?"} removed`
+          : action.external_object_deleted === false
+            ? "shared External Object retained"
+            : "External Object cascade details unavailable"
+      }`;
     case "externalObjectDeleted":
-      return `Removed External Object #${action.external_object_id} locally`;
+      return `Removed External Object #${action.external_object_id} locally · ${externalObjectDeletionSummary(action)}`;
     case "contextCreated":
       return `Created Context #${action.context_id}`;
     case "projectCreated":
@@ -4958,18 +5073,85 @@ function auditActionLabel(action: AuditAction): string {
     case "repositoryRegistered":
       return `Registered Repository #${action.repository_id}`;
     case "repositoryDeleted":
-      return `Deleted Repository #${action.repository_id}`;
+      return `Deleted Repository #${action.repository_id} · ${countLabel(
+        action.workset_count,
+        "Workset",
+      )}`;
     case "machineRegistered":
       return `Registered Machine #${action.machine_id}`;
     case "machineObserved":
       return `Observed Machine #${action.machine_id} as ${action.observation}`;
     case "machineDeleted":
-      return `Deleted Machine #${action.machine_id}`;
+      return `Deleted Machine #${action.machine_id} · ${countLabel(action.run_count, "Run")}`;
     case "contextAttentionDefaultChanged":
       return `Updated attention defaults for Context #${action.context_id}`;
+    case "resetBoundary":
+      return `Reset local data · new Personal Context #${action.context_id}, Default Project #${action.project_id}`;
     default:
       return "Recorded action";
   }
+}
+
+function itemDeletionSummary(summary: ItemDeletionResult["summary"]): string {
+  return cascadeCounts([
+    [summary.reminderCount, "reminder"],
+    [summary.relationshipCount, "relationship"],
+    [summary.worksetCount, "Workset"],
+    [summary.runCount, "Run"],
+    [summary.linkCount, "Link"],
+    [summary.externalObjectCount, "orphaned External Object"],
+    [summary.snapshotCount, "snapshot"],
+    [summary.activityCount, "Activity record"],
+  ]);
+}
+
+function externalObjectDeletionSummary(action: AuditAction): string {
+  if (
+    action.link_count === null ||
+    action.link_count === undefined ||
+    action.snapshot_count === null ||
+    action.snapshot_count === undefined ||
+    action.activity_count === null ||
+    action.activity_count === undefined
+  ) {
+    return "cascade details unavailable";
+  }
+  return cascadeCounts([
+    [action.link_count ?? 0, "Link"],
+    [action.snapshot_count ?? 0, "snapshot"],
+    [action.activity_count ?? 0, "Activity record"],
+  ]);
+}
+
+function parentDeletionSummary(summary: ParentDeletionResult["summary"]): string {
+  return cascadeCounts([
+    [summary.projectCount, "Project"],
+    [summary.itemCount, "Item"],
+    [summary.repositoryCount, "Repository"],
+    [summary.machineCount, "Machine"],
+    [summary.worksetCount, "Workset"],
+    [summary.runCount, "Run"],
+    [summary.reminderCount, "reminder"],
+    [summary.relationshipCount, "relationship"],
+    [summary.linkCount, "Link"],
+    [summary.attentionDefaultCount, "attention default"],
+    [summary.externalObjectCount, "orphaned External Object"],
+    [summary.snapshotCount, "snapshot"],
+    [summary.activityCount, "Activity record"],
+  ]);
+}
+
+function cascadeCounts(counts: [number, string][]): string {
+  const nonEmpty = counts
+    .filter(([count]) => count > 0)
+    .map(([count, label]) => `${count} ${label}${count === 1 ? "" : "s"}`);
+  return nonEmpty.length > 0 ? nonEmpty.join(", ") : "no local descendants";
+}
+
+function countLabel(count: number | null | undefined, label: string): string {
+  if (count === null || count === undefined) return `${label} count unavailable`;
+  if (!count) return `no ${label.toLowerCase()} records`;
+  return `${count} ${label}${count === 1 ? "" : "s"}`;
 }
 
 function paneTabForRun(run: Run): PaneTab {

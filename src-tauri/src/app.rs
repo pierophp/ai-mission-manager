@@ -12,18 +12,18 @@ use crate::{
     agent_state::{provision_hooks, read_state_file, state_file_path, AgentStateRecord},
     dependencies::{check_command, resolve_executable, DependencyState, DependencyStatus},
     domain::{
-        compose_run_prompt as build_run_prompt, decide, external_link_view, home_view,
-        plan_context_deletion, plan_external_object_deletion, plan_item_deletion,
+        activity_tab_view, compose_run_prompt as build_run_prompt, decide, external_link_view,
+        home_view, plan_context_deletion, plan_external_object_deletion, plan_item_deletion,
         plan_machine_deletion, plan_project_deletion, plan_repository_deletion, search_items,
-        suggest_untracked_runs, AgentKind, AgentPaneObservation, AttachedRepositoryInput,
-        AuditAction, AuditEntry, Context, ContextAttentionDefault, DomainState, Effect, Event,
-        ExecutionProfile, ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
-        ExternalObjectDeletionSummary, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
-        ExternalSnapshot, HomeView, Item, ItemDeletionPlan, ItemDeletionSummary, ItemRelation,
-        ItemRelationKind, ItemStatus, ItemView, Machine, MachineDeletionPlan, MachineObservation,
-        MachineTransport, ParentDeletionPlan, Project, ProjectDefaults, Repository,
-        RepositoryDeletionPlan, Run, RunPaneStatus, RunPromptSelection, RunState, RunSuggestion,
-        Workset, WorksetRepositoryInput,
+        suggest_untracked_runs, ActivityTabView, AgentKind, AgentPaneObservation,
+        AttachedRepositoryInput, AuditAction, AuditEntry, Context, ContextAttentionDefault,
+        DomainState, Effect, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
+        ExternalObjectDeletionPlan, ExternalObjectDeletionSummary, ExternalObjectInput,
+        ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView, Item, ItemDeletionPlan,
+        ItemDeletionSummary, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine,
+        MachineDeletionPlan, MachineObservation, MachineTransport, ParentDeletionPlan, Project,
+        ProjectDefaults, Repository, RepositoryDeletionPlan, Run, RunPaneStatus,
+        RunPromptSelection, RunState, RunSuggestion, Workset, WorksetRepositoryInput,
     },
     git::GitCli,
     persistence::SqliteStore,
@@ -2709,6 +2709,14 @@ impl Runtime {
             .map_err(|error| error.to_string())
     }
 
+    fn activity_tab(&self) -> Result<ActivityTabView, String> {
+        let audit_entries = self
+            .store
+            .list_audit_history()
+            .map_err(|error| error.to_string())?;
+        Ok(activity_tab_view(&self.state, audit_entries))
+    }
+
     fn commit(&mut self, decision: crate::domain::Decision) -> Result<(), String> {
         self.commit_with_audit(decision, &[])
     }
@@ -2809,20 +2817,77 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
             }
             Effect::RemoveWorkset { workset_id } => Some(AuditAction::WorksetRemoved {
                 workset_id: *workset_id,
+                repository_count: before
+                    .worksets
+                    .iter()
+                    .find(|workset| workset.id == *workset_id)
+                    .map(|workset| workset.repositories.len())
+                    .unwrap_or_default()
+                    .into(),
             }),
             Effect::RemoveRepository { repository_id } => Some(AuditAction::RepositoryDeleted {
                 repository_id: *repository_id,
+                workset_count: before
+                    .worksets
+                    .iter()
+                    .filter(|workset| {
+                        workset
+                            .repositories
+                            .iter()
+                            .any(|repository| repository.repository_id == *repository_id)
+                    })
+                    .count()
+                    .into(),
             }),
             Effect::RemoveMachine { machine_id } => Some(AuditAction::MachineDeleted {
                 machine_id: *machine_id,
+                run_count: before
+                    .runs
+                    .iter()
+                    .filter(|run| run.machine_id == *machine_id)
+                    .count()
+                    .into(),
             }),
             Effect::RemoveRun { run_id } => Some(AuditAction::RunDeleted { run_id: *run_id }),
-            Effect::RemoveLink { link_id, .. } => {
-                Some(AuditAction::LinkDeleted { link_id: *link_id })
-            }
+            Effect::RemoveLink {
+                link_id,
+                external_object_id,
+            } => Some(AuditAction::LinkDeleted {
+                link_id: *link_id,
+                external_object_id: Some(*external_object_id),
+                external_object_deleted: Some(
+                    before
+                        .links
+                        .iter()
+                        .filter(|link| link.external_object_id == *external_object_id)
+                        .count()
+                        == 1,
+                ),
+            }),
             Effect::RemoveExternalObject { external_object_id } => {
                 Some(AuditAction::ExternalObjectDeleted {
                     external_object_id: *external_object_id,
+                    link_count: Some(
+                        before
+                            .links
+                            .iter()
+                            .filter(|link| link.external_object_id == *external_object_id)
+                            .count(),
+                    ),
+                    snapshot_count: Some(
+                        before
+                            .snapshots
+                            .iter()
+                            .filter(|snapshot| snapshot.external_object_id == *external_object_id)
+                            .count(),
+                    ),
+                    activity_count: Some(
+                        before
+                            .activities
+                            .iter()
+                            .filter(|activity| activity.external_object_id == *external_object_id)
+                            .count(),
+                    ),
                 })
             }
             Effect::RemoveItemCascade { summary, .. } => Some(AuditAction::ItemDeleted {
@@ -3517,6 +3582,14 @@ pub fn list_audit_history(state: State<'_, Mutex<Runtime>>) -> Result<Vec<AuditE
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .list_audit_history()
+}
+
+#[tauri::command]
+pub fn get_activity_tab(state: State<'_, Mutex<Runtime>>) -> Result<ActivityTabView, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .activity_tab()
 }
 
 #[tauri::command]
@@ -5060,9 +5133,10 @@ fi
         assert!(history
             .iter()
             .any(|entry| matches!(entry.action, AuditAction::RunDeleted { run_id: 1 })));
-        assert!(history
-            .iter()
-            .any(|entry| matches!(entry.action, AuditAction::MachineDeleted { machine_id: 1 })));
+        assert!(history.iter().any(|entry| matches!(
+            entry.action,
+            AuditAction::MachineDeleted { machine_id: 1, .. }
+        )));
     }
 
     #[test]
@@ -5232,7 +5306,10 @@ fi
         );
         assert!(history.iter().any(|entry| matches!(
             entry.action,
-            AuditAction::RepositoryDeleted { repository_id: 1 }
+            AuditAction::RepositoryDeleted {
+                repository_id: 1,
+                ..
+            }
         )));
     }
 

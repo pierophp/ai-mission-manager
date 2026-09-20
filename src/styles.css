@@ -1658,15 +1658,25 @@ button:disabled {
   flex-basis: 100%;
 }
 
-.audit-history {
+.activity-page {
+  display: grid;
+  gap: 20px;
   margin-top: 28px;
+}
+
+.activity-section {
+  margin-top: 0;
   padding: 22px 24px;
   border: 1px solid #ddd3c7;
   border-radius: 14px;
   background: #fffdf9;
 }
 
-.audit-history-list {
+.activity-section + .activity-section {
+  margin-top: 0;
+}
+
+.audit-record-list {
   display: grid;
   gap: 8px;
   margin: 18px 0 0;
@@ -1674,7 +1684,7 @@ button:disabled {
   list-style: none;
 }
 
-.audit-history-list li {
+.audit-record-list li {
   display: flex;
   justify-content: space-between;
   gap: 16px;
@@ -1684,10 +1694,70 @@ button:disabled {
   font-size: 0.82rem;
 }
 
-.audit-history-list time {
+.audit-record-list time {
   flex: 0 0 auto;
   color: #8b837a;
   font-size: 0.72rem;
+}
+
+.observed-activity-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.observed-activity-card {
+  border-bottom: 1px solid #eee7de;
+  color: #4e4942;
+  font-size: 0.82rem;
+}
+
+.observed-activity-card summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  cursor: pointer;
+  list-style-position: outside;
+}
+
+.observed-activity-card summary::marker {
+  color: #b05c39;
+}
+
+.observed-activity-card summary > div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.observed-activity-card summary span,
+.observed-activity-details,
+.observed-activity-card time {
+  color: #8b837a;
+  font-size: 0.72rem;
+}
+
+.observed-activity-card time {
+  flex: 0 0 auto;
+}
+
+.observed-activity-details {
+  display: grid;
+  gap: 10px;
+  padding: 0 0 14px 20px;
+}
+
+.observed-activity-details a {
+  overflow-wrap: anywhere;
+}
+
+.observed-activity-details ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 18px;
 }
 
 @media (max-width: 1120px) {

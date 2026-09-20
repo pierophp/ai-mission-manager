@@ -719,6 +719,8 @@ pub enum AuditAction {
     },
     WorksetRemoved {
         workset_id: i64,
+        #[serde(default)]
+        repository_count: Option<usize>,
     },
     MachineRegistered {
         machine_id: i64,
@@ -729,6 +731,8 @@ pub enum AuditAction {
     },
     MachineDeleted {
         machine_id: i64,
+        #[serde(default)]
+        run_count: Option<usize>,
     },
     RunCreated {
         run_id: i64,
@@ -763,9 +767,19 @@ pub enum AuditAction {
     },
     LinkDeleted {
         link_id: i64,
+        #[serde(default)]
+        external_object_id: Option<i64>,
+        #[serde(default)]
+        external_object_deleted: Option<bool>,
     },
     ExternalObjectDeleted {
         external_object_id: i64,
+        #[serde(default)]
+        link_count: Option<usize>,
+        #[serde(default)]
+        snapshot_count: Option<usize>,
+        #[serde(default)]
+        activity_count: Option<usize>,
     },
     ContextAttentionDefaultChanged {
         context_id: i64,
@@ -776,12 +790,18 @@ pub enum AuditAction {
     },
     RepositoryDeleted {
         repository_id: i64,
+        #[serde(default)]
+        workset_count: Option<usize>,
     },
     ProjectDeleted {
         summary: ParentDeletionSummary,
     },
     ContextDeleted {
         summary: ParentDeletionSummary,
+    },
+    ResetBoundary {
+        context_id: i64,
+        project_id: i64,
     },
 }
 
@@ -790,6 +810,18 @@ pub struct AuditEntry {
     pub id: i64,
     pub recorded_at: i64,
     pub action: AuditAction,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedActivity {
+    pub activity: Activity,
+    pub object: ExternalObject,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityTabView {
+    pub audit_entries: Vec<AuditEntry>,
+    pub activities: Vec<ObservedActivity>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -819,6 +851,29 @@ pub struct DomainState {
     pub snapshots: Vec<ExternalSnapshot>,
     pub activities: Vec<Activity>,
     pub attention_defaults: Vec<ContextAttentionDefault>,
+}
+
+pub fn activity_tab_view(state: &DomainState, audit_entries: Vec<AuditEntry>) -> ActivityTabView {
+    let activities = state
+        .activities
+        .iter()
+        .rev()
+        .filter_map(|activity| {
+            let object = state
+                .external_objects
+                .iter()
+                .find(|object| object.id == activity.external_object_id)?;
+            Some(ObservedActivity {
+                activity: activity.clone(),
+                object: object.clone(),
+            })
+        })
+        .collect();
+
+    ActivityTabView {
+        audit_entries,
+        activities,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3909,6 +3964,47 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn activity_tab_view_exposes_observed_activity_without_execution_or_attention_details() {
+        let mut state = state_with_context(7, "Work");
+        state.external_objects.push(ExternalObject {
+            id: 1,
+            provider: ExternalProvider::GitHub,
+            kind: ExternalObjectKind::PullRequest,
+            external_key: "acme/app#42".into(),
+            canonical_url: "https://github.com/acme/app/pull/42".into(),
+        });
+        state.activities.push(Activity {
+            id: 1,
+            external_object_id: 1,
+            observed_at: 20,
+            changes: vec![ExternalChange {
+                kind: ExternalChangeKind::State,
+                key: None,
+                previous: Some("DRAFT".into()),
+                current: Some("OPEN".into()),
+            }],
+        });
+
+        let audit_entry = AuditEntry {
+            id: 1,
+            recorded_at: 20,
+            action: AuditAction::ItemCreated { item_id: 1 },
+        };
+        let view = activity_tab_view(&state, vec![audit_entry.clone()]);
+
+        assert_eq!(view.audit_entries, vec![audit_entry]);
+        assert_eq!(view.activities.len(), 1);
+        assert_eq!(view.activities[0].activity.id, 1);
+        assert_eq!(view.activities[0].object.external_key, "acme/app#42");
+
+        let serialized = serde_json::to_string(&view).expect("Activity tab view should serialize");
+        assert!(!serialized.contains("reviewed_activity_id"));
+        assert!(!serialized.contains("prompt"));
+        assert!(!serialized.contains("pane_id"));
+        assert!(!serialized.contains("working_directory"));
     }
 
     #[test]

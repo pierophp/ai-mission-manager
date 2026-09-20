@@ -1882,6 +1882,106 @@ mod tests {
     }
 
     #[test]
+    fn reset_boundary_audit_entries_survive_reopening_as_the_new_audit_boundary() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+
+        {
+            let mut store = SqliteStore::open(&path).expect("database should open");
+            store
+                .apply_with_audit(
+                    &[],
+                    &[AuditAction::ResetBoundary {
+                        context_id: 8,
+                        project_id: 9,
+                    }],
+                )
+                .expect("reset boundary should persist");
+        }
+
+        let history = SqliteStore::open(&path)
+            .expect("database should reopen")
+            .list_audit_history()
+            .expect("audit history should load");
+        assert!(matches!(
+            history.as_slice(),
+            [AuditEntry {
+                action: AuditAction::ResetBoundary {
+                    context_id: 8,
+                    project_id: 9,
+                },
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn older_deletion_audit_entries_remain_readable_after_summary_fields_are_added() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+        let store = SqliteStore::open(&path).expect("database should open");
+        let legacy_actions = [
+            r#"{"action":"worksetRemoved","workset_id":1}"#,
+            r#"{"action":"repositoryDeleted","repository_id":2}"#,
+            r#"{"action":"machineDeleted","machine_id":3}"#,
+            r#"{"action":"linkDeleted","link_id":4}"#,
+            r#"{"action":"externalObjectDeleted","external_object_id":5}"#,
+        ];
+        for (index, action) in legacy_actions.iter().enumerate() {
+            store
+                .connection
+                .execute(
+                    "INSERT INTO audit_entries (id, recorded_at, action_json)
+                     VALUES (?1, 1, ?2)",
+                    params![index as i64 + 1, action],
+                )
+                .expect("legacy audit entry should insert");
+        }
+
+        let history = store
+            .list_audit_history()
+            .expect("legacy audit entries should remain readable");
+        assert!(history.iter().any(|entry| matches!(
+            entry.action,
+            AuditAction::WorksetRemoved {
+                workset_id: 1,
+                repository_count: None,
+            }
+        )));
+        assert!(history.iter().any(|entry| matches!(
+            entry.action,
+            AuditAction::RepositoryDeleted {
+                repository_id: 2,
+                workset_count: None,
+            }
+        )));
+        assert!(history.iter().any(|entry| matches!(
+            entry.action,
+            AuditAction::MachineDeleted {
+                machine_id: 3,
+                run_count: None,
+            }
+        )));
+        assert!(history.iter().any(|entry| matches!(
+            entry.action,
+            AuditAction::LinkDeleted {
+                link_id: 4,
+                external_object_id: None,
+                external_object_deleted: None,
+            }
+        )));
+        assert!(history.iter().any(|entry| matches!(
+            entry.action,
+            AuditAction::ExternalObjectDeleted {
+                external_object_id: 5,
+                link_count: None,
+                snapshot_count: None,
+                activity_count: None,
+            }
+        )));
+    }
+
+    #[test]
     fn parent_deletion_cascades_survive_reopening_and_keep_context_lifecycle_valid() {
         let directory = tempdir().expect("temporary database directory should exist");
         let path = directory.path().join("mission-manager.sqlite");
@@ -2465,8 +2565,14 @@ mod tests {
                 .apply_with_audit(
                     &deletion.effects,
                     &[
-                        AuditAction::WorksetRemoved { workset_id: 1 },
-                        AuditAction::RepositoryDeleted { repository_id: 1 },
+                        AuditAction::WorksetRemoved {
+                            workset_id: 1,
+                            repository_count: Some(1),
+                        },
+                        AuditAction::RepositoryDeleted {
+                            repository_id: 1,
+                            workset_count: Some(1),
+                        },
                     ],
                 )
                 .expect("Repository deletion should persist transactionally");
@@ -2481,12 +2587,16 @@ mod tests {
         let history = reopened
             .list_audit_history()
             .expect("audit history should load");
-        assert!(history
-            .iter()
-            .any(|entry| matches!(entry.action, AuditAction::WorksetRemoved { workset_id: 1 })));
         assert!(history.iter().any(|entry| matches!(
             entry.action,
-            AuditAction::RepositoryDeleted { repository_id: 1 }
+            AuditAction::WorksetRemoved { workset_id: 1, .. }
+        )));
+        assert!(history.iter().any(|entry| matches!(
+            entry.action,
+            AuditAction::RepositoryDeleted {
+                repository_id: 1,
+                ..
+            }
         )));
     }
 
@@ -2576,7 +2686,10 @@ mod tests {
                     &deletion.effects,
                     &[
                         AuditAction::RunDeleted { run_id: 1 },
-                        AuditAction::MachineDeleted { machine_id: 1 },
+                        AuditAction::MachineDeleted {
+                            machine_id: 1,
+                            run_count: Some(1),
+                        },
                     ],
                 )
                 .expect("Machine deletion should persist transactionally");
@@ -2594,9 +2707,10 @@ mod tests {
         assert!(history
             .iter()
             .any(|entry| matches!(entry.action, AuditAction::RunDeleted { run_id: 1 })));
-        assert!(history
-            .iter()
-            .any(|entry| matches!(entry.action, AuditAction::MachineDeleted { machine_id: 1 })));
+        assert!(history.iter().any(|entry| matches!(
+            entry.action,
+            AuditAction::MachineDeleted { machine_id: 1, .. }
+        )));
     }
 
     #[test]
