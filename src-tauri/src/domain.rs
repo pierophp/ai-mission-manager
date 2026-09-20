@@ -419,6 +419,64 @@ pub struct ItemView {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDeletionWorkset {
+    pub id: i64,
+    pub root_directory: String,
+    pub branch: String,
+    pub archived: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDeletionPlan {
+    pub item_id: i64,
+    pub human_identifier: String,
+    pub title: String,
+    pub reminder_count: usize,
+    pub relationship_count: usize,
+    pub worksets: Vec<ItemDeletionWorkset>,
+    pub run_ids: Vec<i64>,
+    pub active_run_ids: Vec<i64>,
+    pub link_ids: Vec<i64>,
+    pub orphaned_external_object_ids: Vec<i64>,
+    pub orphaned_snapshot_count: usize,
+    pub orphaned_activity_count: usize,
+    #[serde(skip)]
+    pub state_fingerprint: String,
+}
+
+impl ItemDeletionPlan {
+    pub fn summary(&self) -> ItemDeletionSummary {
+        ItemDeletionSummary {
+            item_id: self.item_id,
+            reminder_count: self.reminder_count,
+            relationship_count: self.relationship_count,
+            workset_count: self.worksets.len(),
+            run_count: self.run_ids.len(),
+            link_count: self.link_ids.len(),
+            external_object_count: self.orphaned_external_object_ids.len(),
+            snapshot_count: self.orphaned_snapshot_count,
+            activity_count: self.orphaned_activity_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDeletionSummary {
+    pub item_id: i64,
+    pub reminder_count: usize,
+    pub relationship_count: usize,
+    pub workset_count: usize,
+    pub run_count: usize,
+    pub link_count: usize,
+    pub external_object_count: usize,
+    pub snapshot_count: usize,
+    pub activity_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HomeView {
     pub needs_attention: Vec<ItemView>,
     pub attention_entries: Vec<AttentionEntry>,
@@ -510,6 +568,9 @@ pub enum AuditAction {
     ContextAttentionDefaultChanged {
         context_id: i64,
         object_kind: ExternalObjectKind,
+    },
+    ItemDeleted {
+        summary: ItemDeletionSummary,
     },
 }
 
@@ -603,6 +664,9 @@ pub enum Event {
     },
     RemoveWorkset {
         workset_id: i64,
+    },
+    DeleteItem {
+        item_id: i64,
     },
     StartRun {
         item_id: i64,
@@ -767,12 +831,101 @@ pub enum Effect {
     PersistContextAttentionDefault {
         attention_default: ContextAttentionDefault,
     },
+    RemoveItemCascade {
+        item_id: i64,
+        orphaned_external_object_ids: Vec<i64>,
+        summary: ItemDeletionSummary,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Decision {
     pub state: DomainState,
     pub effects: Vec<Effect>,
+}
+
+pub fn plan_item_deletion(
+    state: &DomainState,
+    item_id: i64,
+) -> Result<ItemDeletionPlan, DomainError> {
+    let item = state
+        .items
+        .iter()
+        .find(|item| item.id == item_id)
+        .ok_or(DomainError::ItemNotFound { item_id })?;
+    let worksets = state
+        .worksets
+        .iter()
+        .filter(|workset| workset.item_id == item_id)
+        .map(|workset| ItemDeletionWorkset {
+            id: workset.id,
+            root_directory: workset.root_directory.clone(),
+            branch: workset.branch.clone(),
+            archived: workset.archived,
+        })
+        .collect::<Vec<_>>();
+    let run_ids = state
+        .runs
+        .iter()
+        .filter(|run| run.item_id == item_id)
+        .map(|run| run.id)
+        .collect::<Vec<_>>();
+    let active_run_ids = state
+        .runs
+        .iter()
+        .filter(|run| run.item_id == item_id && run.state != RunState::Finished)
+        .map(|run| run.id)
+        .collect::<Vec<_>>();
+    let link_ids = state
+        .links
+        .iter()
+        .filter(|link| link.item_id == item_id)
+        .map(|link| link.id)
+        .collect::<Vec<_>>();
+    let linked_external_object_ids = state
+        .links
+        .iter()
+        .filter(|link| link.item_id == item_id)
+        .map(|link| link.external_object_id)
+        .collect::<Vec<_>>();
+    let orphaned_external_object_ids = linked_external_object_ids
+        .iter()
+        .copied()
+        .filter(|external_object_id| {
+            !state.links.iter().any(|link| {
+                link.external_object_id == *external_object_id && link.item_id != item_id
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(ItemDeletionPlan {
+        item_id,
+        human_identifier: item.human_identifier.clone(),
+        title: item.title.clone(),
+        reminder_count: item.reminders.len(),
+        relationship_count: state
+            .relationships
+            .iter()
+            .filter(|relation| relation.from_item_id == item_id || relation.to_item_id == item_id)
+            .count(),
+        worksets,
+        run_ids,
+        active_run_ids,
+        link_ids,
+        orphaned_snapshot_count: state
+            .snapshots
+            .iter()
+            .filter(|snapshot| orphaned_external_object_ids.contains(&snapshot.external_object_id))
+            .count(),
+        orphaned_activity_count: state
+            .activities
+            .iter()
+            .filter(|activity| orphaned_external_object_ids.contains(&activity.external_object_id))
+            .count(),
+        orphaned_external_object_ids,
+        state_fingerprint: serde_json::to_string(state)
+            .expect("DomainState should always be serializable"),
+    })
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -874,6 +1027,8 @@ pub enum DomainError {
     DuplicateRepositorySelection { repository_id: i64 },
     #[error("Item {item_id} does not exist")]
     ItemNotFound { item_id: i64 },
+    #[error("Item {item_id} has active Runs: {run_ids:?}")]
+    ItemHasActiveRuns { item_id: i64, run_ids: Vec<i64> },
     #[error("Items {from_item_id} and {to_item_id} belong to different Contexts")]
     ItemContextMismatch { from_item_id: i64, to_item_id: i64 },
     #[error("an Item cannot relate to itself: {item_id}")]
@@ -1355,6 +1510,42 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             Ok(Decision {
                 state,
                 effects: vec![Effect::RemoveWorkset { workset_id }],
+            })
+        }
+        Event::DeleteItem { item_id } => {
+            let plan = plan_item_deletion(&state, item_id)?;
+            if !plan.active_run_ids.is_empty() {
+                return Err(DomainError::ItemHasActiveRuns {
+                    item_id,
+                    run_ids: plan.active_run_ids,
+                });
+            }
+            let summary = plan.summary();
+            let orphaned_external_object_ids = plan.orphaned_external_object_ids.clone();
+            state.items.retain(|item| item.id != item_id);
+            state.worksets.retain(|workset| workset.item_id != item_id);
+            state.runs.retain(|run| run.item_id != item_id);
+            state.relationships.retain(|relation| {
+                relation.from_item_id != item_id && relation.to_item_id != item_id
+            });
+            state.links.retain(|link| link.item_id != item_id);
+            state
+                .external_objects
+                .retain(|object| !orphaned_external_object_ids.contains(&object.id));
+            state.snapshots.retain(|snapshot| {
+                !orphaned_external_object_ids.contains(&snapshot.external_object_id)
+            });
+            state.activities.retain(|activity| {
+                !orphaned_external_object_ids.contains(&activity.external_object_id)
+            });
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::RemoveItemCascade {
+                    item_id,
+                    orphaned_external_object_ids,
+                    summary,
+                }],
             })
         }
         Event::StartRun {
@@ -3046,6 +3237,181 @@ mod tests {
             ),
             Err(DomainError::SelfRelation { item_id: 1 })
         );
+    }
+
+    #[test]
+    fn item_deletion_plan_describes_the_local_cascade_and_preserves_shared_external_objects() {
+        let mut state = state_with_context(7, "Work");
+        state.items = vec![
+            Item {
+                id: 1,
+                human_identifier: "MC-1".into(),
+                title: "Remove this Item".into(),
+                project_id: 1,
+                status: ItemStatus::Done,
+                notes: "private notes".into(),
+                reminders: vec![Reminder {
+                    id: 1,
+                    remind_at: "2026-09-20T09:00".into(),
+                }],
+            },
+            Item {
+                id: 2,
+                human_identifier: "MC-2".into(),
+                title: "Keep this Item".into(),
+                project_id: 1,
+                status: ItemStatus::Inbox,
+                notes: String::new(),
+                reminders: Vec::new(),
+            },
+        ];
+        state.worksets.push(Workset {
+            id: 1,
+            item_id: 1,
+            root_directory: "/tmp/remove-this".into(),
+            branch: "feature/remove-this".into(),
+            archived: true,
+            repositories: Vec::new(),
+        });
+        state.runs.push(Run {
+            id: 1,
+            item_id: 1,
+            workset_id: 1,
+            machine_id: 1,
+            agent: AgentKind::Codex,
+            execution_profile: ExecutionProfile::Implement,
+            prompt: "do not retain this prompt".into(),
+            working_directory: "/tmp/remove-this".into(),
+            session_name: "remove-this".into(),
+            pane_id: "%1".into(),
+            started_at: 1,
+            state: RunState::Finished,
+            pane_status: RunPaneStatus::Missing,
+        });
+        state.relationships.push(ItemRelation {
+            from_item_id: 1,
+            to_item_id: 2,
+            kind: ItemRelationKind::Blocks,
+        });
+        state.external_objects = vec![
+            ExternalObject {
+                id: 1,
+                provider: ExternalProvider::GitHub,
+                kind: ExternalObjectKind::Issue,
+                external_key: "issue:shared".into(),
+                canonical_url: "https://example.com/shared".into(),
+            },
+            ExternalObject {
+                id: 2,
+                provider: ExternalProvider::GitHub,
+                kind: ExternalObjectKind::Issue,
+                external_key: "issue:orphan".into(),
+                canonical_url: "https://example.com/orphan".into(),
+            },
+        ];
+        state.links = vec![
+            Link {
+                id: 1,
+                item_id: 1,
+                external_object_id: 1,
+                reviewed_activity_id: 0,
+                attention_policy: None,
+                watch_until: None,
+                review_at: None,
+            },
+            Link {
+                id: 2,
+                item_id: 2,
+                external_object_id: 1,
+                reviewed_activity_id: 0,
+                attention_policy: None,
+                watch_until: None,
+                review_at: None,
+            },
+            Link {
+                id: 3,
+                item_id: 1,
+                external_object_id: 2,
+                reviewed_activity_id: 0,
+                attention_policy: None,
+                watch_until: None,
+                review_at: None,
+            },
+        ];
+        state.snapshots.push(ExternalSnapshot {
+            external_object_id: 2,
+            title: "Orphan snapshot".into(),
+            state: "OPEN".into(),
+            metadata: Vec::new(),
+            fetched_at: 1,
+        });
+        state.activities.push(Activity {
+            id: 1,
+            external_object_id: 2,
+            observed_at: 1,
+            changes: Vec::new(),
+        });
+
+        let plan = plan_item_deletion(&state, 1).expect("the Item should have a deletion plan");
+        assert_eq!(plan.human_identifier, "MC-1");
+        assert_eq!(plan.reminder_count, 1);
+        assert_eq!(plan.relationship_count, 1);
+        assert_eq!(plan.worksets[0].root_directory, "/tmp/remove-this");
+        assert_eq!(plan.run_ids, vec![1]);
+        assert!(plan.active_run_ids.is_empty());
+        assert_eq!(plan.link_ids, vec![1, 3]);
+        assert_eq!(plan.orphaned_external_object_ids, vec![2]);
+        assert_eq!(plan.orphaned_snapshot_count, 1);
+        assert_eq!(plan.orphaned_activity_count, 1);
+
+        let deleted = decide(state, Event::DeleteItem { item_id: 1 })
+            .expect("a finished Item can be deleted");
+        assert_eq!(deleted.state.items.len(), 1);
+        assert_eq!(deleted.state.worksets.len(), 0);
+        assert_eq!(deleted.state.runs.len(), 0);
+        assert!(deleted.state.relationships.is_empty());
+        assert_eq!(deleted.state.links.len(), 1);
+        assert_eq!(deleted.state.links[0].id, 2);
+        assert_eq!(deleted.state.external_objects.len(), 1);
+        assert_eq!(deleted.state.external_objects[0].id, 1);
+        assert!(deleted.state.snapshots.is_empty());
+        assert!(deleted.state.activities.is_empty());
+        assert!(matches!(
+            deleted.effects.as_slice(),
+            [Effect::RemoveItemCascade { summary, .. }] if summary.item_id == 1
+                && summary.workset_count == 1
+                && summary.run_count == 1
+                && summary.external_object_count == 1
+        ));
+    }
+
+    #[test]
+    fn active_runs_block_item_deletion_before_any_state_changes() {
+        let mut state = state_with_item(7, "Work");
+        state.runs.push(Run {
+            id: 1,
+            item_id: 1,
+            workset_id: 1,
+            machine_id: 1,
+            agent: AgentKind::Claude,
+            execution_profile: ExecutionProfile::Investigate,
+            prompt: "prompt".into(),
+            working_directory: "/tmp/work".into(),
+            session_name: "session".into(),
+            pane_id: "%1".into(),
+            started_at: 1,
+            state: RunState::Working,
+            pane_status: RunPaneStatus::Available,
+        });
+
+        assert_eq!(
+            decide(state.clone(), Event::DeleteItem { item_id: 1 }),
+            Err(DomainError::ItemHasActiveRuns {
+                item_id: 1,
+                run_ids: vec![1],
+            })
+        );
+        assert_eq!(state.items.len(), 1);
     }
 
     #[test]

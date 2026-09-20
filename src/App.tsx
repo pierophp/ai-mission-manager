@@ -314,6 +314,58 @@ type WorksetRemovalReport = {
   repositories: RepositoryRemovalReport[];
 };
 
+type ItemDeletionPlan = {
+  itemId: number;
+  humanIdentifier: string;
+  title: string;
+  reminderCount: number;
+  relationshipCount: number;
+  worksets: {
+    id: number;
+    rootDirectory: string;
+    branch: string;
+    archived: boolean;
+  }[];
+  runIds: number[];
+  activeRunIds: number[];
+  linkIds: number[];
+  orphanedExternalObjectIds: number[];
+  orphanedSnapshotCount: number;
+  orphanedActivityCount: number;
+};
+
+type ItemWorksetDeletionPreview = {
+  worksetId: number;
+  rootDirectory: string;
+  branch: string;
+  archived: boolean;
+  safe: boolean;
+  blockers: string[];
+  safetyReport: WorksetRemovalReport | null;
+};
+
+type ItemDeletionPreview = {
+  plan: ItemDeletionPlan;
+  worksets: ItemWorksetDeletionPreview[];
+  blockers: string[];
+};
+
+type ItemDeletionResult = {
+  summary: {
+    itemId: number;
+    reminderCount: number;
+    relationshipCount: number;
+    worksetCount: number;
+    runCount: number;
+    linkCount: number;
+    externalObjectCount: number;
+    snapshotCount: number;
+    activityCount: number;
+  };
+  worksetDirectoriesDeleted: boolean;
+  physicalCleanupWarning: string | null;
+};
+
 type HomeView = {
   needs_attention: ItemView[];
   attention_entries: AttentionEntry[];
@@ -345,6 +397,7 @@ type AuditAction = {
   link_id?: number;
   from_item_id?: number;
   to_item_id?: number;
+  summary?: ItemDeletionResult["summary"];
 };
 
 type AuditEntry = {
@@ -2137,6 +2190,7 @@ function ItemCard({
   const [additionalBaseBranchOverride, setAdditionalBaseBranchOverride] =
     useState("");
   const [removalReport, setRemovalReport] = useState<WorksetRemovalReport>();
+  const [deletionPreview, setDeletionPreview] = useState<ItemDeletionPreview>();
   const [runPreviewWorksetId, setRunPreviewWorksetId] = useState<number>();
   const [runMachineId, setRunMachineId] = useState<number>();
   const [runAgent, setRunAgent] = useState<AgentKind>("claude");
@@ -2300,6 +2354,55 @@ function ItemCard({
       await invoke("remove_workset", { worksetId, confirmed: true });
       setRemovalReport(undefined);
     });
+  }
+
+  async function handlePrepareItemDeletion() {
+    setIsSaving(true);
+    try {
+      const preview = await invoke<ItemDeletionPreview>("prepare_item_deletion", {
+        itemId: view.item.id,
+      });
+      setDeletionPreview(preview);
+    } catch (previewError) {
+      window.alert(errorMessage(previewError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleDeleteItem() {
+    if (!deletionPreview || deletionPreview.blockers.length > 0) return;
+    if (
+      !window.confirm(
+        `Delete ${deletionPreview.plan.humanIdentifier} and its local records? This cannot be undone.`,
+      )
+    ) {
+      return;
+    }
+    const deleteWorksetDirectories =
+      deletionPreview.worksets.length > 0 &&
+      window.confirm(
+        `Permanently delete these ${deletionPreview.worksets.length} Workset director${deletionPreview.worksets.length === 1 ? "y" : "ies"} from disk too? Choose Cancel to delete the Item records while leaving the directories in place.`,
+      );
+
+    setIsSaving(true);
+    try {
+      const result = await invoke<ItemDeletionResult>("delete_item", {
+        itemId: view.item.id,
+        confirmed: true,
+        deleteWorksetDirectories,
+      });
+      setDeletionPreview(undefined);
+      await onChanged();
+      if (result.physicalCleanupWarning) {
+        window.alert(result.physicalCleanupWarning);
+      }
+    } catch (deleteError) {
+      setDeletionPreview(undefined);
+      window.alert(errorMessage(deleteError));
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   function runPromptSelection(): RunPromptSelection {
@@ -2788,11 +2891,83 @@ function ItemCard({
             </option>
           ))}
         </select>
+        <button
+          type="button"
+          className="danger-button"
+          disabled={isSaving}
+          onClick={() => void handlePrepareItemDeletion()}
+        >
+          Delete Item
+        </button>
       </div>
       <h4>{view.item.title}</h4>
       <p className="item-context">
         {view.context_name} <span>·</span> {view.project_name}
       </p>
+      {deletionPreview && (
+        <div className="deletion-preview" role="alert">
+          <strong>Item deletion preview</strong>
+          <p>
+            This removes <b>{deletionPreview.plan.humanIdentifier}</b> ·{" "}
+            {deletionPreview.plan.title} and its local descendants. External Issues and
+            pull requests are never changed.
+          </p>
+          <ul>
+            <li>{deletionPreview.plan.reminderCount} reminder(s)</li>
+            <li>{deletionPreview.plan.relationshipCount} Item relationship(s)</li>
+            <li>{deletionPreview.plan.worksets.length} Workset(s)</li>
+            <li>{deletionPreview.plan.runIds.length} Run(s)</li>
+            <li>{deletionPreview.plan.linkIds.length} Link(s)</li>
+            <li>
+              {deletionPreview.plan.orphanedExternalObjectIds.length} orphaned External
+              Object(s), {deletionPreview.plan.orphanedSnapshotCount} snapshot(s), and{" "}
+              {deletionPreview.plan.orphanedActivityCount} Activity record(s)
+            </li>
+          </ul>
+          {deletionPreview.worksets.length > 0 && (
+            <div className="deletion-worksets">
+              <span className="relationship-label">Workset directories</span>
+              {deletionPreview.worksets.map((workset) => (
+                <div className="deletion-workset" key={workset.worksetId}>
+                  <strong>
+                    {workset.branch} {workset.archived ? "· Archived" : ""}
+                  </strong>
+                  <code>{workset.rootDirectory}</code>
+                  {!workset.safe &&
+                    workset.blockers.map((blocker) => <span key={blocker}>{blocker}</span>)}
+                </div>
+              ))}
+            </div>
+          )}
+          {deletionPreview.blockers.length > 0 && (
+            <div className="deletion-blockers">
+              <strong>Deletion blocked</strong>
+              {deletionPreview.blockers.map((blocker) => (
+                <span key={blocker}>{blocker}</span>
+              ))}
+              <p>Resolve each blocker, then create a fresh preview.</p>
+            </div>
+          )}
+          <div className="deletion-preview-actions">
+            <button
+              type="button"
+              className="danger-button"
+              disabled={isSaving || deletionPreview.blockers.length > 0}
+              onClick={() => void handleDeleteItem()}
+            >
+              Confirm logical deletion
+            </button>
+            <button
+              type="button"
+              className="text-button"
+              disabled={isSaving}
+              onClick={() => setDeletionPreview(undefined)}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
       <label className="card-notes">
         <span>Notes</span>
         <textarea
@@ -3738,6 +3913,8 @@ function auditActionLabel(action: AuditAction): string {
       return `Updated notes on Item #${action.item_id}`;
     case "itemRemindersChanged":
       return `Updated reminders on Item #${action.item_id}`;
+    case "itemDeleted":
+      return `Deleted Item #${action.summary?.itemId ?? action.item_id}`;
     case "itemRelationChanged":
       return `Updated the relationship between Items #${action.from_item_id} and #${action.to_item_id}`;
     case "worksetCreated":

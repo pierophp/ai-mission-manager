@@ -834,6 +834,43 @@ impl SqliteStore {
                     transaction
                         .execute("DELETE FROM worksets WHERE id = ?1", params![workset_id])?;
                 }
+                Effect::RemoveItemCascade {
+                    item_id,
+                    orphaned_external_object_ids,
+                    ..
+                } => {
+                    transaction.execute("DELETE FROM runs WHERE item_id = ?1", params![item_id])?;
+                    transaction.execute(
+                        "DELETE FROM workset_repositories
+                         WHERE workset_id IN (SELECT id FROM worksets WHERE item_id = ?1)",
+                        params![item_id],
+                    )?;
+                    transaction
+                        .execute("DELETE FROM worksets WHERE item_id = ?1", params![item_id])?;
+                    transaction
+                        .execute("DELETE FROM reminders WHERE item_id = ?1", params![item_id])?;
+                    transaction.execute(
+                        "DELETE FROM item_relationships
+                         WHERE from_item_id = ?1 OR to_item_id = ?1",
+                        params![item_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM external_links WHERE item_id = ?1",
+                        params![item_id],
+                    )?;
+                    for external_object_id in orphaned_external_object_ids {
+                        transaction.execute(
+                            "DELETE FROM external_objects
+                             WHERE id = ?1
+                               AND NOT EXISTS (
+                                   SELECT 1 FROM external_links
+                                   WHERE external_object_id = external_objects.id
+                               )",
+                            params![external_object_id],
+                        )?;
+                    }
+                    transaction.execute("DELETE FROM items WHERE id = ?1", params![item_id])?;
+                }
                 Effect::PersistItemRelation { relation } => {
                     transaction.execute(
                         "INSERT INTO item_relationships (from_item_id, to_item_id, kind)
@@ -1580,7 +1617,7 @@ mod tests {
     use crate::domain::{
         decide, AgentKind, AuditAction, Event, ExternalChangePolicy, ExternalMetadata,
         ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshotData,
-        MachineTransport, RunState, WorksetRepositoryInput,
+        MachineTransport, RunPaneStatus, RunState, WorksetRepositoryInput,
     };
 
     #[test]
@@ -1689,6 +1726,220 @@ mod tests {
             crate::domain::MachineObservation::Available
         );
         assert_eq!(state.machines[0].last_observed_at, Some(123));
+    }
+
+    #[test]
+    fn item_deletion_cascade_survives_reopening_and_keeps_shared_external_data() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+
+        {
+            let mut store = SqliteStore::open(&path).expect("database should open");
+            let repository = decide(
+                store.load_state().expect("state should load"),
+                Event::RegisterRepository {
+                    project_id: 1,
+                    name: "service".into(),
+                    remote_url: "https://example.com/service.git".into(),
+                },
+            )
+            .expect("Repository should register");
+            store
+                .apply(&repository.effects)
+                .expect("Repository should persist");
+            let first_item = decide(
+                repository.state,
+                Event::CreateItem {
+                    title: "Delete me".into(),
+                    context_id: 1,
+                    project_id: 1,
+                },
+            )
+            .expect("first Item should be created");
+            store
+                .apply(&first_item.effects)
+                .expect("first Item should persist");
+            let second_item = decide(
+                first_item.state,
+                Event::CreateItem {
+                    title: "Keep me".into(),
+                    context_id: 1,
+                    project_id: 1,
+                },
+            )
+            .expect("second Item should be created");
+            store
+                .apply(&second_item.effects)
+                .expect("second Item should persist");
+            let workset = decide(
+                second_item.state,
+                Event::CreateWorkset {
+                    item_id: 1,
+                    root_directory: "/tmp/item-deletion-roundtrip".into(),
+                    branch: "feature/delete-me".into(),
+                    repositories: vec![WorksetRepositoryInput {
+                        repository_id: 1,
+                        branch_override: None,
+                        base_branch_override: None,
+                    }],
+                },
+            )
+            .expect("Workset should be created");
+            store
+                .apply(&workset.effects)
+                .expect("Workset should persist");
+            let machine = decide(
+                workset.state,
+                Event::RegisterMachine {
+                    context_id: 1,
+                    name: "Local".into(),
+                    socket_name: "mission-manager".into(),
+                    transport: MachineTransport::Local,
+                },
+            )
+            .expect("Machine should register");
+            store
+                .apply(&machine.effects)
+                .expect("Machine should persist");
+            let run = decide(
+                machine.state,
+                Event::AttachRun {
+                    item_id: 1,
+                    workset_id: 1,
+                    machine_id: 1,
+                    agent: AgentKind::Codex,
+                    working_directory: "/tmp/item-deletion-roundtrip".into(),
+                    session_name: "delete-me".into(),
+                    pane_id: "%1".into(),
+                    attached_at: 1,
+                },
+            )
+            .expect("Run should attach");
+            store.apply(&run.effects).expect("Run should persist");
+            let finished = decide(
+                run.state,
+                Event::UpdateRunState {
+                    run_id: 1,
+                    state: RunState::Finished,
+                },
+            )
+            .expect("Run should finish");
+            store
+                .apply(&finished.effects)
+                .expect("Run state should persist");
+            let pane_missing = decide(
+                finished.state,
+                Event::SetRunPaneStatus {
+                    run_id: 1,
+                    status: RunPaneStatus::Missing,
+                },
+            )
+            .expect("Run Pane should be marked missing");
+            store
+                .apply(&pane_missing.effects)
+                .expect("Pane state should persist");
+            let reminded = decide(
+                pane_missing.state,
+                Event::AddItemReminder {
+                    item_id: 1,
+                    remind_at: "2026-09-20T09:00".into(),
+                },
+            )
+            .expect("Reminder should be added");
+            store
+                .apply(&reminded.effects)
+                .expect("Reminder should persist");
+            let related = decide(
+                reminded.state,
+                Event::SetItemRelation {
+                    from_item_id: 1,
+                    to_item_id: 2,
+                    kind: crate::domain::ItemRelationKind::RelatedTo,
+                },
+            )
+            .expect("Items should be related");
+            store
+                .apply(&related.effects)
+                .expect("Relationship should persist");
+            let linked = decide(
+                related.state,
+                Event::LinkExternalObject {
+                    item_id: 1,
+                    object: ExternalObjectInput {
+                        provider: ExternalProvider::GitHub,
+                        kind: ExternalObjectKind::Issue,
+                        external_key: "issue:shared".into(),
+                        canonical_url: "https://example.com/shared".into(),
+                    },
+                    snapshot: Some(ExternalSnapshotData {
+                        title: "Shared issue".into(),
+                        state: "OPEN".into(),
+                        metadata: vec![ExternalMetadata {
+                            key: "author".into(),
+                            value: "octocat".into(),
+                        }],
+                        fetched_at: 1,
+                    }),
+                },
+            )
+            .expect("External Object should link");
+            store
+                .apply(&linked.effects)
+                .expect("External Object should persist");
+            let second_link = decide(
+                linked.state,
+                Event::LinkExternalObject {
+                    item_id: 2,
+                    object: ExternalObjectInput {
+                        provider: ExternalProvider::GitHub,
+                        kind: ExternalObjectKind::Issue,
+                        external_key: "issue:shared".into(),
+                        canonical_url: "https://example.com/shared".into(),
+                    },
+                    snapshot: None,
+                },
+            )
+            .expect("the shared External Object should link twice");
+            store
+                .apply(&second_link.effects)
+                .expect("second Link should persist");
+            let deletion = decide(second_link.state, Event::DeleteItem { item_id: 1 })
+                .expect("the finished Item should delete");
+            let summary = crate::domain::ItemDeletionSummary {
+                item_id: 1,
+                reminder_count: 1,
+                relationship_count: 1,
+                workset_count: 1,
+                run_count: 1,
+                link_count: 1,
+                external_object_count: 0,
+                snapshot_count: 0,
+                activity_count: 0,
+            };
+            store
+                .apply_with_audit(&deletion.effects, &[AuditAction::ItemDeleted { summary }])
+                .expect("the Item cascade should persist transactionally");
+        }
+
+        let reopened = SqliteStore::open(&path).expect("database should reopen");
+        let state = reopened.load_state().expect("state should reload");
+        assert_eq!(state.items.len(), 1);
+        assert_eq!(state.items[0].title, "Keep me");
+        assert!(state.worksets.is_empty());
+        assert!(state.runs.is_empty());
+        assert!(state.relationships.is_empty());
+        assert_eq!(state.links.len(), 1);
+        assert_eq!(state.links[0].item_id, 2);
+        assert_eq!(state.external_objects.len(), 1);
+        assert_eq!(state.snapshots.len(), 1);
+        assert!(reopened
+            .list_audit_history()
+            .expect("audit history should load")
+            .iter()
+            .any(|entry| matches!(entry.action, AuditAction::ItemDeleted { .. })));
+        assert_eq!(state.next_item_id, 3);
+        assert_eq!(state.next_run_id, 2);
+        assert_eq!(state.next_link_id, 3);
     }
 
     #[test]

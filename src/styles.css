@@ -705,6 +705,16 @@ button:disabled {
   font-size: 0.7rem;
 }
 
+.danger-button {
+  border: 1px solid #b65b45;
+  background: #fff1eb;
+  color: #91432f;
+}
+
+.danger-button:hover:not(:disabled) {
+  background: #f8ded4;
+}
+
 .item-identifier {
   color: #b05c39;
   font-size: 0.72rem;
@@ -716,6 +726,74 @@ button:disabled {
   margin: 0 0 13px;
   color: #8b837a;
   font-size: 0.72rem;
+}
+
+.deletion-preview {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 13px;
+  padding: 10px;
+  border: 1px solid #d5aa8c;
+  border-radius: 8px;
+  background: #fff4eb;
+  color: #5f493d;
+  font-size: 0.7rem;
+  line-height: 1.4;
+}
+
+.deletion-preview > p,
+.deletion-preview ul,
+.deletion-blockers p {
+  margin: 0;
+}
+
+.deletion-preview ul {
+  display: grid;
+  gap: 2px;
+  padding-left: 18px;
+}
+
+.deletion-worksets,
+.deletion-blockers {
+  display: grid;
+  gap: 6px;
+  padding-top: 8px;
+  border-top: 1px solid #eedbcf;
+}
+
+.deletion-workset {
+  display: grid;
+  gap: 2px;
+  padding: 7px;
+  border: 1px solid #eedbcf;
+  border-radius: 7px;
+  background: #fffdf9;
+}
+
+.deletion-workset strong,
+.deletion-blockers strong {
+  color: #91432f;
+}
+
+.deletion-workset code {
+  overflow: hidden;
+  color: #8b837a;
+  font-size: 0.64rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.deletion-workset span,
+.deletion-blockers span {
+  color: #91432f;
+  font-size: 0.68rem;
+}
+
+.deletion-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 2px;
 }
 
 .item-context span,

@@ -43,6 +43,8 @@ pub fn run() {
             app::set_workset_archived,
             app::prepare_workset_removal,
             app::remove_workset,
+            app::prepare_item_deletion,
+            app::delete_item,
             app::list_inbox_items,
             app::create_item,
             app::compose_run_prompt,

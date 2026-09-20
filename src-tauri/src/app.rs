@@ -13,13 +13,14 @@ use crate::{
     dependencies::{check_command, resolve_executable, DependencyState, DependencyStatus},
     domain::{
         compose_run_prompt as build_run_prompt, decide, external_link_view, home_view,
-        search_items, suggest_untracked_runs, AgentKind, AgentPaneObservation,
+        plan_item_deletion, search_items, suggest_untracked_runs, AgentKind, AgentPaneObservation,
         AttachedRepositoryInput, AuditAction, AuditEntry, Context, ContextAttentionDefault,
         DomainState, Effect, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
         ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView,
-        Item, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine, MachineObservation,
-        MachineTransport, Project, ProjectDefaults, Repository, Run, RunPaneStatus,
-        RunPromptSelection, RunState, RunSuggestion, Workset, WorksetRepositoryInput,
+        Item, ItemDeletionPlan, ItemDeletionSummary, ItemRelation, ItemRelationKind, ItemStatus,
+        ItemView, Machine, MachineObservation, MachineTransport, Project, ProjectDefaults,
+        Repository, Run, RunPaneStatus, RunPromptSelection, RunState, RunSuggestion, Workset,
+        WorksetRepositoryInput,
     },
     git::GitCli,
     persistence::SqliteStore,
@@ -37,6 +38,7 @@ pub struct Runtime {
     state: DomainState,
     gh_executable_path: Option<PathBuf>,
     pending_workset_removal: Option<WorksetRemovalReport>,
+    pending_item_deletion: Option<ItemDeletionPreview>,
     terminal_connections: HashMap<String, TmuxControlPane>,
     agent_state_directory: PathBuf,
 }
@@ -89,6 +91,7 @@ impl Runtime {
             state,
             gh_executable_path,
             pending_workset_removal: None,
+            pending_item_deletion: None,
             terminal_connections: HashMap::new(),
             agent_state_directory,
         };
@@ -1352,6 +1355,162 @@ impl Runtime {
         Ok(report)
     }
 
+    fn build_item_deletion_preview(&self, item_id: i64) -> Result<ItemDeletionPreview, String> {
+        let plan = plan_item_deletion(&self.state, item_id).map_err(|error| error.to_string())?;
+        let mut blockers = plan
+            .active_run_ids
+            .iter()
+            .map(|run_id| format!("Run #{run_id} is active; stop it before deleting this Item."))
+            .collect::<Vec<_>>();
+        let mut seen_roots = HashSet::new();
+        let worksets = plan
+            .worksets
+            .iter()
+            .map(|workset| {
+                let mut workset_blockers = Vec::new();
+                let safety_report = match self.build_workset_removal_report(workset.id) {
+                    Ok(report) => {
+                        workset_blockers.extend(workset_safety_blockers(&report));
+                        Some(report)
+                    }
+                    Err(error) => {
+                        workset_blockers.push(error);
+                        None
+                    }
+                };
+                if !seen_roots.insert(workset.root_directory.clone()) {
+                    workset_blockers.push(format!(
+                        "Workset #{} shares its directory with another Workset; separate the roots before deleting the Item.",
+                        workset.id
+                    ));
+                }
+                blockers.extend(
+                    workset_blockers
+                        .iter()
+                        .map(|blocker| format!("Workset #{}: {blocker}", workset.id)),
+                );
+                ItemWorksetDeletionPreview {
+                    workset_id: workset.id,
+                    root_directory: workset.root_directory.clone(),
+                    branch: workset.branch.clone(),
+                    archived: workset.archived,
+                    safe: workset_blockers.is_empty(),
+                    blockers: workset_blockers,
+                    safety_report,
+                }
+            })
+            .collect();
+
+        Ok(ItemDeletionPreview {
+            plan,
+            worksets,
+            blockers,
+        })
+    }
+
+    fn prepare_item_deletion(&mut self, item_id: i64) -> Result<ItemDeletionPreview, String> {
+        let preview = self.build_item_deletion_preview(item_id)?;
+        self.pending_item_deletion = Some(preview.clone());
+        Ok(preview)
+    }
+
+    fn delete_item(
+        &mut self,
+        item_id: i64,
+        confirmed: bool,
+        delete_workset_directories: bool,
+    ) -> Result<ItemDeletionResult, String> {
+        if !confirmed {
+            return Err(
+                "Item deletion requires explicit confirmation after reviewing its deletion preview"
+                    .into(),
+            );
+        }
+        let pending = self
+            .pending_item_deletion
+            .as_ref()
+            .filter(|preview| preview.plan.item_id == item_id)
+            .cloned()
+            .ok_or_else(|| "Review the Item deletion preview before deleting it".to_owned())?;
+        let current = self.build_item_deletion_preview(item_id)?;
+        if current != pending {
+            return Err(
+                "The Item or a Workset safety report changed after the preview; review the updated deletion preview before deleting it"
+                    .into(),
+            );
+        }
+        if !current.blockers.is_empty() {
+            return Err(format!(
+                "Item deletion is blocked:\n{}",
+                current.blockers.join("\n")
+            ));
+        }
+
+        let mut staged = Vec::new();
+        if delete_workset_directories {
+            for workset in &current.plan.worksets {
+                let root = Path::new(&workset.root_directory);
+                let staging = match workset_removal_staging_path(root, workset.id) {
+                    Ok(staging) => staging,
+                    Err(error) => {
+                        let restore_error = restore_staged_directories(&staged);
+                        return Err(format_commit_error(error, restore_error));
+                    }
+                };
+                if let Err(error) = fs::rename(root, &staging) {
+                    let restore_error = restore_staged_directories(&staged);
+                    return Err(format_commit_error(
+                        format!("Could not stage Workset directory for Item deletion: {error}"),
+                        restore_error,
+                    ));
+                }
+                staged.push((root.to_owned(), staging));
+            }
+        }
+
+        let decision = match decide(self.state.clone(), Event::DeleteItem { item_id }) {
+            Ok(decision) => decision,
+            Err(error) => {
+                let restore_error = restore_staged_directories(&staged);
+                return Err(format_commit_error(error.to_string(), restore_error));
+            }
+        };
+        let summary = current.plan.summary();
+        if let Err(error) = self.commit(decision) {
+            let restore_error = restore_staged_directories(&staged);
+            return Err(format_commit_error(error, restore_error));
+        }
+        self.pending_item_deletion = None;
+
+        let physical_cleanup_warning = if delete_workset_directories {
+            let mut cleanup_errors = Vec::new();
+            for (_, staging) in staged {
+                if let Err(error) = fs::remove_dir_all(&staging) {
+                    cleanup_errors.push(format!("{}: {error}", staging.display()));
+                }
+            }
+            (!cleanup_errors.is_empty()).then(|| {
+                format!(
+                    "Item records were deleted, but some Workset directories could not be removed: {}",
+                    cleanup_errors.join(", ")
+                )
+            })
+        } else if current.plan.worksets.is_empty() {
+            None
+        } else {
+            Some(
+                "Item records were deleted; Workset directories were left on disk by choice."
+                    .into(),
+            )
+        };
+
+        Ok(ItemDeletionResult {
+            summary,
+            workset_directories_deleted: delete_workset_directories,
+            physical_cleanup_warning,
+        })
+    }
+
     fn remove_workset(&mut self, workset_id: i64, confirmed: bool) -> Result<(), String> {
         if !confirmed {
             return Err(
@@ -1985,6 +2144,9 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
             Effect::RemoveWorkset { workset_id } => Some(AuditAction::WorksetRemoved {
                 workset_id: *workset_id,
             }),
+            Effect::RemoveItemCascade { summary, .. } => Some(AuditAction::ItemDeleted {
+                summary: summary.clone(),
+            }),
             Effect::PersistMachine { machine, .. } => Some(AuditAction::MachineRegistered {
                 machine_id: machine.id,
             }),
@@ -2122,6 +2284,50 @@ fn workset_removal_staging_path(root: &Path, workset_id: i64) -> Result<PathBuf,
     Ok(staging)
 }
 
+fn workset_safety_blockers(report: &WorksetRemovalReport) -> Vec<String> {
+    report
+        .repositories
+        .iter()
+        .flat_map(|repository| {
+            let mut blockers = Vec::new();
+            if repository.unpushed_commits_unknown {
+                blockers.push(format!(
+                    "Repository {} has unverified unpushed commits; configure an upstream branch and review again.",
+                    repository.name
+                ));
+            } else if !repository.unpushed_commits.is_empty() {
+                blockers.push(format!(
+                    "Repository {} has {} unpushed commit{}; push or preserve the work before deleting.",
+                    repository.name,
+                    repository.unpushed_commits.len(),
+                    if repository.unpushed_commits.len() == 1 { "" } else { "s" }
+                ));
+            }
+            if !repository.uncommitted_changes.is_empty() {
+                blockers.push(format!(
+                    "Repository {} has uncommitted changes; commit or preserve the work before deleting.",
+                    repository.name
+                ));
+            }
+            blockers
+        })
+        .collect()
+}
+
+fn restore_staged_directories(staged: &[(PathBuf, PathBuf)]) -> Option<String> {
+    let mut errors = Vec::new();
+    for (root, staging) in staged.iter().rev() {
+        if let Err(error) = fs::rename(staging, root) {
+            errors.push(format!(
+                "could not restore {} to {}: {error}",
+                staging.display(),
+                root.display()
+            ));
+        }
+    }
+    (!errors.is_empty()).then(|| errors.join(", "))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct RepositoryRemovalReport {
     pub repository_id: i64,
@@ -2138,6 +2344,34 @@ pub struct WorksetRemovalReport {
     pub workset_id: i64,
     pub root_directory: String,
     pub repositories: Vec<RepositoryRemovalReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemWorksetDeletionPreview {
+    pub workset_id: i64,
+    pub root_directory: String,
+    pub branch: String,
+    pub archived: bool,
+    pub safe: bool,
+    pub blockers: Vec<String>,
+    pub safety_report: Option<WorksetRemovalReport>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDeletionPreview {
+    pub plan: ItemDeletionPlan,
+    pub worksets: Vec<ItemWorksetDeletionPreview>,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemDeletionResult {
+    pub summary: ItemDeletionSummary,
+    pub workset_directories_deleted: bool,
+    pub physical_cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -2645,6 +2879,30 @@ pub fn remove_workset(
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .remove_workset(workset_id, confirmed)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn prepare_item_deletion(
+    item_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ItemDeletionPreview, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .prepare_item_deletion(item_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_item(
+    item_id: i64,
+    confirmed: bool,
+    delete_workset_directories: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ItemDeletionResult, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .delete_item(item_id, confirmed, delete_workset_directories)
 }
 
 #[tauri::command]
@@ -3564,6 +3822,104 @@ fi
             .expect("confirmed removal should delete the Workset");
         assert!(!root.exists());
         assert!(runtime.state.worksets.is_empty());
+    }
+
+    #[test]
+    fn item_deletion_requires_a_fresh_preview_and_records_a_summary() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .create_item("Delete after review".into(), 1, 1)
+            .expect("Item should be created");
+
+        let preview = runtime
+            .prepare_item_deletion(1)
+            .expect("Item deletion preview should be available");
+        assert_eq!(preview.plan.human_identifier, "MC-1");
+        assert!(preview.blockers.is_empty());
+        assert_eq!(preview.plan.reminder_count, 0);
+        runtime
+            .update_item(
+                Event::SetItemNotes {
+                    item_id: 1,
+                    notes: "changed after preview".into(),
+                },
+                1,
+            )
+            .expect("Item changes should persist");
+        assert!(runtime.delete_item(1, true, false).is_err());
+        assert_eq!(runtime.state.items.len(), 1);
+
+        runtime
+            .prepare_item_deletion(1)
+            .expect("a fresh deletion preview should be available");
+        let result = runtime
+            .delete_item(1, true, false)
+            .expect("the confirmed Item deletion should succeed");
+        assert_eq!(result.summary.item_id, 1);
+        assert!(!result.workset_directories_deleted);
+        assert!(result.physical_cleanup_warning.is_none());
+        assert!(runtime.state.items.is_empty());
+        assert!(runtime
+            .list_audit_history()
+            .expect("audit history should load")
+            .iter()
+            .any(|entry| matches!(entry.action, AuditAction::ItemDeleted { .. })));
+    }
+
+    #[test]
+    fn confirmed_item_deletion_stages_and_removes_safe_workset_directories() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let seed = directory.path().join("seed");
+        run_git(directory.path(), &["init", "--initial-branch=main", "seed"]);
+        run_git(&seed, &["config", "user.email", "test@example.com"]);
+        run_git(&seed, &["config", "user.name", "Test User"]);
+        fs::write(seed.join("README.md"), "safe\n").expect("seed file should be written");
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-m", "initial"]);
+        let origin = directory.path().join("service.git");
+        run_git(directory.path(), &["init", "--bare", "service.git"]);
+        let origin_url = origin.to_string_lossy().into_owned();
+        run_git(&seed, &["remote", "add", "origin", &origin_url]);
+        run_git(&seed, &["push", "origin", "main"]);
+
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .register_repository(1, "service".into(), origin_url)
+            .expect("Repository should register");
+        runtime
+            .create_item("Delete the safe Workset".into(), 1, 1)
+            .expect("Item should be created");
+        let root = directory.path().join("workset-root");
+        runtime
+            .create_workset(
+                1,
+                root.to_string_lossy().into_owned(),
+                "feature/delete-safe".into(),
+                vec![WorksetRepositoryInput {
+                    repository_id: 1,
+                    branch_override: None,
+                    base_branch_override: Some("main".into()),
+                }],
+            )
+            .expect("Workset should be created");
+        run_git(
+            &root.join("service"),
+            &["branch", "--set-upstream-to=origin/main"],
+        );
+
+        let preview = runtime
+            .prepare_item_deletion(1)
+            .expect("deletion preview should be available");
+        assert!(preview.blockers.is_empty());
+        let result = runtime
+            .delete_item(1, true, true)
+            .expect("safe Item deletion should succeed");
+        assert!(result.workset_directories_deleted);
+        assert!(!root.exists());
+        assert!(runtime.state.items.is_empty());
     }
 
     #[test]
