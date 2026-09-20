@@ -1496,9 +1496,9 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        decide, AgentKind, Event, ExecutionProfile, ExternalChangePolicy, ExternalMetadata,
-        ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshotData,
-        MachineTransport, RunPromptSelection, RunState, WorksetRepositoryInput,
+        decide, AgentKind, Event, ExternalChangePolicy, ExternalMetadata, ExternalObjectInput,
+        ExternalObjectKind, ExternalProvider, ExternalSnapshotData, MachineTransport, RunState,
+        WorksetRepositoryInput,
     };
 
     #[test]
@@ -1762,25 +1762,18 @@ mod tests {
                 .expect("Machine should persist");
             let run = decide(
                 machine.state,
-                Event::StartRun {
+                Event::AttachRun {
                     item_id: 1,
                     workset_id: 1,
                     machine_id: 1,
                     agent: AgentKind::Codex,
-                    execution_profile: ExecutionProfile::Implement,
-                    prompt: "Implement the platform change".into(),
                     working_directory: "/tmp/worksets/platform-change".into(),
                     session_name: "mission-item-1-run-1".into(),
                     pane_id: "%1".into(),
-                    started_at: 123,
-                    prompt_selection: RunPromptSelection {
-                        include_objective: true,
-                        include_notes: false,
-                        external_object_ids: Vec::new(),
-                    },
+                    attached_at: 123,
                 },
             )
-            .expect("Run should start");
+            .expect("Run should attach");
             store.apply(&run.effects).expect("Run should persist");
             let blocked = decide(
                 run.state,

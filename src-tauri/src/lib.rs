@@ -43,6 +43,8 @@ pub fn run() {
             app::create_item,
             app::compose_run_prompt,
             app::start_run,
+            app::list_run_suggestions,
+            app::attach_run,
             app::list_workset_panes,
             app::open_terminal,
             app::terminal_input,

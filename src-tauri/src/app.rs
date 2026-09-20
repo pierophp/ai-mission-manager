@@ -12,20 +12,21 @@ use crate::{
     agent_state::{provision_hooks, read_state_file, state_file_path, AgentStateRecord},
     domain::{
         compose_run_prompt as build_run_prompt, decide, external_link_view, home_view,
-        search_items, AgentKind, AttachedRepositoryInput, Context, ContextAttentionDefault,
-        DomainState, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
-        ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView,
-        Item, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine, MachineObservation,
-        MachineTransport, Project, ProjectDefaults, Repository, Run, RunPaneStatus,
-        RunPromptSelection, RunState, Workset, WorksetRepositoryInput,
+        search_items, suggest_untracked_runs, AgentKind, AgentPaneObservation,
+        AttachedRepositoryInput, Context, ContextAttentionDefault, DomainState, Event,
+        ExecutionProfile, ExternalChangePolicy, ExternalLinkView, ExternalObjectInput,
+        ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView, Item, ItemRelation,
+        ItemRelationKind, ItemStatus, ItemView, Machine, MachineObservation, MachineTransport,
+        Project, ProjectDefaults, Repository, Run, RunPaneStatus, RunPromptSelection, RunState,
+        RunSuggestion, Workset, WorksetRepositoryInput,
     },
     git::GitCli,
     persistence::SqliteStore,
     provider::{classify_url, resolve_gh_executable, GithubCli},
     terminal::{
-        capture_pane, find_agent_executable, list_panes, open_pane_in_terminal, probe_machine,
-        terminal_transport, workset_root_exists, AgentLaunchContext, ExternalPaneIdentity,
-        PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime,
+        capture_pane, find_agent_executable, list_agent_panes, list_panes, open_pane_in_terminal,
+        probe_machine, terminal_transport, workset_root_exists, AgentLaunchContext,
+        ExternalPaneIdentity, PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime,
     },
 };
 
@@ -475,6 +476,104 @@ impl Runtime {
             }
         }
         Ok(tabs)
+    }
+
+    fn list_run_suggestions(&mut self) -> Result<Vec<RunSuggestion>, String> {
+        self.recover_run_states()?;
+        let local_machine_item_ids = self
+            .state
+            .worksets
+            .iter()
+            .filter(|workset| !workset.archived)
+            .map(|workset| workset.item_id)
+            .collect::<Vec<_>>();
+        for item_id in local_machine_item_ids {
+            self.local_machine_for_item(item_id)?;
+        }
+        let observations = self
+            .state
+            .machines
+            .iter()
+            .flat_map(|machine| match list_agent_panes(machine) {
+                Ok(panes) => panes
+                    .into_iter()
+                    .map(|pane| AgentPaneObservation {
+                        machine_id: machine.id,
+                        agent: pane.agent,
+                        session_name: pane.session_name,
+                        pane_id: pane.pane_id,
+                        current_path: pane.current_path,
+                    })
+                    .collect::<Vec<_>>(),
+                Err(error) => {
+                    eprintln!(
+                        "Could not inspect Machine {} for agent Panes: {error}",
+                        machine.name
+                    );
+                    Vec::new()
+                }
+            })
+            .collect::<Vec<_>>();
+        Ok(suggest_untracked_runs(&self.state, &observations))
+    }
+
+    fn attach_run(&mut self, suggestion: RunSuggestion) -> Result<Run, String> {
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == suggestion.machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", suggestion.machine_id))?;
+        let observation = list_agent_panes(&machine)?
+            .into_iter()
+            .find(|pane| {
+                pane.agent == suggestion.agent
+                    && pane.session_name == suggestion.session_name
+                    && pane.pane_id == suggestion.pane_id
+            })
+            .ok_or_else(|| "The suggested agent is no longer available".to_owned())?;
+        let canonical = suggest_untracked_runs(
+            &self.state,
+            &[AgentPaneObservation {
+                machine_id: suggestion.machine_id,
+                agent: observation.agent,
+                session_name: observation.session_name.clone(),
+                pane_id: observation.pane_id.clone(),
+                current_path: observation.current_path,
+            }],
+        )
+        .into_iter()
+        .find(|candidate| {
+            candidate.workset_id == suggestion.workset_id
+                && candidate.item_id == suggestion.item_id
+                && candidate.machine_id == suggestion.machine_id
+                && candidate.session_name == suggestion.session_name
+                && candidate.pane_id == suggestion.pane_id
+        })
+        .ok_or_else(|| "The suggested agent no longer matches that Workset".to_owned())?;
+        let decision = decide(
+            self.state.clone(),
+            Event::AttachRun {
+                item_id: canonical.item_id,
+                workset_id: canonical.workset_id,
+                machine_id: canonical.machine_id,
+                agent: canonical.agent,
+                working_directory: canonical.workset_root_directory,
+                session_name: canonical.session_name,
+                pane_id: canonical.pane_id,
+                attached_at: current_unix_seconds(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let run = decision
+            .state
+            .runs
+            .last()
+            .cloned()
+            .ok_or_else(|| "Run attachment produced no Run".to_owned())?;
+        self.commit(decision)?;
+        Ok(run)
     }
 
     fn open_terminal(
@@ -1708,6 +1807,27 @@ pub fn start_run(
         )
 }
 
+#[tauri::command]
+pub fn list_run_suggestions(
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Vec<RunSuggestion>, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .list_run_suggestions()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn attach_run(
+    suggestion: RunSuggestion,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Run, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .attach_run(suggestion)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn register_machine(
     context_id: i64,
@@ -2347,6 +2467,126 @@ mod tests {
         assert_eq!(runtime.state.runs[1].pane_status, RunPaneStatus::Missing);
         assert_eq!(runtime.state.runs[1].state, RunState::Blocked);
         assert_eq!(runtime.state.runs[2].pane_status, RunPaneStatus::Missing);
+        run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "kill-session",
+            "-t",
+            &session,
+        ]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_manual_agent_pane_is_suggested_and_attaches_only_after_approval() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let root = directory.path().join("manual-workset");
+        fs::create_dir_all(&root).expect("the Workset root should exist");
+        let agent = directory.path().join("claude");
+        fs::write(&agent, "#!/bin/sh\nwhile true; do sleep 1; done\n")
+            .expect("the fake agent should be written");
+        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755))
+            .expect("the fake agent should be executable");
+
+        let socket = format!("mission-manager-suggestion-{}", std::process::id());
+        let session = format!("manual-agent-{}", std::process::id());
+        let root_string = root.to_string_lossy().into_owned();
+        let agent_string = agent.to_string_lossy().into_owned();
+        run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "new-session",
+            "-d",
+            "-s",
+            &session,
+            "-c",
+            &root_string,
+            &agent_string,
+        ]);
+        run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "select-pane",
+            "-t",
+            &session,
+            "-T",
+            "claude",
+        ]);
+
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        let item = decide(
+            runtime.state.clone(),
+            Event::CreateItem {
+                title: "Attach the manual agent".into(),
+                context_id: 1,
+                project_id: 1,
+            },
+        )
+        .expect("the Item should be created");
+        runtime
+            .commit(item.clone())
+            .expect("the Item should persist");
+        let workset = decide(
+            item.state,
+            Event::AttachWorkset {
+                item_id: 1,
+                root_directory: root_string.clone(),
+                repositories: vec![AttachedRepositoryInput {
+                    name: "service".into(),
+                    remote_url: "https://example.com/service.git".into(),
+                    current_branch: "main".into(),
+                    is_dirty: false,
+                }],
+            },
+        )
+        .expect("the Workset should attach");
+        runtime
+            .commit(workset.clone())
+            .expect("the Workset should persist");
+        let machine = decide(
+            workset.state,
+            Event::RegisterMachine {
+                context_id: 1,
+                name: "Local Mac".into(),
+                socket_name: socket.clone(),
+                transport: MachineTransport::Local,
+            },
+        )
+        .expect("the Machine should register");
+        runtime.commit(machine).expect("the Machine should persist");
+
+        let suggestions = runtime
+            .list_run_suggestions()
+            .expect("manual agent detection should succeed");
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].workset_id, 1);
+        assert_eq!(suggestions[0].item_identifier, "MC-1");
+        assert_eq!(suggestions[0].agent, AgentKind::Claude);
+        assert!(runtime.state.runs.is_empty());
+
+        let run = runtime
+            .attach_run(suggestions[0].clone())
+            .expect("the approved suggestion should attach");
+        assert_eq!(run.item_id, 1);
+        assert_eq!(run.state, RunState::Unknown);
+        assert_eq!(runtime.state.runs.len(), 1);
+        assert!(runtime
+            .list_run_suggestions()
+            .expect("the attached Pane should no longer be suggested")
+            .is_empty());
+
+        let reopened = Runtime::open(&database).expect("runtime should reopen");
+        assert_eq!(reopened.state.runs.len(), 1);
+        assert_eq!(reopened.state.runs[0].workset_id, 1);
         run_tmux(&[
             "-f",
             "/dev/null",

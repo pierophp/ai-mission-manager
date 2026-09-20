@@ -12,7 +12,7 @@ use serde::Serialize;
 
 use crate::{
     agent_state::{AgentStateRecord, AGENT_STATE_OPTION},
-    domain::{Machine, MachineTransport},
+    domain::{AgentKind, Machine, MachineTransport},
 };
 
 pub trait TerminalRuntime {
@@ -44,6 +44,14 @@ pub struct PaneSummary {
     pub rows: u16,
     pub title: String,
     pub current_command: String,
+    pub current_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentPaneSummary {
+    pub agent: AgentKind,
+    pub session_name: String,
+    pub pane_id: String,
     pub current_path: String,
 }
 
@@ -707,6 +715,22 @@ pub fn list_panes(machine: &Machine, session_name: &str) -> Result<Vec<PaneSumma
         .collect::<Result<Vec<_>, _>>()
 }
 
+pub fn list_agent_panes(machine: &Machine) -> Result<Vec<AgentPaneSummary>, String> {
+    let output = run_tmux(
+        machine,
+        &[
+            "list-panes".into(),
+            "-a".into(),
+            "-F".into(),
+            "#{session_name}\t#{pane_id}\t#{pane_current_command}\t#{pane_title}\t#{pane_current_path}".into(),
+        ],
+    )?;
+    output
+        .lines()
+        .filter_map(|line| parse_agent_pane_summary(line).transpose())
+        .collect::<Result<Vec<_>, _>>()
+}
+
 pub fn capture_pane(machine: &Machine, pane_id: &str) -> Result<Vec<u8>, String> {
     validate_pane_id(pane_id)?;
     let output = run_tmux_output(
@@ -737,6 +761,42 @@ fn parse_pane_summary(line: &str) -> Result<PaneSummary, String> {
         current_command: fields[6].to_owned(),
         current_path: fields[7].to_owned(),
     })
+}
+
+fn parse_agent_pane_summary(line: &str) -> Result<Option<AgentPaneSummary>, String> {
+    let fields = line.split('\t').collect::<Vec<_>>();
+    if fields.len() != 5 {
+        return Err(format!(
+            "tmux returned an invalid agent Pane description: {line}"
+        ));
+    }
+    let Some(agent) =
+        agent_kind_from_command(fields[2]).or_else(|| agent_kind_from_command(fields[3]))
+    else {
+        return Ok(None);
+    };
+    Ok(Some(AgentPaneSummary {
+        agent,
+        session_name: fields[0].to_owned(),
+        pane_id: fields[1].to_owned(),
+        current_path: fields[4].to_owned(),
+    }))
+}
+
+fn agent_kind_from_command(command: &str) -> Option<AgentKind> {
+    let command = command
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match command.as_str() {
+        "claude" | "claude-code" => Some(AgentKind::Claude),
+        "codex" => Some(AgentKind::Codex),
+        _ => None,
+    }
 }
 
 fn parse_pane_number<T>(value: &str, label: &str) -> Result<T, String>
@@ -1182,6 +1242,29 @@ mod tests {
             .last()
             .is_some_and(|argument| argument.contains("'tmux'")));
         assert!(!command.0.ends_with("tmux"));
+    }
+
+    #[test]
+    fn agent_pane_discovery_recognizes_supported_cli_commands_only() {
+        let claude = parse_agent_pane_summary(
+            "manual-session\t%7\t/usr/local/bin/claude\tterminal\t/tmp/workset/service",
+        )
+        .expect("the Pane description should parse")
+        .expect("Claude should be recognized");
+        assert_eq!(claude.agent, AgentKind::Claude);
+        assert_eq!(claude.session_name, "manual-session");
+        assert_eq!(claude.pane_id, "%7");
+
+        let codex = parse_agent_pane_summary("manual-session\t%8\tcodex\tterminal\t/tmp/workset")
+            .expect("the Pane description should parse")
+            .expect("Codex should be recognized");
+        assert_eq!(codex.agent, AgentKind::Codex);
+
+        assert!(
+            parse_agent_pane_summary("shell\t%9\tbash\tterminal\t/tmp/workset")
+                .expect("the Pane description should parse")
+                .is_none()
+        );
     }
 
     fn receive_until(receiver: &std::sync::mpsc::Receiver<Vec<u8>>, expected: &str) -> String {

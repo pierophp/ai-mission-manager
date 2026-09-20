@@ -285,6 +285,54 @@ button:disabled {
   line-height: 1.4;
 }
 
+.run-suggestions {
+  margin-top: 26px;
+  padding: 18px;
+  border: 1px solid #c9d9d2;
+  border-radius: 14px;
+  background: #f5faf7;
+}
+
+.run-suggestion-list {
+  display: grid;
+  gap: 10px;
+  padding-top: 14px;
+}
+
+.run-suggestion-card {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(240px, 1.5fr) auto;
+  align-items: center;
+  gap: 18px;
+  padding: 13px;
+  border: 1px solid #d8e7df;
+  border-radius: 10px;
+  background: #fffdf9;
+}
+
+.run-suggestion-card strong,
+.run-suggestion-card span,
+.run-suggestion-card code {
+  display: block;
+}
+
+.run-suggestion-card strong {
+  color: #40564d;
+  font-size: 0.78rem;
+}
+
+.run-suggestion-card span,
+.run-suggestion-card code {
+  margin-top: 5px;
+  color: #766f67;
+  font-size: 0.72rem;
+  line-height: 1.4;
+}
+
+.run-suggestion-card code {
+  overflow-wrap: anywhere;
+}
+
 .attention-state {
   color: #a45230;
   font-size: 0.7rem;
@@ -1206,6 +1254,10 @@ button:disabled {
   }
 
   .attention-entry-card {
+    grid-template-columns: 1fr;
+  }
+
+  .run-suggestion-card {
     grid-template-columns: 1fr;
   }
 

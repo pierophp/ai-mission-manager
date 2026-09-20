@@ -176,6 +176,34 @@ pub struct Run {
     pub pane_status: RunPaneStatus,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentPaneObservation {
+    pub machine_id: i64,
+    pub agent: AgentKind,
+    pub session_name: String,
+    pub pane_id: String,
+    pub current_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSuggestion {
+    pub machine_id: i64,
+    pub machine_name: String,
+    pub agent: AgentKind,
+    pub session_name: String,
+    pub pane_id: String,
+    pub current_path: String,
+    pub workset_id: i64,
+    pub workset_root_directory: String,
+    pub workset_branch: String,
+    pub item_id: i64,
+    pub item_identifier: String,
+    pub item_title: String,
+    pub context_id: i64,
+    pub context_name: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Reminder {
     pub id: i64,
@@ -497,6 +525,16 @@ pub enum Event {
         started_at: i64,
         prompt_selection: RunPromptSelection,
     },
+    AttachRun {
+        item_id: i64,
+        workset_id: i64,
+        machine_id: i64,
+        agent: AgentKind,
+        working_directory: String,
+        session_name: String,
+        pane_id: String,
+        attached_at: i64,
+    },
     UpdateRunState {
         run_id: i64,
         state: RunState,
@@ -723,6 +761,14 @@ pub enum DomainError {
     EmptyRunPaneId,
     #[error("Run {run_id} does not exist")]
     RunNotFound { run_id: i64 },
+    #[error(
+        "a Run is already attached to Machine {machine_id}, session {session_name}, Pane {pane_id}"
+    )]
+    RunAlreadyAttached {
+        machine_id: i64,
+        session_name: String,
+        pane_id: String,
+    },
     #[error("Workset {workset_id} belongs to another Item")]
     WorksetItemMismatch { workset_id: i64, item_id: i64 },
     #[error("External Object {external_object_id} is not linked to Item {item_id}")]
@@ -1297,6 +1343,81 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::PersistRun { run, next_run_id }],
             })
         }
+        Event::AttachRun {
+            item_id,
+            workset_id,
+            machine_id,
+            agent,
+            working_directory,
+            session_name,
+            pane_id,
+            attached_at,
+        } => {
+            let context_id = item_context_id(&state, item_id)?;
+            let workset = state
+                .worksets
+                .iter()
+                .find(|workset| workset.id == workset_id)
+                .ok_or(DomainError::WorksetNotFound { workset_id })?;
+            if workset.item_id != item_id {
+                return Err(DomainError::WorksetItemMismatch {
+                    workset_id,
+                    item_id,
+                });
+            }
+            let machine = state
+                .machines
+                .iter()
+                .find(|machine| machine.id == machine_id)
+                .ok_or(DomainError::MachineNotFound { machine_id })?;
+            if machine.context_id != context_id {
+                return Err(DomainError::MachineContextMismatch {
+                    machine_id,
+                    context_id,
+                });
+            }
+            let working_directory =
+                clean_name(working_directory, DomainError::EmptyRunWorkingDirectory)?;
+            if working_directory != workset.root_directory {
+                return Err(DomainError::RunWorkingDirectoryMismatch { workset_id });
+            }
+            let session_name = clean_name(session_name, DomainError::EmptyRunSessionName)?;
+            let pane_id = clean_name(pane_id, DomainError::EmptyRunPaneId)?;
+            if state.runs.iter().any(|run| {
+                run.machine_id == machine_id
+                    && run.session_name == session_name
+                    && run.pane_id == pane_id
+            }) {
+                return Err(DomainError::RunAlreadyAttached {
+                    machine_id,
+                    session_name,
+                    pane_id,
+                });
+            }
+            let id = state.next_run_id;
+            let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let run = Run {
+                id,
+                item_id,
+                workset_id,
+                machine_id,
+                agent,
+                execution_profile: ExecutionProfile::CustomPrompt,
+                prompt: "Attached existing agent".into(),
+                working_directory,
+                session_name,
+                pane_id,
+                started_at: attached_at,
+                state: RunState::Unknown,
+                pane_status: RunPaneStatus::Available,
+            };
+            state.next_run_id = next_run_id;
+            state.runs.push(run.clone());
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRun { run, next_run_id }],
+            })
+        }
         Event::UpdateRunState {
             run_id,
             state: run_state,
@@ -1689,6 +1810,81 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             })
         }
     }
+}
+
+pub fn suggest_untracked_runs(
+    state: &DomainState,
+    panes: &[AgentPaneObservation],
+) -> Vec<RunSuggestion> {
+    let mut suggestions = panes
+        .iter()
+        .filter(|pane| {
+            !state.runs.iter().any(|run| {
+                run.machine_id == pane.machine_id
+                    && run.session_name == pane.session_name
+                    && run.pane_id == pane.pane_id
+            })
+        })
+        .filter_map(|pane| {
+            let machine = state
+                .machines
+                .iter()
+                .find(|machine| machine.id == pane.machine_id)?;
+            let workset = state
+                .worksets
+                .iter()
+                .filter(|workset| {
+                    !workset.archived
+                        && path_is_within_workset(&workset.root_directory, &pane.current_path)
+                })
+                .max_by_key(|workset| workset.root_directory.len())?;
+            let item = state.items.iter().find(|item| item.id == workset.item_id)?;
+            let project = state
+                .projects
+                .iter()
+                .find(|project| project.id == item.project_id)?;
+            let context = state
+                .contexts
+                .iter()
+                .find(|context| context.id == project.context_id)?;
+
+            Some(RunSuggestion {
+                machine_id: machine.id,
+                machine_name: machine.name.clone(),
+                agent: pane.agent,
+                session_name: pane.session_name.clone(),
+                pane_id: pane.pane_id.clone(),
+                current_path: pane.current_path.clone(),
+                workset_id: workset.id,
+                workset_root_directory: workset.root_directory.clone(),
+                workset_branch: workset.branch.clone(),
+                item_id: item.id,
+                item_identifier: item.human_identifier.clone(),
+                item_title: item.title.clone(),
+                context_id: context.id,
+                context_name: context.name.clone(),
+            })
+        })
+        .collect::<Vec<_>>();
+    suggestions.sort_by(|left, right| {
+        left.machine_id
+            .cmp(&right.machine_id)
+            .then_with(|| left.session_name.cmp(&right.session_name))
+            .then_with(|| left.pane_id.cmp(&right.pane_id))
+    });
+    suggestions
+}
+
+fn path_is_within_workset(root: &str, path: &str) -> bool {
+    let root = without_macos_private_prefix(root).trim_end_matches('/');
+    let path = without_macos_private_prefix(path);
+    root == "/" || path == root || path.starts_with(&format!("{root}/"))
+}
+
+fn without_macos_private_prefix(path: &str) -> &str {
+    path.strip_prefix("/private")
+        .filter(|path| path.starts_with('/'))
+        .unwrap_or(path)
 }
 
 pub fn home_view(state: &DomainState, context_id: Option<i64>, now: &str) -> HomeView {
@@ -3922,6 +4118,160 @@ mod tests {
             second.effects.as_slice(),
             [Effect::PersistRun { run, next_run_id }] if run.id == 2 && *next_run_id == 3
         ));
+    }
+
+    #[test]
+    fn an_untracked_agent_in_the_deepest_known_workset_is_suggested_once() {
+        let mut state = state_with_item(1, "Work");
+        state.worksets.extend([
+            Workset {
+                id: 1,
+                item_id: 1,
+                root_directory: "/tmp/worksets".into(),
+                branch: "main".into(),
+                archived: false,
+                repositories: Vec::new(),
+            },
+            Workset {
+                id: 2,
+                item_id: 1,
+                root_directory: "/tmp/worksets/platform".into(),
+                branch: "feature/platform".into(),
+                archived: false,
+                repositories: Vec::new(),
+            },
+        ]);
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: "mission-manager".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+        state.runs.push(Run {
+            id: 1,
+            item_id: 1,
+            workset_id: 1,
+            machine_id: 1,
+            agent: AgentKind::Codex,
+            execution_profile: ExecutionProfile::Implement,
+            prompt: "Already attached".into(),
+            working_directory: "/tmp/worksets".into(),
+            session_name: "known-session".into(),
+            pane_id: "%1".into(),
+            started_at: 1,
+            state: RunState::Unknown,
+            pane_status: RunPaneStatus::Available,
+        });
+
+        let suggestions = suggest_untracked_runs(
+            &state,
+            &[
+                AgentPaneObservation {
+                    machine_id: 1,
+                    agent: AgentKind::Claude,
+                    session_name: "manual-session".into(),
+                    pane_id: "%2".into(),
+                    current_path: "/tmp/worksets/platform/service-a".into(),
+                },
+                AgentPaneObservation {
+                    machine_id: 1,
+                    agent: AgentKind::Codex,
+                    session_name: "known-session".into(),
+                    pane_id: "%1".into(),
+                    current_path: "/tmp/worksets".into(),
+                },
+                AgentPaneObservation {
+                    machine_id: 1,
+                    agent: AgentKind::Claude,
+                    session_name: "outside-session".into(),
+                    pane_id: "%3".into(),
+                    current_path: "/tmp/elsewhere".into(),
+                },
+            ],
+        );
+
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].workset_id, 2);
+        assert_eq!(suggestions[0].item_identifier, "MC-1");
+        assert_eq!(suggestions[0].context_name, "Work");
+        assert_eq!(suggestions[0].agent, AgentKind::Claude);
+    }
+
+    #[test]
+    fn attaching_a_suggestion_creates_an_unknown_run_without_starting_an_agent() {
+        let mut state = state_with_item(1, "Work");
+        state.worksets.push(Workset {
+            id: 1,
+            item_id: 1,
+            root_directory: "/tmp/workset".into(),
+            branch: "main".into(),
+            archived: false,
+            repositories: Vec::new(),
+        });
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: "mission-manager".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+
+        let attached = decide(
+            state,
+            Event::AttachRun {
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Claude,
+                working_directory: "/tmp/workset".into(),
+                session_name: "manual-session".into(),
+                pane_id: "%2".into(),
+                attached_at: 123,
+            },
+        )
+        .expect("the explicit attachment should succeed");
+
+        assert_eq!(attached.state.runs.len(), 1);
+        assert_eq!(attached.state.runs[0].state, RunState::Unknown);
+        assert_eq!(attached.state.runs[0].pane_status, RunPaneStatus::Available);
+        assert_eq!(
+            attached.state.runs[0].execution_profile,
+            ExecutionProfile::CustomPrompt
+        );
+        assert_eq!(attached.state.runs[0].prompt, "Attached existing agent");
+        assert!(matches!(
+            attached.effects.as_slice(),
+            [Effect::PersistRun { run, next_run_id }]
+                if run.id == 1 && *next_run_id == 2
+        ));
+
+        let duplicate = decide(
+            attached.state,
+            Event::AttachRun {
+                item_id: 1,
+                workset_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Claude,
+                working_directory: "/tmp/workset".into(),
+                session_name: "manual-session".into(),
+                pane_id: "%2".into(),
+                attached_at: 124,
+            },
+        )
+        .expect_err("the same Pane must not be attached twice");
+        assert_eq!(
+            duplicate,
+            DomainError::RunAlreadyAttached {
+                machine_id: 1,
+                session_name: "manual-session".into(),
+                pane_id: "%2".into(),
+            }
+        );
     }
 
     #[test]

@@ -100,6 +100,23 @@ type Run = {
   pane_status: RunPaneStatus;
 };
 
+type RunSuggestion = {
+  machineId: number;
+  machineName: string;
+  agent: AgentKind;
+  sessionName: string;
+  paneId: string;
+  currentPath: string;
+  worksetId: number;
+  worksetRootDirectory: string;
+  worksetBranch: string;
+  itemId: number;
+  itemIdentifier: string;
+  itemTitle: string;
+  contextId: number;
+  contextName: string;
+};
+
 type PaneTab = {
   paneId: string;
   sessionName: string;
@@ -304,6 +321,7 @@ export function App() {
     ContextAttentionDefault[]
   >([]);
   const [home, setHome] = useState<HomeView>();
+  const [runSuggestions, setRunSuggestions] = useState<RunSuggestion[]>([]);
   const [searchResults, setSearchResults] = useState<ItemView[]>([]);
   const [contextFilterId, setContextFilterId] = useState<number>();
   const [captureContextId, setCaptureContextId] = useState<number>();
@@ -359,6 +377,7 @@ export function App() {
         await invoke("reconcile_runs");
         if (!disposed) {
           await refreshHome();
+          await refreshRunSuggestions();
           if (searchQuery.trim()) {
             await refreshSearch();
           }
@@ -423,6 +442,14 @@ export function App() {
     return () => window.clearInterval(interval);
   }, [contextFilterId, searchQuery]);
 
+  useEffect(() => {
+    if (!initialStateLoaded) return;
+    const interval = window.setInterval(() => {
+      void refreshRunSuggestions().catch(() => undefined);
+    }, 10_000);
+    return () => window.clearInterval(interval);
+  }, [initialStateLoaded]);
+
   async function loadAppState() {
     setIsLoading(true);
     try {
@@ -433,6 +460,7 @@ export function App() {
         loadedMachines,
         loadedRepositories,
         loadedHome,
+        loadedRunSuggestions,
       ] = await Promise.all([
         invoke<Context[]>("list_contexts"),
         invoke<Project[]>("list_projects"),
@@ -443,6 +471,7 @@ export function App() {
           contextId: contextFilterId ?? null,
           now: currentMinute(),
         }),
+        invoke<RunSuggestion[]>("list_run_suggestions"),
       ]);
       const nextCaptureContextId =
         loadedContexts.find((context) => context.id === captureContextId)?.id ??
@@ -461,6 +490,7 @@ export function App() {
       setRepositories(loadedRepositories);
       setMachines(loadedMachines);
       setAttentionDefaults(loadedAttentionDefaults);
+      setRunSuggestions(loadedRunSuggestions);
       setCaptureContextId(nextCaptureContextId);
       setCaptureProjectId(nextCaptureProjectId);
       setHome(loadedHome);
@@ -493,6 +523,11 @@ export function App() {
       now: currentMinute(),
     });
     setHome(loadedHome);
+  }
+
+  async function refreshRunSuggestions() {
+    const suggestions = await invoke<RunSuggestion[]>("list_run_suggestions");
+    setRunSuggestions(suggestions);
   }
 
   async function refreshSearch() {
@@ -712,6 +747,19 @@ export function App() {
     }
   }
 
+  async function handleAttachRun(suggestion: RunSuggestion) {
+    setIsSaving(true);
+    try {
+      await invoke<Run>("attach_run", { suggestion });
+      await updateHomeAfterEdit();
+      setError(undefined);
+    } catch (attachError) {
+      setError(errorMessage(attachError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   async function handleContextFilterChange(value: string) {
     const nextContextFilterId = value === "all" ? undefined : Number(value);
     setContextFilterId(nextContextFilterId);
@@ -736,6 +784,7 @@ export function App() {
       invoke<Machine[]>("list_machines"),
       refreshHome(),
       refreshSearch(),
+      refreshRunSuggestions(),
     ]);
     setRepositories(loadedRepositories);
     setMachines(loadedMachines);
@@ -798,6 +847,36 @@ export function App() {
           initialPane={terminalRequest.pane}
           onClose={() => setTerminalRequest(undefined)}
         />
+      )}
+
+      {runSuggestions.filter(
+        (suggestion) =>
+          contextFilterId === undefined || suggestion.contextId === contextFilterId,
+      ).length > 0 && (
+        <section className="run-suggestions" aria-labelledby="run-suggestions-heading">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Found outside the app</p>
+              <h2 id="run-suggestions-heading">Untracked agents</h2>
+            </div>
+            <span className="item-count">Approval required</span>
+          </div>
+          <div className="run-suggestion-list">
+            {runSuggestions
+              .filter(
+                (suggestion) =>
+                  contextFilterId === undefined || suggestion.contextId === contextFilterId,
+              )
+              .map((suggestion) => (
+                <RunSuggestionCard
+                  key={`${suggestion.machineId}-${suggestion.sessionName}-${suggestion.paneId}`}
+                  suggestion={suggestion}
+                  disabled={isSaving}
+                  onAttach={handleAttachRun}
+                />
+              ))}
+          </div>
+        </section>
       )}
 
       {searchQuery.trim() && (
@@ -3034,6 +3113,44 @@ function AttentionEntryCard({
       setIsSaving(false);
     }
   }
+}
+
+function RunSuggestionCard({
+  suggestion,
+  disabled,
+  onAttach,
+}: {
+  suggestion: RunSuggestion;
+  disabled: boolean;
+  onAttach: (suggestion: RunSuggestion) => Promise<void>;
+}) {
+  return (
+    <article className="run-suggestion-card">
+      <div>
+        <strong>
+          {suggestion.agent === "claude" ? "Claude Code" : "Codex"} in {suggestion.machineName}
+        </strong>
+        <span>
+          {suggestion.itemIdentifier} · {suggestion.itemTitle} · {suggestion.contextName}
+        </span>
+      </div>
+      <div>
+        <strong>Likely Workset: {suggestion.worksetBranch}</strong>
+        <span>{suggestion.worksetRootDirectory}</span>
+        <code>
+          Session {suggestion.sessionName} · Pane {suggestion.paneId} · {suggestion.currentPath}
+        </code>
+      </div>
+      <button
+        type="button"
+        className="secondary-button"
+        disabled={disabled}
+        onClick={() => void onAttach(suggestion)}
+      >
+        Attach Run
+      </button>
+    </article>
+  );
 }
 
 function attentionEntryLabel(entry: AttentionEntry): string {
