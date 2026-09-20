@@ -2003,15 +2003,29 @@ function ItemCard({
                 Session {run.session_name} · Pane {run.pane_id}
               </span>
               {findWorkset(view, run.workset_id) && (
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() =>
-                    onOpenTerminal(run.workset_id, paneTabForRun(run))
-                  }
-                >
-                  Open terminal
-                </button>
+                <div className="run-history-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() =>
+                      onOpenTerminal(run.workset_id, paneTabForRun(run))
+                    }
+                  >
+                    Open embedded terminal
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    disabled={isSaving}
+                    onClick={() =>
+                      void saveItem(() =>
+                        invoke("open_external_terminal", { runId: run.id }),
+                      )
+                    }
+                  >
+                    Open in Terminal
+                  </button>
+                </div>
               )}
             </article>
           ))}

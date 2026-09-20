@@ -46,6 +46,203 @@ pub struct PaneSummary {
     pub current_path: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SshTransport {
+    pub host: String,
+    pub user: Option<String>,
+    pub port: Option<u16>,
+    pub identity_file: Option<String>,
+    pub known_hosts_file: Option<String>,
+    pub strict_host_key_checking: Option<String>,
+    pub ssh_path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+// Remote Machine records will supply this branch when remote Runs are wired.
+#[allow(dead_code)]
+pub enum TerminalTransport {
+    Local,
+    Ssh(SshTransport),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalPaneIdentity {
+    pub tmux_path: String,
+    pub socket_name: String,
+    pub session_name: String,
+    pub pane_id: String,
+    pub transport: TerminalTransport,
+}
+
+/// Builds the command that a real terminal client executes for one stored Pane.
+///
+/// The session lookup happens before attach so a missing or stale identity cannot
+/// fall through to the session's current/default Pane.
+pub fn build_pane_attach_command(identity: &ExternalPaneIdentity) -> Result<String, String> {
+    if identity.tmux_path.trim().is_empty() {
+        return Err("tmux executable path cannot be blank".to_owned());
+    }
+    validate_tmux_target(&identity.socket_name)?;
+    validate_tmux_target(&identity.session_name)?;
+    validate_pane_id(&identity.pane_id)?;
+
+    let lookup = tmux_command(
+        identity,
+        &[
+            "display-message",
+            "-p",
+            "-t",
+            &identity.pane_id,
+            "#{session_name}",
+        ],
+    );
+    let attach = tmux_command(identity, &["attach-session", "-t", &identity.pane_id]);
+    let expected_session = shell_quote(&identity.session_name);
+    let missing_message = shell_quote(&format!(
+        "Pane {} in session {} was not found",
+        identity.pane_id, identity.session_name
+    ));
+    let wrong_session_message = shell_quote(&format!(
+        "Pane {} is not in stored session {}",
+        identity.pane_id, identity.session_name
+    ));
+    let remote_command = format!(
+        "actual_session=\"$({lookup} 2>/dev/null)\"; if [ -z \"$actual_session\" ]; then printf '%s\\n' {missing_message}; exit 1; fi; if [ \"$actual_session\" != {expected_session} ]; then printf '%s\\n' {wrong_session_message}; exit 1; fi; exec {attach}"
+    );
+
+    match &identity.transport {
+        TerminalTransport::Local => Ok(remote_command),
+        TerminalTransport::Ssh(transport) => {
+            validate_ssh_transport(transport)?;
+            let target = match &transport.user {
+                Some(user) => format!("{user}@{}", transport.host),
+                None => transport.host.clone(),
+            };
+            let mut args = vec![
+                transport.ssh_path.as_deref().unwrap_or("ssh").to_owned(),
+                "-tt".to_owned(),
+                "-o".to_owned(),
+                "BatchMode=yes".to_owned(),
+            ];
+            if let Some(port) = transport.port {
+                args.extend(["-p".to_owned(), port.to_string()]);
+            }
+            if let Some(identity_file) = &transport.identity_file {
+                args.extend(["-i".to_owned(), identity_file.clone()]);
+            }
+            if let Some(known_hosts_file) = &transport.known_hosts_file {
+                args.extend([
+                    "-o".to_owned(),
+                    format!("UserKnownHostsFile={known_hosts_file}"),
+                ]);
+            }
+            if let Some(strict_host_key_checking) = &transport.strict_host_key_checking {
+                args.extend([
+                    "-o".to_owned(),
+                    format!("StrictHostKeyChecking={strict_host_key_checking}"),
+                ]);
+            }
+            args.extend([target, remote_command]);
+            Ok(args
+                .iter()
+                .map(|argument| shell_quote(argument))
+                .collect::<Vec<_>>()
+                .join(" "))
+        }
+    }
+}
+
+pub fn open_pane_in_terminal(identity: &ExternalPaneIdentity) -> Result<(), String> {
+    let command = build_pane_attach_command(identity)?;
+    let script = build_terminal_apple_script(&command, "Terminal");
+    let output = Command::new("osascript")
+        .args(["-e", &script])
+        .output()
+        .map_err(|error| format!("Could not open macOS Terminal: {error}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+    Err(if detail.is_empty() {
+        format!("macOS Terminal exited with {}", output.status)
+    } else {
+        format!("Could not open macOS Terminal: {detail}")
+    })
+}
+
+fn tmux_command(identity: &ExternalPaneIdentity, args: &[&str]) -> String {
+    let mut command = vec![
+        identity.tmux_path.as_str(),
+        "-f",
+        "/dev/null",
+        "-L",
+        identity.socket_name.as_str(),
+    ];
+    command.extend(args.iter().copied());
+    command
+        .iter()
+        .map(|argument| shell_quote(argument))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn validate_ssh_transport(transport: &SshTransport) -> Result<(), String> {
+    if transport.host.is_empty()
+        || !transport
+            .host
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b".@:_-".contains(&byte))
+    {
+        return Err(format!(
+            "SSH host contains unsupported characters: {}",
+            transport.host
+        ));
+    }
+    if let Some(user) = &transport.user {
+        if user.is_empty()
+            || !user
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+        {
+            return Err(format!("SSH user contains unsupported characters: {user}"));
+        }
+    }
+    if let Some(port) = transport.port {
+        if port == 0 {
+            return Err("SSH port must be positive".to_owned());
+        }
+    }
+    if let Some(strict_host_key_checking) = &transport.strict_host_key_checking {
+        if !matches!(
+            strict_host_key_checking.as_str(),
+            "yes" | "accept-new" | "no"
+        ) {
+            return Err(format!(
+                "unsupported SSH StrictHostKeyChecking value: {strict_host_key_checking}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn build_terminal_apple_script(command: &str, terminal_app: &str) -> String {
+    format!(
+        "tell application {}\nactivate\ndo script {}\nend tell",
+        apple_script_string(terminal_app),
+        apple_script_string(command)
+    )
+}
+
+fn apple_script_string(value: &str) -> String {
+    format!(
+        "\"{}\"",
+        value
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+    )
+}
+
 pub struct TmuxControlPane {
     input: Arc<Mutex<ChildStdin>>,
     child: Arc<Mutex<Child>>,
@@ -638,6 +835,67 @@ mod tests {
             .expect("the original Pane should remain after detach");
         assert_eq!(after_close.pid, before.pid);
         kill_tmux_session(&machine, &session_name).expect("the test session should be cleaned up");
+    }
+
+    #[test]
+    fn external_terminal_command_checks_the_exact_local_pane_before_attaching() {
+        let command = build_pane_attach_command(&ExternalPaneIdentity {
+            tmux_path: "tmux".into(),
+            socket_name: "mission-manager".into(),
+            session_name: "mission-item-1-run-2".into(),
+            pane_id: "%7".into(),
+            transport: TerminalTransport::Local,
+        })
+        .expect("the local Pane identity should build");
+
+        assert!(command.contains("display-message"));
+        assert!(command.contains("-t' '%7"));
+        assert!(command.contains("if [ -z \"$actual_session\" ]; then"));
+        assert!(command.contains("attach-session' '-t' '%7"));
+        assert!(command.contains("exec 'tmux'"));
+    }
+
+    #[test]
+    fn external_terminal_command_uses_ssh_for_a_remote_pane() {
+        let command = build_pane_attach_command(&ExternalPaneIdentity {
+            tmux_path: "/usr/bin/tmux".into(),
+            socket_name: "mission-manager".into(),
+            session_name: "remote-run".into(),
+            pane_id: "%12".into(),
+            transport: TerminalTransport::Ssh(SshTransport {
+                host: "remote.example".into(),
+                user: Some("runner".into()),
+                port: Some(2222),
+                identity_file: Some("/Users/me/.ssh/mission".into()),
+                known_hosts_file: Some("/Users/me/.ssh/known_hosts".into()),
+                strict_host_key_checking: Some("accept-new".into()),
+                ssh_path: Some("/usr/bin/ssh".into()),
+            }),
+        })
+        .expect("the remote Pane identity should build");
+
+        assert!(command.starts_with("'/usr/bin/ssh' '-tt' '-o' 'BatchMode=yes'"));
+        assert!(command.contains("'-p' '2222'"));
+        assert!(command.contains("'runner@remote.example'"));
+        assert!(command.contains("/usr/bin/tmux"));
+        assert!(command.contains("display-message"));
+        assert!(command.contains("attach-session"));
+        assert!(command.contains("%12"));
+        assert!(!command.starts_with("'tmux'"));
+    }
+
+    #[test]
+    fn external_terminal_command_rejects_a_non_pane_identity() {
+        let error = build_pane_attach_command(&ExternalPaneIdentity {
+            tmux_path: "tmux".into(),
+            socket_name: "mission-manager".into(),
+            session_name: "mission-item-1-run-2".into(),
+            pane_id: "main".into(),
+            transport: TerminalTransport::Local,
+        })
+        .expect_err("a display name must not be accepted as a Pane identity");
+
+        assert_eq!(error, "invalid tmux Pane identity: main");
     }
 
     fn receive_until(receiver: &std::sync::mpsc::Receiver<Vec<u8>>, expected: &str) -> String {

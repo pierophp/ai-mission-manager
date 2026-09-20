@@ -45,6 +45,7 @@ pub fn run() {
             app::terminal_input,
             app::terminal_resize,
             app::close_terminal,
+            app::open_external_terminal,
             app::set_item_status,
             app::set_item_notes,
             app::add_item_reminder,

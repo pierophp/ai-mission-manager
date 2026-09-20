@@ -23,8 +23,8 @@ use crate::{
     persistence::SqliteStore,
     provider::{classify_url, resolve_gh_executable, GithubCli},
     terminal::{
-        capture_pane, list_panes, AgentLaunchContext, PaneSummary, TerminalRuntime,
-        TmuxControlPane, TmuxRuntime,
+        capture_pane, list_panes, open_pane_in_terminal, AgentLaunchContext, ExternalPaneIdentity,
+        PaneSummary, TerminalRuntime, TerminalTransport, TmuxControlPane, TmuxRuntime,
     },
 };
 
@@ -519,6 +519,44 @@ impl Runtime {
             connection.close()?;
         }
         Ok(())
+    }
+
+    fn open_external_terminal(&self, run_id: i64) -> Result<(), String> {
+        let run = self
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == run.machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
+        let panes = list_panes(&machine, &run.session_name).map_err(|error| {
+            format!(
+                "Pane {} is not available in session {}: {error}",
+                run.pane_id, run.session_name
+            )
+        })?;
+        if !panes.iter().any(|pane| pane.pane_id == run.pane_id) {
+            return Err(format!(
+                "Pane {} is not available in session {}",
+                run.pane_id, run.session_name
+            ));
+        }
+
+        let identity = ExternalPaneIdentity {
+            tmux_path: "tmux".into(),
+            socket_name: machine.socket_name,
+            session_name: run.session_name,
+            pane_id: run.pane_id,
+            transport: TerminalTransport::Local,
+        };
+        open_pane_in_terminal(&identity)
     }
 
     fn provision_agent_hooks(&self) -> Result<(), String> {
@@ -1616,6 +1654,14 @@ pub fn close_terminal(terminal_id: String, state: State<'_, Mutex<Runtime>>) -> 
         .close_terminal(&terminal_id)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn open_external_terminal(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<(), String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .open_external_terminal(run_id)
+}
+
 #[tauri::command]
 pub fn list_context_attention_defaults(
     state: State<'_, Mutex<Runtime>>,
@@ -2020,6 +2066,39 @@ mod tests {
 
     use super::*;
     use crate::persistence::SqliteStore;
+
+    #[test]
+    fn opening_external_terminal_reports_a_missing_run_pane_before_launching_anything() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime.state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: format!("mission-manager-missing-pane-{}", std::process::id()),
+        });
+        runtime.state.runs.push(Run {
+            id: 1,
+            item_id: 1,
+            workset_id: 1,
+            machine_id: 1,
+            agent: AgentKind::Claude,
+            execution_profile: ExecutionProfile::Implement,
+            prompt: "Open the missing Pane".into(),
+            working_directory: directory.path().to_string_lossy().into_owned(),
+            session_name: "missing-session".into(),
+            pane_id: "%99".into(),
+            started_at: 1,
+            state: RunState::Unknown,
+        });
+
+        let error = runtime
+            .open_external_terminal(1)
+            .expect_err("a missing Pane must stop before Terminal.app launches");
+
+        assert!(error.contains("Pane %99 is not available in session missing-session"));
+    }
 
     #[cfg(unix)]
     #[test]
