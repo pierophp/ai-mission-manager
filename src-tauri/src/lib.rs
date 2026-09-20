@@ -39,6 +39,8 @@ pub fn run() {
             app::delete_project,
             app::prepare_context_deletion,
             app::delete_context,
+            app::prepare_reset_local_data,
+            app::reset_all_local_data,
             app::register_machine,
             app::check_machine,
             app::create_workset,

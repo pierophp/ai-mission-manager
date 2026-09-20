@@ -531,6 +531,48 @@ type ParentDeletionResult = {
   physicalCleanupWarning: string | null;
 };
 
+type ResetLocalDataSummary = {
+  contextCount: number;
+  projectCount: number;
+  repositoryCount: number;
+  itemCount: number;
+  worksetCount: number;
+  machineCount: number;
+  runCount: number;
+  reminderCount: number;
+  relationshipCount: number;
+  linkCount: number;
+  externalObjectCount: number;
+  snapshotCount: number;
+  activityCount: number;
+  attentionDefaultCount: number;
+};
+
+type ResetLocalDataRecord = {
+  kind: string;
+  id: number;
+  label: string;
+};
+
+type ResetLocalDataPreview = {
+  plan: {
+    summary: ResetLocalDataSummary;
+    affectedRecords: ResetLocalDataRecord[];
+    worksets: ItemDeletionPlan["worksets"];
+  };
+  auditEntryCount: number;
+  worksets: WorksetDeletionPreview[];
+  blockers: string[];
+  confirmationPhrase: string;
+};
+
+type ResetLocalDataResult = {
+  summary: ResetLocalDataSummary;
+  auditEntryCount: number;
+  worksetDirectoriesDeleted: boolean;
+  physicalCleanupWarning: string | null;
+};
+
 type RunDeletionResult = {
   runId: number;
 };
@@ -671,6 +713,8 @@ export function App() {
     useState<MachineDeletionPreview>();
   const [parentDeletionPreview, setParentDeletionPreview] =
     useState<ParentDeletionPreview>();
+  const [resetLocalDataPreview, setResetLocalDataPreview] =
+    useState<ResetLocalDataPreview>();
   const [machines, setMachines] = useState<Machine[]>([]);
   const [attentionDefaults, setAttentionDefaults] = useState<
     ContextAttentionDefault[]
@@ -1068,6 +1112,56 @@ export function App() {
       setError(undefined);
     } catch (previewError) {
       window.alert(errorMessage(previewError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handlePrepareResetLocalData() {
+    setIsSaving(true);
+    try {
+      const preview = await invoke<ResetLocalDataPreview>("prepare_reset_local_data");
+      setResetLocalDataPreview(preview);
+      setError(undefined);
+    } catch (previewError) {
+      window.alert(errorMessage(previewError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleResetLocalData() {
+    if (!resetLocalDataPreview || resetLocalDataPreview.blockers.length > 0) return;
+    const confirmation = window.prompt(
+      `This permanently resets all local records. Type ${resetLocalDataPreview.confirmationPhrase} to continue. Workset directories will be confirmed separately.`,
+      "",
+    );
+    if (confirmation === null) return;
+    const deleteWorksetDirectories =
+      resetLocalDataPreview.worksets.length === 0 ||
+      window.confirm(
+        `Permanently delete these ${resetLocalDataPreview.worksets.length} Workset director${resetLocalDataPreview.worksets.length === 1 ? "y" : "ies"} from disk too? Choose Cancel to keep the directories while removing their local records.`,
+      );
+
+    setIsSaving(true);
+    try {
+      const result = await invoke<ResetLocalDataResult>("reset_all_local_data", {
+        confirmation,
+        deleteWorksetDirectories,
+      });
+      setResetLocalDataPreview(undefined);
+      setContextFilterId(undefined);
+      setTerminalRequest(undefined);
+      await loadAppState();
+      const summary = result.summary;
+      window.alert(
+        `Reset local data. Removed ${summary.contextCount} Context(s), ${summary.projectCount} Project(s), ${summary.repositoryCount} Repository record(s), ${summary.itemCount} Item(s), ${summary.worksetCount} Workset(s), ${summary.machineCount} Machine(s), ${summary.runCount} Run(s), ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.linkCount} Link(s), ${summary.externalObjectCount} External Object(s), ${summary.snapshotCount} snapshot(s), ${summary.activityCount} Activity record(s), ${summary.attentionDefaultCount} attention default(s), and ${result.auditEntryCount} prior audit entr${result.auditEntryCount === 1 ? "y" : "ies"}. A new Personal Context and Default Project are ready.`,
+      );
+      if (result.physicalCleanupWarning) {
+        window.alert(result.physicalCleanupWarning);
+      }
+    } catch (resetError) {
+      window.alert(errorMessage(resetError));
     } finally {
       setIsSaving(false);
     }
@@ -2448,6 +2542,35 @@ export function App() {
             Save attention defaults
           </button>
         </form>
+        <section className="danger-zone" aria-labelledby="danger-zone-heading">
+          <div className="section-heading">
+            <div>
+              <p className="eyebrow">Danger zone</p>
+              <h3 id="danger-zone-heading">Reset all local data</h3>
+              <p className="column-hint">
+                Remove the local working model, cached External Objects, and audit history, then
+                choose separately what happens to every Workset directory. Setup and dependency
+                configuration remain available.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="danger-button"
+              disabled={isSaving}
+              onClick={() => void handlePrepareResetLocalData()}
+            >
+              Review reset impact
+            </button>
+          </div>
+          {resetLocalDataPreview && (
+            <ResetLocalDataPreviewCard
+              preview={resetLocalDataPreview}
+              disabled={isSaving}
+              onConfirm={() => void handleResetLocalData()}
+              onCancel={() => setResetLocalDataPreview(undefined)}
+            />
+          )}
+        </section>
         </section>
       )}
     </main>
@@ -2479,6 +2602,115 @@ function TabNavigation({
         ))}
       </div>
     </nav>
+  );
+}
+
+function ResetLocalDataPreviewCard({
+  preview,
+  disabled,
+  onConfirm,
+  onCancel,
+}: {
+  preview: ResetLocalDataPreview;
+  disabled: boolean;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const { summary } = preview.plan;
+  const counts: [number, string][] = [
+    [summary.contextCount, "Contexts"],
+    [summary.projectCount, "Projects"],
+    [summary.repositoryCount, "Repositories"],
+    [summary.itemCount, "Items"],
+    [summary.worksetCount, "Worksets"],
+    [summary.machineCount, "Machines"],
+    [summary.runCount, "Runs"],
+    [summary.reminderCount, "reminders"],
+    [summary.relationshipCount, "relationships"],
+    [summary.linkCount, "Links"],
+    [summary.externalObjectCount, "External Objects"],
+    [summary.snapshotCount, "snapshots"],
+    [summary.activityCount, "Activity records"],
+    [summary.attentionDefaultCount, "attention defaults"],
+    [preview.auditEntryCount, "prior audit entries"],
+  ];
+
+  return (
+    <div className="deletion-preview reset-preview" role="alert">
+      <strong>Reset impact preview</strong>
+      <p>
+        This removes only Mission Manager&apos;s local working model. Provider-owned Issues,
+        pull requests, and other external objects are never deleted. All listed Workset roots
+        must pass the same safety checks used by ordinary deletion before any optional physical
+        cleanup is staged.
+      </p>
+      <div className="parent-deletion-summary">
+        {counts.map(([count, label]) => (
+          <span key={label}><strong>{count}</strong> {label}</span>
+        ))}
+      </div>
+      {preview.plan.affectedRecords.length > 0 && (
+        <div className="deletion-worksets">
+          <span className="relationship-label">Records to reset</span>
+          {preview.plan.affectedRecords.map((record) => (
+            <span key={`${record.kind}-${record.id}`}>
+              <strong>{record.kind} #{record.id}</strong> · {record.label}
+            </span>
+          ))}
+        </div>
+      )}
+      {preview.worksets.length > 0 ? (
+        <div className="deletion-worksets">
+          <span className="relationship-label">Workset roots to stage and remove</span>
+          {preview.worksets.map((workset) => (
+            <div className="deletion-workset" key={workset.worksetId}>
+              <strong>
+                Workset #{workset.worksetId} · {workset.branch} {workset.archived ? "· Archived" : ""}
+              </strong>
+              <code>{workset.rootDirectory}</code>
+              {workset.safetyReport?.repositories.map((repository) => (
+                <span key={repository.repository_id}>
+                  {repository.unpushed_commits_unknown
+                    ? `${repository.name}: unpushed commits could not be verified.`
+                    : repository.unpushed_commits.length > 0
+                      ? `${repository.name}: ${repository.unpushed_commits.length} unpushed commit(s).`
+                      : `${repository.name}: no unpushed commits.`}
+                  {repository.uncommitted_changes.length > 0
+                    ? ` ${repository.uncommitted_changes.length} uncommitted change(s).`
+                    : " No uncommitted changes."}
+                </span>
+              ))}
+              {workset.blockers.map((blocker) => <span key={blocker}>{blocker}</span>)}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p>No Workset roots are registered. The local records will still be reset.</p>
+      )}
+      {preview.blockers.length > 0 && (
+        <div className="deletion-blockers">
+          <strong>Reset blocked</strong>
+          {preview.blockers.map((blocker) => <span key={blocker}>{blocker}</span>)}
+          <p>Resolve every finding, then create a fresh preview.</p>
+        </div>
+      )}
+      <p className="column-hint">
+        Confirmation requires typing <code>{preview.confirmationPhrase}</code> exactly.
+      </p>
+      <div className="deletion-preview-actions">
+        <button
+          type="button"
+          className="danger-button"
+          disabled={disabled || preview.blockers.length > 0}
+          onClick={onConfirm}
+        >
+          Reset all local data
+        </button>
+        <button type="button" className="text-button" disabled={disabled} onClick={onCancel}>
+          Cancel
+        </button>
+      </div>
+    </div>
   );
 }
 

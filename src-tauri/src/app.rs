@@ -14,15 +14,16 @@ use crate::{
     domain::{
         activity_tab_view, compose_run_prompt as build_run_prompt, decide, external_link_view,
         home_view, plan_context_deletion, plan_external_object_deletion, plan_item_deletion,
-        plan_machine_deletion, plan_project_deletion, plan_repository_deletion, search_items,
-        suggest_untracked_runs, ActivityTabView, AgentKind, AgentPaneObservation,
-        AttachedRepositoryInput, AuditAction, AuditEntry, Context, ContextAttentionDefault,
-        DomainState, Effect, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
-        ExternalObjectDeletionPlan, ExternalObjectDeletionSummary, ExternalObjectInput,
-        ExternalObjectKind, ExternalProvider, ExternalSnapshot, HomeView, Item, ItemDeletionPlan,
-        ItemDeletionSummary, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine,
-        MachineDeletionPlan, MachineObservation, MachineTransport, ParentDeletionPlan, Project,
-        ProjectDefaults, Repository, RepositoryDeletionPlan, Run, RunPaneStatus,
+        plan_machine_deletion, plan_project_deletion, plan_repository_deletion,
+        plan_reset_local_data, search_items, suggest_untracked_runs, ActivityTabView, AgentKind,
+        AgentPaneObservation, AttachedRepositoryInput, AuditAction, AuditEntry, Context,
+        ContextAttentionDefault, DomainState, Effect, Event, ExecutionProfile,
+        ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
+        ExternalObjectDeletionSummary, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
+        ExternalSnapshot, HomeView, Item, ItemDeletionPlan, ItemDeletionSummary, ItemRelation,
+        ItemRelationKind, ItemStatus, ItemView, Machine, MachineDeletionPlan, MachineObservation,
+        MachineTransport, ParentDeletionPlan, Project, ProjectDefaults, Repository,
+        RepositoryDeletionPlan, ResetLocalDataPlan, ResetLocalDataSummary, Run, RunPaneStatus,
         RunPromptSelection, RunState, RunSuggestion, Workset, WorksetRepositoryInput,
     },
     git::GitCli,
@@ -36,6 +37,8 @@ use crate::{
     },
 };
 
+pub const RESET_CONFIRMATION_PHRASE: &str = "RESET ALL LOCAL DATA";
+
 pub struct Runtime {
     store: SqliteStore,
     state: DomainState,
@@ -46,6 +49,7 @@ pub struct Runtime {
     pending_repository_deletion: Option<RepositoryDeletionPreview>,
     pending_machine_deletion: Option<MachineDeletionPreview>,
     pending_parent_deletion: Option<ParentDeletionPreview>,
+    pending_reset_local_data: Option<ResetLocalDataPreview>,
     terminal_connections: HashMap<String, TmuxControlPane>,
     agent_state_directory: PathBuf,
 }
@@ -103,6 +107,7 @@ impl Runtime {
             pending_repository_deletion: None,
             pending_machine_deletion: None,
             pending_parent_deletion: None,
+            pending_reset_local_data: None,
             terminal_connections: HashMap::new(),
             agent_state_directory,
         };
@@ -1507,6 +1512,166 @@ impl Runtime {
         Ok(preview)
     }
 
+    fn build_reset_local_data_preview(&self) -> Result<ResetLocalDataPreview, String> {
+        let plan = plan_reset_local_data(&self.state);
+        let mut blockers = self
+            .state
+            .runs
+            .iter()
+            .filter(|run| run.state != RunState::Finished)
+            .map(|run| {
+                format!(
+                    "Run #{} is active; stop it before resetting local data.",
+                    run.id
+                )
+            })
+            .collect::<Vec<_>>();
+        let worksets = plan
+            .worksets
+            .iter()
+            .map(|workset| {
+                let preview = self.build_workset_deletion_preview(
+                    workset.id,
+                    &workset.root_directory,
+                    &workset.branch,
+                    workset.archived,
+                );
+                blockers.extend(
+                    preview
+                        .blockers
+                        .iter()
+                        .map(|blocker| format!("Workset #{}: {blocker}", workset.id)),
+                );
+                preview
+            })
+            .collect();
+
+        Ok(ResetLocalDataPreview {
+            plan,
+            audit_entry_count: self
+                .store
+                .audit_entry_count()
+                .map_err(|error| error.to_string())?,
+            worksets,
+            blockers,
+            confirmation_phrase: RESET_CONFIRMATION_PHRASE.into(),
+        })
+    }
+
+    fn prepare_reset_local_data(&mut self) -> Result<ResetLocalDataPreview, String> {
+        let preview = self.build_reset_local_data_preview()?;
+        self.pending_reset_local_data = Some(preview.clone());
+        Ok(preview)
+    }
+
+    fn reset_all_local_data(
+        &mut self,
+        confirmation: String,
+        delete_workset_directories: bool,
+    ) -> Result<ResetLocalDataResult, String> {
+        if confirmation != RESET_CONFIRMATION_PHRASE {
+            return Err(format!(
+                "Reset requires the exact confirmation phrase: {RESET_CONFIRMATION_PHRASE}"
+            ));
+        }
+        let pending = self
+            .pending_reset_local_data
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "Review the reset preview before resetting local data".to_owned())?;
+        let current = self.build_reset_local_data_preview()?;
+        if current != pending {
+            return Err(
+                "The local model or a Workset safety report changed after the reset preview; review the updated preview before resetting local data"
+                    .into(),
+            );
+        }
+        if !current.blockers.is_empty() {
+            return Err(format!(
+                "Reset is blocked:\n{}",
+                current.blockers.join("\n")
+            ));
+        }
+
+        let mut staged = Vec::new();
+        if delete_workset_directories {
+            for workset in &current.plan.worksets {
+                let root = Path::new(&workset.root_directory);
+                let staging = match workset_removal_staging_path(root, workset.id) {
+                    Ok(staging) => staging,
+                    Err(error) => {
+                        let restore_error = restore_staged_directories(&staged);
+                        return Err(format_commit_error(error, restore_error));
+                    }
+                };
+                if let Err(error) = fs::rename(root, &staging) {
+                    let restore_error = restore_staged_directories(&staged);
+                    return Err(format_commit_error(
+                        format!("Could not stage Workset directory for local-data reset: {error}"),
+                        restore_error,
+                    ));
+                }
+                staged.push((root.to_owned(), staging));
+            }
+        }
+
+        let decision = match decide(self.state.clone(), Event::ResetLocalData) {
+            Ok(decision) => decision,
+            Err(error) => {
+                let restore_error = restore_staged_directories(&staged);
+                return Err(format_commit_error(error.to_string(), restore_error));
+            }
+        };
+        if let Err(error) = self.commit(decision) {
+            let restore_error = restore_staged_directories(&staged);
+            return Err(format_commit_error(error, restore_error));
+        }
+        self.pending_reset_local_data = None;
+        self.pending_workset_removal = None;
+        self.pending_item_deletion = None;
+        self.pending_external_object_deletion = None;
+        self.pending_repository_deletion = None;
+        self.pending_machine_deletion = None;
+        self.pending_parent_deletion = None;
+        self.terminal_connections.clear();
+
+        let mut cleanup_errors = Vec::new();
+        let workset_cleanup_failed = if delete_workset_directories {
+            let mut failed = false;
+            for (_, staging) in staged {
+                if let Err(error) = fs::remove_dir_all(&staging) {
+                    failed = true;
+                    cleanup_errors.push(format!("{}: {error}", staging.display()));
+                }
+            }
+            failed
+        } else {
+            false
+        };
+        if self.agent_state_directory.exists() {
+            if let Err(error) = fs::remove_dir_all(&self.agent_state_directory) {
+                cleanup_errors.push(format!("{}: {error}", self.agent_state_directory.display()));
+            }
+        }
+        let physical_cleanup_warning = if !cleanup_errors.is_empty() {
+            Some(format!(
+                "Local data was reset, but some local physical data could not be removed: {}",
+                cleanup_errors.join(", ")
+            ))
+        } else if !delete_workset_directories && !current.plan.worksets.is_empty() {
+            Some("Local data was reset; Workset directories were left on disk by choice.".into())
+        } else {
+            None
+        };
+
+        Ok(ResetLocalDataResult {
+            summary: current.plan.summary,
+            audit_entry_count: current.audit_entry_count,
+            workset_directories_deleted: delete_workset_directories && !workset_cleanup_failed,
+            physical_cleanup_warning,
+        })
+    }
+
     fn delete_parent(
         &mut self,
         target: ParentDeletionTarget,
@@ -2764,6 +2929,12 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
                     repository_id: repository.id,
                 })
             }
+            Effect::ResetLocalData {
+                context, project, ..
+            } => Some(AuditAction::ResetBoundary {
+                context_id: context.id,
+                project_id: project.id,
+            }),
             Effect::PersistItem { item, .. } => Some(AuditAction::ItemCreated { item_id: item.id }),
             Effect::PersistItemUpdate { item } => {
                 let previous = before
@@ -3202,6 +3373,25 @@ pub struct ParentDeletionPreview {
     pub plan: ParentDeletionPlan,
     pub worksets: Vec<WorksetDeletionPreview>,
     pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetLocalDataPreview {
+    pub plan: ResetLocalDataPlan,
+    pub audit_entry_count: usize,
+    pub worksets: Vec<WorksetDeletionPreview>,
+    pub blockers: Vec<String>,
+    pub confirmation_phrase: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetLocalDataResult {
+    pub summary: ResetLocalDataSummary,
+    pub audit_entry_count: usize,
+    pub workset_directories_deleted: bool,
+    pub physical_cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -3750,6 +3940,28 @@ pub fn delete_context(
         )
 }
 
+#[tauri::command]
+pub fn prepare_reset_local_data(
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ResetLocalDataPreview, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .prepare_reset_local_data()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn reset_all_local_data(
+    confirmation: String,
+    delete_workset_directories: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ResetLocalDataResult, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .reset_all_local_data(confirmation, delete_workset_directories)
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub fn create_workset(
     item_id: i64,
@@ -4231,6 +4443,162 @@ mod tests {
             setup
         );
         assert_eq!(reopened.state.contexts.len(), 1);
+    }
+
+    #[test]
+    fn reset_requires_the_typed_confirmation_and_keeps_the_model_when_rejected() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .complete_setup("Personal".into(), ProviderChoice::GitHub)
+            .expect("setup should complete");
+        let before = runtime.state.clone();
+
+        let preview = runtime
+            .prepare_reset_local_data()
+            .expect("reset preview should be available");
+        assert_eq!(preview.confirmation_phrase, RESET_CONFIRMATION_PHRASE);
+        let error = runtime
+            .reset_all_local_data("RESET".into(), true)
+            .expect_err("a weaker confirmation should be rejected");
+
+        assert!(error.contains(RESET_CONFIRMATION_PHRASE));
+        assert_eq!(runtime.state, before);
+        assert!(runtime.pending_reset_local_data.is_some());
+    }
+
+    #[test]
+    fn reset_recreates_a_usable_personal_context_and_preserves_setup_configuration() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .complete_setup("Personal".into(), ProviderChoice::GitHub)
+            .expect("setup should complete");
+        runtime
+            .store
+            .set_executable_path("tmux_executable_path", Path::new("/custom/tmux"))
+            .expect("dependency configuration should persist");
+        runtime
+            .create_context("Work".into())
+            .expect("extra Context should be created");
+
+        let preview = runtime
+            .prepare_reset_local_data()
+            .expect("reset preview should be available");
+        assert_eq!(preview.plan.summary.context_count, 2);
+        assert_eq!(preview.plan.summary.project_count, 2);
+        assert_eq!(preview.audit_entry_count, 2);
+        let result = runtime
+            .reset_all_local_data(RESET_CONFIRMATION_PHRASE.into(), true)
+            .expect("reset should succeed");
+
+        assert_eq!(result.audit_entry_count, 2);
+        assert_eq!(runtime.state.contexts.len(), 1);
+        assert_eq!(runtime.state.contexts[0].name, "Personal");
+        assert_eq!(runtime.state.contexts[0].id, 3);
+        assert_eq!(runtime.state.projects.len(), 1);
+        assert_eq!(runtime.state.projects[0].name, "Default");
+        assert_eq!(runtime.state.projects[0].id, 3);
+        assert_eq!(
+            runtime
+                .store
+                .executable_path("tmux_executable_path")
+                .expect("dependency configuration should remain readable")
+                .unwrap(),
+            Path::new("/custom/tmux")
+        );
+        let setup = runtime
+            .setup_state()
+            .expect("setup state should remain readable");
+        assert_eq!(setup.provider, ProviderChoice::GitHub);
+        assert!(setup.completed);
+        let history = runtime
+            .list_audit_history()
+            .expect("reset boundary should be readable");
+        assert!(matches!(
+            history.as_slice(),
+            [AuditEntry {
+                action: AuditAction::ResetBoundary {
+                    context_id: 3,
+                    project_id: 3,
+                },
+                ..
+            }]
+        ));
+    }
+
+    #[test]
+    fn reset_staging_failure_leaves_the_working_model_and_roots_intact() {
+        let directory = tempdir().expect("temporary repository directory should exist");
+        let seed = directory.path().join("seed");
+        run_git(directory.path(), &["init", "--initial-branch=main", "seed"]);
+        run_git(&seed, &["config", "user.email", "test@example.com"]);
+        run_git(&seed, &["config", "user.name", "Test User"]);
+        fs::write(seed.join("README.md"), "safe\n").expect("seed file should be written");
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-m", "initial"]);
+        let origin = directory.path().join("service.git");
+        run_git(directory.path(), &["init", "--bare", "service.git"]);
+        let origin_url = origin.to_string_lossy().into_owned();
+        run_git(&seed, &["remote", "add", "origin", &origin_url]);
+        run_git(&seed, &["push", "origin", "main"]);
+
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .register_repository(1, "service".into(), origin_url)
+            .expect("Repository should register");
+        runtime
+            .create_item("Reset the safe Workset".into(), 1, 1)
+            .expect("Item should be created");
+        let root = directory.path().join("workset-root");
+        runtime
+            .create_workset(
+                1,
+                root.to_string_lossy().into_owned(),
+                "feature/reset-safe".into(),
+                vec![WorksetRepositoryInput {
+                    repository_id: 1,
+                    branch_override: None,
+                    base_branch_override: Some("main".into()),
+                }],
+            )
+            .expect("Workset should be created");
+        run_git(
+            &root.join("service"),
+            &["branch", "--set-upstream-to=origin/main"],
+        );
+
+        let preview = runtime
+            .prepare_reset_local_data()
+            .expect("reset preview should be available");
+        assert!(preview.blockers.is_empty());
+        let blocking_staging_path = directory
+            .path()
+            .join(".workset-root.mission-manager-removing-1");
+        fs::create_dir(&blocking_staging_path).expect("the staging blocker should be created");
+        let staging_error = runtime
+            .reset_all_local_data(RESET_CONFIRMATION_PHRASE.into(), true)
+            .expect_err("a staging failure should abort before logical reset");
+        assert!(staging_error.contains("staging path already exists"));
+        assert!(root.is_dir());
+        assert_eq!(runtime.state.items.len(), 1);
+        assert_eq!(runtime.state.worksets.len(), 1);
+
+        fs::remove_dir_all(&blocking_staging_path).expect("the staging blocker should be removed");
+        runtime
+            .prepare_reset_local_data()
+            .expect("fresh reset preview should be available");
+        let result = runtime
+            .reset_all_local_data(RESET_CONFIRMATION_PHRASE.into(), true)
+            .expect("reset should remove safe Workset roots");
+        assert!(result.workset_directories_deleted);
+        assert!(result.physical_cleanup_warning.is_none());
+        assert!(!root.exists());
+        assert!(runtime.state.items.is_empty());
+        assert!(runtime.state.worksets.is_empty());
     }
 
     #[cfg(unix)]

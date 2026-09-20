@@ -622,6 +622,43 @@ pub struct ParentDeletionSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ResetLocalDataSummary {
+    pub context_count: usize,
+    pub project_count: usize,
+    pub repository_count: usize,
+    pub item_count: usize,
+    pub workset_count: usize,
+    pub machine_count: usize,
+    pub run_count: usize,
+    pub reminder_count: usize,
+    pub relationship_count: usize,
+    pub link_count: usize,
+    pub external_object_count: usize,
+    pub snapshot_count: usize,
+    pub activity_count: usize,
+    pub attention_default_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetLocalDataRecord {
+    pub kind: String,
+    pub id: i64,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetLocalDataPlan {
+    pub summary: ResetLocalDataSummary,
+    pub affected_records: Vec<ResetLocalDataRecord>,
+    pub worksets: Vec<ItemDeletionWorkset>,
+    #[serde(skip)]
+    pub state_fingerprint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ParentDeletionPlan {
     pub context_id: Option<i64>,
     pub project_id: Option<i64>,
@@ -876,6 +913,124 @@ pub fn activity_tab_view(state: &DomainState, audit_entries: Vec<AuditEntry>) ->
     }
 }
 
+pub fn plan_reset_local_data(state: &DomainState) -> ResetLocalDataPlan {
+    let mut affected_records = Vec::new();
+    affected_records.extend(state.contexts.iter().map(|context| ResetLocalDataRecord {
+        kind: "Context".into(),
+        id: context.id,
+        label: context.name.clone(),
+    }));
+    affected_records.extend(state.projects.iter().map(|project| ResetLocalDataRecord {
+        kind: "Project".into(),
+        id: project.id,
+        label: project.name.clone(),
+    }));
+    affected_records.extend(
+        state
+            .repositories
+            .iter()
+            .map(|repository| ResetLocalDataRecord {
+                kind: "Repository".into(),
+                id: repository.id,
+                label: repository.name.clone(),
+            }),
+    );
+    affected_records.extend(state.items.iter().map(|item| ResetLocalDataRecord {
+        kind: "Item".into(),
+        id: item.id,
+        label: format!("{} · {}", item.human_identifier, item.title),
+    }));
+    affected_records.extend(state.worksets.iter().map(|workset| ResetLocalDataRecord {
+        kind: "Workset".into(),
+        id: workset.id,
+        label: workset.branch.clone(),
+    }));
+    affected_records.extend(state.machines.iter().map(|machine| ResetLocalDataRecord {
+        kind: "Machine".into(),
+        id: machine.id,
+        label: machine.name.clone(),
+    }));
+    affected_records.extend(state.runs.iter().map(|run| ResetLocalDataRecord {
+        kind: "Run".into(),
+        id: run.id,
+        label: format!(
+            "{:?} · Item {} · Machine {}",
+            run.state,
+            state
+                .items
+                .iter()
+                .find(|item| item.id == run.item_id)
+                .map(|item| item.human_identifier.as_str())
+                .unwrap_or("unknown"),
+            state
+                .machines
+                .iter()
+                .find(|machine| machine.id == run.machine_id)
+                .map(|machine| machine.name.as_str())
+                .unwrap_or("unknown")
+        ),
+    }));
+    affected_records.extend(state.links.iter().map(|link| ResetLocalDataRecord {
+        kind: "Link".into(),
+        id: link.id,
+        label: format!(
+            "Item {} → {}",
+            state
+                .items
+                .iter()
+                .find(|item| item.id == link.item_id)
+                .map(|item| item.human_identifier.as_str())
+                .unwrap_or("unknown"),
+            state
+                .external_objects
+                .iter()
+                .find(|object| object.id == link.external_object_id)
+                .map(|object| object.external_key.as_str())
+                .unwrap_or("unknown")
+        ),
+    }));
+    affected_records.extend(state.external_objects.iter().map(|external_object| {
+        ResetLocalDataRecord {
+            kind: "External Object".into(),
+            id: external_object.id,
+            label: external_object.external_key.clone(),
+        }
+    }));
+
+    ResetLocalDataPlan {
+        summary: ResetLocalDataSummary {
+            context_count: state.contexts.len(),
+            project_count: state.projects.len(),
+            repository_count: state.repositories.len(),
+            item_count: state.items.len(),
+            workset_count: state.worksets.len(),
+            machine_count: state.machines.len(),
+            run_count: state.runs.len(),
+            reminder_count: state.items.iter().map(|item| item.reminders.len()).sum(),
+            relationship_count: state.relationships.len(),
+            link_count: state.links.len(),
+            external_object_count: state.external_objects.len(),
+            snapshot_count: state.snapshots.len(),
+            activity_count: state.activities.len(),
+            attention_default_count: state.attention_defaults.len(),
+        },
+        affected_records,
+        worksets: state
+            .worksets
+            .iter()
+            .map(|workset| ItemDeletionWorkset {
+                id: workset.id,
+                item_id: workset.item_id,
+                root_directory: workset.root_directory.clone(),
+                branch: workset.branch.clone(),
+                archived: workset.archived,
+            })
+            .collect(),
+        state_fingerprint: serde_json::to_string(state)
+            .expect("DomainState should always be serializable"),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Event {
     CreateContext {
@@ -891,6 +1046,7 @@ pub enum Event {
         name: String,
         remote_url: String,
     },
+    ResetLocalData,
     DeleteRepository {
         repository_id: i64,
         workset_ids: Vec<i64>,
@@ -1064,6 +1220,12 @@ pub enum Effect {
     PersistRepository {
         repository: Repository,
         next_repository_id: i64,
+    },
+    ResetLocalData {
+        context: Context,
+        project: Project,
+        next_context_id: i64,
+        next_project_id: i64,
     },
     PersistItem {
         item: Item,
@@ -1634,6 +1796,8 @@ pub enum DomainError {
     ContextDeletionPlanMismatch { context_id: i64 },
     #[error("Context {context_id} has active Runs: {run_ids:?}")]
     ContextHasActiveRuns { context_id: i64, run_ids: Vec<i64> },
+    #[error("local-data reset has active Runs: {run_ids:?}")]
+    ResetHasActiveRuns { run_ids: Vec<i64> },
     #[error("the last Context cannot be deleted")]
     CannotDeleteLastContext,
     #[error("Project {project_id} belongs to another Context")]
@@ -1876,6 +2040,63 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::PersistRepository {
                     repository,
                     next_repository_id,
+                }],
+            })
+        }
+        Event::ResetLocalData => {
+            let active_run_ids = state
+                .runs
+                .iter()
+                .filter(|run| run.state != RunState::Finished)
+                .map(|run| run.id)
+                .collect::<Vec<_>>();
+            if !active_run_ids.is_empty() {
+                return Err(DomainError::ResetHasActiveRuns {
+                    run_ids: active_run_ids,
+                });
+            }
+            let context_id = state.next_context_id;
+            let next_context_id = context_id
+                .checked_add(1)
+                .ok_or(DomainError::SequenceExhausted)?;
+            let project_id = state.next_project_id;
+            let next_project_id = project_id
+                .checked_add(1)
+                .ok_or(DomainError::SequenceExhausted)?;
+            let context = Context {
+                id: context_id,
+                name: "Personal".into(),
+            };
+            let project = Project {
+                id: project_id,
+                context_id,
+                name: "Default".into(),
+                defaults: ProjectDefaults::default(),
+            };
+
+            state.next_context_id = next_context_id;
+            state.next_project_id = next_project_id;
+            state.contexts = vec![context.clone()];
+            state.projects = vec![project.clone()];
+            state.repositories.clear();
+            state.items.clear();
+            state.worksets.clear();
+            state.machines.clear();
+            state.runs.clear();
+            state.relationships.clear();
+            state.external_objects.clear();
+            state.links.clear();
+            state.snapshots.clear();
+            state.activities.clear();
+            state.attention_defaults.clear();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::ResetLocalData {
+                    context,
+                    project,
+                    next_context_id,
+                    next_project_id,
                 }],
             })
         }
@@ -3963,6 +4184,106 @@ mod tests {
                     next_project_id: 2,
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn resetting_local_data_recreates_personal_context_without_reusing_sequences() {
+        let mut state = state_with_contexts(&[(8, "Work")]);
+        state.next_context_id = 9;
+        state.next_project_id = 14;
+        state.repositories.push(Repository {
+            id: 1,
+            project_id: 1,
+            name: "app".into(),
+            remote_url: "https://example.com/app.git".into(),
+        });
+        state.items.push(Item {
+            id: 1,
+            human_identifier: "MC-1".into(),
+            title: "Old work".into(),
+            project_id: 1,
+            status: ItemStatus::Active,
+            notes: "old notes".into(),
+            reminders: vec![Reminder {
+                id: 1,
+                remind_at: "2026-09-20T12:00".into(),
+            }],
+        });
+        state.worksets.push(Workset {
+            id: 1,
+            item_id: 1,
+            root_directory: "/tmp/workset".into(),
+            branch: "main".into(),
+            archived: false,
+            repositories: vec![WorksetRepository {
+                repository_id: 1,
+                branch_override: None,
+                base_branch_override: None,
+                current_branch: "main".into(),
+                is_dirty: false,
+            }],
+        });
+
+        let decision = decide(state, Event::ResetLocalData).expect("reset should succeed");
+
+        assert_eq!(
+            decision.state.contexts,
+            vec![Context {
+                id: 9,
+                name: "Personal".into(),
+            }]
+        );
+        assert_eq!(
+            decision.state.projects,
+            vec![Project {
+                id: 14,
+                context_id: 9,
+                name: "Default".into(),
+                defaults: ProjectDefaults::default(),
+            }]
+        );
+        assert_eq!(decision.state.next_context_id, 10);
+        assert_eq!(decision.state.next_project_id, 15);
+        assert!(decision.state.repositories.is_empty());
+        assert!(decision.state.items.is_empty());
+        assert!(decision.state.worksets.is_empty());
+        assert!(decision.state.machines.is_empty());
+        assert!(decision.state.runs.is_empty());
+        assert!(decision.state.relationships.is_empty());
+        assert!(decision.state.external_objects.is_empty());
+        assert!(decision.state.links.is_empty());
+        assert!(decision.state.snapshots.is_empty());
+        assert!(decision.state.activities.is_empty());
+        assert!(decision.state.attention_defaults.is_empty());
+        assert!(matches!(
+            decision.effects.as_slice(),
+            [Effect::ResetLocalData { .. }]
+        ));
+    }
+
+    #[test]
+    fn resetting_local_data_rejects_active_runs_at_the_domain_seam() {
+        let mut state = state_with_context(1, "Work");
+        state.runs.push(Run {
+            id: 1,
+            item_id: 1,
+            workset_id: 1,
+            machine_id: 1,
+            agent: AgentKind::Codex,
+            execution_profile: ExecutionProfile::Implement,
+            prompt: "keep working".into(),
+            working_directory: "/tmp/workset".into(),
+            session_name: "mission".into(),
+            pane_id: "%1".into(),
+            started_at: 1,
+            state: RunState::Working,
+            pane_status: RunPaneStatus::Available,
+        });
+
+        assert_eq!(
+            decide(state, Event::ResetLocalData),
+            Err(DomainError::ResetHasActiveRuns { run_ids: vec![1] })
         );
     }
 

@@ -600,6 +600,15 @@ impl SqliteStore {
             .map_err(StoreError::from)
     }
 
+    pub fn audit_entry_count(&self) -> Result<usize, StoreError> {
+        self.connection
+            .query_row("SELECT COUNT(*) FROM audit_entries", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|count| count as usize)
+            .map_err(StoreError::from)
+    }
+
     pub fn apply(&mut self, effects: &[Effect]) -> Result<(), StoreError> {
         self.apply_with_audit(effects, &[])
     }
@@ -662,6 +671,55 @@ impl SqliteStore {
                     transaction.execute(
                         "UPDATE metadata SET value = ?1 WHERE key = 'next_repository_id'",
                         params![next_repository_id],
+                    )?;
+                }
+                Effect::ResetLocalData {
+                    context,
+                    project,
+                    next_context_id,
+                    next_project_id,
+                } => {
+                    transaction.execute_batch(
+                        "DELETE FROM audit_entries;
+                         DELETE FROM link_attention_state;
+                         DELETE FROM activities;
+                         DELETE FROM external_snapshots;
+                         DELETE FROM external_links;
+                         DELETE FROM external_objects;
+                         DELETE FROM context_attention_defaults;
+                         DELETE FROM item_relationships;
+                         DELETE FROM reminders;
+                         DELETE FROM runs;
+                         DELETE FROM workset_repositories;
+                         DELETE FROM worksets;
+                         DELETE FROM items;
+                         DELETE FROM repositories;
+                         DELETE FROM machines;
+                         DELETE FROM projects;
+                         DELETE FROM contexts;",
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO contexts (id, name) VALUES (?1, ?2)",
+                        params![context.id, context.name],
+                    )?;
+                    transaction.execute(
+                        "INSERT INTO projects
+                            (id, context_id, name, default_item_status)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            project.id,
+                            project.context_id,
+                            project.name,
+                            item_status_as_str(project.defaults.item_status),
+                        ],
+                    )?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_context_id'",
+                        params![next_context_id],
+                    )?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_project_id'",
+                        params![next_project_id],
                     )?;
                 }
                 Effect::PersistItem {
@@ -1879,6 +1937,159 @@ mod tests {
             .expect("audit history should survive reopening");
         assert_eq!(history.len(), 2);
         assert!(history.iter().all(|entry| entry.recorded_at > 0));
+    }
+
+    #[test]
+    fn resetting_local_data_clears_every_local_table_and_preserves_setup_and_sequences() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+        let mut store = SqliteStore::open(&path).expect("database should open");
+        store
+            .set_setting("setup_completed", "true")
+            .expect("setup setting should persist");
+        store
+            .set_setting("provider_choice", "github")
+            .expect("provider setting should persist");
+        store
+            .set_setting("tmux_executable_path", "/custom/tmux")
+            .expect("dependency setting should persist");
+        store
+            .connection
+            .execute_batch(
+                r#"INSERT INTO contexts (id, name) VALUES (8, 'Work');
+                 INSERT INTO projects (id, context_id, name, default_item_status)
+                     VALUES (14, 8, 'Billing', 'Active');
+                 INSERT INTO repositories (id, project_id, name, remote_url)
+                     VALUES (1, 1, 'app', 'https://example.com/app.git');
+                 INSERT INTO items (id, human_identifier, title, project_id, status, notes)
+                     VALUES (1, 'MC-1', 'Old work', 1, 'Active', 'old notes');
+                 INSERT INTO reminders (id, item_id, remind_at)
+                     VALUES (1, 1, '2026-09-20T12:00');
+                 INSERT INTO worksets (id, item_id, root_directory, branch, archived)
+                     VALUES (1, 1, '/tmp/workset', 'main', 0);
+                 INSERT INTO workset_repositories
+                     (workset_id, repository_id, current_branch, is_dirty)
+                     VALUES (1, 1, 'main', 0);
+                 INSERT INTO machines
+                     (id, context_id, name, socket_name, transport_json,
+                      last_observed, last_observed_at)
+                     VALUES (1, 1, 'Local Mac', 'mission', '{"kind":"local"}',
+                             'available', 10);
+                 INSERT INTO runs
+                     (id, item_id, workset_id, machine_id, agent, execution_profile,
+                      prompt, working_directory, session_name, pane_id, started_at,
+                      state, pane_status)
+                     VALUES (1, 1, 1, 1, 'codex', 'implement', 'prompt',
+                             '/tmp/workset', 'session', '%1', 10, 'finished', 'available');
+                 INSERT INTO item_relationships (from_item_id, to_item_id, kind)
+                     VALUES (1, 1, 'related_to');
+                 INSERT INTO external_objects
+                     (id, provider, kind, external_key, canonical_url)
+                     VALUES (1, 'github', 'issue', 'acme/app#1', 'https://github.com/acme/app/issues/1');
+                 INSERT INTO external_links (id, item_id, external_object_id)
+                     VALUES (1, 1, 1);
+                 INSERT INTO external_snapshots
+                     (external_object_id, title, state, metadata_json, fetched_at)
+                     VALUES (1, 'Old issue', 'OPEN', '[]', 10);
+                 INSERT INTO link_attention_state
+                     (link_id, reviewed_activity_id, title_attention, state_attention,
+                      metadata_attention, watch_until, review_at)
+                     VALUES (1, 0, 1, 1, 1, NULL, NULL);
+                 INSERT INTO activities
+                     (id, external_object_id, observed_at, changes_json)
+                     VALUES (1, 1, 10, '[]');
+                 INSERT INTO context_attention_defaults
+                     (context_id, object_kind, title_attention, state_attention,
+                      metadata_attention)
+                     VALUES (1, 'issue', 1, 1, 1);
+                 INSERT INTO audit_entries (id, recorded_at, action_json)
+                     VALUES (1, 10, '{"action":"itemCreated","item_id":1}');
+                 UPDATE metadata SET value = 9 WHERE key = 'next_context_id';
+                 UPDATE metadata SET value = 15 WHERE key = 'next_project_id';
+                 UPDATE metadata SET value = 4 WHERE key = 'next_item_id';
+                 UPDATE metadata SET value = 8 WHERE key = 'next_item_number';
+                 UPDATE metadata SET value = 6 WHERE key = 'next_repository_id';
+                 UPDATE metadata SET value = 7 WHERE key = 'next_workset_id';
+                 UPDATE metadata SET value = 8 WHERE key = 'next_machine_id';
+                 UPDATE metadata SET value = 9 WHERE key = 'next_run_id';
+                 UPDATE metadata SET value = 10 WHERE key = 'next_external_object_id';
+                 UPDATE metadata SET value = 11 WHERE key = 'next_link_id';
+                 UPDATE metadata SET value = 12 WHERE key = 'next_activity_id';
+                 UPDATE metadata SET value = 13 WHERE key = 'next_reminder_id';
+                 UPDATE metadata SET value = 2 WHERE key = 'next_audit_id';"#,
+            )
+            .expect("local data should be seeded");
+
+        let decision = decide(
+            store.load_state().expect("state should load"),
+            Event::ResetLocalData,
+        )
+        .expect("reset should be decided");
+        store
+            .apply_with_audit(
+                &decision.effects,
+                &[AuditAction::ResetBoundary {
+                    context_id: 9,
+                    project_id: 15,
+                }],
+            )
+            .expect("reset should persist atomically");
+
+        let reopened = SqliteStore::open(&path).expect("database should reopen");
+        let state = reopened.load_state().expect("reset state should load");
+        assert_eq!(state.contexts.len(), 1);
+        assert_eq!(state.contexts[0].name, "Personal");
+        assert_eq!(state.projects.len(), 1);
+        assert_eq!(state.projects[0].name, "Default");
+        assert_eq!(state.next_context_id, 10);
+        assert_eq!(state.next_project_id, 16);
+        assert_eq!(state.next_item_id, 4);
+        assert_eq!(state.next_item_number, 8);
+        assert_eq!(state.next_repository_id, 6);
+        assert_eq!(state.next_workset_id, 7);
+        assert_eq!(state.next_machine_id, 8);
+        assert_eq!(state.next_run_id, 9);
+        assert_eq!(state.next_external_object_id, 10);
+        assert_eq!(state.next_link_id, 11);
+        assert_eq!(state.next_activity_id, 12);
+        assert_eq!(state.next_reminder_id, 13);
+        assert!(state.repositories.is_empty());
+        assert!(state.items.is_empty());
+        assert!(state.worksets.is_empty());
+        assert!(state.machines.is_empty());
+        assert!(state.runs.is_empty());
+        assert!(state.relationships.is_empty());
+        assert!(state.external_objects.is_empty());
+        assert!(state.links.is_empty());
+        assert!(state.snapshots.is_empty());
+        assert!(state.activities.is_empty());
+        assert!(state.attention_defaults.is_empty());
+        assert_eq!(
+            reopened.setting("setup_completed").unwrap().as_deref(),
+            Some("true")
+        );
+        assert_eq!(
+            reopened.setting("provider_choice").unwrap().as_deref(),
+            Some("github")
+        );
+        assert_eq!(
+            reopened.setting("tmux_executable_path").unwrap().as_deref(),
+            Some("/custom/tmux")
+        );
+        let history = reopened
+            .list_audit_history()
+            .expect("reset boundary should be readable");
+        assert!(matches!(
+            history.as_slice(),
+            [AuditEntry {
+                id: 2,
+                action: AuditAction::ResetBoundary {
+                    context_id: 9,
+                    project_id: 15,
+                },
+                ..
+            }]
+        ));
     }
 
     #[test]

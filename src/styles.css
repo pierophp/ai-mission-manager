@@ -809,6 +809,24 @@ button:disabled {
   color: #91432f;
 }
 
+.danger-zone {
+  display: grid;
+  gap: 12px;
+  margin-top: 24px;
+  padding: 16px;
+  border: 1px solid #d5aa8c;
+  border-radius: 12px;
+  background: #fff8f2;
+}
+
+.danger-zone h3 {
+  color: #91432f;
+}
+
+.reset-preview {
+  margin: 0;
+}
+
 .item-context span,
 .search-result p span {
   color: #c4b8aa;
