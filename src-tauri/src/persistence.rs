@@ -427,25 +427,28 @@ impl SqliteStore {
         };
         let runs = {
             let mut statement = self.connection.prepare(
-                "SELECT id, item_id, workset_id, workspace_id, machine_id, agent, execution_profile,
+                "SELECT id, item_id, workset_id, workspace_id, repository_id, worktree_id,
+                        machine_id, agent, execution_profile,
                         prompt, working_directory, session_name, pane_id, started_at, state,
                         pane_status, direct_checkouts_json
                  FROM runs
                  ORDER BY id",
             )?;
             let rows = statement.query_map([], |row| {
-                let agent: String = row.get(5)?;
-                let execution_profile: String = row.get(6)?;
-                let direct_checkouts_json: String = row.get(14)?;
+                let agent: String = row.get(7)?;
+                let execution_profile: String = row.get(8)?;
+                let direct_checkouts_json: String = row.get(16)?;
                 Ok(Run {
                     id: row.get(0)?,
                     item_id: row.get(1)?,
                     workset_id: row.get(2)?,
                     workspace_id: row.get(3)?,
-                    machine_id: row.get(4)?,
+                    repository_id: row.get(4)?,
+                    worktree_id: row.get(5)?,
+                    machine_id: row.get(6)?,
                     agent: parse_agent_kind(&agent).map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            5,
+                            7,
                             rusqlite::types::Type::Text,
                             Box::new(error),
                         )
@@ -453,28 +456,28 @@ impl SqliteStore {
                     execution_profile: parse_execution_profile(&execution_profile).map_err(
                         |error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                6,
+                                8,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
                         },
                     )?,
-                    prompt: row.get(7)?,
-                    working_directory: row.get(8)?,
-                    session_name: row.get(9)?,
-                    pane_id: row.get(10)?,
-                    started_at: row.get(11)?,
-                    state: parse_run_state(&row.get::<_, String>(12)?).map_err(|error| {
+                    prompt: row.get(9)?,
+                    working_directory: row.get(10)?,
+                    session_name: row.get(11)?,
+                    pane_id: row.get(12)?,
+                    started_at: row.get(13)?,
+                    state: parse_run_state(&row.get::<_, String>(14)?).map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            12,
+                            14,
                             rusqlite::types::Type::Text,
                             Box::new(error),
                         )
                     })?,
-                    pane_status: parse_run_pane_status(&row.get::<_, String>(13)?).map_err(
+                    pane_status: parse_run_pane_status(&row.get::<_, String>(15)?).map_err(
                         |error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                13,
+                                15,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
@@ -483,7 +486,7 @@ impl SqliteStore {
                     direct_checkouts: serde_json::from_str(&direct_checkouts_json).map_err(
                         |error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                14,
+                                16,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
@@ -1065,15 +1068,18 @@ impl SqliteStore {
                 Effect::PersistRun { run, next_run_id } => {
                     transaction.execute(
                         "INSERT INTO runs
-                            (id, item_id, workset_id, workspace_id, machine_id, agent,
+                            (id, item_id, workset_id, workspace_id, repository_id, worktree_id,
+                            machine_id, agent,
                             execution_profile, prompt, working_directory, session_name, pane_id,
                             started_at, state, pane_status, direct_checkouts_json)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                         params![
                             run.id,
                             run.item_id,
                             run.workset_id,
                             run.workspace_id,
+                            run.repository_id,
+                            run.worktree_id,
                             run.machine_id,
                             agent_kind_as_str(run.agent),
                             execution_profile_as_str(run.execution_profile),
@@ -1804,6 +1810,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              item_id INTEGER NOT NULL REFERENCES items(id),
              workset_id INTEGER REFERENCES worksets(id),
              workspace_id INTEGER REFERENCES workspaces(id),
+             repository_id INTEGER REFERENCES repositories(id),
+             worktree_id INTEGER REFERENCES worktrees(id),
              machine_id INTEGER NOT NULL REFERENCES machines(id),
              agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
              execution_profile TEXT NOT NULL
@@ -1942,6 +1950,12 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
             [],
         )?;
     }
+    if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "repository_id") {
+        connection.execute("ALTER TABLE runs ADD COLUMN repository_id INTEGER", [])?;
+    }
+    if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "worktree_id") {
+        connection.execute("ALTER TABLE runs ADD COLUMN worktree_id INTEGER", [])?;
+    }
     ensure_sequence_at_least(connection, "next_context_id", "contexts", "id")?;
     ensure_sequence_at_least(connection, "next_project_id", "projects", "id")?;
     ensure_sequence_at_least(connection, "next_item_id", "items", "id")?;
@@ -1978,6 +1992,8 @@ fn migrate_runs_for_workspace_execution(connection: &mut Connection) -> Result<(
              item_id INTEGER NOT NULL REFERENCES items(id),
              workset_id INTEGER REFERENCES worksets(id),
              workspace_id INTEGER REFERENCES workspaces(id),
+             repository_id INTEGER REFERENCES repositories(id),
+             worktree_id INTEGER REFERENCES worktrees(id),
              machine_id INTEGER NOT NULL REFERENCES machines(id),
              agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
              execution_profile TEXT NOT NULL
@@ -1992,11 +2008,12 @@ fn migrate_runs_for_workspace_execution(connection: &mut Connection) -> Result<(
              direct_checkouts_json TEXT NOT NULL DEFAULT '[]'
          );
          INSERT INTO runs (
-             id, item_id, workset_id, workspace_id, machine_id, agent, execution_profile,
+             id, item_id, workset_id, workspace_id, repository_id, worktree_id, machine_id,
+             agent, execution_profile,
              prompt, working_directory, session_name, pane_id, started_at, state, pane_status,
              direct_checkouts_json
          )
-         SELECT id, item_id, workset_id, NULL, machine_id, agent, execution_profile,
+         SELECT id, item_id, workset_id, NULL, NULL, NULL, machine_id, agent, execution_profile,
                 prompt, working_directory, session_name, pane_id, started_at, state, pane_status,
                 '[]'
          FROM runs_legacy;

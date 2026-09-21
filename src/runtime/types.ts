@@ -307,6 +307,7 @@ export type ItemView = {
   worksets: Workset[];
   archived_worksets: Workset[];
   workspaces: Workspace[];
+  worktrees: Worktree[];
   runs: Run[];
   links: ExternalLinkView[];
 };

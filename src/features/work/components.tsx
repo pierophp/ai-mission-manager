@@ -222,6 +222,7 @@ export function ItemCard({
   const [runPromptNeedsCompose, setRunPromptNeedsCompose] = useState(false);
   const [directRunWorkspaceId, setDirectRunWorkspaceId] = useState<number>();
   const [directRunMachineId, setDirectRunMachineId] = useState<number>();
+  const [directRunRepositoryId, setDirectRunRepositoryId] = useState<number>();
   const [directRunPreview, setDirectRunPreview] =
     useState<DirectRunPreview>();
   const [directRunDirtyConfirmed, setDirectRunDirtyConfirmed] =
@@ -676,6 +677,7 @@ export function ItemCard({
   async function openDirectRunPreview(workspace: Workspace) {
     setDirectRunWorkspaceId(workspace.id);
     setDirectRunMachineId(undefined);
+    setDirectRunRepositoryId(undefined);
     setDirectRunPreview(undefined);
     setDirectRunDirtyConfirmed(false);
     setDirectRunSharedConfirmed(false);
@@ -722,6 +724,7 @@ export function ItemCard({
     if (
       !directRunWorkspaceId ||
       !directRunPreview ||
+      !directRunRepositoryId ||
       !runPrompt.trim() ||
       runPromptNeedsCompose
     ) {
@@ -738,6 +741,7 @@ export function ItemCard({
       workActions.startDirectRun({
         itemId: view.item.id,
         workspaceId: directRunWorkspaceId,
+        primaryRepositoryId: directRunRepositoryId,
         machineId: directRunMachineId ?? null,
         agent: runAgent,
         executionProfile: runProfile,
@@ -1175,6 +1179,30 @@ export function ItemCard({
                   </div>
                 ))}
               </div>
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Primary Repository / working directory</span>
+                <NativeSelect
+                  value={directRunRepositoryId ?? ""}
+                  onChange={(event) =>
+                    setDirectRunRepositoryId(
+                      Number(event.target.value) || undefined,
+                    )
+                  }
+                  disabled={isSaving}
+                >
+                  <NativeSelectOption value="">
+                    Choose the checkout for this Run
+                  </NativeSelectOption>
+                  {directRunPreview.checkoutDetails.map((checkout) => (
+                    <NativeSelectOption
+                      value={checkout.repositoryId}
+                      key={checkout.repositoryId}
+                    >
+                      {checkout.repositoryName} · {checkout.path}
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+              </label>
               {[...new Set(directRunPreview.currentBranches)].length > 1 && (
                 <Alert>
                   <AlertTitle>Repositories are on different branches</AlertTitle>
@@ -1303,6 +1331,7 @@ export function ItemCard({
                   type="submit"
                   disabled={
                     isSaving ||
+                    !directRunRepositoryId ||
                     !runPrompt.trim() ||
                     runPromptNeedsCompose ||
                     (directRunPreview.dirtyRepositoryIds.length > 0 &&
@@ -1876,6 +1905,26 @@ export function ItemCard({
                 run.workset_id === null
                   ? undefined
                   : findWorkset(view, run.workset_id);
+              const runWorkspace =
+                run.workspace_id === null
+                  ? undefined
+                  : view.workspaces.find(
+                      (workspace) => workspace.id === run.workspace_id,
+                    );
+              const runRepository =
+                run.repository_id === null
+                  ? run.direct_checkouts.find(
+                      (checkout) => checkout.path === run.working_directory,
+                    )?.repositoryId
+                  : run.repository_id;
+              const runWorktree =
+                run.worktree_id === null
+                  ? view.worktrees.find(
+                      (worktree) => worktree.path === run.working_directory,
+                    )
+                  : view.worktrees.find(
+                      (worktree) => worktree.id === run.worktree_id,
+                    );
               return (
                 <Card size="sm" className="bg-muted/20" key={run.id}>
                   <CardContent className="grid gap-2 pt-4">
@@ -1896,6 +1945,17 @@ export function ItemCard({
                     <code className="break-all font-mono text-xs">
                       {run.working_directory}
                     </code>
+                    <span className="text-xs text-muted-foreground">
+                      {runWorkspace
+                        ? `Workspace #${runWorkspace.id}`
+                        : runWorkset
+                          ? `Workset ${runWorkset.branch}`
+                          : "Unscoped"}
+                      {runRepository !== undefined
+                        ? ` · Repository ${repositoryName(repositories, runRepository)}`
+                        : ""}
+                      {runWorktree ? " · Worktree" : runWorkspace ? " · Direct checkout" : ""}
+                    </span>
                     <span className="text-xs text-muted-foreground">
                       Session {run.session_name} · Pane {run.pane_id}
                     </span>
@@ -3227,10 +3287,21 @@ export function RunSuggestionCard({
           </span>
         </div>
         <div className="grid gap-1 text-xs">
-          <strong>Likely Workset: {suggestion.worksetBranch}</strong>
+          <strong>
+            {suggestion.workspaceId
+              ? `Workspace #${suggestion.workspaceId} · ${
+                  suggestion.worktreeId ? "Worktree" : "Direct checkout"
+                }`
+              : `Likely Workset: ${suggestion.worksetBranch}`}
+          </strong>
           <span className="break-all text-muted-foreground">
-            {suggestion.worksetRootDirectory}
+            {suggestion.locationPath ?? suggestion.worksetRootDirectory}
           </span>
+          {suggestion.repositoryId !== null && (
+            <span className="text-muted-foreground">
+              Repository #{suggestion.repositoryId}
+            </span>
+          )}
           <code className="break-all text-muted-foreground">
             Session {suggestion.sessionName} · Pane {suggestion.paneId} ·{" "}
             {suggestion.currentPath}

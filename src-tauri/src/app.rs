@@ -1558,6 +1558,7 @@ impl Runtime {
         item_id: i64,
         workspace_id: i64,
         machine_id: Option<i64>,
+        primary_repository_id: i64,
         agent: AgentKind,
         execution_profile: ExecutionProfile,
         prompt: String,
@@ -1584,7 +1585,8 @@ impl Runtime {
             );
         }
         let working_directory = current_checkouts
-            .first()
+            .iter()
+            .find(|checkout| checkout.repository_id == primary_repository_id)
             .map(|checkout| checkout.path.clone())
             .ok_or_else(|| "Workspace has no selected Repositories".to_owned())?;
         let run_id = self.state.next_run_id;
@@ -1604,6 +1606,7 @@ impl Runtime {
                 started_at: current_unix_seconds(),
                 prompt_selection: prompt_selection.clone(),
                 checkouts: current_checkouts.clone(),
+                repository_id: primary_repository_id,
                 allow_dirty,
                 allow_shared_checkouts,
             },
@@ -1696,6 +1699,7 @@ impl Runtime {
                 started_at: current_unix_seconds(),
                 prompt_selection,
                 checkouts: after_launch,
+                repository_id: primary_repository_id,
                 allow_dirty,
                 allow_shared_checkouts,
             },
@@ -1843,26 +1847,58 @@ impl Runtime {
         )
         .into_iter()
         .find(|candidate| {
-            candidate.workset_id == suggestion.workset_id
-                && candidate.item_id == suggestion.item_id
+            candidate.item_id == suggestion.item_id
                 && candidate.machine_id == suggestion.machine_id
                 && candidate.session_name == suggestion.session_name
                 && candidate.pane_id == suggestion.pane_id
+                && candidate.workspace_id == suggestion.workspace_id
+                && candidate.repository_id == suggestion.repository_id
+                && candidate.worktree_id == suggestion.worktree_id
+                && candidate.workset_id == suggestion.workset_id
         })
-        .ok_or_else(|| "The suggested agent no longer matches that Workset".to_owned())?;
-        let decision = decide(
-            self.state.clone(),
-            Event::AttachRun {
-                item_id: canonical.item_id,
-                workset_id: canonical.workset_id,
-                machine_id: canonical.machine_id,
-                agent: canonical.agent,
-                working_directory: canonical.workset_root_directory,
-                session_name: canonical.session_name,
-                pane_id: canonical.pane_id,
-                attached_at: current_unix_seconds(),
-            },
-        )
+        .ok_or_else(|| {
+            "The suggested agent no longer matches its registered working location".to_owned()
+        })?;
+        let decision = if let Some(workspace_id) = canonical.workspace_id {
+            let repository_id = canonical
+                .repository_id
+                .ok_or_else(|| "The suggested Workspace location has no Repository".to_owned())?;
+            decide(
+                self.state.clone(),
+                Event::AttachWorkspaceRun {
+                    item_id: canonical.item_id,
+                    workspace_id,
+                    worktree_id: canonical.worktree_id,
+                    repository_id,
+                    machine_id: canonical.machine_id,
+                    agent: canonical.agent,
+                    working_directory: canonical
+                        .location_path
+                        .clone()
+                        .unwrap_or(canonical.current_path.clone()),
+                    session_name: canonical.session_name,
+                    pane_id: canonical.pane_id,
+                    attached_at: current_unix_seconds(),
+                },
+            )
+        } else {
+            decide(
+                self.state.clone(),
+                Event::AttachRun {
+                    item_id: canonical.item_id,
+                    workset_id: canonical.workset_id,
+                    machine_id: canonical.machine_id,
+                    agent: canonical.agent,
+                    working_directory: canonical
+                        .location_path
+                        .clone()
+                        .unwrap_or(canonical.current_path.clone()),
+                    session_name: canonical.session_name,
+                    pane_id: canonical.pane_id,
+                    attached_at: current_unix_seconds(),
+                },
+            )
+        }
         .map_err(|error| error.to_string())?;
         let run = decision
             .state
@@ -4737,6 +4773,7 @@ pub fn start_direct_run(
     item_id: i64,
     workspace_id: i64,
     machine_id: Option<i64>,
+    primary_repository_id: i64,
     agent: AgentKind,
     execution_profile: ExecutionProfile,
     prompt: String,
@@ -4753,6 +4790,7 @@ pub fn start_direct_run(
             item_id,
             workspace_id,
             machine_id,
+            primary_repository_id,
             agent,
             execution_profile,
             prompt,
@@ -6029,6 +6067,8 @@ mod tests {
             state: RunState::Working,
             pane_status: RunPaneStatus::Available,
             workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
             direct_checkouts: Vec::new(),
         });
 
@@ -6117,6 +6157,8 @@ mod tests {
             state: RunState::Working,
             pane_status: RunPaneStatus::Available,
             workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
             direct_checkouts: Vec::new(),
         });
 
@@ -6162,6 +6204,8 @@ mod tests {
             state: RunState::Unknown,
             pane_status: RunPaneStatus::Unknown,
             workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
             direct_checkouts: Vec::new(),
         });
 
@@ -6231,6 +6275,8 @@ mod tests {
                 state: RunState::Working,
                 pane_status: RunPaneStatus::Unknown,
                 workspace_id: None,
+                repository_id: None,
+                worktree_id: None,
                 direct_checkouts: Vec::new(),
             },
             Run {
@@ -6248,6 +6294,8 @@ mod tests {
                 state: RunState::Blocked,
                 pane_status: RunPaneStatus::Unknown,
                 workspace_id: None,
+                repository_id: None,
+                worktree_id: None,
                 direct_checkouts: Vec::new(),
             },
             Run {
@@ -6265,6 +6313,8 @@ mod tests {
                 state: RunState::Finished,
                 pane_status: RunPaneStatus::Unknown,
                 workspace_id: None,
+                repository_id: None,
+                worktree_id: None,
                 direct_checkouts: Vec::new(),
             },
         ]);

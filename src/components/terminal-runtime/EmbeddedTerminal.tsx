@@ -182,13 +182,16 @@ export function EmbeddedTerminal({
           <h2 id="embedded-terminal-heading" className="font-heading text-xl font-medium text-[var(--terminal-heading)]">
             {activePane.label}
           </h2>
+          <code className="mt-1 block break-all text-xs text-[var(--terminal-muted)]">
+            {activePane.currentPath || "Working directory unavailable"}
+          </code>
           <p className="mt-1.5 text-xs text-[var(--terminal-muted)]">{status}</p>
         </div>
         <Button type="button" variant="secondary" onClick={onClose}>
           Close view
         </Button>
       </div>
-      <div className="flex gap-1.5 overflow-x-auto pb-0.5" role="tablist" aria-label="Panes in this Workset">
+      <div className="flex gap-1.5 overflow-x-auto pb-0.5" role="tablist" aria-label="Panes in this Run">
         {panes.map((pane) => (
           <button
             type="button"

@@ -272,6 +272,8 @@ pub struct Run {
     pub item_id: i64,
     pub workset_id: Option<i64>,
     pub workspace_id: Option<i64>,
+    pub repository_id: Option<i64>,
+    pub worktree_id: Option<i64>,
     pub machine_id: i64,
     pub agent: AgentKind,
     pub execution_profile: ExecutionProfile,
@@ -311,6 +313,14 @@ pub struct RunSuggestion {
     pub item_title: String,
     pub context_id: i64,
     pub context_name: String,
+    #[serde(default)]
+    pub workspace_id: Option<i64>,
+    #[serde(default)]
+    pub repository_id: Option<i64>,
+    #[serde(default)]
+    pub worktree_id: Option<i64>,
+    #[serde(default)]
+    pub location_path: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1303,12 +1313,39 @@ pub enum Event {
         started_at: i64,
         prompt_selection: RunPromptSelection,
         checkouts: Vec<RunCheckout>,
+        repository_id: i64,
         allow_dirty: bool,
         allow_shared_checkouts: bool,
+    },
+    StartWorktreeRun {
+        item_id: i64,
+        workspace_id: i64,
+        worktree_id: i64,
+        machine_id: i64,
+        agent: AgentKind,
+        execution_profile: ExecutionProfile,
+        prompt: String,
+        working_directory: String,
+        session_name: String,
+        pane_id: String,
+        started_at: i64,
+        prompt_selection: RunPromptSelection,
     },
     AttachRun {
         item_id: i64,
         workset_id: i64,
+        machine_id: i64,
+        agent: AgentKind,
+        working_directory: String,
+        session_name: String,
+        pane_id: String,
+        attached_at: i64,
+    },
+    AttachWorkspaceRun {
+        item_id: i64,
+        workspace_id: i64,
+        worktree_id: Option<i64>,
+        repository_id: i64,
         machine_id: i64,
         agent: AgentKind,
         working_directory: String,
@@ -2084,6 +2121,15 @@ pub enum DomainError {
     WorkspaceHasRuns { workspace_id: i64 },
     #[error("Workspace {workspace_id} belongs to another Item")]
     WorkspaceItemMismatch { workspace_id: i64, item_id: i64 },
+    #[error("Repository {repository_id} is not selected in Workspace {workspace_id}")]
+    RunRepositoryNotSelected {
+        repository_id: i64,
+        workspace_id: i64,
+    },
+    #[error("Worktree {worktree_id} does not belong to Workspace {workspace_id}")]
+    RunWorktreeWorkspaceMismatch { worktree_id: i64, workspace_id: i64 },
+    #[error("Run working directory does not match Repository {repository_id}")]
+    RunWorkingDirectoryRepositoryMismatch { repository_id: i64 },
     #[error("Repository {repository_id} is already in Workspace {workspace_id}")]
     RepositoryAlreadyInWorkspace {
         repository_id: i64,
@@ -2137,6 +2183,8 @@ pub enum DomainError {
     EmptyDirectRunCheckouts,
     #[error("Direct Run checkout for Repository {repository_id} is invalid")]
     InvalidDirectRunCheckout { repository_id: i64 },
+    #[error("Direct Run must choose a primary Repository")]
+    MissingDirectRunRepository,
     #[error("Direct Run has dirty checkouts for Repositories {repository_ids:?}; confirm the warning before starting")]
     DirectRunDirtyCheckouts { repository_ids: Vec<i64> },
     #[error("Direct Run shares checkout paths with active Runs {run_ids:?}: {paths:?}; confirm the shared checkout warning before starting")]
@@ -3578,6 +3626,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 item_id,
                 workset_id: Some(workset_id),
                 workspace_id: None,
+                repository_id: None,
+                worktree_id: None,
                 machine_id,
                 agent,
                 execution_profile,
@@ -3610,6 +3660,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             started_at,
             prompt_selection,
             checkouts,
+            repository_id,
             allow_dirty,
             allow_shared_checkouts,
         } => {
@@ -3638,6 +3689,16 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             }
             if checkouts.is_empty() {
                 return Err(DomainError::EmptyDirectRunCheckouts);
+            }
+            if !workspace
+                .repositories
+                .iter()
+                .any(|selected| selected.repository_id == repository_id)
+            {
+                return Err(DomainError::RunRepositoryNotSelected {
+                    repository_id,
+                    workspace_id,
+                });
             }
             let selected_repository_ids = workspace
                 .repositories
@@ -3724,6 +3785,14 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     repository_id: checkouts[0].repository_id,
                 });
             }
+            if checkouts
+                .iter()
+                .find(|checkout| checkout.repository_id == repository_id)
+                .map(|checkout| checkout.path.as_str())
+                != Some(working_directory.as_str())
+            {
+                return Err(DomainError::RunWorkingDirectoryRepositoryMismatch { repository_id });
+            }
             let session_name = clean_name(session_name, DomainError::EmptyRunSessionName)?;
             let pane_id = clean_name(pane_id, DomainError::EmptyRunPaneId)?;
             if state.runs.iter().any(|run| {
@@ -3744,6 +3813,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 item_id,
                 workset_id: None,
                 workspace_id: Some(workspace_id),
+                repository_id: Some(repository_id),
+                worktree_id: None,
                 machine_id,
                 agent,
                 execution_profile,
@@ -3755,6 +3826,129 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 state: RunState::Unknown,
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: checkouts,
+            };
+            state.next_run_id = next_run_id;
+            state.runs.push(run.clone());
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRun { run, next_run_id }],
+            })
+        }
+        Event::StartWorktreeRun {
+            item_id,
+            workspace_id,
+            worktree_id,
+            machine_id,
+            agent,
+            execution_profile,
+            prompt,
+            working_directory,
+            session_name,
+            pane_id,
+            started_at,
+            prompt_selection,
+        } => {
+            let context_id = item_context_id(&state, item_id)?;
+            let workspace = state
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+                .ok_or(DomainError::WorkspaceNotFound { workspace_id })?;
+            if workspace.item_id != item_id {
+                return Err(DomainError::WorkspaceItemMismatch {
+                    workspace_id,
+                    item_id,
+                });
+            }
+            let worktree = state
+                .worktrees
+                .iter()
+                .find(|worktree| worktree.id == worktree_id)
+                .ok_or(DomainError::WorktreeNotFound { worktree_id })?;
+            if worktree.workspace_id != workspace_id {
+                return Err(DomainError::RunWorktreeWorkspaceMismatch {
+                    worktree_id,
+                    workspace_id,
+                });
+            }
+            if worktree.machine_id != machine_id {
+                return Err(DomainError::MachineContextMismatch {
+                    machine_id,
+                    context_id,
+                });
+            }
+            let machine = state
+                .machines
+                .iter()
+                .find(|machine| machine.id == machine_id)
+                .ok_or(DomainError::MachineNotFound { machine_id })?;
+            if machine.context_id != context_id {
+                return Err(DomainError::MachineContextMismatch {
+                    machine_id,
+                    context_id,
+                });
+            }
+            if !workspace
+                .repositories
+                .iter()
+                .any(|repository| repository.repository_id == worktree.repository_id)
+            {
+                return Err(DomainError::RunRepositoryNotSelected {
+                    repository_id: worktree.repository_id,
+                    workspace_id,
+                });
+            }
+            for external_object_id in prompt_selection.external_object_ids {
+                if !state.links.iter().any(|link| {
+                    link.item_id == item_id && link.external_object_id == external_object_id
+                }) {
+                    return Err(DomainError::RunPromptSourceNotLinked {
+                        external_object_id,
+                        item_id,
+                    });
+                }
+            }
+            let prompt = clean_name(prompt, DomainError::EmptyRunPrompt)?;
+            let working_directory =
+                clean_name(working_directory, DomainError::EmptyRunWorkingDirectory)?;
+            if working_directory != worktree.path {
+                return Err(DomainError::RunWorkingDirectoryRepositoryMismatch {
+                    repository_id: worktree.repository_id,
+                });
+            }
+            let session_name = clean_name(session_name, DomainError::EmptyRunSessionName)?;
+            let pane_id = clean_name(pane_id, DomainError::EmptyRunPaneId)?;
+            if state.runs.iter().any(|run| {
+                run.machine_id == machine_id
+                    && run.session_name == session_name
+                    && run.pane_id == pane_id
+            }) {
+                return Err(DomainError::RunAlreadyAttached {
+                    machine_id,
+                    session_name,
+                    pane_id,
+                });
+            }
+            let id = state.next_run_id;
+            let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let run = Run {
+                id,
+                item_id,
+                workset_id: None,
+                workspace_id: Some(workspace_id),
+                repository_id: Some(worktree.repository_id),
+                worktree_id: Some(worktree_id),
+                machine_id,
+                agent,
+                execution_profile,
+                prompt,
+                working_directory,
+                session_name,
+                pane_id,
+                started_at,
+                state: RunState::Unknown,
+                pane_status: RunPaneStatus::Available,
+                direct_checkouts: Vec::new(),
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -3821,6 +4015,122 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 item_id,
                 workset_id: Some(workset_id),
                 workspace_id: None,
+                repository_id: None,
+                worktree_id: None,
+                machine_id,
+                agent,
+                execution_profile: ExecutionProfile::CustomPrompt,
+                prompt: "Attached existing agent".into(),
+                working_directory,
+                session_name,
+                pane_id,
+                started_at: attached_at,
+                state: RunState::Unknown,
+                pane_status: RunPaneStatus::Available,
+                direct_checkouts: Vec::new(),
+            };
+            state.next_run_id = next_run_id;
+            state.runs.push(run.clone());
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRun { run, next_run_id }],
+            })
+        }
+        Event::AttachWorkspaceRun {
+            item_id,
+            workspace_id,
+            worktree_id,
+            repository_id,
+            machine_id,
+            agent,
+            working_directory,
+            session_name,
+            pane_id,
+            attached_at,
+        } => {
+            let context_id = item_context_id(&state, item_id)?;
+            let workspace = state
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+                .ok_or(DomainError::WorkspaceNotFound { workspace_id })?;
+            if workspace.item_id != item_id {
+                return Err(DomainError::WorkspaceItemMismatch {
+                    workspace_id,
+                    item_id,
+                });
+            }
+            if !workspace
+                .repositories
+                .iter()
+                .any(|repository| repository.repository_id == repository_id)
+            {
+                return Err(DomainError::RunRepositoryNotSelected {
+                    repository_id,
+                    workspace_id,
+                });
+            }
+            if let Some(worktree_id) = worktree_id {
+                let worktree = state
+                    .worktrees
+                    .iter()
+                    .find(|worktree| worktree.id == worktree_id)
+                    .ok_or(DomainError::WorktreeNotFound { worktree_id })?;
+                if worktree.workspace_id != workspace_id
+                    || worktree.repository_id != repository_id
+                    || worktree.path != working_directory
+                {
+                    return Err(DomainError::RunWorkingDirectoryRepositoryMismatch {
+                        repository_id,
+                    });
+                }
+            } else {
+                let location_matches = state.repository_locations.iter().any(|location| {
+                    location.repository_id == repository_id
+                        && location.machine_id == machine_id
+                        && path_is_within_workset(&location.checkout_path, &working_directory)
+                });
+                if !location_matches {
+                    return Err(DomainError::RunWorkingDirectoryRepositoryMismatch {
+                        repository_id,
+                    });
+                }
+            }
+            let machine = state
+                .machines
+                .iter()
+                .find(|machine| machine.id == machine_id)
+                .ok_or(DomainError::MachineNotFound { machine_id })?;
+            if machine.context_id != context_id {
+                return Err(DomainError::MachineContextMismatch {
+                    machine_id,
+                    context_id,
+                });
+            }
+            let working_directory =
+                clean_name(working_directory, DomainError::EmptyRunWorkingDirectory)?;
+            let session_name = clean_name(session_name, DomainError::EmptyRunSessionName)?;
+            let pane_id = clean_name(pane_id, DomainError::EmptyRunPaneId)?;
+            if state.runs.iter().any(|run| {
+                run.machine_id == machine_id
+                    && run.session_name == session_name
+                    && run.pane_id == pane_id
+            }) {
+                return Err(DomainError::RunAlreadyAttached {
+                    machine_id,
+                    session_name,
+                    pane_id,
+                });
+            }
+            let id = state.next_run_id;
+            let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let run = Run {
+                id,
+                item_id,
+                workset_id: None,
+                workspace_id: Some(workspace_id),
+                repository_id: Some(repository_id),
+                worktree_id,
                 machine_id,
                 agent,
                 execution_profile: ExecutionProfile::CustomPrompt,
@@ -4277,8 +4587,87 @@ pub fn suggest_untracked_runs(
                     !workset.archived
                         && path_is_within_workset(&workset.root_directory, &pane.current_path)
                 })
-                .max_by_key(|workset| workset.root_directory.len())?;
-            let item = state.items.iter().find(|item| item.id == workset.item_id)?;
+                .max_by_key(|workset| workset.root_directory.len());
+            let workspace_location = state
+                .workspaces
+                .iter()
+                .filter_map(|workspace| {
+                    let repository_id = workspace.repositories.iter().find_map(|selected| {
+                        state
+                            .repository_locations
+                            .iter()
+                            .any(|location| {
+                                location.repository_id == selected.repository_id
+                                    && location.machine_id == pane.machine_id
+                                    && path_is_within_workset(
+                                        &location.checkout_path,
+                                        &pane.current_path,
+                                    )
+                            })
+                            .then_some(selected.repository_id)
+                    });
+                    let worktree = state
+                        .worktrees
+                        .iter()
+                        .filter(|worktree| {
+                            worktree.workspace_id == workspace.id
+                                && worktree.machine_id == pane.machine_id
+                                && path_is_within_workset(&worktree.path, &pane.current_path)
+                        })
+                        .max_by_key(|worktree| worktree.path.len());
+                    let (repository_id, worktree_id, root) = if let Some(worktree) = worktree {
+                        (
+                            Some(worktree.repository_id),
+                            Some(worktree.id),
+                            worktree.path.clone(),
+                        )
+                    } else if let Some(repository_id) = repository_id {
+                        let location = state.repository_locations.iter().find(|location| {
+                            location.repository_id == repository_id
+                                && location.machine_id == pane.machine_id
+                                && path_is_within_workset(
+                                    &location.checkout_path,
+                                    &pane.current_path,
+                                )
+                        })?;
+                        (Some(repository_id), None, location.checkout_path.clone())
+                    } else {
+                        return None;
+                    };
+                    Some((root.len(), workspace.id, repository_id?, worktree_id, root))
+                })
+                .max_by_key(|candidate| candidate.0);
+            let (item_id, workspace_id, repository_id, worktree_id, worktree_root, workset) =
+                match (workset, workspace_location) {
+                    (
+                        Some(workset),
+                        Some((location_length, workspace_id, repository_id, worktree_id, root)),
+                    ) if location_length > workset.root_directory.len() => (
+                        workset.item_id,
+                        Some(workspace_id),
+                        Some(repository_id),
+                        worktree_id,
+                        Some(root),
+                        Some(workset),
+                    ),
+                    (Some(workset), _) => (workset.item_id, None, None, None, None, Some(workset)),
+                    (None, Some((_, workspace_id, repository_id, worktree_id, root))) => {
+                        let workspace = state
+                            .workspaces
+                            .iter()
+                            .find(|workspace| workspace.id == workspace_id)?;
+                        (
+                            workspace.item_id,
+                            Some(workspace_id),
+                            Some(repository_id),
+                            worktree_id,
+                            Some(root),
+                            None,
+                        )
+                    }
+                    (None, None) => return None,
+                };
+            let item = state.items.iter().find(|item| item.id == item_id)?;
             let project = state
                 .projects
                 .iter()
@@ -4295,14 +4684,32 @@ pub fn suggest_untracked_runs(
                 session_name: pane.session_name.clone(),
                 pane_id: pane.pane_id.clone(),
                 current_path: pane.current_path.clone(),
-                workset_id: workset.id,
-                workset_root_directory: workset.root_directory.clone(),
-                workset_branch: workset.branch.clone(),
+                workset_id: workset
+                    .as_ref()
+                    .map(|workset| workset.id)
+                    .unwrap_or_default(),
+                workset_root_directory: workset
+                    .as_ref()
+                    .map(|workset| workset.root_directory.clone())
+                    .or(worktree_root.clone())
+                    .unwrap_or_default(),
+                workset_branch: workset
+                    .as_ref()
+                    .map(|workset| workset.branch.clone())
+                    .unwrap_or_default(),
                 item_id: item.id,
                 item_identifier: item.human_identifier.clone(),
                 item_title: item.title.clone(),
                 context_id: context.id,
                 context_name: context.name.clone(),
+                workspace_id,
+                repository_id,
+                worktree_id,
+                location_path: worktree_root.or_else(|| {
+                    workset
+                        .as_ref()
+                        .map(|workset| workset.root_directory.clone())
+                }),
             })
         })
         .collect::<Vec<_>>();
@@ -4318,6 +4725,12 @@ pub fn suggest_untracked_runs(
 fn path_is_within_workset(root: &str, path: &str) -> bool {
     let root = without_macos_private_prefix(root).trim_end_matches('/');
     let path = without_macos_private_prefix(path);
+    if let Some(home_relative_root) = root.strip_prefix("~/") {
+        return path == home_relative_root
+            || path.ends_with(&format!("/{home_relative_root}"))
+            || path.ends_with(&format!("/{home_relative_root}/"))
+            || path.contains(&format!("/{home_relative_root}/"));
+    }
     root == "/" || path == root || path.starts_with(&format!("{root}/"))
 }
 
@@ -5214,6 +5627,8 @@ mod tests {
             state: RunState::Working,
             pane_status: RunPaneStatus::Available,
             workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
             direct_checkouts: Vec::new(),
         });
 
@@ -5702,6 +6117,8 @@ mod tests {
             state: RunState::Finished,
             pane_status: RunPaneStatus::Missing,
             workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
             direct_checkouts: Vec::new(),
         });
         state.relationships.push(ItemRelation {
@@ -5928,6 +6345,8 @@ mod tests {
             state: RunState::Finished,
             pane_status: RunPaneStatus::Missing,
             workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
             direct_checkouts: Vec::new(),
         }];
         state.next_run_id = 2;
@@ -6149,6 +6568,8 @@ mod tests {
             state: RunState::Working,
             pane_status: RunPaneStatus::Available,
             workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
             direct_checkouts: Vec::new(),
         });
 
@@ -6283,6 +6704,8 @@ mod tests {
             state: RunState::Working,
             pane_status: RunPaneStatus::Available,
             workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
             direct_checkouts: Vec::new(),
         });
 
@@ -6332,6 +6755,8 @@ mod tests {
                 state: RunState::Finished,
                 pane_status: RunPaneStatus::Missing,
                 workspace_id: None,
+                repository_id: None,
+                worktree_id: None,
                 direct_checkouts: Vec::new(),
             },
             Run {
@@ -6349,6 +6774,8 @@ mod tests {
                 state: RunState::Working,
                 pane_status: RunPaneStatus::Available,
                 workspace_id: None,
+                repository_id: None,
+                worktree_id: None,
                 direct_checkouts: Vec::new(),
             },
         ];
@@ -6405,6 +6832,8 @@ mod tests {
                 state: RunState::Finished,
                 pane_status: RunPaneStatus::Missing,
                 workspace_id: None,
+                repository_id: None,
+                worktree_id: None,
                 direct_checkouts: Vec::new(),
             },
             Run {
@@ -6422,6 +6851,8 @@ mod tests {
                 state: RunState::Blocked,
                 pane_status: RunPaneStatus::Available,
                 workspace_id: None,
+                repository_id: None,
+                worktree_id: None,
                 direct_checkouts: Vec::new(),
             },
         ];
@@ -8099,6 +8530,7 @@ mod tests {
                 external_object_ids: Vec::new(),
             },
             checkouts: vec![checkout.clone()],
+            repository_id: 1,
             allow_dirty,
             allow_shared_checkouts,
         };
@@ -8125,6 +8557,8 @@ mod tests {
             started_at: 1,
             state: RunState::Working,
             pane_status: RunPaneStatus::Available,
+            repository_id: Some(1),
+            worktree_id: None,
             direct_checkouts: vec![checkout.clone()],
         });
         state.next_run_id = 2;
@@ -8188,6 +8622,8 @@ mod tests {
             state: RunState::Unknown,
             pane_status: RunPaneStatus::Available,
             workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
             direct_checkouts: Vec::new(),
         });
 
@@ -8746,6 +9182,160 @@ mod tests {
             second.state.workspaces[0].preparation_state,
             WorkspacePreparationState::Ready
         );
+    }
+
+    #[test]
+    fn a_worktree_run_keeps_workspace_repository_and_worktree_context() {
+        let mut state = state_with_item(1, "Work");
+        state.repositories.push(Repository {
+            id: 1,
+            project_id: 1,
+            name: "service".into(),
+            remote_url: "https://example.com/service.git".into(),
+            base_branch: "main".into(),
+        });
+        state.workspaces.push(Workspace {
+            id: 1,
+            item_id: 1,
+            repositories: vec![WorkspaceRepository {
+                repository_id: 1,
+                branch: "feature/terminal-runtime".into(),
+                base_branch: "main".into(),
+            }],
+            preparation_state: WorkspacePreparationState::Ready,
+        });
+        state.worktrees.push(Worktree {
+            id: 1,
+            workspace_id: 1,
+            repository_id: 1,
+            machine_id: 1,
+            path: "/tmp/worktrees/service".into(),
+            branch: "feature/terminal-runtime".into(),
+            base_branch: "main".into(),
+            is_dirty: false,
+        });
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: "mission-manager".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+
+        let decision = decide(
+            state,
+            Event::StartWorktreeRun {
+                item_id: 1,
+                workspace_id: 1,
+                worktree_id: 1,
+                machine_id: 1,
+                agent: AgentKind::Codex,
+                execution_profile: ExecutionProfile::Implement,
+                prompt: "Use the selected Worktree".into(),
+                working_directory: "/tmp/worktrees/service".into(),
+                session_name: "mission-item-1-run-1".into(),
+                pane_id: "%1".into(),
+                started_at: 1,
+                prompt_selection: RunPromptSelection {
+                    include_objective: true,
+                    include_notes: false,
+                    external_object_ids: Vec::new(),
+                },
+            },
+        )
+        .expect("the Worktree Run should start");
+
+        assert_eq!(decision.state.runs.len(), 1);
+        let run = &decision.state.runs[0];
+        assert_eq!(run.workspace_id, Some(1));
+        assert_eq!(run.repository_id, Some(1));
+        assert_eq!(run.worktree_id, Some(1));
+        assert_eq!(run.working_directory, "/tmp/worktrees/service");
+    }
+
+    #[test]
+    fn untracked_agents_match_registered_checkouts_and_worktrees_by_path() {
+        let mut state = state_with_item(1, "Work");
+        state.repositories.push(Repository {
+            id: 1,
+            project_id: 1,
+            name: "service".into(),
+            remote_url: "https://example.com/service.git".into(),
+            base_branch: "main".into(),
+        });
+        state.repository_locations.push(RepositoryLocation {
+            repository_id: 1,
+            machine_id: 1,
+            checkout_path: "/tmp/checkouts/service".into(),
+            worktree_root: "/tmp/worktrees".into(),
+        });
+        state.workspaces.push(Workspace {
+            id: 1,
+            item_id: 1,
+            repositories: vec![WorkspaceRepository {
+                repository_id: 1,
+                branch: "feature/terminal-runtime".into(),
+                base_branch: "main".into(),
+            }],
+            preparation_state: WorkspacePreparationState::Ready,
+        });
+        state.worktrees.push(Worktree {
+            id: 1,
+            workspace_id: 1,
+            repository_id: 1,
+            machine_id: 1,
+            path: "/tmp/worktrees/service".into(),
+            branch: "feature/terminal-runtime".into(),
+            base_branch: "main".into(),
+            is_dirty: false,
+        });
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: "mission-manager".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+
+        let suggestions = suggest_untracked_runs(
+            &state,
+            &[
+                AgentPaneObservation {
+                    machine_id: 1,
+                    agent: AgentKind::Claude,
+                    session_name: "direct-session".into(),
+                    pane_id: "%1".into(),
+                    current_path: "/tmp/checkouts/service/src".into(),
+                },
+                AgentPaneObservation {
+                    machine_id: 1,
+                    agent: AgentKind::Codex,
+                    session_name: "worktree-session".into(),
+                    pane_id: "%2".into(),
+                    current_path: "/tmp/worktrees/service/src".into(),
+                },
+            ],
+        );
+
+        assert_eq!(suggestions.len(), 2);
+        let direct = suggestions
+            .iter()
+            .find(|suggestion| suggestion.session_name == "direct-session")
+            .expect("the checkout Pane should be suggested");
+        assert_eq!(direct.workspace_id, Some(1));
+        assert_eq!(direct.repository_id, Some(1));
+        assert_eq!(direct.worktree_id, None);
+        let worktree = suggestions
+            .iter()
+            .find(|suggestion| suggestion.session_name == "worktree-session")
+            .expect("the Worktree Pane should be suggested");
+        assert_eq!(worktree.workspace_id, Some(1));
+        assert_eq!(worktree.repository_id, Some(1));
+        assert_eq!(worktree.worktree_id, Some(1));
     }
 
     #[test]

@@ -226,6 +226,7 @@ export const workAdapter = {
   startDirectRun: ({
     itemId,
     workspaceId,
+    primaryRepositoryId,
     machineId,
     agent,
     executionProfile,
@@ -237,6 +238,7 @@ export const workAdapter = {
   }: {
     itemId: number;
     workspaceId: number;
+    primaryRepositoryId: number;
     machineId: number | null;
     agent: Run["agent"];
     executionProfile: Run["execution_profile"];
@@ -249,6 +251,7 @@ export const workAdapter = {
     command<Run>("start_direct_run", {
       itemId,
       workspaceId,
+      primaryRepositoryId,
       machineId,
       agent,
       executionProfile,

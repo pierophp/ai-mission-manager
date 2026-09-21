@@ -15,6 +15,8 @@ export type Run = {
   item_id: number;
   workset_id: number | null;
   workspace_id: number | null;
+  repository_id: number | null;
+  worktree_id: number | null;
   machine_id: number;
   agent: AgentKind;
   execution_profile: ExecutionProfile;
@@ -43,6 +45,10 @@ export type RunSuggestion = {
   itemTitle: string;
   contextId: number;
   contextName: string;
+  workspaceId: number | null;
+  repositoryId: number | null;
+  worktreeId: number | null;
+  locationPath: string | null;
 };
 
 export type RunPromptSelection = {
