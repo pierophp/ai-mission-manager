@@ -5,10 +5,11 @@ use thiserror::Error;
 
 use crate::domain::{
     Activity, AgentKind, AuditAction, AuditEntry, Context, ContextAttentionDefault, DomainState,
-    Effect, ExecutionProfile, ExternalChangePolicy, ExternalMetadata, ExternalObject,
-    ExternalObjectKind, ExternalProvider, ExternalSnapshot, Item, ItemRelation, ItemRelationKind,
-    ItemStatus, Link, Machine, MachineObservation, Project, ProjectDefaults, Reminder, Repository,
-    Run, RunPaneStatus, RunState, Workset, WorksetRepository,
+    Effect, ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalMetadata,
+    ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, Item, ItemRelation,
+    ItemRelationKind, ItemStatus, Link, Machine, MachineObservation, Project, ProjectDefaults,
+    Reminder, Repository, Run, RunPaneStatus, RunState, Workset, WorksetRepository, Workspace,
+    WorkspaceRepository, Worktree,
 };
 
 #[derive(Debug, Error)]
@@ -33,6 +34,8 @@ pub enum StoreError {
     InvalidAgentKind(String),
     #[error("invalid Execution Profile in database: {0}")]
     InvalidExecutionProfile(String),
+    #[error("invalid Execution Mode in database: {0}")]
+    InvalidExecutionMode(String),
     #[error("invalid Run state in database: {0}")]
     InvalidRunState(String),
     #[error("invalid Run Pane status in database: {0}")]
@@ -136,6 +139,8 @@ impl SqliteStore {
         let next_item_number = self.sequence("next_item_number")?;
         let next_repository_id = self.sequence("next_repository_id")?;
         let next_workset_id = self.sequence("next_workset_id")?;
+        let next_workspace_id = self.sequence("next_workspace_id")?;
+        let next_worktree_id = self.sequence("next_worktree_id")?;
         let next_machine_id = self.sequence("next_machine_id")?;
         let next_run_id = self.sequence("next_run_id")?;
         let next_external_object_id = self.sequence("next_external_object_id")?;
@@ -156,12 +161,13 @@ impl SqliteStore {
         };
         let projects = {
             let mut statement = self.connection.prepare(
-                "SELECT id, context_id, name, default_item_status
+                "SELECT id, context_id, name, default_item_status, default_execution_mode
                  FROM projects
                  ORDER BY id",
             )?;
             let rows = statement.query_map([], |row| {
                 let status: String = row.get(3)?;
+                let execution_mode: String = row.get(4)?;
                 Ok(Project {
                     id: row.get(0)?,
                     context_id: row.get(1)?,
@@ -170,6 +176,13 @@ impl SqliteStore {
                         item_status: parse_project_default_status(&status).map_err(|error| {
                             rusqlite::Error::FromSqlConversionFailure(
                                 3,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        execution_mode: parse_execution_mode(&execution_mode).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                4,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
@@ -321,6 +334,68 @@ impl SqliteStore {
                 workset.repositories.push(repository);
             }
         }
+        let mut workspaces = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, item_id
+                 FROM workspaces
+                 ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(Workspace {
+                    id: row.get(0)?,
+                    item_id: row.get(1)?,
+                    repositories: Vec::new(),
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let workspace_repositories = {
+            let mut statement = self.connection.prepare(
+                "SELECT workspace_id, repository_id, branch, base_branch
+                 FROM workspace_repositories
+                 ORDER BY workspace_id, repository_id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    WorkspaceRepository {
+                        repository_id: row.get(1)?,
+                        branch: row.get(2)?,
+                        base_branch: row.get(3)?,
+                    },
+                ))
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for (workspace_id, repository) in workspace_repositories {
+            if let Some(workspace) = workspaces
+                .iter_mut()
+                .find(|workspace| workspace.id == workspace_id)
+            {
+                workspace.repositories.push(repository);
+            }
+        }
+        let worktrees = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, workspace_id, repository_id, machine_id, path, branch,
+                        base_branch, is_dirty
+                 FROM worktrees
+                 ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(Worktree {
+                    id: row.get(0)?,
+                    workspace_id: row.get(1)?,
+                    repository_id: row.get(2)?,
+                    machine_id: row.get(3)?,
+                    path: row.get(4)?,
+                    branch: row.get(5)?,
+                    base_branch: row.get(6)?,
+                    is_dirty: row.get::<_, i64>(7)? != 0,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
         let runs = {
             let mut statement = self.connection.prepare(
                 "SELECT id, item_id, workset_id, machine_id, agent, execution_profile,
@@ -553,6 +628,8 @@ impl SqliteStore {
             next_item_number,
             next_repository_id,
             next_workset_id,
+            next_workspace_id,
+            next_worktree_id,
             next_machine_id,
             next_run_id,
             next_external_object_id,
@@ -564,6 +641,8 @@ impl SqliteStore {
             repositories,
             items,
             worksets,
+            workspaces,
+            worktrees,
             machines,
             runs,
             relationships,
@@ -640,13 +719,14 @@ impl SqliteStore {
                 } => {
                     transaction.execute(
                         "INSERT INTO projects
-                            (id, context_id, name, default_item_status)
-                         VALUES (?1, ?2, ?3, ?4)",
+                            (id, context_id, name, default_item_status, default_execution_mode)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
                         params![
                             project.id,
                             project.context_id,
                             project.name,
                             item_status_as_str(project.defaults.item_status),
+                            execution_mode_as_str(project.defaults.execution_mode),
                         ],
                     )?;
                     transaction.execute(
@@ -690,6 +770,9 @@ impl SqliteStore {
                          DELETE FROM item_relationships;
                          DELETE FROM reminders;
                          DELETE FROM runs;
+                         DELETE FROM worktrees;
+                         DELETE FROM workspace_repositories;
+                         DELETE FROM workspaces;
                          DELETE FROM workset_repositories;
                          DELETE FROM worksets;
                          DELETE FROM items;
@@ -808,6 +891,45 @@ impl SqliteStore {
                     )?;
                     persist_workset_repositories(&transaction, workset)?;
                 }
+                Effect::PersistWorkspace {
+                    workspace,
+                    next_workspace_id,
+                } => {
+                    transaction.execute(
+                        "INSERT INTO workspaces (id, item_id) VALUES (?1, ?2)",
+                        params![workspace.id, workspace.item_id],
+                    )?;
+                    persist_workspace_repositories(&transaction, workspace)?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_workspace_id'",
+                        params![next_workspace_id],
+                    )?;
+                }
+                Effect::PersistWorktree {
+                    worktree,
+                    next_worktree_id,
+                } => {
+                    transaction.execute(
+                        "INSERT INTO worktrees
+                            (id, workspace_id, repository_id, machine_id, path, branch,
+                             base_branch, is_dirty)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![
+                            worktree.id,
+                            worktree.workspace_id,
+                            worktree.repository_id,
+                            worktree.machine_id,
+                            worktree.path,
+                            worktree.branch,
+                            worktree.base_branch,
+                            bool_as_i64(worktree.is_dirty),
+                        ],
+                    )?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_worktree_id'",
+                        params![next_worktree_id],
+                    )?;
+                }
                 Effect::PersistMachine {
                     machine,
                     next_machine_id,
@@ -894,6 +1016,32 @@ impl SqliteStore {
                 }
                 Effect::RemoveRepository { repository_id } => {
                     transaction.execute(
+                        "DELETE FROM worktrees
+                         WHERE repository_id = ?1
+                            OR workspace_id IN (
+                                SELECT workspace_id FROM workspace_repositories
+                                WHERE repository_id = ?1
+                            )",
+                        params![repository_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM workspaces
+                         WHERE id IN (
+                             SELECT workspace_id FROM workspace_repositories
+                             WHERE repository_id = ?1
+                         )",
+                        params![repository_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM workspace_repositories
+                         WHERE repository_id = ?1
+                            OR workspace_id IN (
+                                SELECT workspace_id FROM workspace_repositories
+                                WHERE repository_id = ?1
+                            )",
+                        params![repository_id],
+                    )?;
+                    transaction.execute(
                         "DELETE FROM repositories WHERE id = ?1",
                         params![repository_id],
                     )?;
@@ -921,6 +1069,20 @@ impl SqliteStore {
                     ..
                 } => {
                     transaction.execute("DELETE FROM runs WHERE item_id = ?1", params![item_id])?;
+                    transaction.execute(
+                        "DELETE FROM worktrees
+                         WHERE workspace_id IN (SELECT id FROM workspaces WHERE item_id = ?1)",
+                        params![item_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM workspace_repositories
+                         WHERE workspace_id IN (SELECT id FROM workspaces WHERE item_id = ?1)",
+                        params![item_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM workspaces WHERE item_id = ?1",
+                        params![item_id],
+                    )?;
                     transaction.execute(
                         "DELETE FROM workset_repositories
                          WHERE workset_id IN (SELECT id FROM worksets WHERE item_id = ?1)",
@@ -962,6 +1124,29 @@ impl SqliteStore {
                          WHERE item_id IN (
                              SELECT id FROM items WHERE project_id = ?1
                          )",
+                        params![project_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM worktrees
+                         WHERE workspace_id IN (
+                             SELECT workspaces.id FROM workspaces
+                             JOIN items ON items.id = workspaces.item_id
+                             WHERE items.project_id = ?1
+                         )",
+                        params![project_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM workspace_repositories
+                         WHERE workspace_id IN (
+                             SELECT workspaces.id FROM workspaces
+                             JOIN items ON items.id = workspaces.item_id
+                             WHERE items.project_id = ?1
+                         )",
+                        params![project_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM workspaces
+                         WHERE item_id IN (SELECT id FROM items WHERE project_id = ?1)",
                         params![project_id],
                     )?;
                     transaction.execute(
@@ -1040,6 +1225,35 @@ impl SqliteStore {
                             OR item_id IN (
                              SELECT items.id
                              FROM items
+                             JOIN projects ON projects.id = items.project_id
+                             WHERE projects.context_id = ?1
+                         )",
+                        params![context_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM worktrees
+                         WHERE workspace_id IN (
+                             SELECT workspaces.id FROM workspaces
+                             JOIN items ON items.id = workspaces.item_id
+                             JOIN projects ON projects.id = items.project_id
+                             WHERE projects.context_id = ?1
+                         )",
+                        params![context_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM workspace_repositories
+                         WHERE workspace_id IN (
+                             SELECT workspaces.id FROM workspaces
+                             JOIN items ON items.id = workspaces.item_id
+                             JOIN projects ON projects.id = items.project_id
+                             WHERE projects.context_id = ?1
+                         )",
+                        params![context_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM workspaces
+                         WHERE item_id IN (
+                             SELECT items.id FROM items
                              JOIN projects ON projects.id = items.project_id
                              WHERE projects.context_id = ?1
                          )",
@@ -1357,6 +1571,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              name TEXT NOT NULL,
              default_item_status TEXT NOT NULL
                  CHECK (default_item_status IN ('Inbox', 'Active', 'Waiting', 'Done')),
+             default_execution_mode TEXT NOT NULL DEFAULT 'worktree'
+                 CHECK (default_execution_mode IN ('direct', 'worktree')),
              UNIQUE (context_id, name)
          );
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_context_id', 1);
@@ -1365,6 +1581,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_item_number', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_repository_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_workset_id', 1);
+         INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_workspace_id', 1);
+         INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_worktree_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_machine_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_run_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_external_object_id', 1);
@@ -1381,6 +1599,18 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
 
     if table_columns(connection, "items")?.is_empty() {
         create_items_table(connection)?;
+    }
+
+    let project_columns = table_columns(connection, "projects")?;
+    if !project_columns.is_empty()
+        && !project_columns
+            .iter()
+            .any(|column| column == "default_execution_mode")
+    {
+        connection.execute(
+            "ALTER TABLE projects ADD COLUMN default_execution_mode TEXT NOT NULL DEFAULT 'worktree'",
+            [],
+        )?;
     }
 
     connection.execute_batch(
@@ -1429,6 +1659,35 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          );
          CREATE INDEX IF NOT EXISTS workset_repositories_by_repository
              ON workset_repositories (repository_id);
+         CREATE TABLE IF NOT EXISTS workspaces (
+             id INTEGER PRIMARY KEY NOT NULL,
+             item_id INTEGER NOT NULL REFERENCES items(id)
+         );
+         CREATE INDEX IF NOT EXISTS workspaces_by_item
+             ON workspaces (item_id, id);
+         CREATE TABLE IF NOT EXISTS workspace_repositories (
+             workspace_id INTEGER NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+             repository_id INTEGER NOT NULL REFERENCES repositories(id),
+             branch TEXT NOT NULL,
+             base_branch TEXT NOT NULL,
+             PRIMARY KEY (workspace_id, repository_id)
+         );
+         CREATE INDEX IF NOT EXISTS workspace_repositories_by_repository
+             ON workspace_repositories (repository_id);
+         CREATE TABLE IF NOT EXISTS worktrees (
+             id INTEGER PRIMARY KEY NOT NULL,
+             workspace_id INTEGER NOT NULL REFERENCES workspaces(id),
+             repository_id INTEGER NOT NULL REFERENCES repositories(id),
+             machine_id INTEGER NOT NULL REFERENCES machines(id),
+             path TEXT NOT NULL,
+             branch TEXT NOT NULL,
+             base_branch TEXT NOT NULL,
+             is_dirty INTEGER NOT NULL DEFAULT 0
+         );
+         CREATE INDEX IF NOT EXISTS worktrees_by_workspace
+             ON worktrees (workspace_id, id);
+         CREATE INDEX IF NOT EXISTS worktrees_by_repository
+             ON worktrees (repository_id, id);
          CREATE TABLE IF NOT EXISTS runs (
              id INTEGER PRIMARY KEY NOT NULL,
              item_id INTEGER NOT NULL REFERENCES items(id),
@@ -1540,6 +1799,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     ensure_sequence_at_least(connection, "next_item_id", "items", "id")?;
     ensure_sequence_at_least(connection, "next_repository_id", "repositories", "id")?;
     ensure_sequence_at_least(connection, "next_workset_id", "worksets", "id")?;
+    ensure_sequence_at_least(connection, "next_workspace_id", "workspaces", "id")?;
+    ensure_sequence_at_least(connection, "next_worktree_id", "worktrees", "id")?;
     ensure_sequence_at_least(connection, "next_machine_id", "machines", "id")?;
     ensure_sequence_at_least(connection, "next_run_id", "runs", "id")?;
     ensure_sequence_at_least(
@@ -1716,6 +1977,30 @@ fn persist_workset_repositories(
     Ok(())
 }
 
+fn persist_workspace_repositories(
+    transaction: &rusqlite::Transaction<'_>,
+    workspace: &Workspace,
+) -> Result<(), rusqlite::Error> {
+    transaction.execute(
+        "DELETE FROM workspace_repositories WHERE workspace_id = ?1",
+        params![workspace.id],
+    )?;
+    for repository in &workspace.repositories {
+        transaction.execute(
+            "INSERT INTO workspace_repositories
+                (workspace_id, repository_id, branch, base_branch)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                workspace.id,
+                repository.repository_id,
+                repository.branch,
+                repository.base_branch,
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 fn bool_as_i64(value: bool) -> i64 {
     i64::from(value)
 }
@@ -1751,6 +2036,21 @@ fn parse_execution_profile(profile: &str) -> Result<ExecutionProfile, StoreError
         "review" => Ok(ExecutionProfile::Review),
         "custom" => Ok(ExecutionProfile::CustomPrompt),
         other => Err(StoreError::InvalidExecutionProfile(other.into())),
+    }
+}
+
+fn execution_mode_as_str(mode: ExecutionMode) -> &'static str {
+    match mode {
+        ExecutionMode::Direct => "direct",
+        ExecutionMode::Worktree => "worktree",
+    }
+}
+
+fn parse_execution_mode(mode: &str) -> Result<ExecutionMode, StoreError> {
+    match mode {
+        "direct" => Ok(ExecutionMode::Direct),
+        "worktree" => Ok(ExecutionMode::Worktree),
+        other => Err(StoreError::InvalidExecutionMode(other.into())),
     }
 }
 
@@ -1889,9 +2189,10 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        decide, AgentKind, AttachedRepositoryInput, AuditAction, Event, ExternalChangePolicy,
-        ExternalMetadata, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
-        ExternalSnapshotData, MachineTransport, RunPaneStatus, RunState, WorksetRepositoryInput,
+        decide, AgentKind, AttachedRepositoryInput, AuditAction, Event, ExecutionMode,
+        ExternalChangePolicy, ExternalMetadata, ExternalObjectInput, ExternalObjectKind,
+        ExternalProvider, ExternalSnapshotData, MachineTransport, RunPaneStatus, RunState,
+        WorksetRepositoryInput, WorkspaceRepositoryInput,
     };
 
     #[test]
@@ -2950,6 +3251,7 @@ mod tests {
                     name: "Billing".into(),
                     defaults: ProjectDefaults {
                         item_status: ItemStatus::Active,
+                        execution_mode: ExecutionMode::Worktree,
                     },
                 },
             )
@@ -3521,5 +3823,151 @@ mod tests {
         assert!(state.external_objects.is_empty());
         assert!(state.snapshots.is_empty());
         assert!(state.activities.is_empty());
+    }
+
+    #[test]
+    fn workspace_worktree_and_execution_defaults_survive_reopening() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+        let mut store = SqliteStore::open(&path).expect("database should open");
+
+        let context = decide(
+            store.load_state().expect("initial state should load"),
+            Event::CreateContext {
+                name: "Work".into(),
+            },
+        )
+        .expect("Context should be created");
+        store
+            .apply(&context.effects)
+            .expect("Context should persist");
+
+        let project = decide(
+            context.state,
+            Event::CreateProject {
+                context_id: 1,
+                name: "Direct execution".into(),
+                defaults: ProjectDefaults {
+                    item_status: ItemStatus::Inbox,
+                    execution_mode: ExecutionMode::Direct,
+                },
+            },
+        )
+        .expect("Project execution defaults should be configurable");
+        store
+            .apply(&project.effects)
+            .expect("Project execution defaults should persist");
+        assert_eq!(
+            store
+                .load_state()
+                .expect("Project state should reload")
+                .projects
+                .iter()
+                .find(|project| project.name == "Direct execution")
+                .expect("Direct execution project should exist")
+                .defaults
+                .execution_mode,
+            ExecutionMode::Direct
+        );
+
+        let repository = decide(
+            project.state,
+            Event::RegisterRepository {
+                project_id: 1,
+                name: "mission-manager".into(),
+                remote_url: "https://example.com/mission-manager.git".into(),
+            },
+        )
+        .expect("Repository should be registered");
+        store
+            .apply(&repository.effects)
+            .expect("Repository should persist");
+
+        let item = decide(
+            repository.state,
+            Event::CreateItem {
+                title: "Implement execution contract".into(),
+                context_id: 1,
+                project_id: 1,
+            },
+        )
+        .expect("Item should be created");
+        store.apply(&item.effects).expect("Item should persist");
+
+        let machine = decide(
+            item.state,
+            Event::RegisterMachine {
+                context_id: 1,
+                name: "Local Mac".into(),
+                socket_name: "mission".into(),
+                transport: MachineTransport::Local,
+            },
+        )
+        .expect("Machine should be registered");
+        store
+            .apply(&machine.effects)
+            .expect("Machine should persist");
+
+        let workspace = decide(
+            machine.state,
+            Event::CreateWorkspace {
+                item_id: 1,
+                repositories: vec![WorkspaceRepositoryInput {
+                    repository_id: 1,
+                    branch: "feature/contracts".into(),
+                    base_branch: "main".into(),
+                }],
+            },
+        )
+        .expect("Workspace should be created");
+        store
+            .apply(&workspace.effects)
+            .expect("Workspace should persist");
+
+        let worktree = decide(
+            workspace.state,
+            Event::CreateWorktree {
+                workspace_id: 1,
+                repository_id: 1,
+                machine_id: 1,
+                path: "/Users/piero/worktrees/feature-contracts/mission-manager".into(),
+                branch: "feature/contracts".into(),
+                base_branch: "main".into(),
+            },
+        )
+        .expect("Worktree should be created");
+        store
+            .apply(&worktree.effects)
+            .expect("Worktree should persist");
+
+        let reopened = SqliteStore::open(&path).expect("database should reopen");
+        let state = reopened
+            .load_state()
+            .expect("new execution state should load");
+        assert_eq!(
+            state.projects[0].defaults.execution_mode,
+            ExecutionMode::Worktree
+        );
+        assert_eq!(
+            state
+                .projects
+                .iter()
+                .find(|project| project.name == "Direct execution")
+                .expect("Direct execution project should exist")
+                .defaults
+                .execution_mode,
+            ExecutionMode::Direct
+        );
+        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces[0].repositories.len(), 1);
+        assert_eq!(state.workspaces[0].repositories[0].base_branch, "main");
+        assert_eq!(state.worktrees.len(), 1);
+        assert_eq!(state.worktrees[0].workspace_id, state.workspaces[0].id);
+        assert_eq!(
+            state.worktrees[0].path,
+            "/Users/piero/worktrees/feature-contracts/mission-manager"
+        );
+        assert_eq!(state.next_workspace_id, 2);
+        assert_eq!(state.next_worktree_id, 2);
     }
 }

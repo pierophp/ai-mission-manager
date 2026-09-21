@@ -32,6 +32,14 @@ _Avoid_: association, reference, join
 A Git repository's canonical identity, registered under a Project. Not any particular checkout of it.
 _Avoid_: checkout, clone, worktree
 
+**Workspace**:
+A persistent logical grouping of selected Repositories for one Item. It has no shared physical root directory; its physical isolation is represented by its Worktrees.
+_Avoid_: workset, sandbox
+
+**Worktree**:
+One physical Git worktree for one Repository, associated with a Workspace, Machine, path, branch, and base branch.
+_Avoid_: workspace, checkout
+
 ### Execution
 
 **Terminal Runtime**:
@@ -43,7 +51,7 @@ An execution target reachable through the Terminal Runtime, whether the local Ma
 _Avoid_: host, server, node
 
 **Workset**:
-A persistent multi-repository working environment representing one logical line of work: a root directory holding one checkout per included Repository.
+A legacy persistent multi-repository working environment representing one logical line of work: a root directory holding one independent checkout per included Repository. New execution contracts use Workspace and Worktree instead.
 _Avoid_: worktree, checkout, sandbox, workspace
 
 **Run**:

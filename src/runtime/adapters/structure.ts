@@ -17,6 +17,7 @@ import type {
   RunDeletionResult,
   Item,
   ItemStatus,
+  ExecutionMode,
 } from "../types";
 import { command } from "./tauri";
 
@@ -28,11 +29,17 @@ export const structureAdapter = {
   listAttentionDefaults: () =>
     command<ContextAttentionDefault[]>("list_context_attention_defaults"),
   createContext: (name: string) => command<Context>("create_context", { name }),
-  createProject: (name: string, contextId: number, defaultItemStatus: ItemStatus) =>
+  createProject: (
+    name: string,
+    contextId: number,
+    defaultItemStatus: ItemStatus,
+    executionMode: ExecutionMode = "worktree",
+  ) =>
     command<ProjectRecord>("create_project", {
       name,
       contextId,
       defaultItemStatus,
+      executionMode,
     }),
   prepareProjectDeletion: (projectId: number) =>
     command<ParentDeletionPreview>("prepare_project_deletion", { projectId }),

@@ -49,6 +49,8 @@ pub fn run() {
             app::register_machine,
             app::check_machine,
             app::create_workset,
+            app::create_workspace,
+            app::create_worktree,
             app::attach_workset,
             app::add_repository_to_workset,
             app::set_workset_archived,

@@ -35,6 +35,7 @@ export type HealthStatus = {
 };
 
 export type ItemStatus = "Inbox" | "Active" | "Waiting" | "Done";
+export type ExecutionMode = "direct" | "worktree";
 
 export type Project = {
   id: number;
@@ -42,6 +43,7 @@ export type Project = {
   name: string;
   defaults: {
     item_status: ItemStatus;
+    execution_mode: ExecutionMode;
   };
 };
 
@@ -73,6 +75,35 @@ export type WorksetRepositoryInput = {
   repositoryId: number;
   branchOverride: string | null;
   baseBranchOverride: string | null;
+};
+
+export type WorkspaceRepository = {
+  repository_id: number;
+  branch: string;
+  base_branch: string;
+};
+
+export type WorkspaceRepositoryInput = {
+  repositoryId: number;
+  branch: string;
+  baseBranch: string;
+};
+
+export type Workspace = {
+  id: number;
+  item_id: number;
+  repositories: WorkspaceRepository[];
+};
+
+export type Worktree = {
+  id: number;
+  workspace_id: number;
+  repository_id: number;
+  machine_id: number;
+  path: string;
+  branch: string;
+  base_branch: string;
+  is_dirty: boolean;
 };
 
 export type MachineTransport =
@@ -214,6 +245,7 @@ export type ItemView = {
   relationships: ItemRelation[];
   worksets: Workset[];
   archived_worksets: Workset[];
+  workspaces: Workspace[];
   runs: Run[];
   links: ExternalLinkView[];
 };

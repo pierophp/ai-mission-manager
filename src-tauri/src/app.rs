@@ -17,14 +17,15 @@ use crate::{
         plan_machine_deletion, plan_project_deletion, plan_repository_deletion,
         plan_reset_local_data, search_items, suggest_untracked_runs, ActivityTabView, AgentKind,
         AgentPaneObservation, AttachedRepositoryInput, AuditAction, AuditEntry, Context,
-        ContextAttentionDefault, DomainState, Effect, Event, ExecutionProfile,
+        ContextAttentionDefault, DomainState, Effect, Event, ExecutionMode, ExecutionProfile,
         ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
         ExternalObjectDeletionSummary, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
         ExternalSnapshot, HomeView, Item, ItemDeletionPlan, ItemDeletionSummary, ItemRelation,
         ItemRelationKind, ItemStatus, ItemView, Machine, MachineDeletionPlan, MachineObservation,
         MachineTransport, ParentDeletionPlan, Project, ProjectDefaults, Repository,
         RepositoryDeletionPlan, ResetLocalDataPlan, ResetLocalDataSummary, Run, RunPaneStatus,
-        RunPromptSelection, RunState, RunSuggestion, Workset, WorksetRepositoryInput,
+        RunPromptSelection, RunState, RunSuggestion, Workset, WorksetRepositoryInput, Workspace,
+        WorkspaceRepositoryInput, Worktree,
     },
     git::GitCli,
     persistence::SqliteStore,
@@ -488,6 +489,60 @@ impl Runtime {
             return Err(format_commit_error(error, cleanup_error));
         }
         Ok(workset)
+    }
+
+    fn create_workspace(
+        &mut self,
+        item_id: i64,
+        repositories: Vec<WorkspaceRepositoryInput>,
+    ) -> Result<Workspace, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::CreateWorkspace {
+                item_id,
+                repositories,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let workspace = decision
+            .state
+            .workspaces
+            .last()
+            .cloned()
+            .ok_or_else(|| "Workspace creation produced no Workspace".to_owned())?;
+        self.commit(decision)?;
+        Ok(workspace)
+    }
+
+    fn create_worktree(
+        &mut self,
+        workspace_id: i64,
+        repository_id: i64,
+        machine_id: i64,
+        path: String,
+        branch: String,
+        base_branch: String,
+    ) -> Result<Worktree, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::CreateWorktree {
+                workspace_id,
+                repository_id,
+                machine_id,
+                path,
+                branch,
+                base_branch,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let worktree = decision
+            .state
+            .worktrees
+            .last()
+            .cloned()
+            .ok_or_else(|| "Worktree creation produced no Worktree".to_owned())?;
+        self.commit(decision)?;
+        Ok(worktree)
     }
 
     fn attach_workset(&mut self, item_id: i64, root_directory: String) -> Result<Workset, String> {
@@ -3130,6 +3185,7 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
                         to: run.pane_status,
                     })
             }
+            Effect::PersistWorkspace { .. } | Effect::PersistWorktree { .. } => None,
             Effect::PersistItemRelation { relation } => Some(AuditAction::ItemRelationChanged {
                 from_item_id: relation.from_item_id,
                 to_item_id: relation.to_item_id,
@@ -3861,6 +3917,7 @@ pub fn create_project(
     name: String,
     context_id: i64,
     default_item_status: ItemStatus,
+    execution_mode: Option<ExecutionMode>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Project, String> {
     state
@@ -3871,6 +3928,7 @@ pub fn create_project(
             context_id,
             ProjectDefaults {
                 item_status: default_item_status,
+                execution_mode: execution_mode.unwrap_or(ExecutionMode::Worktree),
             },
         )
 }
@@ -3995,6 +4053,41 @@ pub fn create_workset(
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .create_workset(item_id, root_directory, branch, repositories)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn create_workspace(
+    item_id: i64,
+    repositories: Vec<WorkspaceRepositoryInput>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Workspace, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .create_workspace(item_id, repositories)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn create_worktree(
+    workspace_id: i64,
+    repository_id: i64,
+    machine_id: i64,
+    path: String,
+    branch: String,
+    base_branch: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Worktree, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .create_worktree(
+            workspace_id,
+            repository_id,
+            machine_id,
+            path,
+            branch,
+            base_branch,
+        )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5347,6 +5440,7 @@ fi
                 2,
                 ProjectDefaults {
                     item_status: ItemStatus::Inbox,
+                    execution_mode: crate::domain::ExecutionMode::Worktree,
                 },
             )
             .expect("Project should be created");
@@ -5469,6 +5563,7 @@ fi
                 1,
                 ProjectDefaults {
                     item_status: ItemStatus::Inbox,
+                    execution_mode: crate::domain::ExecutionMode::Worktree,
                 },
             )
             .expect("Project should be created");

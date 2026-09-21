@@ -20,6 +20,9 @@ import type {
   WorksetRemovalReport,
   WorksetRemovalResult,
   WorksetRepositoryInput,
+  Workspace,
+  WorkspaceRepositoryInput,
+  Worktree,
 } from "../types";
 import { command } from "./tauri";
 
@@ -61,6 +64,24 @@ export const workAdapter = {
       rootDirectory,
       branch,
       repositories,
+    }),
+  createWorkspace: (itemId: number, repositories: WorkspaceRepositoryInput[]) =>
+    command<Workspace>("create_workspace", { itemId, repositories }),
+  createWorktree: (
+    workspaceId: number,
+    repositoryId: number,
+    machineId: number,
+    path: string,
+    branch: string,
+    baseBranch: string,
+  ) =>
+    command<Worktree>("create_worktree", {
+      workspaceId,
+      repositoryId,
+      machineId,
+      path,
+      branch,
+      baseBranch,
     }),
   attachWorkset: (itemId: number, rootDirectory: string) =>
     command<Workset>("attach_workset", { itemId, rootDirectory }),

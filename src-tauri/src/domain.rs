@@ -10,14 +10,23 @@ pub struct Context {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectDefaults {
     pub item_status: ItemStatus,
+    pub execution_mode: ExecutionMode,
 }
 
 impl Default for ProjectDefaults {
     fn default() -> Self {
         Self {
             item_status: ItemStatus::Inbox,
+            execution_mode: ExecutionMode::Worktree,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ExecutionMode {
+    Direct,
+    Worktree,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +79,42 @@ pub struct Workset {
     pub branch: String,
     pub archived: bool,
     pub repositories: Vec<WorksetRepository>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRepositoryInput {
+    pub repository_id: i64,
+    pub branch: String,
+    pub base_branch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRepository {
+    pub repository_id: i64,
+    pub branch: String,
+    pub base_branch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Workspace {
+    pub id: i64,
+    pub item_id: i64,
+    pub repositories: Vec<WorkspaceRepository>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Worktree {
+    pub id: i64,
+    pub workspace_id: i64,
+    pub repository_id: i64,
+    pub machine_id: i64,
+    pub path: String,
+    pub branch: String,
+    pub base_branch: String,
+    pub is_dirty: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -414,6 +459,7 @@ pub struct ItemView {
     pub relationships: Vec<ItemRelation>,
     pub worksets: Vec<Workset>,
     pub archived_worksets: Vec<Workset>,
+    pub workspaces: Vec<Workspace>,
     pub runs: Vec<Run>,
     pub links: Vec<ExternalLinkView>,
 }
@@ -872,6 +918,8 @@ pub struct DomainState {
     pub next_item_number: i64,
     pub next_repository_id: i64,
     pub next_workset_id: i64,
+    pub next_workspace_id: i64,
+    pub next_worktree_id: i64,
     pub next_machine_id: i64,
     pub next_run_id: i64,
     pub next_external_object_id: i64,
@@ -883,6 +931,8 @@ pub struct DomainState {
     pub repositories: Vec<Repository>,
     pub items: Vec<Item>,
     pub worksets: Vec<Workset>,
+    pub workspaces: Vec<Workspace>,
+    pub worktrees: Vec<Worktree>,
     pub machines: Vec<Machine>,
     pub runs: Vec<Run>,
     pub relationships: Vec<ItemRelation>,
@@ -1083,6 +1133,18 @@ pub enum Event {
         branch: String,
         repositories: Vec<WorksetRepositoryInput>,
     },
+    CreateWorkspace {
+        item_id: i64,
+        repositories: Vec<WorkspaceRepositoryInput>,
+    },
+    CreateWorktree {
+        workspace_id: i64,
+        repository_id: i64,
+        machine_id: i64,
+        path: String,
+        branch: String,
+        base_branch: String,
+    },
     AttachWorkset {
         item_id: i64,
         root_directory: String,
@@ -1245,6 +1307,14 @@ pub enum Effect {
     },
     PersistWorksetUpdate {
         workset: Workset,
+    },
+    PersistWorkspace {
+        workspace: Workspace,
+        next_workspace_id: i64,
+    },
+    PersistWorktree {
+        worktree: Worktree,
+        next_worktree_id: i64,
     },
     RemoveWorkset {
         workset_id: i64,
@@ -1849,6 +1919,31 @@ pub enum DomainError {
     WorksetNotFound { workset_id: i64 },
     #[error("Workset {workset_id} has Run history and cannot be removed")]
     WorksetHasRuns { workset_id: i64 },
+    #[error("a Workspace must include at least one Repository")]
+    EmptyWorkspaceRepositories,
+    #[error("Workspace {workspace_id} does not exist")]
+    WorkspaceNotFound { workspace_id: i64 },
+    #[error("Workspace {workspace_id} belongs to another Item")]
+    WorkspaceItemMismatch { workspace_id: i64, item_id: i64 },
+    #[error("Repository {repository_id} is already in Workspace {workspace_id}")]
+    RepositoryAlreadyInWorkspace {
+        repository_id: i64,
+        workspace_id: i64,
+    },
+    #[error("Worktree {worktree_id} does not exist")]
+    WorktreeNotFound { worktree_id: i64 },
+    #[error("Repository {repository_id} already has a Worktree in Workspace {workspace_id}")]
+    WorktreeAlreadyExists {
+        repository_id: i64,
+        workspace_id: i64,
+    },
+    #[error("Worktree Repository {repository_id} is not selected in Workspace {workspace_id}")]
+    WorktreeRepositoryNotSelected {
+        repository_id: i64,
+        workspace_id: i64,
+    },
+    #[error("a Worktree path cannot be blank")]
+    EmptyWorktreePath,
     #[error("a Machine name cannot be blank")]
     EmptyMachineName,
     #[error("a Machine socket name cannot be blank")]
@@ -2491,6 +2586,102 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::PersistWorkset {
                     workset,
                     next_workset_id,
+                }],
+            })
+        }
+        Event::CreateWorkspace {
+            item_id,
+            repositories,
+        } => {
+            let project_id = item_project_id(&state, item_id)?;
+            if repositories.is_empty() {
+                return Err(DomainError::EmptyWorkspaceRepositories);
+            }
+            let repositories = normalize_workspace_repositories(&state, project_id, repositories)?;
+            let id = state.next_workspace_id;
+            let next_workspace_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let workspace = Workspace {
+                id,
+                item_id,
+                repositories,
+            };
+            state.next_workspace_id = next_workspace_id;
+            state.workspaces.push(workspace.clone());
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistWorkspace {
+                    workspace,
+                    next_workspace_id,
+                }],
+            })
+        }
+        Event::CreateWorktree {
+            workspace_id,
+            repository_id,
+            machine_id,
+            path,
+            branch,
+            base_branch,
+        } => {
+            let workspace = state
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+                .ok_or(DomainError::WorkspaceNotFound { workspace_id })?;
+            if !workspace
+                .repositories
+                .iter()
+                .any(|repository| repository.repository_id == repository_id)
+            {
+                return Err(DomainError::WorktreeRepositoryNotSelected {
+                    repository_id,
+                    workspace_id,
+                });
+            }
+            if state.worktrees.iter().any(|worktree| {
+                worktree.workspace_id == workspace_id && worktree.repository_id == repository_id
+            }) {
+                return Err(DomainError::WorktreeAlreadyExists {
+                    repository_id,
+                    workspace_id,
+                });
+            }
+            let item_context_id = item_context_id(&state, workspace.item_id)?;
+            let machine = state
+                .machines
+                .iter()
+                .find(|machine| machine.id == machine_id)
+                .ok_or(DomainError::MachineNotFound { machine_id })?;
+            if machine.context_id != item_context_id {
+                return Err(DomainError::MachineContextMismatch {
+                    machine_id,
+                    context_id: item_context_id,
+                });
+            }
+            let path = clean_name(path, DomainError::EmptyWorktreePath)?;
+            let branch = clean_name(branch, DomainError::EmptyWorksetBranch)?;
+            let base_branch = clean_name(base_branch, DomainError::EmptyWorksetBranch)?;
+            let id = state.next_worktree_id;
+            let next_worktree_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let worktree = Worktree {
+                id,
+                workspace_id,
+                repository_id,
+                machine_id,
+                path,
+                branch,
+                base_branch,
+                is_dirty: false,
+            };
+            state.next_worktree_id = next_worktree_id;
+            state.worktrees.push(worktree.clone());
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistWorktree {
+                    worktree,
+                    next_worktree_id,
                 }],
             })
         }
@@ -3747,6 +3938,12 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 .filter(|workset| workset.item_id == item.id)
                 .cloned()
                 .partition(|workset| !workset.archived);
+            let workspaces = state
+                .workspaces
+                .iter()
+                .filter(|workspace| workspace.item_id == item.id)
+                .cloned()
+                .collect();
             let runs = state
                 .runs
                 .iter()
@@ -3761,6 +3958,7 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 relationships,
                 worksets,
                 archived_worksets,
+                workspaces,
                 runs,
                 links,
             })
@@ -3963,6 +4161,43 @@ fn normalize_workset_repositories(
             branch_override: clean_optional_branch(input.branch_override)?,
             base_branch_override: clean_optional_branch(input.base_branch_override)?,
             is_dirty: false,
+        });
+    }
+    Ok(normalized)
+}
+
+fn normalize_workspace_repositories(
+    state: &DomainState,
+    project_id: i64,
+    repositories: Vec<WorkspaceRepositoryInput>,
+) -> Result<Vec<WorkspaceRepository>, DomainError> {
+    let mut normalized = Vec::with_capacity(repositories.len());
+    for input in repositories {
+        let repository = state
+            .repositories
+            .iter()
+            .find(|repository| repository.id == input.repository_id)
+            .ok_or(DomainError::RepositoryNotFound {
+                repository_id: input.repository_id,
+            })?;
+        if repository.project_id != project_id {
+            return Err(DomainError::RepositoryProjectMismatch {
+                repository_id: input.repository_id,
+                project_id,
+            });
+        }
+        if normalized
+            .iter()
+            .any(|selected: &WorkspaceRepository| selected.repository_id == input.repository_id)
+        {
+            return Err(DomainError::DuplicateRepositorySelection {
+                repository_id: input.repository_id,
+            });
+        }
+        normalized.push(WorkspaceRepository {
+            repository_id: input.repository_id,
+            branch: clean_name(input.branch, DomainError::EmptyWorksetBranch)?,
+            base_branch: clean_name(input.base_branch, DomainError::EmptyWorksetBranch)?,
         });
     }
     Ok(normalized)
@@ -4194,6 +4429,7 @@ mod tests {
                 name: "Default".into(),
                 defaults: ProjectDefaults {
                     item_status: ItemStatus::Inbox,
+                    execution_mode: ExecutionMode::Worktree,
                 },
             }]
         );
@@ -4362,6 +4598,7 @@ mod tests {
                 name: "Billing".into(),
                 defaults: ProjectDefaults {
                     item_status: ItemStatus::Active,
+                    execution_mode: ExecutionMode::Worktree,
                 },
             },
         )
@@ -4375,6 +4612,7 @@ mod tests {
                 name: "Billing".into(),
                 defaults: ProjectDefaults {
                     item_status: ItemStatus::Active,
+                    execution_mode: ExecutionMode::Worktree,
                 },
             }
         );
@@ -4389,6 +4627,7 @@ mod tests {
             name: "Billing".into(),
             defaults: ProjectDefaults {
                 item_status: ItemStatus::Active,
+                execution_mode: ExecutionMode::Worktree,
             },
         });
         state.next_project_id = 3;
@@ -4491,6 +4730,7 @@ mod tests {
                     name: "No context".into(),
                     defaults: ProjectDefaults {
                         item_status: ItemStatus::Inbox,
+                        execution_mode: ExecutionMode::Worktree,
                     },
                 },
             ),
@@ -4893,6 +5133,7 @@ mod tests {
             name: "Billing".into(),
             defaults: ProjectDefaults {
                 item_status: ItemStatus::Active,
+                execution_mode: ExecutionMode::Worktree,
             },
         });
         state.next_project_id = 4;
@@ -7411,6 +7652,69 @@ mod tests {
         state_with_contexts(&[(id, name)])
     }
 
+    #[test]
+    fn workspace_and_worktree_execution_contract_is_decided_in_memory() {
+        let mut state = state_with_item(1, "Work");
+        state.repositories.push(Repository {
+            id: 1,
+            project_id: 1,
+            name: "mission-manager".into(),
+            remote_url: "https://example.com/mission-manager.git".into(),
+        });
+        state.next_repository_id = 2;
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: "mission".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Available,
+            last_observed_at: Some(1),
+        });
+        state.next_machine_id = 2;
+
+        let workspace = decide(
+            state,
+            Event::CreateWorkspace {
+                item_id: 1,
+                repositories: vec![WorkspaceRepositoryInput {
+                    repository_id: 1,
+                    branch: "feature/contracts".into(),
+                    base_branch: "main".into(),
+                }],
+            },
+        )
+        .expect("a selected Repository should create a Workspace");
+        assert_eq!(workspace.state.workspaces.len(), 1);
+        assert_eq!(
+            workspace.state.workspaces[0].repositories[0].repository_id,
+            1
+        );
+        assert!(matches!(
+            workspace.effects.as_slice(),
+            [Effect::PersistWorkspace { .. }]
+        ));
+
+        let worktree = decide(
+            workspace.state,
+            Event::CreateWorktree {
+                workspace_id: 1,
+                repository_id: 1,
+                machine_id: 1,
+                path: "/Users/piero/worktrees/feature-contracts/mission-manager".into(),
+                branch: "feature/contracts".into(),
+                base_branch: "main".into(),
+            },
+        )
+        .expect("a Workspace should own a physical Worktree");
+        assert_eq!(worktree.state.worktrees.len(), 1);
+        assert_eq!(worktree.state.worktrees[0].workspace_id, 1);
+        assert!(matches!(
+            worktree.effects.as_slice(),
+            [Effect::PersistWorktree { .. }]
+        ));
+    }
+
     fn state_with_item(id: i64, name: &str) -> DomainState {
         let mut state = state_with_context(id, name);
         state.items.push(Item {
@@ -7439,6 +7743,8 @@ mod tests {
             next_item_number: 1,
             next_repository_id: 1,
             next_workset_id: 1,
+            next_workspace_id: 1,
+            next_worktree_id: 1,
             next_machine_id: 1,
             next_run_id: 1,
             next_external_object_id: 1,
@@ -7461,12 +7767,15 @@ mod tests {
                     name: "Default".into(),
                     defaults: ProjectDefaults {
                         item_status: ItemStatus::Inbox,
+                        execution_mode: ExecutionMode::Worktree,
                     },
                 })
                 .collect(),
             repositories: Vec::new(),
             items: Vec::new(),
             worksets: Vec::new(),
+            workspaces: Vec::new(),
+            worktrees: Vec::new(),
             machines: Vec::new(),
             runs: Vec::new(),
             relationships: Vec::new(),
@@ -7486,6 +7795,8 @@ mod tests {
             next_item_number: 1,
             next_repository_id: 1,
             next_workset_id: 1,
+            next_workspace_id: 1,
+            next_worktree_id: 1,
             next_machine_id: 1,
             next_run_id: 1,
             next_external_object_id: 1,
@@ -7497,6 +7808,8 @@ mod tests {
             repositories: Vec::new(),
             items: Vec::new(),
             worksets: Vec::new(),
+            workspaces: Vec::new(),
+            worktrees: Vec::new(),
             machines: Vec::new(),
             runs: Vec::new(),
             relationships: Vec::new(),
