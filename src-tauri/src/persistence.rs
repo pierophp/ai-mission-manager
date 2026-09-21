@@ -9,7 +9,7 @@ use crate::domain::{
     ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, Item, ItemRelation,
     ItemRelationKind, ItemStatus, Link, Machine, MachineObservation, Project, ProjectDefaults,
     Reminder, Repository, RepositoryLocation, Run, RunPaneStatus, RunState, Workset,
-    WorksetRepository, Workspace, WorkspaceRepository, Worktree,
+    WorksetRepository, Workspace, WorkspacePreparationState, WorkspaceRepository, Worktree,
 };
 
 #[derive(Debug, Error)]
@@ -40,6 +40,8 @@ pub enum StoreError {
     InvalidRunState(String),
     #[error("invalid Run Pane status in database: {0}")]
     InvalidRunPaneStatus(String),
+    #[error("invalid Workspace preparation state in database: {0}")]
+    InvalidWorkspacePreparationState(String),
     #[error("invalid Machine transport in database: {0}")]
     InvalidMachineTransport(String),
     #[error("invalid Machine observation in database: {0}")]
@@ -354,15 +356,24 @@ impl SqliteStore {
         }
         let mut workspaces = {
             let mut statement = self.connection.prepare(
-                "SELECT id, item_id
+                "SELECT id, item_id, preparation_state
                  FROM workspaces
                  ORDER BY id",
             )?;
             let rows = statement.query_map([], |row| {
+                let preparation_state: String = row.get(2)?;
                 Ok(Workspace {
                     id: row.get(0)?,
                     item_id: row.get(1)?,
                     repositories: Vec::new(),
+                    preparation_state: parse_workspace_preparation_state(&preparation_state)
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -949,13 +960,27 @@ impl SqliteStore {
                     next_workspace_id,
                 } => {
                     transaction.execute(
-                        "INSERT INTO workspaces (id, item_id) VALUES (?1, ?2)",
-                        params![workspace.id, workspace.item_id],
+                        "INSERT INTO workspaces (id, item_id, preparation_state)
+                         VALUES (?1, ?2, ?3)",
+                        params![
+                            workspace.id,
+                            workspace.item_id,
+                            workspace_preparation_state_as_str(workspace.preparation_state),
+                        ],
                     )?;
                     persist_workspace_repositories(&transaction, workspace)?;
                     transaction.execute(
                         "UPDATE metadata SET value = ?1 WHERE key = 'next_workspace_id'",
                         params![next_workspace_id],
+                    )?;
+                }
+                Effect::PersistWorkspaceUpdate { workspace } => {
+                    transaction.execute(
+                        "UPDATE workspaces SET preparation_state = ?1 WHERE id = ?2",
+                        params![
+                            workspace_preparation_state_as_str(workspace.preparation_state),
+                            workspace.id,
+                        ],
                     )?;
                 }
                 Effect::PersistWorktree {
@@ -981,6 +1006,20 @@ impl SqliteStore {
                     transaction.execute(
                         "UPDATE metadata SET value = ?1 WHERE key = 'next_worktree_id'",
                         params![next_worktree_id],
+                    )?;
+                }
+                Effect::RemoveWorktree { worktree_id } => {
+                    transaction
+                        .execute("DELETE FROM worktrees WHERE id = ?1", params![worktree_id])?;
+                }
+                Effect::RemoveWorkspace { workspace_id } => {
+                    transaction.execute(
+                        "DELETE FROM worktrees WHERE workspace_id = ?1",
+                        params![workspace_id],
+                    )?;
+                    transaction.execute(
+                        "DELETE FROM workspaces WHERE id = ?1",
+                        params![workspace_id],
                     )?;
                 }
                 Effect::PersistMachine {
@@ -1732,7 +1771,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              ON workset_repositories (repository_id);
          CREATE TABLE IF NOT EXISTS workspaces (
              id INTEGER PRIMARY KEY NOT NULL,
-             item_id INTEGER NOT NULL REFERENCES items(id)
+             item_id INTEGER NOT NULL REFERENCES items(id),
+             preparation_state TEXT NOT NULL DEFAULT 'pending'
          );
          CREATE INDEX IF NOT EXISTS workspaces_by_item
              ON workspaces (item_id, id);
@@ -1865,6 +1905,17 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     {
         connection.execute(
             "ALTER TABLE repositories ADD COLUMN base_branch TEXT NOT NULL DEFAULT 'main'",
+            [],
+        )?;
+    }
+    let workspace_columns = table_columns(connection, "workspaces")?;
+    if !workspace_columns.is_empty()
+        && !workspace_columns
+            .iter()
+            .any(|column| column == "preparation_state")
+    {
+        connection.execute(
+            "ALTER TABLE workspaces ADD COLUMN preparation_state TEXT NOT NULL DEFAULT 'pending'",
             [],
         )?;
     }
@@ -2188,6 +2239,23 @@ fn parse_execution_mode(mode: &str) -> Result<ExecutionMode, StoreError> {
         "direct" => Ok(ExecutionMode::Direct),
         "worktree" => Ok(ExecutionMode::Worktree),
         other => Err(StoreError::InvalidExecutionMode(other.into())),
+    }
+}
+
+fn workspace_preparation_state_as_str(state: WorkspacePreparationState) -> &'static str {
+    match state {
+        WorkspacePreparationState::Pending => "pending",
+        WorkspacePreparationState::Resumable => "resumable",
+        WorkspacePreparationState::Ready => "ready",
+    }
+}
+
+fn parse_workspace_preparation_state(state: &str) -> Result<WorkspacePreparationState, StoreError> {
+    match state {
+        "pending" => Ok(WorkspacePreparationState::Pending),
+        "resumable" => Ok(WorkspacePreparationState::Resumable),
+        "ready" => Ok(WorkspacePreparationState::Ready),
+        other => Err(StoreError::InvalidWorkspacePreparationState(other.into())),
     }
 }
 

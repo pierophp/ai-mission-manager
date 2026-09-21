@@ -67,6 +67,8 @@ pub struct Runtime {
     state: DomainState,
     gh_executable_path: Option<PathBuf>,
     pending_workset_removal: Option<WorksetRemovalReport>,
+    pending_worktree_removals: HashMap<i64, WorktreeRemovalReport>,
+    pending_workspace_removal: Option<WorkspaceRemovalReport>,
     pending_item_deletion: Option<ItemDeletionPreview>,
     pending_external_object_deletion: Option<ExternalObjectDeletionPreview>,
     pending_repository_deletion: Option<RepositoryDeletionPreview>,
@@ -158,6 +160,8 @@ impl Runtime {
             state,
             gh_executable_path,
             pending_workset_removal: None,
+            pending_worktree_removals: HashMap::new(),
+            pending_workspace_removal: None,
             pending_item_deletion: None,
             pending_external_object_deletion: None,
             pending_repository_deletion: None,
@@ -724,18 +728,22 @@ impl Runtime {
             &selected.branch,
             &repository.name,
         );
-        let inspection = GitCli::system()
-            .prepare_worktree_on_machine(
-                &machine,
-                &repository,
-                &canonical_checkout,
-                &destination,
-                &selected.branch,
-                &selected.base_branch,
-                reuse_existing_branch,
-                confirm_dirty_attachment,
-            )
-            .map_err(|error| error.to_string())?;
+        let inspection = match GitCli::system().prepare_worktree_on_machine(
+            &machine,
+            &repository,
+            &canonical_checkout,
+            &destination,
+            &selected.branch,
+            &selected.base_branch,
+            reuse_existing_branch,
+            confirm_dirty_attachment,
+        ) {
+            Ok(inspection) => inspection,
+            Err(error) => {
+                let mark_error = self.mark_workspace_resumable(workspace_id).err();
+                return Err(format_commit_error(error.to_string(), mark_error));
+            }
+        };
         let path = normalize_machine_path(&destination.to_string_lossy(), &machine_home)
             .map_err(|error| error.to_string())?;
         self.persist_prepared_worktree(
@@ -747,6 +755,15 @@ impl Runtime {
             selected.base_branch,
             inspection.is_dirty,
         )
+    }
+
+    fn mark_workspace_resumable(&mut self, workspace_id: i64) -> Result<(), String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::MarkWorkspaceResumable { workspace_id },
+        )
+        .map_err(|error| error.to_string())?;
+        self.commit(decision)
     }
 
     fn attach_worktree(
@@ -888,6 +905,253 @@ impl Runtime {
             .ok_or_else(|| "Worktree creation produced no Worktree".to_owned())?;
         self.commit(decision)?;
         Ok(worktree)
+    }
+
+    fn build_worktree_removal_report(
+        &self,
+        worktree_id: i64,
+    ) -> Result<WorktreeRemovalReport, String> {
+        let worktree = self
+            .state
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.id == worktree_id)
+            .cloned()
+            .ok_or_else(|| format!("Worktree {worktree_id} does not exist"))?;
+        let repository = self.repository(worktree.repository_id)?;
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == worktree.machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", worktree.machine_id))?;
+        let location = self
+            .state
+            .repository_locations
+            .iter()
+            .find(|location| {
+                location.repository_id == worktree.repository_id
+                    && location.machine_id == worktree.machine_id
+            })
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "Repository {} has no checkout registered on Machine {}",
+                    repository.name, machine.name
+                )
+            })?;
+        let machine_home = machine_home_directory(&machine);
+        let canonical_checkout = resolve_machine_path(&location.checkout_path, &machine_home);
+        let path = resolve_machine_path(&worktree.path, &machine_home);
+        let inspection = GitCli::system()
+            .validate_worktree_attachment_on_machine(
+                &machine,
+                &repository,
+                &canonical_checkout,
+                &path,
+                &worktree.branch,
+                true,
+            )
+            .map_err(|error| error.to_string())?;
+        Ok(WorktreeRemovalReport {
+            worktree_id,
+            workspace_id: worktree.workspace_id,
+            repository_id: worktree.repository_id,
+            repository_name: repository.name,
+            machine_id: worktree.machine_id,
+            path: worktree.path,
+            branch: worktree.branch,
+            is_dirty: inspection.is_dirty,
+            requires_destructive_confirmation: inspection.is_dirty,
+        })
+    }
+
+    fn prepare_worktree_removal(
+        &mut self,
+        worktree_id: i64,
+    ) -> Result<WorktreeRemovalReport, String> {
+        let report = self.build_worktree_removal_report(worktree_id)?;
+        self.pending_worktree_removals
+            .insert(worktree_id, report.clone());
+        Ok(report)
+    }
+
+    fn remove_worktree(
+        &mut self,
+        worktree_id: i64,
+        confirmed: bool,
+        destructive_confirmed: bool,
+    ) -> Result<WorktreeRemovalResult, String> {
+        if !confirmed {
+            return Err(
+                "Worktree removal requires explicit confirmation after reviewing its safety report"
+                    .into(),
+            );
+        }
+        let pending = self
+            .pending_worktree_removals
+            .get(&worktree_id)
+            .cloned()
+            .ok_or_else(|| {
+                "Review the Worktree removal safety report before removing it".to_owned()
+            })?;
+        let current = self.build_worktree_removal_report(worktree_id)?;
+        if current != pending {
+            return Err("The Worktree changed after the safety report; review the updated report before removing it".into());
+        }
+        if current.requires_destructive_confirmation && !destructive_confirmed {
+            return Err("Removing a dirty Worktree requires destructive confirmation".into());
+        }
+        self.remove_worktree_physical(&current)?;
+        let decision = decide(self.state.clone(), Event::RemoveWorktree { worktree_id })
+            .map_err(|error| error.to_string())?;
+        self.commit(decision)?;
+        self.pending_worktree_removals.remove(&worktree_id);
+        Ok(WorktreeRemovalResult {
+            worktree_id,
+            branch_preserved: true,
+        })
+    }
+
+    fn remove_worktree_physical(&self, report: &WorktreeRemovalReport) -> Result<(), String> {
+        let worktree = self
+            .state
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.id == report.worktree_id)
+            .ok_or_else(|| format!("Worktree {} does not exist", report.worktree_id))?;
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == worktree.machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", worktree.machine_id))?;
+        let location = self
+            .state
+            .repository_locations
+            .iter()
+            .find(|location| {
+                location.repository_id == worktree.repository_id
+                    && location.machine_id == worktree.machine_id
+            })
+            .cloned()
+            .ok_or_else(|| "The Repository checkout location no longer exists".to_owned())?;
+        let machine_home = machine_home_directory(&machine);
+        GitCli::system()
+            .remove_worktree_on_machine(
+                &machine,
+                &resolve_machine_path(&location.checkout_path, &machine_home),
+                &resolve_machine_path(&worktree.path, &machine_home),
+                report.requires_destructive_confirmation,
+            )
+            .map_err(|error| error.to_string())
+    }
+
+    fn build_workspace_removal_report(
+        &self,
+        workspace_id: i64,
+    ) -> Result<WorkspaceRemovalReport, String> {
+        if !self
+            .state
+            .workspaces
+            .iter()
+            .any(|workspace| workspace.id == workspace_id)
+        {
+            return Err(format!("Workspace {workspace_id} does not exist"));
+        }
+        let worktrees = self
+            .state
+            .worktrees
+            .iter()
+            .filter(|worktree| worktree.workspace_id == workspace_id)
+            .map(|worktree| self.build_worktree_removal_report(worktree.id))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut blockers = Vec::new();
+        if self
+            .state
+            .runs
+            .iter()
+            .any(|run| run.workspace_id == Some(workspace_id))
+        {
+            blockers.push("This Workspace has Run history and cannot be removed.".into());
+        }
+        Ok(WorkspaceRemovalReport {
+            workspace_id,
+            worktrees,
+            safe: blockers.is_empty(),
+            blockers,
+        })
+    }
+
+    fn prepare_workspace_removal(
+        &mut self,
+        workspace_id: i64,
+    ) -> Result<WorkspaceRemovalReport, String> {
+        let report = self.build_workspace_removal_report(workspace_id)?;
+        self.pending_workspace_removal = Some(report.clone());
+        Ok(report)
+    }
+
+    fn remove_workspace(
+        &mut self,
+        workspace_id: i64,
+        confirmed_worktree_ids: Vec<i64>,
+        destructive_worktree_ids: Vec<i64>,
+        confirmed: bool,
+    ) -> Result<WorkspaceRemovalResult, String> {
+        if !confirmed {
+            return Err(
+                "Workspace removal requires explicit confirmation for every Worktree".into(),
+            );
+        }
+        let pending = self
+            .pending_workspace_removal
+            .as_ref()
+            .filter(|report| report.workspace_id == workspace_id)
+            .cloned()
+            .ok_or_else(|| "Review the Workspace removal report before removing it".to_owned())?;
+        let current = self.build_workspace_removal_report(workspace_id)?;
+        if current != pending {
+            return Err("The Workspace changed after the safety report; review the updated report before removing it".into());
+        }
+        if !current.safe {
+            return Err(format!(
+                "Workspace removal is blocked:\n{}",
+                current.blockers.join("\n")
+            ));
+        }
+        let mut expected_ids = current
+            .worktrees
+            .iter()
+            .map(|worktree| worktree.worktree_id)
+            .collect::<Vec<_>>();
+        let mut confirmed_ids = confirmed_worktree_ids;
+        expected_ids.sort_unstable();
+        confirmed_ids.sort_unstable();
+        if expected_ids != confirmed_ids {
+            return Err("Confirm each listed Worktree before removing the Workspace".into());
+        }
+        if current.worktrees.iter().any(|worktree| {
+            worktree.requires_destructive_confirmation
+                && !destructive_worktree_ids.contains(&worktree.worktree_id)
+        }) {
+            return Err("Each dirty Worktree requires destructive confirmation".into());
+        }
+        for worktree in &current.worktrees {
+            self.remove_worktree_physical(worktree)?;
+        }
+        let worktree_count = current.worktrees.len();
+        let decision = decide(self.state.clone(), Event::RemoveWorkspace { workspace_id })
+            .map_err(|error| error.to_string())?;
+        self.commit(decision)?;
+        self.pending_workspace_removal = None;
+        Ok(WorkspaceRemovalResult {
+            workspace_id,
+            worktree_count,
+            branches_preserved: true,
+        })
     }
 
     fn attach_workset(&mut self, item_id: i64, root_directory: String) -> Result<Workset, String> {
@@ -3861,7 +4125,10 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
                     })
             }
             Effect::PersistWorkspace { .. }
+            | Effect::PersistWorkspaceUpdate { .. }
             | Effect::PersistWorktree { .. }
+            | Effect::RemoveWorktree { .. }
+            | Effect::RemoveWorkspace { .. }
             | Effect::UpdateRepository { .. }
             | Effect::PersistRepositoryLocation { .. } => None,
             Effect::PersistItemRelation { relation } => Some(AuditAction::ItemRelationChanged {
@@ -4050,6 +4317,29 @@ pub struct WorksetRemovalReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct WorktreeRemovalReport {
+    pub worktree_id: i64,
+    pub workspace_id: i64,
+    pub repository_id: i64,
+    pub repository_name: String,
+    pub machine_id: i64,
+    pub path: String,
+    pub branch: String,
+    pub is_dirty: bool,
+    pub requires_destructive_confirmation: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRemovalReport {
+    pub workspace_id: i64,
+    pub worktrees: Vec<WorktreeRemovalReport>,
+    pub safe: bool,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WorksetDeletionPreview {
     pub workset_id: i64,
     pub root_directory: String,
@@ -4185,6 +4475,21 @@ pub struct WorksetRemovalResult {
     pub workset_id: i64,
     pub workset_directories_deleted: bool,
     pub physical_cleanup_warning: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeRemovalResult {
+    pub worktree_id: i64,
+    pub branch_preserved: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceRemovalResult {
+    pub workspace_id: i64,
+    pub worktree_count: usize,
+    pub branches_preserved: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -4868,6 +5173,60 @@ pub fn prepare_worktree(
             machine_id,
             reuse_existing_branch,
             confirm_dirty_attachment,
+        )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn prepare_worktree_removal(
+    worktree_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<WorktreeRemovalReport, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .prepare_worktree_removal(worktree_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn remove_worktree(
+    worktree_id: i64,
+    confirmed: bool,
+    destructive_confirmed: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<WorktreeRemovalResult, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .remove_worktree(worktree_id, confirmed, destructive_confirmed)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn prepare_workspace_removal(
+    workspace_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<WorkspaceRemovalReport, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .prepare_workspace_removal(workspace_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn remove_workspace(
+    workspace_id: i64,
+    confirmed_worktree_ids: Vec<i64>,
+    destructive_worktree_ids: Vec<i64>,
+    confirmed: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<WorkspaceRemovalResult, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .remove_workspace(
+            workspace_id,
+            confirmed_worktree_ids,
+            destructive_worktree_ids,
+            confirmed,
         )
 }
 

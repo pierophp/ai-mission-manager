@@ -440,6 +440,85 @@ impl GitCli {
         Ok(inspection)
     }
 
+    pub fn remove_worktree_on_machine(
+        &self,
+        machine: &Machine,
+        canonical_checkout: &Path,
+        worktree_path: &Path,
+        force: bool,
+    ) -> Result<(), GitError> {
+        if matches!(machine.transport, MachineTransport::Local) {
+            return self.remove_worktree(canonical_checkout, worktree_path, force);
+        }
+
+        let requested_path = self.remote_canonical_path(machine, worktree_path)?;
+        let canonical_path = self.remote_canonical_path(machine, canonical_checkout)?;
+        let registered = self
+            .list_worktrees_on_machine(machine, canonical_checkout)?
+            .into_iter()
+            .any(|entry| {
+                self.remote_canonical_path(machine, &entry.path)
+                    .map(|path| path == requested_path && path != canonical_path)
+                    .unwrap_or(false)
+            });
+        if !registered {
+            return Err(GitError::NotAWorktree {
+                path: worktree_path.to_owned(),
+            });
+        }
+        let force_flag = if force { "--force " } else { "" };
+        self.remote_git(
+            machine,
+            "remove the Git Worktree",
+            canonical_checkout,
+            &format!(
+                "worktree remove {force_flag}{}",
+                machine_path_arg(worktree_path)
+            ),
+        )
+        .map(|_| ())
+    }
+
+    pub fn remove_worktree(
+        &self,
+        canonical_checkout: &Path,
+        worktree_path: &Path,
+        force: bool,
+    ) -> Result<(), GitError> {
+        let canonical_worktree =
+            fs::canonicalize(worktree_path).map_err(|source| GitError::ReadWorksetRoot {
+                path: worktree_path.to_owned(),
+                source,
+            })?;
+        let canonical_checkout =
+            fs::canonicalize(canonical_checkout).map_err(|source| GitError::ReadWorksetRoot {
+                path: canonical_checkout.to_owned(),
+                source,
+            })?;
+        let registered = self
+            .list_worktrees(&canonical_checkout)?
+            .into_iter()
+            .any(|entry| {
+                fs::canonicalize(entry.path)
+                    .map(|path| path == canonical_worktree && path != canonical_checkout)
+                    .unwrap_or(false)
+            });
+        if !registered {
+            return Err(GitError::NotAWorktree {
+                path: worktree_path.to_owned(),
+            });
+        }
+
+        let canonical = canonical_checkout.to_string_lossy().into_owned();
+        let destination = worktree_path.to_string_lossy().into_owned();
+        let mut arguments = vec!["-C", canonical.as_str(), "worktree", "remove"];
+        if force {
+            arguments.push("--force");
+        }
+        arguments.push(destination.as_str());
+        self.run("remove the Git Worktree", &arguments)
+    }
+
     fn inspect_remote_checkout(
         &self,
         machine: &Machine,
@@ -1583,6 +1662,75 @@ mod tests {
 
         assert!(inspection.is_dirty);
         assert_eq!(inspection.current_branch, "feature/fix");
+    }
+
+    #[test]
+    fn removing_a_worktree_requires_force_when_dirty_and_never_deletes_its_branch() {
+        let directory = tempdir().expect("temporary Git directory should exist");
+        let (canonical, repository) = remote_fixture(directory.path());
+        let clean_destination = directory.path().join("clean");
+        GitCli::system()
+            .prepare_worktree(
+                &repository,
+                &canonical,
+                &clean_destination,
+                "feature/clean-removal",
+                "main",
+                false,
+                false,
+            )
+            .expect("the clean Worktree should be created");
+        GitCli::system()
+            .remove_worktree(&canonical, &clean_destination, false)
+            .expect("an explicit clean removal should succeed");
+        assert!(!clean_destination.exists());
+        assert_eq!(
+            run_git_output(
+                &canonical,
+                &["show-ref", "--verify", "refs/heads/feature/clean-removal"]
+            ),
+            format!(
+                "{} refs/heads/feature/clean-removal",
+                run_git_output(&canonical, &["rev-parse", "feature/clean-removal"])
+            )
+        );
+
+        let dirty_destination = directory.path().join("dirty");
+        GitCli::system()
+            .prepare_worktree(
+                &repository,
+                &canonical,
+                &dirty_destination,
+                "feature/dirty-removal",
+                "main",
+                false,
+                false,
+            )
+            .expect("the dirty Worktree should be created");
+        fs::write(
+            dirty_destination.join("notes.txt"),
+            "keep this until confirmation\n",
+        )
+        .expect("the Worktree should become dirty");
+        let error = GitCli::system()
+            .remove_worktree(&canonical, &dirty_destination, false)
+            .expect_err("dirty cleanup must require destructive confirmation");
+        assert!(matches!(
+            error,
+            GitError::Failed {
+                operation: "remove the Git Worktree",
+                ..
+            }
+        ));
+        GitCli::system()
+            .remove_worktree(&canonical, &dirty_destination, true)
+            .expect("destructive confirmation should allow dirty cleanup");
+        assert!(!dirty_destination.exists());
+        assert!(run_git_output(
+            &canonical,
+            &["show-ref", "--verify", "refs/heads/feature/dirty-removal"]
+        )
+        .contains("refs/heads/feature/dirty-removal"));
     }
 
     #[test]

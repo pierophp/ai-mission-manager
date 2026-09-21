@@ -108,11 +108,20 @@ pub struct WorkspaceRepository {
     pub base_branch: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkspacePreparationState {
+    Pending,
+    Resumable,
+    Ready,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
     pub id: i64,
     pub item_id: i64,
     pub repositories: Vec<WorkspaceRepository>,
+    pub preparation_state: WorkspacePreparationState,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -515,6 +524,7 @@ pub struct ItemView {
     pub worksets: Vec<Workset>,
     pub archived_worksets: Vec<Workset>,
     pub workspaces: Vec<Workspace>,
+    pub worktrees: Vec<Worktree>,
     pub runs: Vec<Run>,
     pub links: Vec<ExternalLinkView>,
 }
@@ -1217,6 +1227,15 @@ pub enum Event {
         base_branch: String,
         is_dirty: bool,
     },
+    MarkWorkspaceResumable {
+        workspace_id: i64,
+    },
+    RemoveWorktree {
+        worktree_id: i64,
+    },
+    RemoveWorkspace {
+        workspace_id: i64,
+    },
     AttachWorkset {
         item_id: i64,
         root_directory: String,
@@ -1406,9 +1425,18 @@ pub enum Effect {
         workspace: Workspace,
         next_workspace_id: i64,
     },
+    PersistWorkspaceUpdate {
+        workspace: Workspace,
+    },
     PersistWorktree {
         worktree: Worktree,
         next_worktree_id: i64,
+    },
+    RemoveWorktree {
+        worktree_id: i64,
+    },
+    RemoveWorkspace {
+        workspace_id: i64,
     },
     RemoveWorkset {
         workset_id: i64,
@@ -1941,6 +1969,33 @@ fn parent_selection_matches(expected: &[i64], provided: Vec<i64>) -> bool {
     sorted_ids(expected.to_vec()) == sorted_ids(provided)
 }
 
+fn workspace_preparation_state(
+    state: &DomainState,
+    workspace_id: i64,
+    previous: WorkspacePreparationState,
+) -> WorkspacePreparationState {
+    let Some(workspace) = state
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id)
+    else {
+        return previous;
+    };
+    let complete = workspace.repositories.iter().all(|repository| {
+        state.worktrees.iter().any(|worktree| {
+            worktree.workspace_id == workspace_id
+                && worktree.repository_id == repository.repository_id
+        })
+    });
+    if complete {
+        WorkspacePreparationState::Ready
+    } else if previous == WorkspacePreparationState::Resumable {
+        WorkspacePreparationState::Resumable
+    } else {
+        WorkspacePreparationState::Pending
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DomainError {
     #[error("a Context name cannot be blank")]
@@ -2025,6 +2080,8 @@ pub enum DomainError {
     EmptyWorkspaceRepositories,
     #[error("Workspace {workspace_id} does not exist")]
     WorkspaceNotFound { workspace_id: i64 },
+    #[error("Workspace {workspace_id} has Run history and cannot be removed")]
+    WorkspaceHasRuns { workspace_id: i64 },
     #[error("Workspace {workspace_id} belongs to another Item")]
     WorkspaceItemMismatch { workspace_id: i64, item_id: i64 },
     #[error("Repository {repository_id} is already in Workspace {workspace_id}")]
@@ -2916,6 +2973,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 id,
                 item_id,
                 repositories,
+                preparation_state: WorkspacePreparationState::Pending,
             };
             state.next_workspace_id = next_workspace_id;
             state.workspaces.push(workspace.clone());
@@ -2990,12 +3048,100 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             state.next_worktree_id = next_worktree_id;
             state.worktrees.push(worktree.clone());
 
+            let preparation_state =
+                workspace_preparation_state(&state, workspace_id, workspace.preparation_state);
+            let workspace = state
+                .workspaces
+                .iter_mut()
+                .find(|workspace| workspace.id == workspace_id)
+                .expect("the Workspace was checked above");
+            let workspace_changed = workspace.preparation_state != preparation_state;
+            workspace.preparation_state = preparation_state;
+            let workspace = workspace.clone();
+            let mut effects = vec![Effect::PersistWorktree {
+                worktree,
+                next_worktree_id,
+            }];
+            if workspace_changed {
+                effects.push(Effect::PersistWorkspaceUpdate { workspace });
+            }
+
+            Ok(Decision { state, effects })
+        }
+        Event::MarkWorkspaceResumable { workspace_id } => {
+            let workspace = state
+                .workspaces
+                .iter_mut()
+                .find(|workspace| workspace.id == workspace_id)
+                .ok_or(DomainError::WorkspaceNotFound { workspace_id })?;
+            workspace.preparation_state = WorkspacePreparationState::Resumable;
+            let workspace = workspace.clone();
+
             Ok(Decision {
                 state,
-                effects: vec![Effect::PersistWorktree {
-                    worktree,
-                    next_worktree_id,
-                }],
+                effects: vec![Effect::PersistWorkspaceUpdate { workspace }],
+            })
+        }
+        Event::RemoveWorktree { worktree_id } => {
+            let position = state
+                .worktrees
+                .iter()
+                .position(|worktree| worktree.id == worktree_id)
+                .ok_or(DomainError::WorktreeNotFound { worktree_id })?;
+            let workspace_id = state.worktrees[position].workspace_id;
+            state.worktrees.remove(position);
+            let previous_workspace = state
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+                .cloned()
+                .ok_or(DomainError::WorkspaceNotFound { workspace_id })?;
+            let preparation_state = workspace_preparation_state(
+                &state,
+                workspace_id,
+                previous_workspace.preparation_state,
+            );
+            let workspace = state
+                .workspaces
+                .iter_mut()
+                .find(|workspace| workspace.id == workspace_id)
+                .expect("the Workspace was checked above");
+            workspace.preparation_state = preparation_state;
+            let workspace = workspace.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![
+                    Effect::RemoveWorktree { worktree_id },
+                    Effect::PersistWorkspaceUpdate { workspace },
+                ],
+            })
+        }
+        Event::RemoveWorkspace { workspace_id } => {
+            if !state
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == workspace_id)
+            {
+                return Err(DomainError::WorkspaceNotFound { workspace_id });
+            }
+            if state
+                .runs
+                .iter()
+                .any(|run| run.workspace_id == Some(workspace_id))
+            {
+                return Err(DomainError::WorkspaceHasRuns { workspace_id });
+            }
+            state
+                .worktrees
+                .retain(|worktree| worktree.workspace_id != workspace_id);
+            state
+                .workspaces
+                .retain(|workspace| workspace.id != workspace_id);
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::RemoveWorkspace { workspace_id }],
             })
         }
         Event::AttachWorkset {
@@ -4438,6 +4584,16 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 .filter(|run| run.item_id == item.id)
                 .cloned()
                 .collect();
+            let worktrees = state
+                .worktrees
+                .iter()
+                .filter(|worktree| {
+                    state.workspaces.iter().any(|workspace| {
+                        workspace.id == worktree.workspace_id && workspace.item_id == item.id
+                    })
+                })
+                .cloned()
+                .collect();
             Some(ItemView {
                 item: item.clone(),
                 context_id: context.id,
@@ -4447,6 +4603,7 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 worksets,
                 archived_worksets,
                 workspaces,
+                worktrees,
                 runs,
                 links,
             })
@@ -7908,6 +8065,7 @@ mod tests {
                 branch: "feature/direct".into(),
                 base_branch: "main".into(),
             }],
+            preparation_state: WorkspacePreparationState::Pending,
         });
         state.machines.push(Machine {
             id: 1,
@@ -8485,7 +8643,167 @@ mod tests {
         assert_eq!(worktree.state.worktrees[0].workspace_id, 1);
         assert!(matches!(
             worktree.effects.as_slice(),
-            [Effect::PersistWorktree { .. }]
+            [
+                Effect::PersistWorktree { .. },
+                Effect::PersistWorkspaceUpdate { .. }
+            ]
+        ));
+    }
+
+    #[test]
+    fn partial_workspace_preparation_is_resumable_and_completion_keeps_successful_worktrees() {
+        let mut state = state_with_item(1, "Work");
+        state.repositories.extend([
+            Repository {
+                id: 1,
+                project_id: 1,
+                name: "service-a".into(),
+                remote_url: "https://example.com/service-a.git".into(),
+                base_branch: "main".into(),
+            },
+            Repository {
+                id: 2,
+                project_id: 1,
+                name: "service-b".into(),
+                remote_url: "https://example.com/service-b.git".into(),
+                base_branch: "main".into(),
+            },
+        ]);
+        state.next_repository_id = 3;
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: "mission-manager".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+        let workspace = decide(
+            state,
+            Event::CreateWorkspace {
+                item_id: 1,
+                repositories: vec![
+                    WorkspaceRepositoryInput {
+                        repository_id: 1,
+                        branch: "feature/partial".into(),
+                        base_branch: "main".into(),
+                    },
+                    WorkspaceRepositoryInput {
+                        repository_id: 2,
+                        branch: "feature/partial".into(),
+                        base_branch: "main".into(),
+                    },
+                ],
+            },
+        )
+        .expect("Workspace should be created");
+
+        let resumable = decide(
+            workspace.state,
+            Event::MarkWorkspaceResumable { workspace_id: 1 },
+        )
+        .expect("a failed preparation should mark the Workspace resumable");
+        assert_eq!(
+            resumable.state.workspaces[0].preparation_state,
+            WorkspacePreparationState::Resumable
+        );
+
+        let first = decide(
+            resumable.state,
+            Event::CreateWorktree {
+                workspace_id: 1,
+                repository_id: 1,
+                machine_id: 1,
+                path: "/tmp/service-a".into(),
+                branch: "feature/partial".into(),
+                base_branch: "main".into(),
+                is_dirty: false,
+            },
+        )
+        .expect("the successful Worktree should remain available");
+        assert_eq!(first.state.worktrees.len(), 1);
+        assert_eq!(
+            first.state.workspaces[0].preparation_state,
+            WorkspacePreparationState::Resumable
+        );
+
+        let second = decide(
+            first.state,
+            Event::CreateWorktree {
+                workspace_id: 1,
+                repository_id: 2,
+                machine_id: 1,
+                path: "/tmp/service-b".into(),
+                branch: "feature/partial".into(),
+                base_branch: "main".into(),
+                is_dirty: false,
+            },
+        )
+        .expect("retrying the failed Repository should complete preparation");
+        assert_eq!(second.state.worktrees.len(), 2);
+        assert_eq!(
+            second.state.workspaces[0].preparation_state,
+            WorkspacePreparationState::Ready
+        );
+    }
+
+    #[test]
+    fn removing_a_worktree_removes_only_the_physical_record_and_workspace_cleanup_is_explicit() {
+        let mut state = state_with_item(1, "Work");
+        state.repositories.push(Repository {
+            id: 1,
+            project_id: 1,
+            name: "service".into(),
+            remote_url: "https://example.com/service.git".into(),
+            base_branch: "main".into(),
+        });
+        state.next_repository_id = 2;
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: "mission-manager".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+        let workspace = decide(
+            state,
+            Event::CreateWorkspace {
+                item_id: 1,
+                repositories: vec![WorkspaceRepositoryInput {
+                    repository_id: 1,
+                    branch: "feature/keep-branch".into(),
+                    base_branch: "main".into(),
+                }],
+            },
+        )
+        .expect("Workspace should be created");
+        let worktree = decide(
+            workspace.state,
+            Event::CreateWorktree {
+                workspace_id: 1,
+                repository_id: 1,
+                machine_id: 1,
+                path: "/tmp/service".into(),
+                branch: "feature/keep-branch".into(),
+                base_branch: "main".into(),
+                is_dirty: false,
+            },
+        )
+        .expect("Worktree should be created");
+
+        let removed = decide(worktree.state, Event::RemoveWorktree { worktree_id: 1 })
+            .expect("an explicit Worktree removal should succeed");
+        assert!(removed.state.worktrees.is_empty());
+        assert_eq!(removed.state.workspaces[0].repositories.len(), 1);
+        assert!(matches!(
+            removed.effects.as_slice(),
+            [
+                Effect::RemoveWorktree { worktree_id: 1 },
+                Effect::PersistWorkspaceUpdate { .. }
+            ]
         ));
     }
 
