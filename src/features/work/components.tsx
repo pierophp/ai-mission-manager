@@ -1,4 +1,21 @@
-import { FormEvent, useEffect, useState } from "react";
+import { type FormEvent, useEffect, useState } from "react";
+import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
+import { Badge } from "../../components/ui/badge";
+import { Button } from "../../components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "../../components/ui/card";
+import { Checkbox } from "../../components/ui/checkbox";
+import { Input } from "../../components/ui/input";
+import {
+  NativeSelect,
+  NativeSelectOption,
+} from "../../components/ui/native-select";
+import { Textarea } from "../../components/ui/textarea";
 import { currentMinute } from "../../runtime/time";
 import { errorMessage } from "../../runtime/errors";
 import { workAdapter } from "../../runtime/adapters";
@@ -35,11 +52,7 @@ import {
 } from "./work-utils";
 
 const itemStatuses: ItemStatus[] = ["Inbox", "Active", "Waiting", "Done"];
-const relationKinds: ItemRelationKind[] = [
-  "Blocks",
-  "BlockedBy",
-  "RelatedTo",
-];
+const relationKinds: ItemRelationKind[] = ["Blocks", "BlockedBy", "RelatedTo"];
 
 export function HomeColumn({
   title,
@@ -61,18 +74,25 @@ export function HomeColumn({
   onOpenTerminal: (worksetId: number, pane: PaneTab) => void;
 }) {
   return (
-    <section className="home-column" aria-labelledby={`${title}-heading`}>
-      <div className="column-heading">
+    <section className="min-w-0 space-y-3" aria-labelledby={`${title}-heading`}>
+      <div className="flex items-start justify-between gap-3">
         <div>
-          <h3 id={`${title}-heading`}>{title}</h3>
-          <span className="column-hint">{hint}</span>
+          <h3
+            id={`${title}-heading`}
+            className="font-heading text-base font-medium normal-case tracking-normal text-foreground"
+          >
+            {title}
+          </h3>
+          <span className="text-xs text-muted-foreground">{hint}</span>
         </div>
-        <span className="column-count">{items.length}</span>
+        <Badge variant="secondary">{items.length}</Badge>
       </div>
       {items.length === 0 ? (
-        <p className="column-empty">Nothing here.</p>
+        <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
+          Nothing here.
+        </p>
       ) : (
-        <div className="column-items">
+        <div className="grid gap-3">
           {items.map((view) => (
             <ItemCard
               key={view.item.id}
@@ -117,14 +137,17 @@ export function ItemCard({
   const [worksetRoot, setWorksetRoot] = useState("");
   const [worksetBranch, setWorksetBranch] = useState("");
   const [attachWorksetRoot, setAttachWorksetRoot] = useState("");
-  const [selectedRepositoryIds, setSelectedRepositoryIds] = useState<number[]>([]);
+  const [selectedRepositoryIds, setSelectedRepositoryIds] = useState<number[]>(
+    [],
+  );
   const [worksetBranchOverrides, setWorksetBranchOverrides] = useState<
     Record<number, string>
   >({});
   const [worksetBaseBranchOverrides, setWorksetBaseBranchOverrides] = useState<
     Record<number, string>
   >({});
-  const [additionalRepositoryId, setAdditionalRepositoryId] = useState<number>();
+  const [additionalRepositoryId, setAdditionalRepositoryId] =
+    useState<number>();
   const [additionalBranchOverride, setAdditionalBranchOverride] = useState("");
   const [additionalBaseBranchOverride, setAdditionalBaseBranchOverride] =
     useState("");
@@ -179,7 +202,10 @@ export function ItemCard({
     if (!externalUrl.trim()) return;
     setIsSaving(true);
     try {
-      const result = await workAdapter.linkExternalObject(view.item.id, externalUrl);
+      const result = await workAdapter.linkExternalObject(
+        view.item.id,
+        externalUrl,
+      );
       setExternalUrl("");
       await onChanged();
       if (result.warning) {
@@ -194,7 +220,11 @@ export function ItemCard({
 
   async function handleCreateWorkset(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!worksetRoot.trim() || !worksetBranch.trim() || selectedRepositoryIds.length === 0) {
+    if (
+      !worksetRoot.trim() ||
+      !worksetBranch.trim() ||
+      selectedRepositoryIds.length === 0
+    ) {
       return;
     }
     await saveItem(async () => {
@@ -244,10 +274,11 @@ export function ItemCard({
     });
   }
 
-  async function handleSetWorksetArchived(worksetId: number, archived: boolean) {
-    await saveItem(() =>
-      workAdapter.setWorksetArchived(worksetId, archived),
-    );
+  async function handleSetWorksetArchived(
+    worksetId: number,
+    archived: boolean,
+  ) {
+    await saveItem(() => workAdapter.setWorksetArchived(worksetId, archived));
     if (removalReport?.workset_id === worksetId) {
       setRemovalReport(undefined);
     }
@@ -292,7 +323,8 @@ export function ItemCard({
 
   async function handleRemoveWorkset(worksetId: number) {
     if (removalReport?.workset_id !== worksetId) return;
-    if (!window.confirm("Remove this Workset and its directory from disk?")) return;
+    if (!window.confirm("Remove this Workset and its directory from disk?"))
+      return;
     await saveItem(async () => {
       const result = await workAdapter.removeWorkset(worksetId);
       setRemovalReport(undefined);
@@ -331,7 +363,10 @@ export function ItemCard({
 
     setIsSaving(true);
     try {
-      const result = await workAdapter.deleteItem(view.item.id, deleteWorksetDirectories);
+      const result = await workAdapter.deleteItem(
+        view.item.id,
+        deleteWorksetDirectories,
+      );
       setDeletionPreview(undefined);
       await onChanged();
       const summary = result.summary;
@@ -370,7 +405,8 @@ export function ItemCard({
   async function handlePrepareExternalObjectDeletion(externalObjectId: number) {
     setIsSaving(true);
     try {
-      const preview = await workAdapter.prepareExternalObjectDeletion(externalObjectId);
+      const preview =
+        await workAdapter.prepareExternalObjectDeletion(externalObjectId);
       setExternalObjectDeletionPreview(preview);
     } catch (previewError) {
       window.alert(errorMessage(previewError));
@@ -391,7 +427,9 @@ export function ItemCard({
     }
     setIsSaving(true);
     try {
-      const result = await workAdapter.deleteExternalObject(plan.externalObjectId);
+      const result = await workAdapter.deleteExternalObject(
+        plan.externalObjectId,
+      );
       setExternalObjectDeletionPreview(undefined);
       await onChanged();
       window.alert(
@@ -465,7 +503,8 @@ export function ItemCard({
 
   async function handleStartRun(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!runPreviewWorksetId || !runPrompt.trim() || runPromptNeedsCompose) return;
+    if (!runPreviewWorksetId || !runPrompt.trim() || runPromptNeedsCompose)
+      return;
     await saveItem(async () => {
       await workAdapter.startRun({
         itemId: view.item.id,
@@ -551,932 +590,1137 @@ export function ItemCard({
     const availableRepositories = itemRepositories.filter(
       (repository) => !selectedIds.has(repository.id),
     );
-    const report = removalReport?.workset_id === workset.id ? removalReport : undefined;
+    const report =
+      removalReport?.workset_id === workset.id ? removalReport : undefined;
 
     return (
-      <article className={`workset-card${archived ? " archived-workset-card" : ""}`} key={workset.id}>
-        <div className="workset-heading">
+      <Card
+        size="sm"
+        className={archived ? "border-dashed opacity-80" : ""}
+        key={workset.id}
+      >
+        <CardHeader className="border-b border-border/70">
           <div>
-            <strong>{workset.branch}</strong>
-            {archived && <span className="archived-label">Archived</span>}
+            <CardTitle className="flex items-center gap-2">
+              {workset.branch}
+              {archived && <Badge variant="outline">Archived</Badge>}
+            </CardTitle>
+            <CardDescription className="mt-1 break-all font-mono text-xs">
+              {workset.root_directory}
+            </CardDescription>
           </div>
-          <span>{workset.root_directory}</span>
-        </div>
-        <div className="workset-repositories">
-          {workset.repositories.map((selected) => (
-            <span className="relationship-chip" key={selected.repository_id}>
-              <strong>{repositoryName(repositories, selected.repository_id)}</strong>
-              <span>
-                {selected.current_branch} · {selected.is_dirty ? "uncommitted changes" : "clean"}
-              </span>
-            </span>
-          ))}
-        </div>
-        <div className="workset-actions">
-          {!archived && (
-            <button
-              type="button"
-              disabled={isSaving}
-              onClick={() => void openRunPreview(workset)}
-            >
-              Start Run
-            </button>
-          )}
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={isSaving}
-            onClick={() => void handleSetWorksetArchived(workset.id, !archived)}
-          >
-            {archived ? "Restore" : "Archive"}
-          </button>
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={isSaving}
-            onClick={() => void handlePrepareRemoval(workset.id)}
-          >
-            Review removal
-          </button>
-        </div>
-        {report && (
-          <div className="removal-report" role="alert">
-            <strong>Removal safety report</strong>
-            <p>{report.root_directory} will be removed from disk.</p>
-            {report.repositories.map((repository) => (
-              <div className="removal-repository" key={repository.repository_id}>
-                <strong>{repository.name}</strong>
-                <span>{repository.current_branch} · {repository.path}</span>
-                {repository.unpushed_commits_unknown ? (
-                  <p>Unpushed commits could not be verified: no upstream branch is configured.</p>
-                ) : (
-                  renderRemovalFinding(
-                    "Unpushed commits",
-                    repository.unpushed_commits,
-                    "No unpushed commits.",
-                  )
-                )}
-                {renderRemovalFinding(
-                  "Uncommitted changes",
-                  repository.uncommitted_changes,
-                  "No uncommitted changes.",
-                )}
-              </div>
+        </CardHeader>
+        <CardContent className="space-y-3 pt-4">
+          <div className="flex flex-wrap gap-2">
+            {workset.repositories.map((selected) => (
+              <Badge
+                variant="secondary"
+                className="h-auto items-start gap-1 py-1"
+                key={selected.repository_id}
+              >
+                <span className="font-medium">
+                  {repositoryName(repositories, selected.repository_id)}
+                </span>
+                <span className="text-muted-foreground">
+                  {selected.current_branch} ·{" "}
+                  {selected.is_dirty ? "uncommitted changes" : "clean"}
+                </span>
+              </Badge>
             ))}
-            {report.blockers.length > 0 && (
-              <div className="deletion-blockers">
-                <strong>Removal blocked</strong>
-                {report.blockers.map((blocker) => (
-                  <span key={blocker}>{blocker}</span>
-                ))}
-                <p>Resolve each finding, then create a fresh report.</p>
-              </div>
-            )}
-            <div className="workset-actions">
-              <button
-                type="button"
-                disabled={isSaving || !report.safe}
-                onClick={() => void handleRemoveWorkset(workset.id)}
-              >
-                Confirm and remove
-              </button>
-              <button
-                type="button"
-                className="text-button"
-                disabled={isSaving}
-                onClick={() => setRemovalReport(undefined)}
-              >
-                Keep Workset
-              </button>
-            </div>
           </div>
-        )}
-        {runPreviewWorksetId === workset.id && (
-          <form className="run-preview" onSubmit={handleStartRun}>
-            <div className="run-preview-heading">
-              <div>
-                <strong>Confirm Run</strong>
-                <p>
-                  Context: {view.context_name} · Project: {view.project_name} · Workset: {workset.branch}
-                </p>
-              </div>
-              <span className="run-machine">
-                Machine:{" "}
-                {itemMachines.find((machine) => machine.id === runMachineId)?.name ??
-                  "Local Mac"}
-              </span>
-            </div>
-            <p className="run-working-directory">
-              Working directory: <code>{workset.root_directory}</code>
-            </p>
-            <div className="run-options">
-              <label>
-                <span>Machine</span>
-                <select
-                  value={runMachineId ?? ""}
-                  onChange={(event) =>
-                    setRunMachineId(Number(event.target.value) || undefined)
-                  }
-                  disabled={isSaving}
-                >
-                  <option value="">Local Mac (default)</option>
-                  {itemMachines.map((machine) => (
-                    <option value={machine.id} key={machine.id}>
-                      {machine.name} · {machine.last_observed}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label>
-                <span>Agent</span>
-                <select
-                  value={runAgent}
-                  onChange={(event) => setRunAgent(event.target.value as AgentKind)}
-                  disabled={isSaving}
-                >
-                  <option value="claude">Claude Code</option>
-                  <option value="codex">Codex</option>
-                </select>
-              </label>
-              <label>
-                <span>Execution Profile</span>
-                <select
-                  value={runProfile}
-                  onChange={(event) => {
-                    setRunProfile(event.target.value as ExecutionProfile);
-                    setRunPromptNeedsCompose(true);
-                  }}
-                  disabled={isSaving}
-                >
-                  <option value="investigate">Investigate</option>
-                  <option value="implement">Implement</option>
-                  <option value="review">Review</option>
-                  <option value="custom">Custom prompt</option>
-                </select>
-              </label>
-            </div>
-            {runProfile === "custom" && (
-              <label>
-                <span>Custom prompt source</span>
-                <textarea
-                  value={runCustomPrompt}
-                  onChange={(event) => {
-                    setRunCustomPrompt(event.target.value);
-                    setRunPromptNeedsCompose(true);
-                  }}
-                  rows={3}
-                  placeholder="Tell the agent exactly what to do"
-                  disabled={isSaving}
-                />
-              </label>
+          <div className="flex flex-wrap gap-2">
+            {!archived && (
+              <Button
+                type="button"
+                size="sm"
+                disabled={isSaving}
+                onClick={() => void openRunPreview(workset)}
+              >
+                Start Run
+              </Button>
             )}
-            <div className="run-content-selection">
-              <span className="relationship-label">Include explicitly selected content</span>
-              <label>
-                <input
-                  type="checkbox"
-                  checked={includeRunObjective}
-                  onChange={(event) => {
-                    setIncludeRunObjective(event.target.checked);
-                    setRunPromptNeedsCompose(true);
-                  }}
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={isSaving}
+              onClick={() =>
+                void handleSetWorksetArchived(workset.id, !archived)
+              }
+            >
+              {archived ? "Restore" : "Archive"}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={isSaving}
+              onClick={() => void handlePrepareRemoval(workset.id)}
+            >
+              Review removal
+            </Button>
+          </div>
+          {report && (
+            <Alert
+              variant={report.blockers.length > 0 ? "destructive" : "default"}
+            >
+              <AlertTitle>Removal safety report</AlertTitle>
+              <AlertDescription className="space-y-3">
+                <p>{report.root_directory} will be removed from disk.</p>
+                {report.repositories.map((repository) => (
+                  <div className="grid gap-1" key={repository.repository_id}>
+                    <strong>{repository.name}</strong>
+                    <span>
+                      {repository.current_branch} · {repository.path}
+                    </span>
+                    {repository.unpushed_commits_unknown ? (
+                      <p>
+                        Unpushed commits could not be verified: no upstream
+                        branch is configured.
+                      </p>
+                    ) : (
+                      renderRemovalFinding(
+                        "Unpushed commits",
+                        repository.unpushed_commits,
+                        "No unpushed commits.",
+                      )
+                    )}
+                    {renderRemovalFinding(
+                      "Uncommitted changes",
+                      repository.uncommitted_changes,
+                      "No uncommitted changes.",
+                    )}
+                  </div>
+                ))}
+                {report.blockers.length > 0 && (
+                  <div className="grid gap-1">
+                    <strong>Removal blocked</strong>
+                    {report.blockers.map((blocker) => (
+                      <span key={blocker}>{blocker}</span>
+                    ))}
+                    <p>Resolve each finding, then create a fresh report.</p>
+                  </div>
+                )}
+              </AlertDescription>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={isSaving || !report.safe}
+                  onClick={() => void handleRemoveWorkset(workset.id)}
+                >
+                  Confirm and remove
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
                   disabled={isSaving}
-                />
-                Item objective
-              </label>
-              {view.item.notes.trim() && (
-                <label>
-                  <input
-                    type="checkbox"
-                    checked={includeRunNotes}
+                  onClick={() => setRemovalReport(undefined)}
+                >
+                  Keep Workset
+                </Button>
+              </div>
+            </Alert>
+          )}
+          {runPreviewWorksetId === workset.id && (
+            <form
+              className="grid gap-4 rounded-lg border border-primary/30 bg-primary/5 p-4"
+              onSubmit={handleStartRun}
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h4 className="m-0 text-base font-medium">Confirm Run</h4>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Context: {view.context_name} · Project: {view.project_name}{" "}
+                    · Workset: {workset.branch}
+                  </p>
+                </div>
+                <Badge variant="outline">
+                  Machine:{" "}
+                  {itemMachines.find((machine) => machine.id === runMachineId)
+                    ?.name ?? "Local Mac"}
+                </Badge>
+              </div>
+              <p className="m-0 text-sm text-muted-foreground">
+                Working directory:{" "}
+                <code className="break-all font-mono text-xs">
+                  {workset.root_directory}
+                </code>
+              </p>
+              <div className="grid gap-3 md:grid-cols-3">
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Machine</span>
+                  <NativeSelect
+                    value={runMachineId ?? ""}
+                    onChange={(event) =>
+                      setRunMachineId(Number(event.target.value) || undefined)
+                    }
+                    disabled={isSaving}
+                  >
+                    <NativeSelectOption value="">
+                      Local Mac (default)
+                    </NativeSelectOption>
+                    {itemMachines.map((machine) => (
+                      <NativeSelectOption value={machine.id} key={machine.id}>
+                        {machine.name} · {machine.last_observed}
+                      </NativeSelectOption>
+                    ))}
+                  </NativeSelect>
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Agent</span>
+                  <NativeSelect
+                    value={runAgent}
+                    onChange={(event) =>
+                      setRunAgent(event.target.value as AgentKind)
+                    }
+                    disabled={isSaving}
+                  >
+                    <NativeSelectOption value="claude">
+                      Claude Code
+                    </NativeSelectOption>
+                    <NativeSelectOption value="codex">Codex</NativeSelectOption>
+                  </NativeSelect>
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Execution Profile</span>
+                  <NativeSelect
+                    value={runProfile}
                     onChange={(event) => {
-                      setIncludeRunNotes(event.target.checked);
+                      setRunProfile(event.target.value as ExecutionProfile);
                       setRunPromptNeedsCompose(true);
                     }}
                     disabled={isSaving}
+                  >
+                    <NativeSelectOption value="investigate">
+                      Investigate
+                    </NativeSelectOption>
+                    <NativeSelectOption value="implement">
+                      Implement
+                    </NativeSelectOption>
+                    <NativeSelectOption value="review">
+                      Review
+                    </NativeSelectOption>
+                    <NativeSelectOption value="custom">
+                      Custom prompt
+                    </NativeSelectOption>
+                  </NativeSelect>
+                </label>
+              </div>
+              {runProfile === "custom" && (
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Custom prompt source</span>
+                  <Textarea
+                    value={runCustomPrompt}
+                    onChange={(event) => {
+                      setRunCustomPrompt(event.target.value);
+                      setRunPromptNeedsCompose(true);
+                    }}
+                    rows={3}
+                    placeholder="Tell the agent exactly what to do"
+                    disabled={isSaving}
                   />
-                  Item notes
                 </label>
               )}
-              {view.links.map((link) => (
-                <label key={link.object.id}>
-                  <input
-                    type="checkbox"
-                    checked={selectedRunExternalObjectIds.includes(link.object.id)}
-                    onChange={(event) => {
-                      setSelectedRunExternalObjectIds((current) =>
-                        event.target.checked
-                          ? [...current, link.object.id]
-                          : current.filter((id) => id !== link.object.id),
-                      );
+              <fieldset className="grid gap-2 rounded-md border p-3">
+                <legend className="px-1 text-sm font-medium">
+                  Include explicitly selected content
+                </legend>
+                <label className="flex items-center gap-2 text-sm font-normal">
+                  <Checkbox
+                    checked={includeRunObjective}
+                    onCheckedChange={(checked) => {
+                      setIncludeRunObjective(checked === true);
                       setRunPromptNeedsCompose(true);
                     }}
                     disabled={isSaving}
                   />
-                  {link.snapshot?.title ?? link.object.canonical_url}
+                  Item objective
                 </label>
-              ))}
-            </div>
-            <label>
-              <span>Editable composed prompt</span>
-              <textarea
-                value={runPrompt}
-                onChange={(event) => setRunPrompt(event.target.value)}
-                rows={7}
+                {view.item.notes.trim() && (
+                  <label className="flex items-center gap-2 text-sm font-normal">
+                    <Checkbox
+                      checked={includeRunNotes}
+                      onCheckedChange={(checked) => {
+                        setIncludeRunNotes(checked === true);
+                        setRunPromptNeedsCompose(true);
+                      }}
+                      disabled={isSaving}
+                    />
+                    Item notes
+                  </label>
+                )}
+                {view.links.map((link) => (
+                  <label
+                    className="flex items-center gap-2 text-sm font-normal"
+                    key={link.object.id}
+                  >
+                    <Checkbox
+                      checked={selectedRunExternalObjectIds.includes(
+                        link.object.id,
+                      )}
+                      onCheckedChange={(checked) => {
+                        setSelectedRunExternalObjectIds((current) =>
+                          checked === true
+                            ? [...current, link.object.id]
+                            : current.filter((id) => id !== link.object.id),
+                        );
+                        setRunPromptNeedsCompose(true);
+                      }}
+                      disabled={isSaving}
+                    />
+                    {link.snapshot?.title ?? link.object.canonical_url}
+                  </label>
+                ))}
+              </fieldset>
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Editable composed prompt</span>
+                <Textarea
+                  value={runPrompt}
+                  onChange={(event) => setRunPrompt(event.target.value)}
+                  rows={7}
+                  disabled={isSaving}
+                />
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={isSaving}
+                  onClick={() => void composeRunPromptPreview()}
+                >
+                  Compose from selection
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={
+                    isSaving || !runPrompt.trim() || runPromptNeedsCompose
+                  }
+                >
+                  {isSaving
+                    ? "Starting…"
+                    : runPromptNeedsCompose
+                      ? "Compose before starting"
+                      : "Confirm and start Run"}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={isSaving}
+                  onClick={() => setRunPreviewWorksetId(undefined)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </form>
+          )}
+          {!archived && availableRepositories.length > 0 && (
+            <div className="grid gap-2 rounded-md border p-3 md:grid-cols-[1.2fr_1fr_1fr_auto] md:items-end">
+              <NativeSelect
+                aria-label={`Repository to add to Workset ${workset.id}`}
+                value={additionalRepositoryId ?? ""}
+                onChange={(event) =>
+                  setAdditionalRepositoryId(
+                    Number(event.target.value) || undefined,
+                  )
+                }
+                disabled={isSaving}
+              >
+                <NativeSelectOption value="">
+                  Add a Repository
+                </NativeSelectOption>
+                {availableRepositories.map((repository) => (
+                  <NativeSelectOption value={repository.id} key={repository.id}>
+                    {repository.name}
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+              <Input
+                aria-label="Added Repository branch override"
+                value={additionalBranchOverride}
+                onChange={(event) =>
+                  setAdditionalBranchOverride(event.target.value)
+                }
+                placeholder="Branch override (optional)"
                 disabled={isSaving}
               />
-            </label>
-            <div className="run-preview-actions">
-              <button
-                type="button"
-                className="secondary-button"
+              <Input
+                aria-label="Added Repository base branch override"
+                value={additionalBaseBranchOverride}
+                onChange={(event) =>
+                  setAdditionalBaseBranchOverride(event.target.value)
+                }
+                placeholder="Base branch override (optional)"
                 disabled={isSaving}
-                onClick={() => void composeRunPromptPreview()}
-              >
-                Compose from selection
-              </button>
-              <button
-                type="submit"
-                disabled={isSaving || !runPrompt.trim() || runPromptNeedsCompose}
-              >
-                {isSaving
-                  ? "Starting…"
-                  : runPromptNeedsCompose
-                    ? "Compose before starting"
-                    : "Confirm and start Run"}
-              </button>
-              <button
+              />
+              <Button
                 type="button"
-                className="text-button"
-                disabled={isSaving}
-                onClick={() => setRunPreviewWorksetId(undefined)}
+                variant="outline"
+                disabled={isSaving || !additionalRepositoryId}
+                onClick={() => void handleAddRepositoryToWorkset(workset.id)}
               >
-                Cancel
-              </button>
+                Add
+              </Button>
             </div>
-          </form>
-        )}
-        {!archived && availableRepositories.length > 0 && (
-          <div className="workset-add-repository">
-            <select
-              aria-label={`Repository to add to Workset ${workset.id}`}
-              value={additionalRepositoryId ?? ""}
-              onChange={(event) =>
-                setAdditionalRepositoryId(Number(event.target.value) || undefined)
-              }
-              disabled={isSaving}
-            >
-              <option value="">Add a Repository</option>
-              {availableRepositories.map((repository) => (
-                <option value={repository.id} key={repository.id}>
-                  {repository.name}
-                </option>
-              ))}
-            </select>
-            <input
-              aria-label="Added Repository branch override"
-              value={additionalBranchOverride}
-              onChange={(event) => setAdditionalBranchOverride(event.target.value)}
-              placeholder="Branch override (optional)"
-              disabled={isSaving}
-            />
-            <input
-              aria-label="Added Repository base branch override"
-              value={additionalBaseBranchOverride}
-              onChange={(event) =>
-                setAdditionalBaseBranchOverride(event.target.value)
-              }
-              placeholder="Base branch override (optional)"
-              disabled={isSaving}
-            />
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={isSaving || !additionalRepositoryId}
-              onClick={() => void handleAddRepositoryToWorkset(workset.id)}
-            >
-              Add
-            </button>
-          </div>
-        )}
-      </article>
+          )}
+        </CardContent>
+      </Card>
     );
   }
 
   return (
-    <article className="item-card">
-      <div className="item-card-heading">
-        <span className="item-identifier">{view.item.human_identifier}</span>
-        <select
-          aria-label={`Status for ${view.item.human_identifier}`}
-          value={view.item.status}
-          onChange={(event) => {
-            const nextStatus = event.target.value as ItemStatus;
-            if (nextStatus === "Done" && view.item.status !== "Done") {
-              const activeRuns = view.runs.filter(
-                (run) => run.state !== "finished" && run.pane_status !== "missing",
-              );
-              if (
-                activeRuns.length > 0 &&
-                !window.confirm(
-                  `${activeRuns.length} Run${activeRuns.length === 1 ? " is" : "s are"} still active. Complete the Item without stopping them?`,
-                )
-              ) {
-                return;
+    <Card size="sm" className="h-full">
+      <CardHeader className="border-b border-border/70">
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="outline">{view.item.human_identifier}</Badge>
+          <NativeSelect
+            aria-label={`Status for ${view.item.human_identifier}`}
+            value={view.item.status}
+            onChange={(event) => {
+              const nextStatus = event.target.value as ItemStatus;
+              if (nextStatus === "Done" && view.item.status !== "Done") {
+                const activeRuns = view.runs.filter(
+                  (run) =>
+                    run.state !== "finished" && run.pane_status !== "missing",
+                );
+                if (
+                  activeRuns.length > 0 &&
+                  !window.confirm(
+                    `${activeRuns.length} Run${activeRuns.length === 1 ? " is" : "s are"} still active. Complete the Item without stopping them?`,
+                  )
+                ) {
+                  return;
+                }
               }
-            }
-            void saveItem(() =>
-              workAdapter.setItemStatus(view.item.id, nextStatus),
-            );
-          }}
-          disabled={isSaving}
-        >
-          {itemStatuses.map((status) => (
-            <option value={status} key={status}>
-              {status}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="danger-button"
-          disabled={isSaving}
-          onClick={() => void handlePrepareItemDeletion()}
-        >
-          Delete Item
-        </button>
-      </div>
-      <h4>{view.item.title}</h4>
-      <p className="item-context">
-        {view.context_name} <span>·</span> {view.project_name}
-      </p>
-      {deletionPreview && (
-        <div className="deletion-preview" role="alert">
-          <strong>Item deletion preview</strong>
-          <p>
-            This removes <b>{deletionPreview.plan.humanIdentifier}</b> ·{" "}
-            {deletionPreview.plan.title} and its local descendants. External Issues and
-            pull requests are never changed.
-          </p>
-          <ul>
-            <li>{deletionPreview.plan.reminderCount} reminder(s)</li>
-            <li>{deletionPreview.plan.relationshipCount} Item relationship(s)</li>
-            <li>{deletionPreview.plan.worksets.length} Workset(s)</li>
-            <li>{deletionPreview.plan.runIds.length} Run(s)</li>
-            <li>{deletionPreview.plan.linkIds.length} Link(s)</li>
-            <li>
-              {deletionPreview.plan.orphanedExternalObjectIds.length} orphaned External
-              Object(s), {deletionPreview.plan.orphanedSnapshotCount} snapshot(s), and{" "}
-              {deletionPreview.plan.orphanedActivityCount} Activity record(s)
-            </li>
-          </ul>
-          {deletionPreview.worksets.length > 0 && (
-            <div className="deletion-worksets">
-              <span className="relationship-label">Workset directories</span>
-              {deletionPreview.worksets.map((workset) => (
-                <div className="deletion-workset" key={workset.worksetId}>
-                  <strong>
-                    {workset.branch} {workset.archived ? "· Archived" : ""}
-                  </strong>
-                  <code>{workset.rootDirectory}</code>
-                  {!workset.safe &&
-                    workset.blockers.map((blocker) => <span key={blocker}>{blocker}</span>)}
-                </div>
-              ))}
-            </div>
-          )}
-          {deletionPreview.blockers.length > 0 && (
-            <div className="deletion-blockers">
-              <strong>Deletion blocked</strong>
-              {deletionPreview.blockers.map((blocker) => (
-                <span key={blocker}>{blocker}</span>
-              ))}
-              <p>Resolve each blocker, then create a fresh preview.</p>
-            </div>
-          )}
-          <div className="deletion-preview-actions">
-            <button
-              type="button"
-              className="danger-button"
-              disabled={isSaving || deletionPreview.blockers.length > 0}
-              onClick={() => void handleDeleteItem()}
-            >
-              Confirm logical deletion
-            </button>
-            <button
-              type="button"
-              className="text-button"
-              disabled={isSaving}
-              onClick={() => setDeletionPreview(undefined)}
-            >
-              Cancel
-            </button>
-          </div>
+              void saveItem(() =>
+                workAdapter.setItemStatus(view.item.id, nextStatus),
+              );
+            }}
+            disabled={isSaving}
+          >
+            {itemStatuses.map((status) => (
+              <NativeSelectOption value={status} key={status}>
+                {status}
+              </NativeSelectOption>
+            ))}
+          </NativeSelect>
+          <Button
+            type="button"
+            size="sm"
+            variant="destructive"
+            disabled={isSaving}
+            onClick={() => void handlePrepareItemDeletion()}
+          >
+            Delete Item
+          </Button>
         </div>
-      )}
-      <label className="card-notes">
-        <span>Notes</span>
-        <textarea
-          value={notes}
-          onChange={(event) => setNotes(event.target.value)}
-          placeholder="Add a useful handoff note"
-          rows={3}
-          disabled={isSaving}
-        />
-      </label>
-      <div className="card-actions">
-        <button
-          type="button"
-          className="secondary-button"
-          disabled={isSaving || notes === view.item.notes}
-          onClick={() =>
-            void saveItem(() =>
-              workAdapter.setItemNotes(view.item.id, notes),
-            )
-          }
-        >
-          Save notes
-        </button>
-        <label className="reminder-field">
-          <span>New reminder</span>
-          <input
-            type="datetime-local"
-            value={reminderAt}
-            onChange={(event) => setReminderAt(event.target.value)}
+        <CardTitle className="mt-2 text-base">{view.item.title}</CardTitle>
+        <CardDescription>
+          {view.context_name} <span>·</span> {view.project_name}
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-5 pt-4">
+        {deletionPreview && (
+          <Alert
+            variant={
+              deletionPreview.blockers.length > 0 ? "destructive" : "default"
+            }
+          >
+            <AlertTitle>Item deletion preview</AlertTitle>
+            <AlertDescription className="space-y-3">
+              <p>
+                This removes <b>{deletionPreview.plan.humanIdentifier}</b> ·{" "}
+                {deletionPreview.plan.title} and its local descendants. External
+                Issues and pull requests are never changed.
+              </p>
+              <ul className="grid gap-1 pl-5">
+                <li>{deletionPreview.plan.reminderCount} reminder(s)</li>
+                <li>
+                  {deletionPreview.plan.relationshipCount} Item relationship(s)
+                </li>
+                <li>{deletionPreview.plan.worksets.length} Workset(s)</li>
+                <li>{deletionPreview.plan.runIds.length} Run(s)</li>
+                <li>{deletionPreview.plan.linkIds.length} Link(s)</li>
+                <li>
+                  {deletionPreview.plan.orphanedExternalObjectIds.length}{" "}
+                  orphaned External Object(s),{" "}
+                  {deletionPreview.plan.orphanedSnapshotCount} snapshot(s), and{" "}
+                  {deletionPreview.plan.orphanedActivityCount} Activity
+                  record(s)
+                </li>
+              </ul>
+              {deletionPreview.worksets.length > 0 && (
+                <div className="grid gap-2">
+                  <span className="font-medium">Workset directories</span>
+                  {deletionPreview.worksets.map((workset) => (
+                    <div
+                      className="grid gap-1 rounded-md border p-2"
+                      key={workset.worksetId}
+                    >
+                      <strong>
+                        {workset.branch} {workset.archived ? "· Archived" : ""}
+                      </strong>
+                      <code className="break-all font-mono text-xs">
+                        {workset.rootDirectory}
+                      </code>
+                      {!workset.safe &&
+                        workset.blockers.map((blocker) => (
+                          <span key={blocker}>{blocker}</span>
+                        ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {deletionPreview.blockers.length > 0 && (
+                <div className="grid gap-1">
+                  <strong>Deletion blocked</strong>
+                  {deletionPreview.blockers.map((blocker) => (
+                    <span key={blocker}>{blocker}</span>
+                  ))}
+                  <p>Resolve each blocker, then create a fresh preview.</p>
+                </div>
+              )}
+            </AlertDescription>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="destructive"
+                disabled={isSaving || deletionPreview.blockers.length > 0}
+                onClick={() => void handleDeleteItem()}
+              >
+                Confirm logical deletion
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={isSaving}
+                onClick={() => setDeletionPreview(undefined)}
+              >
+                Cancel
+              </Button>
+            </div>
+          </Alert>
+        )}
+        <label className="grid gap-1.5 text-sm font-medium">
+          <span>Notes</span>
+          <Textarea
+            value={notes}
+            onChange={(event) => setNotes(event.target.value)}
+            placeholder="Add a useful handoff note"
+            rows={3}
             disabled={isSaving}
           />
         </label>
-        <button
-          type="button"
-          className="secondary-button"
-          disabled={isSaving || !reminderAt}
-          onClick={() =>
-            void saveItem(() =>
-              workAdapter.addReminder(view.item.id, reminderAt),
-            )
-          }
-        >
-          Add reminder
-        </button>
-      </div>
-      {view.item.reminders.length > 0 && (
-        <div className="reminder-list">
-          <span className="relationship-label">Reminders</span>
-          {view.item.reminders.map((reminder) => (
-            <span className="reminder-chip" key={reminder.id}>
-              {reminder.remind_at}
-              <button
-                type="button"
-                className="text-button"
-                disabled={isSaving}
-                onClick={() =>
-                  void saveItem(() =>
-                    workAdapter.removeReminder(view.item.id, reminder.id),
-                  )
-                }
-              >
-                Remove
-              </button>
-            </span>
-          ))}
-        </div>
-      )}
-      {view.runs.length > 0 && (
-        <div className="run-history">
-          <span className="relationship-label">Run history</span>
-          {view.runs.map((run) => {
-            const runWorkset = findWorkset(view, run.workset_id);
-            return (
-              <article className="run-history-card" key={run.id}>
-                <div>
-                  <strong>
-                    Run #{run.id} · {run.agent === "claude" ? "Claude Code" : "Codex"}
-                  </strong>
-                  <span>
-                    {run.execution_profile} ·{" "}
-                    {machines.find((machine) => machine.id === run.machine_id)?.name ??
-                      "Machine #" + run.machine_id}{" "}
-                    · {runStateLabel(run.state)}
-                    {run.pane_status === "available" && " · Pane available"}
-                  </span>
-                </div>
-                <code>{run.working_directory}</code>
-                <span>
-                  Session {run.session_name} · Pane {run.pane_id}
-                </span>
-                {run.pane_status === "missing" && (
-                  <span className="run-pane-missing">
-                    Pane missing. Decide whether to start another Run.
-                  </span>
-                )}
-                {run.pane_status === "unknown" && (
-                  <span className="run-pane-unknown">Pane status not confirmed.</span>
-                )}
-                {runWorkset && (
-                  <div className="run-history-actions">
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      disabled={isSaving || run.pane_status === "missing"}
-                      onClick={() =>
-                        onOpenTerminal(run.workset_id, paneTabForRun(run))
-                      }
-                    >
-                      Open embedded terminal
-                    </button>
-                    <button
-                      type="button"
-                      className="secondary-button"
-                      disabled={isSaving || run.pane_status === "missing"}
-                        onClick={() =>
-                          void saveItem(() =>
-                            workAdapter.openExternalTerminal(run.id),
-                        )
-                      }
-                    >
-                      Open in Terminal
-                    </button>
-                    {run.state !== "finished" && run.pane_status !== "missing" && (
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        disabled={isSaving}
-                        onClick={() => void handleStopRun(run)}
-                      >
-                        Stop Run
-                      </button>
-                    )}
-                    {run.state === "finished" && (
-                      <button
-                        type="button"
-                        className="danger-button"
-                        disabled={isSaving}
-                        onClick={() => void handleDeleteRun(run)}
-                      >
-                        Delete finished Run
-                      </button>
-                    )}
-                    {run.pane_status === "missing" && !runWorkset.archived && (
-                      <button
-                        type="button"
-                        className="secondary-button"
-                        disabled={isSaving}
-                        onClick={() => void openRunPreview(runWorkset)}
-                      >
-                        Start a new Run
-                      </button>
-                    )}
-                  </div>
-                )}
-              </article>
-            );
-          })}
-        </div>
-      )}
-      <div className="worksets">
-        <span className="relationship-label">Worksets</span>
-        {view.worksets.map((workset) => renderWorksetCard(workset, false))}
-        {view.archived_worksets.length > 0 && (
-          <div className="archived-worksets">
-            <span className="relationship-label">Archived Worksets</span>
-            {view.archived_worksets.map((workset) => renderWorksetCard(workset, true))}
-          </div>
-        )}
-        <form className="workset-form" onSubmit={handleCreateWorkset}>
-          <strong>Create a Workset</strong>
-          <label>
-            <span>Root directory</span>
-            <input
-              value={worksetRoot}
-              onChange={(event) => setWorksetRoot(event.target.value)}
-              placeholder="/Users/me/worksets/PLAT-847"
-              disabled={isSaving}
-            />
-          </label>
-          <label>
-            <span>Logical branch</span>
-            <input
-              value={worksetBranch}
-              onChange={(event) => setWorksetBranch(event.target.value)}
-              placeholder="feature/PLAT-847"
-              disabled={isSaving}
-            />
-          </label>
-          <span className="relationship-label">Select repositories</span>
-          {itemRepositories.length === 0 ? (
-            <span className="relationship-empty">
-              Register a Repository under this Project first.
-            </span>
-          ) : (
-            <div className="workset-selection-list">
-              {itemRepositories.map((repository) => {
-                const selected = selectedRepositoryIds.includes(repository.id);
-                return (
-                  <div className="workset-selection" key={repository.id}>
-                    <label>
-                      <input
-                        type="checkbox"
-                        checked={selected}
-                        onChange={(event) =>
-                          setSelectedRepositoryIds((current) =>
-                            event.target.checked
-                              ? [...current, repository.id]
-                              : current.filter((id) => id !== repository.id),
-                          )
-                        }
-                        disabled={isSaving}
-                      />
-                      {repository.name}
-                    </label>
-                    {selected && (
-                      <div className="workset-overrides">
-                        <input
-                          aria-label={`${repository.name} branch override`}
-                          value={worksetBranchOverrides[repository.id] ?? ""}
-                          onChange={(event) =>
-                            setWorksetBranchOverrides((current) => ({
-                              ...current,
-                              [repository.id]: event.target.value,
-                            }))
-                          }
-                          placeholder="Branch override (optional)"
-                          disabled={isSaving}
-                        />
-                        <input
-                          aria-label={`${repository.name} base branch override`}
-                          value={worksetBaseBranchOverrides[repository.id] ?? ""}
-                          onChange={(event) =>
-                            setWorksetBaseBranchOverrides((current) => ({
-                              ...current,
-                              [repository.id]: event.target.value,
-                            }))
-                          }
-                          placeholder="Base branch override (optional)"
-                          disabled={isSaving}
-                        />
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          )}
-          <button
-            type="submit"
-            disabled={
-              isSaving ||
-              !worksetRoot.trim() ||
-              !worksetBranch.trim() ||
-              selectedRepositoryIds.length === 0
+        <div className="flex flex-wrap items-end gap-3">
+          <Button
+            size="sm"
+            type="button"
+            variant="outline"
+            disabled={isSaving || notes === view.item.notes}
+            onClick={() =>
+              void saveItem(() => workAdapter.setItemNotes(view.item.id, notes))
             }
           >
-            {isSaving ? "Checking out…" : "Create Workset"}
-          </button>
-        </form>
-        <form className="workset-form" onSubmit={handleAttachWorkset}>
-          <strong>Attach an Existing Workset</strong>
-          <label>
-            <span>Existing root directory</span>
-            <input
-              value={attachWorksetRoot}
-              onChange={(event) => setAttachWorksetRoot(event.target.value)}
-              placeholder="/Users/me/worksets/PLAT-847"
+            Save notes
+          </Button>
+          <label className="grid min-w-52 gap-1.5 text-sm font-medium">
+            <span>New reminder</span>
+            <Input
+              type="datetime-local"
+              value={reminderAt}
+              onChange={(event) => setReminderAt(event.target.value)}
               disabled={isSaving}
             />
           </label>
-          <p className="workset-help">
-            Inspects direct child repositories, branches, and uncommitted changes without modifying Git.
-          </p>
-          <button type="submit" disabled={isSaving || !attachWorksetRoot.trim()}>
-            {isSaving ? "Inspecting…" : "Attach Workset"}
-          </button>
-        </form>
-      </div>
-      <div className="external-links">
-        <span className="relationship-label">External Links</span>
-        {view.links.map((externalLink) => (
-          <ExternalLinkCard
-            key={externalLink.link.id}
-            externalLink={externalLink}
-            isSaving={isSaving}
-            onRefresh={() => refreshExternalObject(externalLink.object.id)}
-            onUnlink={() => handleUnlinkExternalLink(externalLink.link.id)}
-            onPrepareDeleteObject={() =>
-              handlePrepareExternalObjectDeletion(externalLink.object.id)
-            }
-            onSavePolicy={(policy) =>
-              saveItem(() =>
-                workAdapter.setLinkAttentionPolicy(externalLink.link.id, policy),
+          <Button
+            size="sm"
+            type="button"
+            variant="outline"
+            disabled={isSaving || !reminderAt}
+            onClick={() =>
+              void saveItem(() =>
+                workAdapter.addReminder(view.item.id, reminderAt),
               )
             }
-            onMarkReviewed={() =>
-              saveItem(() =>
-                workAdapter.markLinkReviewed(externalLink.link.id),
-              )
-            }
-            onSaveWatchUntil={(watchUntil) =>
-              saveItem(() =>
-                workAdapter.setLinkWatchUntil(externalLink.link.id, watchUntil),
-              )
-            }
-            onSaveReviewAt={(reviewAt) =>
-              saveItem(() =>
-                workAdapter.setLinkReviewAt(externalLink.link.id, reviewAt),
-              )
-            }
-            onClearReviewAt={() =>
-              saveItem(() =>
-                workAdapter.clearLinkReviewAt(externalLink.link.id),
-              )
-            }
-            onAddComment={(body) =>
-              saveItem(() =>
-                workAdapter.addExternalComment(externalLink.link.id, body),
-              )
-            }
-          />
-        ))}
-        {externalObjectDeletionPreview && (
-          <div className="deletion-preview external-object-deletion-preview" role="alert">
-            <strong>Remove External Object locally</strong>
-            <p>
-              This removes the local External Object record and every Link to it. It does not
-              call GitHub or any other provider, so provider-owned Issues, pull requests, and
-              other objects are never deleted.
-            </p>
-            <ul>
-              <li>{externalObjectDeletionPreview.plan.linkIds.length} Link(s)</li>
-              <li>{externalObjectDeletionPreview.plan.snapshotCount} snapshot(s)</li>
-              <li>{externalObjectDeletionPreview.plan.activityCount} Activity record(s)</li>
-            </ul>
-            <div className="external-object-deletion-links">
-              <strong>Items affected</strong>
-              {externalObjectDeletionPreview.links.map((link) => (
-                <span key={link.linkId}>
-                  {link.itemIdentifier} · {link.itemTitle}
-                </span>
+          >
+            Add reminder
+          </Button>
+        </div>
+        {view.item.reminders.length > 0 && (
+          <div className="grid gap-2">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Reminders
+            </span>
+            <div className="flex flex-wrap gap-2">
+              {view.item.reminders.map((reminder) => (
+                <Badge
+                  variant="secondary"
+                  className="h-auto gap-1 py-1"
+                  key={reminder.id}
+                >
+                  {reminder.remind_at}
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost"
+                    disabled={isSaving}
+                    onClick={() =>
+                      void saveItem(() =>
+                        workAdapter.removeReminder(view.item.id, reminder.id),
+                      )
+                    }
+                  >
+                    Remove
+                  </Button>
+                </Badge>
               ))}
             </div>
-            <p className="provider-warning">{externalObjectDeletionPreview.providerWarning}</p>
-            <div className="deletion-preview-actions">
-              <button
-                type="button"
-                disabled={isSaving}
-                onClick={() => void handleDeleteExternalObject()}
-              >
-                Confirm local removal
-              </button>
-              <button
-                type="button"
-                className="text-button"
-                disabled={isSaving}
-                onClick={() => setExternalObjectDeletionPreview(undefined)}
-              >
-                Keep local records
-              </button>
-            </div>
           </div>
         )}
-        <form className="external-link-form" onSubmit={handleExternalLink}>
-          <input
-            aria-label={`External URL for ${view.item.human_identifier}`}
-            value={externalUrl}
-            onChange={(event) => setExternalUrl(event.target.value)}
-            placeholder="Paste a GitHub issue, pull request, or URL"
-            disabled={isSaving}
-          />
-          <button
-            type="submit"
-            className="secondary-button"
-            disabled={isSaving || !externalUrl.trim()}
-          >
-            Add link
-          </button>
-        </form>
-        {!isIssuePreviewOpen ? (
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={isSaving}
-            onClick={openIssuePreview}
-          >
-            Create GitHub Issue
-          </button>
-        ) : (
-          <form className="issue-preview" onSubmit={handleCreateIssue}>
-            <div>
-              <strong>Preview GitHub Issue</strong>
-              <p>
-                Nothing is sent until you confirm. The existing Item will remain
-                unchanged and the created Issue will be linked to it.
-              </p>
+        {view.runs.length > 0 && (
+          <div className="grid gap-2">
+            <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+              Run history
+            </span>
+            {view.runs.map((run) => {
+              const runWorkset = findWorkset(view, run.workset_id);
+              return (
+                <Card size="sm" className="bg-muted/20" key={run.id}>
+                  <CardContent className="grid gap-2 pt-4">
+                    <div>
+                      <strong className="block text-sm">
+                        Run #{run.id} ·{" "}
+                        {run.agent === "claude" ? "Claude Code" : "Codex"}
+                      </strong>
+                      <span className="text-xs text-muted-foreground">
+                        {run.execution_profile} ·{" "}
+                        {machines.find(
+                          (machine) => machine.id === run.machine_id,
+                        )?.name ?? "Machine #" + run.machine_id}{" "}
+                        · {runStateLabel(run.state)}
+                        {run.pane_status === "available" && " · Pane available"}
+                      </span>
+                    </div>
+                    <code className="break-all font-mono text-xs">
+                      {run.working_directory}
+                    </code>
+                    <span className="text-xs text-muted-foreground">
+                      Session {run.session_name} · Pane {run.pane_id}
+                    </span>
+                    {run.pane_status === "missing" && (
+                      <span className="text-xs text-destructive">
+                        Pane missing. Decide whether to start another Run.
+                      </span>
+                    )}
+                    {run.pane_status === "unknown" && (
+                      <span className="text-xs text-muted-foreground">
+                        Pane status not confirmed.
+                      </span>
+                    )}
+                    {runWorkset && (
+                      <div className="flex flex-wrap gap-2">
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={isSaving || run.pane_status === "missing"}
+                          onClick={() =>
+                            onOpenTerminal(run.workset_id, paneTabForRun(run))
+                          }
+                        >
+                          Open embedded terminal
+                        </Button>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={isSaving || run.pane_status === "missing"}
+                          onClick={() =>
+                            void saveItem(() =>
+                              workAdapter.openExternalTerminal(run.id),
+                            )
+                          }
+                        >
+                          Open in Terminal
+                        </Button>
+                        {run.state !== "finished" &&
+                          run.pane_status !== "missing" && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={isSaving}
+                              onClick={() => void handleStopRun(run)}
+                            >
+                              Stop Run
+                            </Button>
+                          )}
+                        {run.state === "finished" && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="destructive"
+                            disabled={isSaving}
+                            onClick={() => void handleDeleteRun(run)}
+                          >
+                            Delete finished Run
+                          </Button>
+                        )}
+                        {run.pane_status === "missing" &&
+                          !runWorkset.archived && (
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={isSaving}
+                              onClick={() => void openRunPreview(runWorkset)}
+                            >
+                              Start a new Run
+                            </Button>
+                          )}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+        )}
+        <div className="grid gap-3">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Worksets
+          </span>
+          {view.worksets.map((workset) => renderWorksetCard(workset, false))}
+          {view.archived_worksets.length > 0 && (
+            <div className="grid gap-2">
+              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                Archived Worksets
+              </span>
+              {view.archived_worksets.map((workset) =>
+                renderWorksetCard(workset, true),
+              )}
             </div>
-            <label>
-              <span>Repository</span>
-              <input
-                value={issueRepository}
-                onChange={(event) => setIssueRepository(event.target.value)}
-                placeholder="owner/repository"
-                disabled={isSaving}
-              />
-            </label>
-            <label>
-              <span>Public title</span>
-              <input
-                value={issueTitle}
-                onChange={(event) => setIssueTitle(event.target.value)}
-                disabled={isSaving}
-              />
-            </label>
-            <label>
-              <span>Public body</span>
-              <textarea
-                value={issueBody}
-                onChange={(event) => setIssueBody(event.target.value)}
-                rows={4}
-                placeholder="Optional public context"
-                disabled={isSaving}
-              />
-            </label>
-            <div className="issue-preview-actions">
-              <button
-                type="submit"
-                disabled={isSaving || !issueRepository.trim() || !issueTitle.trim()}
-              >
-                {isSaving ? "Creating…" : "Confirm and create Issue"}
-              </button>
-              <button
-                type="button"
-                className="text-button"
-                disabled={isSaving}
-                onClick={() => setIsIssuePreviewOpen(false)}
-              >
-                Cancel
-              </button>
-            </div>
+          )}
+          <Card size="sm">
+            <CardHeader>
+              <CardTitle className="text-sm">Create a Workset</CardTitle>
+              <CardDescription>
+                Choose repositories and prepare a shared working environment.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form className="grid gap-3" onSubmit={handleCreateWorkset}>
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Root directory</span>
+                  <Input
+                    value={worksetRoot}
+                    onChange={(event) => setWorksetRoot(event.target.value)}
+                    placeholder="/Users/me/worksets/PLAT-847"
+                    disabled={isSaving}
+                  />
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Logical branch</span>
+                  <Input
+                    value={worksetBranch}
+                    onChange={(event) => setWorksetBranch(event.target.value)}
+                    placeholder="feature/PLAT-847"
+                    disabled={isSaving}
+                  />
+                </label>
+                <span className="text-sm font-medium">Select repositories</span>
+                {itemRepositories.length === 0 ? (
+                  <span className="text-sm text-muted-foreground">
+                    Register a Repository under this Project first.
+                  </span>
+                ) : (
+                  <div className="grid gap-2">
+                    {itemRepositories.map((repository) => {
+                      const selected = selectedRepositoryIds.includes(
+                        repository.id,
+                      );
+                      return (
+                        <div
+                          className="grid gap-2 rounded-md border p-3"
+                          key={repository.id}
+                        >
+                          <label className="flex items-center gap-2 text-sm font-normal">
+                            <Checkbox
+                              checked={selected}
+                              onCheckedChange={(checked) =>
+                                setSelectedRepositoryIds((current) =>
+                                  checked === true
+                                    ? [...current, repository.id]
+                                    : current.filter(
+                                        (id) => id !== repository.id,
+                                      ),
+                                )
+                              }
+                              disabled={isSaving}
+                            />
+                            {repository.name}
+                          </label>
+                          {selected && (
+                            <div className="grid gap-2 sm:grid-cols-2">
+                              <Input
+                                aria-label={`${repository.name} branch override`}
+                                value={
+                                  worksetBranchOverrides[repository.id] ?? ""
+                                }
+                                onChange={(event) =>
+                                  setWorksetBranchOverrides((current) => ({
+                                    ...current,
+                                    [repository.id]: event.target.value,
+                                  }))
+                                }
+                                placeholder="Branch override (optional)"
+                                disabled={isSaving}
+                              />
+                              <Input
+                                aria-label={`${repository.name} base branch override`}
+                                value={
+                                  worksetBaseBranchOverrides[repository.id] ??
+                                  ""
+                                }
+                                onChange={(event) =>
+                                  setWorksetBaseBranchOverrides((current) => ({
+                                    ...current,
+                                    [repository.id]: event.target.value,
+                                  }))
+                                }
+                                placeholder="Base branch override (optional)"
+                                disabled={isSaving}
+                              />
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <Button
+                  type="submit"
+                  disabled={
+                    isSaving ||
+                    !worksetRoot.trim() ||
+                    !worksetBranch.trim() ||
+                    selectedRepositoryIds.length === 0
+                  }
+                >
+                  {isSaving ? "Checking out…" : "Create Workset"}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+          <Card size="sm">
+            <CardHeader>
+              <CardTitle className="text-sm">
+                Attach an Existing Workset
+              </CardTitle>
+              <CardDescription>
+                Inspect direct child repositories without modifying Git.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form className="grid gap-3" onSubmit={handleAttachWorkset}>
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Existing root directory</span>
+                  <Input
+                    value={attachWorksetRoot}
+                    onChange={(event) =>
+                      setAttachWorksetRoot(event.target.value)
+                    }
+                    placeholder="/Users/me/worksets/PLAT-847"
+                    disabled={isSaving}
+                  />
+                </label>
+                <p className="m-0 text-sm text-muted-foreground">
+                  Inspects direct child repositories, branches, and uncommitted
+                  changes without modifying Git.
+                </p>
+                <Button
+                  type="submit"
+                  disabled={isSaving || !attachWorksetRoot.trim()}
+                >
+                  {isSaving ? "Inspecting…" : "Attach Workset"}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
+        <div className="grid gap-3">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            External Links
+          </span>
+          {view.links.map((externalLink) => (
+            <ExternalLinkCard
+              key={externalLink.link.id}
+              externalLink={externalLink}
+              isSaving={isSaving}
+              onRefresh={() => refreshExternalObject(externalLink.object.id)}
+              onUnlink={() => handleUnlinkExternalLink(externalLink.link.id)}
+              onPrepareDeleteObject={() =>
+                handlePrepareExternalObjectDeletion(externalLink.object.id)
+              }
+              onSavePolicy={(policy) =>
+                saveItem(() =>
+                  workAdapter.setLinkAttentionPolicy(
+                    externalLink.link.id,
+                    policy,
+                  ),
+                )
+              }
+              onMarkReviewed={() =>
+                saveItem(() =>
+                  workAdapter.markLinkReviewed(externalLink.link.id),
+                )
+              }
+              onSaveWatchUntil={(watchUntil) =>
+                saveItem(() =>
+                  workAdapter.setLinkWatchUntil(
+                    externalLink.link.id,
+                    watchUntil,
+                  ),
+                )
+              }
+              onSaveReviewAt={(reviewAt) =>
+                saveItem(() =>
+                  workAdapter.setLinkReviewAt(externalLink.link.id, reviewAt),
+                )
+              }
+              onClearReviewAt={() =>
+                saveItem(() =>
+                  workAdapter.clearLinkReviewAt(externalLink.link.id),
+                )
+              }
+              onAddComment={(body) =>
+                saveItem(() =>
+                  workAdapter.addExternalComment(externalLink.link.id, body),
+                )
+              }
+            />
+          ))}
+          {externalObjectDeletionPreview && (
+            <Alert variant="destructive">
+              <AlertTitle>Remove External Object locally</AlertTitle>
+              <AlertDescription className="space-y-3">
+                <p>
+                  This removes the local External Object record and every Link
+                  to it. It does not call GitHub or any other provider, so
+                  provider-owned Issues, pull requests, and other objects are
+                  never deleted.
+                </p>
+                <ul className="grid gap-1 pl-5">
+                  <li>
+                    {externalObjectDeletionPreview.plan.linkIds.length} Link(s)
+                  </li>
+                  <li>
+                    {externalObjectDeletionPreview.plan.snapshotCount}{" "}
+                    snapshot(s)
+                  </li>
+                  <li>
+                    {externalObjectDeletionPreview.plan.activityCount} Activity
+                    record(s)
+                  </li>
+                </ul>
+                <div className="grid gap-1">
+                  <strong>Items affected</strong>
+                  {externalObjectDeletionPreview.links.map((link) => (
+                    <span key={link.linkId}>
+                      {link.itemIdentifier} · {link.itemTitle}
+                    </span>
+                  ))}
+                </div>
+                <p className="font-medium">
+                  {externalObjectDeletionPreview.providerWarning}
+                </p>
+              </AlertDescription>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  disabled={isSaving}
+                  onClick={() => void handleDeleteExternalObject()}
+                >
+                  Confirm local removal
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={isSaving}
+                  onClick={() => setExternalObjectDeletionPreview(undefined)}
+                >
+                  Keep local records
+                </Button>
+              </div>
+            </Alert>
+          )}
+          <form className="flex flex-wrap gap-2" onSubmit={handleExternalLink}>
+            <Input
+              className="min-w-0 flex-1"
+              aria-label={`External URL for ${view.item.human_identifier}`}
+              value={externalUrl}
+              onChange={(event) => setExternalUrl(event.target.value)}
+              placeholder="Paste a GitHub issue, pull request, or URL"
+              disabled={isSaving}
+            />
+            <Button
+              type="submit"
+              variant="outline"
+              disabled={isSaving || !externalUrl.trim()}
+            >
+              Add link
+            </Button>
+          </form>
+          {!isIssuePreviewOpen ? (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isSaving}
+              onClick={openIssuePreview}
+            >
+              Create GitHub Issue
+            </Button>
+          ) : (
+            <Card size="sm" className="border-primary/30 bg-primary/5">
+              <form className="grid gap-3 p-4" onSubmit={handleCreateIssue}>
+                <div>
+                  <strong className="block text-sm">
+                    Preview GitHub Issue
+                  </strong>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Nothing is sent until you confirm. The existing Item will
+                    remain unchanged and the created Issue will be linked to it.
+                  </p>
+                </div>
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Repository</span>
+                  <Input
+                    value={issueRepository}
+                    onChange={(event) => setIssueRepository(event.target.value)}
+                    placeholder="owner/repository"
+                    disabled={isSaving}
+                  />
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Public title</span>
+                  <Input
+                    value={issueTitle}
+                    onChange={(event) => setIssueTitle(event.target.value)}
+                    disabled={isSaving}
+                  />
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Public body</span>
+                  <Textarea
+                    value={issueBody}
+                    onChange={(event) => setIssueBody(event.target.value)}
+                    rows={4}
+                    placeholder="Optional public context"
+                    disabled={isSaving}
+                  />
+                </label>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="submit"
+                    disabled={
+                      isSaving || !issueRepository.trim() || !issueTitle.trim()
+                    }
+                  >
+                    {isSaving ? "Creating…" : "Confirm and create Issue"}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    disabled={isSaving}
+                    onClick={() => setIsIssuePreviewOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </form>
+            </Card>
+          )}
+        </div>
+        <div className="grid gap-2">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Relationships
+          </span>
+          {view.relationships.length === 0 ? (
+            <span className="text-sm text-muted-foreground">None yet</span>
+          ) : (
+            view.relationships.map((relation) => {
+              const otherId =
+                relation.from_item_id === view.item.id
+                  ? relation.to_item_id
+                  : relation.from_item_id;
+              const other = allItems.find(
+                (candidate) => candidate.item.id === otherId,
+              );
+              return (
+                <Badge
+                  variant="secondary"
+                  key={`${relation.from_item_id}-${relation.to_item_id}-${relation.kind}`}
+                >
+                  {relationshipLabel(relation, view.item.id)}{" "}
+                  {other?.item.human_identifier ?? `MC-${otherId}`}
+                </Badge>
+              );
+            })
+          )}
+        </div>
+        {visibleTargets.length > 0 && (
+          <form
+            className="grid gap-2 sm:grid-cols-[1fr_2fr_auto] sm:items-end"
+            onSubmit={handleRelation}
+          >
+            <NativeSelect
+              aria-label="Relationship kind"
+              value={relationKind}
+              onChange={(event) =>
+                setRelationKind(event.target.value as ItemRelationKind)
+              }
+              disabled={isSaving}
+            >
+              {relationKinds.map((kind) => (
+                <NativeSelectOption value={kind} key={kind}>
+                  {relationKindLabel(kind)}
+                </NativeSelectOption>
+              ))}
+            </NativeSelect>
+            <NativeSelect
+              aria-label="Related Item"
+              value={targetItemId ?? ""}
+              onChange={(event) => setTargetItemId(Number(event.target.value))}
+              disabled={isSaving}
+            >
+              <NativeSelectOption value="">Choose an Item</NativeSelectOption>
+              {visibleTargets.map((candidate) => (
+                <NativeSelectOption
+                  value={candidate.item.id}
+                  key={candidate.item.id}
+                >
+                  {candidate.item.human_identifier} · {candidate.item.title}
+                </NativeSelectOption>
+              ))}
+            </NativeSelect>
+            <Button
+              type="submit"
+              variant="outline"
+              disabled={isSaving || !targetItemId}
+            >
+              Link
+            </Button>
           </form>
         )}
-      </div>
-      <div className="relationship-list">
-        <span className="relationship-label">Relationships</span>
-        {view.relationships.length === 0 ? (
-          <span className="relationship-empty">None yet</span>
-        ) : (
-          view.relationships.map((relation) => {
-            const otherId =
-              relation.from_item_id === view.item.id
-                ? relation.to_item_id
-                : relation.from_item_id;
-            const other = allItems.find((candidate) => candidate.item.id === otherId);
-            return (
-              <span
-                className="relationship-chip"
-                key={`${relation.from_item_id}-${relation.to_item_id}-${relation.kind}`}
-              >
-                {relationshipLabel(relation, view.item.id)}{" "}
-                {other?.item.human_identifier ?? `MC-${otherId}`}
-              </span>
-            );
-          })
-        )}
-      </div>
-      {visibleTargets.length > 0 && (
-        <form className="relationship-form" onSubmit={handleRelation}>
-          <select
-            aria-label="Relationship kind"
-            value={relationKind}
-            onChange={(event) => setRelationKind(event.target.value as ItemRelationKind)}
-            disabled={isSaving}
-          >
-            {relationKinds.map((kind) => (
-              <option value={kind} key={kind}>
-                {relationKindLabel(kind)}
-              </option>
-            ))}
-          </select>
-          <select
-            aria-label="Related Item"
-            value={targetItemId ?? ""}
-            onChange={(event) => setTargetItemId(Number(event.target.value))}
-            disabled={isSaving}
-          >
-            <option value="">Choose an Item</option>
-            {visibleTargets.map((candidate) => (
-              <option value={candidate.item.id} key={candidate.item.id}>
-                {candidate.item.human_identifier} · {candidate.item.title}
-              </option>
-            ))}
-          </select>
-          <button
-            type="submit"
-            className="secondary-button"
-            disabled={isSaving || !targetItemId}
-          >
-            Link
-          </button>
-        </form>
-      )}
-    </article>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1507,7 +1751,9 @@ export function ExternalLinkCard({
 }) {
   const { object, snapshot } = externalLink;
   const [policy, setPolicy] = useState(externalLink.attention_policy);
-  const [watchUntil, setWatchUntil] = useState(externalLink.link.watch_until ?? "");
+  const [watchUntil, setWatchUntil] = useState(
+    externalLink.link.watch_until ?? "",
+  );
   const [reviewAt, setReviewAt] = useState(externalLink.link.review_at ?? "");
   const [comment, setComment] = useState("");
   const [isCommenting, setIsCommenting] = useState(false);
@@ -1540,216 +1786,258 @@ export function ExternalLinkCard({
   }
 
   return (
-    <article className="external-link-card">
-      <div className="external-link-heading">
-        <div>
-          <strong>{snapshot?.title ?? object.canonical_url}</strong>
-          <span className="external-link-kind">
-            {externalObjectKindLabel(object.kind)} · {snapshot?.state ?? "Not fetched"}
-          </span>
-        </div>
-        <div className="external-link-actions">
-          {object.provider === "github" && (
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={isSaving}
-              onClick={() => void onRefresh()}
-            >
-              Refresh
-            </button>
-          )}
-          <button
-            type="button"
-            className="text-button"
-            disabled={isSaving}
-            onClick={() => void onUnlink()}
-          >
-            Unlink this Item
-          </button>
-          <button
-            type="button"
-            className="text-button danger-text-button"
-            disabled={isSaving}
-            onClick={() => void onPrepareDeleteObject()}
-          >
-            Remove local object…
-          </button>
-        </div>
-      </div>
-      <a href={object.canonical_url} target="_blank" rel="noreferrer">
-        {object.canonical_url}
-      </a>
-      {snapshot ? (
-        <>
-          <div className="external-metadata">
-            {snapshot.metadata.map((metadata) => (
-              <span key={`${metadata.key}-${metadata.value}`}>
-                {metadata.key}: {metadata.value}
-              </span>
-            ))}
+    <Card size="sm">
+      <CardHeader className="border-b border-border/70">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <CardTitle className="text-sm">
+              {snapshot?.title ?? object.canonical_url}
+            </CardTitle>
+            <CardDescription className="mt-1">
+              {externalObjectKindLabel(object.kind)} ·{" "}
+              {snapshot?.state ?? "Not fetched"}
+            </CardDescription>
           </div>
-          <p className="external-age">Fetched {formatSnapshotAge(snapshot.fetched_at)}</p>
-        </>
-      ) : (
-        <p className="external-age">No snapshot yet</p>
-      )}
-      {object.provider === "github" && object.kind !== "generic" && (
-        <form className="comment-form" onSubmit={handleComment}>
-          <label>
-            <span>Comment on GitHub</span>
-            <textarea
-              value={comment}
-              onChange={(event) => setComment(event.target.value)}
-              rows={2}
-              placeholder="Write a short public reply"
-              disabled={isSaving || isCommenting}
-            />
-          </label>
-          <button
-            type="submit"
-            className="secondary-button"
-            disabled={isSaving || isCommenting || !comment.trim()}
-          >
-            {isCommenting ? "Posting…" : "Add comment"}
-          </button>
-        </form>
-      )}
-      {reviewDateReached && (
-        <div className="link-attention">
-          <strong>Review date reached</strong>
-          <p>Review scheduled for {externalLink.link.review_at}</p>
-          <button
-            type="button"
-            className="secondary-button"
-            disabled={isSaving}
-            onClick={() => void onClearReviewAt()}
-          >
-            Clear review date
-          </button>
-        </div>
-      )}
-      {externalLink.attention_entry && (
-        <div className="link-attention">
-          <strong>
-            {externalLink.attention_entry.kind === "review"
-              ? "Review date reached"
-              : "Needs review"}
-          </strong>
-          <p>{externalLink.attention_entry.summary}</p>
-          {externalLink.attention_entry.kind === "review" ? (
-            <button
+          <div className="flex flex-wrap gap-2">
+            {object.provider === "github" && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isSaving}
+                onClick={() => void onRefresh()}
+              >
+                Refresh
+              </Button>
+            )}
+            <Button
               type="button"
-              className="secondary-button"
+              size="sm"
+              variant="ghost"
+              disabled={isSaving}
+              onClick={() => void onUnlink()}
+            >
+              Unlink this Item
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              className="text-destructive hover:text-destructive"
+              disabled={isSaving}
+              onClick={() => void onPrepareDeleteObject()}
+            >
+              Remove local object…
+            </Button>
+          </div>
+        </div>
+      </CardHeader>
+      <CardContent className="grid gap-3 pt-4">
+        <a
+          href={object.canonical_url}
+          target="_blank"
+          rel="noreferrer"
+          className="break-all text-sm text-primary underline-offset-4 hover:underline"
+        >
+          {object.canonical_url}
+        </a>
+        {snapshot ? (
+          <>
+            <div className="flex flex-wrap gap-2">
+              {snapshot.metadata.map((metadata) => (
+                <Badge variant="secondary" key={metadata.key}>
+                  {metadata.key}: {metadata.value}
+                </Badge>
+              ))}
+            </div>
+            <p className="m-0 text-xs text-muted-foreground">
+              Fetched {formatSnapshotAge(snapshot.fetched_at)}
+            </p>
+          </>
+        ) : (
+          <p className="m-0 text-xs text-muted-foreground">No snapshot yet</p>
+        )}
+        {object.provider === "github" && object.kind !== "generic" && (
+          <form className="grid gap-2" onSubmit={handleComment}>
+            <label className="grid gap-1.5 text-sm font-medium">
+              <span>Comment on GitHub</span>
+              <Textarea
+                value={comment}
+                onChange={(event) => setComment(event.target.value)}
+                rows={2}
+                placeholder="Write a short public reply"
+                disabled={isSaving || isCommenting}
+              />
+            </label>
+            <Button
+              type="submit"
+              size="sm"
+              variant="outline"
+              disabled={isSaving || isCommenting || !comment.trim()}
+            >
+              {isCommenting ? "Posting…" : "Add comment"}
+            </Button>
+          </form>
+        )}
+        {reviewDateReached && (
+          <Alert>
+            <AlertTitle>Review date reached</AlertTitle>
+            <AlertDescription>
+              Review scheduled for {externalLink.link.review_at}
+            </AlertDescription>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
               disabled={isSaving}
               onClick={() => void onClearReviewAt()}
             >
               Clear review date
-            </button>
-          ) : (
-            <button
-              type="button"
-              className="secondary-button"
-              disabled={isSaving}
-              onClick={() => void onMarkReviewed()}
-            >
-              Mark changes reviewed
-            </button>
-          )}
-        </div>
-      )}
-      <div className="watch-schedule">
-        <span className="relationship-label">Watch schedule</span>
-        <label>
-          <span>Watch until</span>
-          <input
-            type="datetime-local"
-            value={watchUntil}
-            onChange={(event) => setWatchUntil(event.target.value)}
-            disabled={isSaving}
-          />
-        </label>
-        <button
-          type="button"
-          className="secondary-button"
-          disabled={isSaving}
-          onClick={() => void onSaveWatchUntil(watchUntil || null)}
-        >
-          Save watch period
-        </button>
-        <label>
-          <span>Review at</span>
-          <input
-            type="datetime-local"
-            value={reviewAt}
-            onChange={(event) => setReviewAt(event.target.value)}
-            disabled={isSaving}
-          />
-        </label>
-        <button
-          type="button"
-          className="secondary-button"
-          disabled={isSaving}
-          onClick={() => void onSaveReviewAt(reviewAt || null)}
-        >
-          Save review date
-        </button>
-      </div>
-      <div className="attention-policy">
-        <span className="relationship-label">Attention for this Link</span>
-        <label>
-          <input
-            type="checkbox"
-            checked={policy.title}
-            onChange={(event) =>
-              setPolicy((current) => ({ ...current, title: event.target.checked }))
-            }
-            disabled={isSaving}
-          />
-          Title
-        </label>
-        <label>
-          <input
-            type="checkbox"
-            checked={policy.state}
-            onChange={(event) =>
-              setPolicy((current) => ({ ...current, state: event.target.checked }))
-            }
-            disabled={isSaving}
-          />
-          State
-        </label>
-        <label>
-          <input
-            type="checkbox"
-            checked={policy.metadata}
-            onChange={(event) =>
-              setPolicy((current) => ({ ...current, metadata: event.target.checked }))
-            }
-            disabled={isSaving}
-          />
-          Metadata
-        </label>
-        <button
-          type="button"
-          className="secondary-button"
-          disabled={isSaving}
-          onClick={() => void onSavePolicy(policy)}
-        >
-          Save Link policy
-        </button>
-        {externalLink.link.attention_policy && (
-          <button
-            type="button"
-            className="text-button"
-            disabled={isSaving}
-            onClick={() => void onSavePolicy(null)}
-          >
-            Use Context default
-          </button>
+            </Button>
+          </Alert>
         )}
-      </div>
-    </article>
+        {externalLink.attention_entry && (
+          <Alert>
+            <AlertTitle>
+              {externalLink.attention_entry.kind === "review"
+                ? "Review date reached"
+                : "Needs review"}
+            </AlertTitle>
+            <AlertDescription>
+              {externalLink.attention_entry.summary}
+            </AlertDescription>
+            {externalLink.attention_entry.kind === "review" ? (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isSaving}
+                onClick={() => void onClearReviewAt()}
+              >
+                Clear review date
+              </Button>
+            ) : (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isSaving}
+                onClick={() => void onMarkReviewed()}
+              >
+                Mark changes reviewed
+              </Button>
+            )}
+          </Alert>
+        )}
+        <div className="grid gap-3 rounded-md border p-3">
+          <span className="text-sm font-medium">Watch schedule</span>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="grid gap-1.5 text-sm font-medium">
+              <span>Watch until</span>
+              <Input
+                type="datetime-local"
+                value={watchUntil}
+                onChange={(event) => setWatchUntil(event.target.value)}
+                disabled={isSaving}
+              />
+            </label>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={isSaving}
+              onClick={() => void onSaveWatchUntil(watchUntil || null)}
+            >
+              Save watch period
+            </Button>
+            <label className="grid gap-1.5 text-sm font-medium">
+              <span>Review at</span>
+              <Input
+                type="datetime-local"
+                value={reviewAt}
+                onChange={(event) => setReviewAt(event.target.value)}
+                disabled={isSaving}
+              />
+            </label>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={isSaving}
+              onClick={() => void onSaveReviewAt(reviewAt || null)}
+            >
+              Save review date
+            </Button>
+          </div>
+        </div>
+        <div className="grid gap-3 rounded-md border p-3">
+          <span className="text-sm font-medium">Attention for this Link</span>
+          <div className="flex flex-wrap gap-4">
+            <label className="flex items-center gap-2 text-sm font-normal">
+              <Checkbox
+                checked={policy.title}
+                onCheckedChange={(checked) =>
+                  setPolicy((current) => ({
+                    ...current,
+                    title: checked === true,
+                  }))
+                }
+                disabled={isSaving}
+              />
+              Title
+            </label>
+            <label className="flex items-center gap-2 text-sm font-normal">
+              <Checkbox
+                checked={policy.state}
+                onCheckedChange={(checked) =>
+                  setPolicy((current) => ({
+                    ...current,
+                    state: checked === true,
+                  }))
+                }
+                disabled={isSaving}
+              />
+              State
+            </label>
+            <label className="flex items-center gap-2 text-sm font-normal">
+              <Checkbox
+                checked={policy.metadata}
+                onCheckedChange={(checked) =>
+                  setPolicy((current) => ({
+                    ...current,
+                    metadata: checked === true,
+                  }))
+                }
+                disabled={isSaving}
+              />
+              Metadata
+            </label>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={isSaving}
+              onClick={() => void onSavePolicy(policy)}
+            >
+              Save Link policy
+            </Button>
+            {externalLink.link.attention_policy && (
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={isSaving}
+                onClick={() => void onSavePolicy(null)}
+              >
+                Use Context default
+              </Button>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1777,47 +2065,57 @@ export function AttentionEntryCard({
   }
 
   return (
-    <article className="attention-entry-card">
-      <div>
-        <strong>{entry.source_title}</strong>
-        <span className="external-link-kind">
-          {item?.item.human_identifier ?? "Item"} · {attentionEntryLabel(entry)}
-        </span>
-      </div>
-      <p>{entry.summary}</p>
-      {entry.kind === "reminder" && item && entry.reminder_id !== null ? (
-        <button
-          type="button"
-          className="secondary-button"
-          disabled={isSaving}
-          onClick={() =>
-            void saveReminder(item.item.id, entry.reminder_id as number)
-          }
-        >
-          Dismiss reminder
-        </button>
-      ) : entry.kind === "review" ? (
-        <button
-          type="button"
-          className="secondary-button"
-          disabled={isSaving}
-          onClick={() => void clearReviewDate()}
-        >
-          Clear review date
-        </button>
-      ) : entry.kind === "blocked_run" ? (
-        <span className="attention-state">Open the Run to answer the agent.</span>
-      ) : (
-        <button
-          type="button"
-          className="secondary-button"
-          disabled={isSaving}
-          onClick={() => void markReviewed()}
-        >
-          Mark reviewed
-        </button>
-      )}
-    </article>
+    <Card size="sm">
+      <CardContent className="flex flex-wrap items-center justify-between gap-3 pt-4">
+        <div className="min-w-0">
+          <strong className="block text-sm">{entry.source_title}</strong>
+          <span className="text-xs text-muted-foreground">
+            {item?.item.human_identifier ?? "Item"} ·{" "}
+            {attentionEntryLabel(entry)}
+          </span>
+        </div>
+        <p className="m-0 min-w-0 flex-1 text-sm text-muted-foreground">
+          {entry.summary}
+        </p>
+        {entry.kind === "reminder" && item && entry.reminder_id !== null ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={isSaving}
+            onClick={() =>
+              void saveReminder(item.item.id, entry.reminder_id as number)
+            }
+          >
+            Dismiss reminder
+          </Button>
+        ) : entry.kind === "review" ? (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={isSaving}
+            onClick={() => void clearReviewDate()}
+          >
+            Clear review date
+          </Button>
+        ) : entry.kind === "blocked_run" ? (
+          <span className="text-xs text-muted-foreground">
+            Open the Run to answer the agent.
+          </span>
+        ) : (
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={isSaving}
+            onClick={() => void markReviewed()}
+          >
+            Mark reviewed
+          </Button>
+        )}
+      </CardContent>
+    </Card>
   );
 
   async function saveReminder(itemId: number, reminderId: number) {
@@ -1855,31 +2153,39 @@ export function RunSuggestionCard({
   onAttach: (suggestion: RunSuggestion) => Promise<void>;
 }) {
   return (
-    <article className="run-suggestion-card">
-      <div>
-        <strong>
-          {suggestion.agent === "claude" ? "Claude Code" : "Codex"} in {suggestion.machineName}
-        </strong>
-        <span>
-          {suggestion.itemIdentifier} · {suggestion.itemTitle} · {suggestion.contextName}
-        </span>
-      </div>
-      <div>
-        <strong>Likely Workset: {suggestion.worksetBranch}</strong>
-        <span>{suggestion.worksetRootDirectory}</span>
-        <code>
-          Session {suggestion.sessionName} · Pane {suggestion.paneId} · {suggestion.currentPath}
-        </code>
-      </div>
-      <button
-        type="button"
-        className="secondary-button"
-        disabled={disabled}
-        onClick={() => void onAttach(suggestion)}
-      >
-        Attach Run
-      </button>
-    </article>
+    <Card size="sm">
+      <CardContent className="grid gap-3 pt-4 md:grid-cols-[1fr_1fr_auto] md:items-center">
+        <div className="grid gap-1">
+          <strong className="text-sm">
+            {suggestion.agent === "claude" ? "Claude Code" : "Codex"} in{" "}
+            {suggestion.machineName}
+          </strong>
+          <span className="text-xs text-muted-foreground">
+            {suggestion.itemIdentifier} · {suggestion.itemTitle} ·{" "}
+            {suggestion.contextName}
+          </span>
+        </div>
+        <div className="grid gap-1 text-xs">
+          <strong>Likely Workset: {suggestion.worksetBranch}</strong>
+          <span className="break-all text-muted-foreground">
+            {suggestion.worksetRootDirectory}
+          </span>
+          <code className="break-all text-muted-foreground">
+            Session {suggestion.sessionName} · Pane {suggestion.paneId} ·{" "}
+            {suggestion.currentPath}
+          </code>
+        </div>
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          disabled={disabled}
+          onClick={() => void onAttach(suggestion)}
+        >
+          Attach Run
+        </Button>
+      </CardContent>
+    </Card>
   );
 }
 
@@ -1899,15 +2205,19 @@ function runStateLabel(state: RunState): string {
 
 export function SearchResult({ view }: { view: ItemView }) {
   return (
-    <article className="search-result">
-      <span className="item-identifier">{view.item.human_identifier}</span>
-      <div>
-        <h3>{view.item.title}</h3>
-        <p>
-          {view.context_name} <span>·</span> {view.project_name} <span>·</span>{" "}
-          {view.item.status}
-        </p>
-      </div>
-    </article>
+    <Card size="sm">
+      <CardContent className="flex items-center gap-3 pt-4">
+        <Badge variant="outline">{view.item.human_identifier}</Badge>
+        <div>
+          <h3 className="font-heading text-sm font-medium normal-case tracking-normal text-foreground">
+            {view.item.title}
+          </h3>
+          <p className="m-0 text-xs text-muted-foreground">
+            {view.context_name} <span>·</span> {view.project_name}{" "}
+            <span>·</span> {view.item.status}
+          </p>
+        </div>
+      </CardContent>
+    </Card>
   );
 }
