@@ -131,6 +131,7 @@ impl SqliteStore {
         }
         migrate_runs_for_workspace_execution(&mut connection)?;
         initialize_schema(&mut connection)?;
+        migrate_legacy_workset_data(&mut connection)?;
 
         Ok(Self { connection })
     }
@@ -1696,6 +1697,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_activity_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_reminder_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_audit_id', 1);
+         INSERT OR IGNORE INTO metadata (key, value) VALUES ('workset_migration_completed', 0);
          INSERT OR IGNORE INTO contexts (id, name) VALUES (1, 'Personal');",
     )?;
 
@@ -2019,6 +2021,51 @@ fn migrate_runs_for_workspace_execution(connection: &mut Connection) -> Result<(
          FROM runs_legacy;
          DROP TABLE runs_legacy;",
     )?;
+    Ok(())
+}
+
+/// Remove data owned by the legacy Workset model exactly once.
+///
+/// This deliberately only changes SQLite state. Any old Workset directories are
+/// left for explicit human cleanup, and the transaction keeps all database
+/// records intact if one cleanup step fails.
+fn migrate_legacy_workset_data(connection: &mut Connection) -> Result<(), StoreError> {
+    let transaction = connection.transaction()?;
+    let completed: Option<i64> = transaction
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'workset_migration_completed'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if completed == Some(1) {
+        return Ok(());
+    }
+
+    transaction.execute("DELETE FROM runs WHERE workset_id IS NOT NULL", [])?;
+    transaction.execute(
+        "DELETE FROM activities
+         WHERE external_object_id IN (
+             SELECT DISTINCT external_links.external_object_id
+             FROM external_links
+             JOIN worksets ON worksets.item_id = external_links.item_id
+         )",
+        [],
+    )?;
+    transaction.execute(
+        "DELETE FROM audit_entries WHERE LOWER(action_json) LIKE '%workset%'",
+        [],
+    )?;
+    transaction.execute("DELETE FROM workset_repositories", [])?;
+    transaction.execute("DELETE FROM worksets", [])?;
+    transaction.execute(
+        "UPDATE metadata
+         SET value = 1
+         WHERE key = 'workset_migration_completed'",
+        [],
+    )?;
+    transaction.commit()?;
     Ok(())
 }
 
@@ -2460,6 +2507,155 @@ mod tests {
             .expect("audit history should survive reopening");
         assert_eq!(history.len(), 2);
         assert!(history.iter().all(|entry| entry.recorded_at > 0));
+    }
+
+    fn seed_legacy_workset(store: &mut SqliteStore) {
+        store
+            .connection
+            .execute_batch(
+                r#"DELETE FROM metadata WHERE key = 'workset_migration_completed';
+                 INSERT INTO repositories (id, project_id, name, remote_url)
+                     VALUES (1, 1, 'app', 'https://example.com/app.git');
+                 INSERT INTO items (id, human_identifier, title, project_id, status, notes)
+                     VALUES (1, 'MC-1', 'Legacy work', 1, 'Active', '');
+                 INSERT INTO worksets (id, item_id, root_directory, branch, archived)
+                     VALUES (1, 1, '/tmp/legacy-workset', 'main', 0);
+                 INSERT INTO workset_repositories
+                     (workset_id, repository_id, current_branch, is_dirty)
+                     VALUES (1, 1, 'main', 0);
+                 INSERT INTO machines
+                     (id, context_id, name, socket_name, transport_json,
+                      last_observed, last_observed_at)
+                     VALUES (1, 1, 'Local Mac', 'mission', '{"kind":"local"}',
+                             'available', 10);
+                 INSERT INTO runs
+                     (id, item_id, workset_id, machine_id, agent, execution_profile,
+                      prompt, working_directory, session_name, pane_id, started_at,
+                      state, pane_status)
+                     VALUES (1, 1, 1, 1, 'codex', 'implement', 'prompt',
+                             '/tmp/legacy-workset', 'legacy-session', '%1', 10,
+                             'finished', 'available');
+                 INSERT INTO external_objects
+                     (id, provider, kind, external_key, canonical_url)
+                     VALUES (1, 'github', 'issue', 'acme/app#1',
+                             'https://github.com/acme/app/issues/1');
+                 INSERT INTO external_links (id, item_id, external_object_id)
+                     VALUES (1, 1, 1);
+                 INSERT INTO activities
+                     (id, external_object_id, observed_at, changes_json)
+                     VALUES (1, 1, 10, '[]');
+                 INSERT INTO audit_entries (id, recorded_at, action_json)
+                     VALUES (1, 10, '{"action":"worksetCreated","workset_id":1}');"#,
+            )
+            .expect("legacy Workset data should be seeded");
+    }
+
+    #[test]
+    fn opening_an_old_database_removes_legacy_workset_dependents_atomically() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+        let legacy_directory = directory.path().join("legacy-workset");
+        std::fs::create_dir(&legacy_directory).expect("legacy directory should exist");
+
+        {
+            let mut store = SqliteStore::open(&path).expect("database should open");
+            seed_legacy_workset(&mut store);
+        }
+
+        let store = SqliteStore::open(&path).expect("legacy database should migrate");
+        let state = store.load_state().expect("migrated state should load");
+        assert!(state.worksets.is_empty());
+        assert!(state.runs.is_empty());
+        assert!(state.activities.is_empty());
+        assert_eq!(
+            store
+                .connection
+                .query_row("SELECT COUNT(*) FROM workset_repositories", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("workset repository count should be readable"),
+            0
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT COUNT(*) FROM audit_entries
+                     WHERE LOWER(action_json) LIKE '%workset%'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("legacy audit count should be readable"),
+            0
+        );
+        assert_eq!(
+            store
+                .connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = 'workset_migration_completed'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("migration marker should be readable"),
+            1
+        );
+        assert!(legacy_directory.exists());
+    }
+
+    #[test]
+    fn legacy_workset_migration_rolls_back_when_cleanup_fails() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+
+        {
+            let mut store = SqliteStore::open(&path).expect("database should open");
+            seed_legacy_workset(&mut store);
+            store
+                .connection
+                .execute_batch(
+                    "CREATE TRIGGER fail_legacy_workset_cleanup
+                     BEFORE DELETE ON runs
+                     WHEN OLD.workset_id IS NOT NULL
+                     BEGIN
+                         SELECT RAISE(ABORT, 'forced legacy migration failure');
+                     END;",
+                )
+                .expect("migration failure trigger should be created");
+        }
+
+        let error = match SqliteStore::open(&path) {
+            Ok(_) => panic!("legacy migration should fail"),
+            Err(error) => error,
+        };
+        assert!(error
+            .to_string()
+            .contains("forced legacy migration failure"));
+
+        let connection = Connection::open(&path).expect("database should remain readable");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM worksets", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("Workset count should be readable"),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM runs", [], |row| row.get::<_, i64>(0))
+                .expect("Run count should be readable"),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = 'workset_migration_completed'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("migration marker should be readable"),
+            0
+        );
     }
 
     #[test]
