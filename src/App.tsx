@@ -1,6 +1,5 @@
 import {
   FormEvent,
-  ReactNode,
   useRef,
   useEffect,
   useState,
@@ -11,7 +10,6 @@ import { Alert, AlertDescription } from "./components/ui/alert";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
 import { Card } from "./components/ui/card";
-import { Empty, EmptyDescription } from "./components/ui/empty";
 import { appShellLayoutClassName } from "./components/app-shell-layout";
 import {
   applyTheme,
@@ -29,9 +27,9 @@ import type {
   RunState,
 } from "./runtime/execution-types";
 import type { PaneTab } from "./runtime/terminal-types";
+import { ActivityPage } from "./features/activity/ActivityPage";
 import { WorkPage } from "./features/work/WorkPage";
 import { StructurePage } from "./features/structure/StructurePage";
-import { externalObjectKindLabel } from "./features/work/work-utils";
 
 export type Context = {
   id: number;
@@ -634,7 +632,6 @@ export function AppShell() {
     setupState,
     healthStatus,
     structure,
-    activity,
     error,
     isCheckingDependencies,
     setError,
@@ -648,8 +645,6 @@ export function AppShell() {
     contextFilterId,
     searchQuery,
   } = useAppRuntime();
-  const auditHistory = activity.audit_entries;
-  const observedActivities = activity.activities;
   const [setupContextName, setSetupContextName] = useState("Personal");
   const [setupProvider, setSetupProvider] = useState<ProviderChoice>("github");
   const [isSaving, setIsSaving] = useState(false);
@@ -800,52 +795,7 @@ export function AppShell() {
         />
       )}
 
-      {activeTab === "activity" && (
-        <section className="activity-page" aria-labelledby="activity-heading">
-          <section className="activity-section audit-record">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Append-only record</p>
-                <h2 id="activity-heading">Recent actions</h2>
-              </div>
-              <span className="item-count">{auditHistory.length} entries</span>
-            </div>
-            {auditHistory.length === 0 ? (
-              <EmptyState>No actions have been recorded yet.</EmptyState>
-            ) : (
-              <ol className="audit-record-list">
-                {auditHistory.slice(0, 50).map((entry) => (
-                  <li key={entry.id}>
-                    <span>{auditActionLabel(entry.action)}</span>
-                    <time dateTime={new Date(entry.recorded_at * 1000).toISOString()}>
-                      {new Date(entry.recorded_at * 1000).toLocaleString()}
-                    </time>
-                  </li>
-                ))}
-              </ol>
-            )}
-          </section>
-
-          <section className="activity-section observed-activity" aria-labelledby="observed-activity-heading">
-            <div className="section-heading">
-              <div>
-                <p className="eyebrow">Observed External Objects</p>
-                <h2 id="observed-activity-heading">Activity</h2>
-              </div>
-              <span className="item-count">{observedActivities.length} observations</span>
-            </div>
-            {observedActivities.length === 0 ? (
-              <EmptyState>No External Object changes have been observed yet.</EmptyState>
-            ) : (
-              <div className="observed-activity-list">
-                {observedActivities.slice(0, 50).map((entry) => (
-                  <ObservedActivityCard key={entry.activity.id} entry={entry} />
-                ))}
-              </div>
-            )}
-          </section>
-        </section>
-      )}
+      {activeTab === "activity" && <ActivityPage />}
 
       {activeTab === "work" && (
         <WorkPage
@@ -858,14 +808,6 @@ export function AppShell() {
         <StructurePage onResetComplete={() => setTerminalRequest(undefined)} />
       )}
     </main>
-  );
-}
-
-function EmptyState({ children }: { children: ReactNode }) {
-  return (
-    <Empty className="items-start border-0 p-0 py-8 text-left">
-      <EmptyDescription>{children}</EmptyDescription>
-    </Empty>
   );
 }
 
@@ -1105,225 +1047,4 @@ function dependencyStateLabel(state: DependencyState): string {
     case "unavailable":
       return "Unavailable";
   }
-}
-
-function ObservedActivityCard({ entry }: { entry: ObservedActivity }) {
-  const titleChange = entry.activity.changes.find((change) => change.kind === "title");
-  const stateChange = entry.activity.changes.find((change) => change.kind === "state");
-  const title = titleChange?.current ?? titleChange?.previous ?? entry.object.external_key;
-  const state = stateChange?.current ?? stateChange?.previous;
-
-  return (
-    <details className="observed-activity-card">
-      <summary>
-        <div>
-          <strong>{title}</strong>
-          <span>
-            Observed at this change · {externalObjectKindLabel(entry.object.kind)} · {entry.object.external_key}
-            {state ? ` · observed state ${state}` : ""}
-          </span>
-        </div>
-        <time dateTime={new Date(entry.activity.observed_at * 1000).toISOString()}>
-          {new Date(entry.activity.observed_at * 1000).toLocaleString()}
-        </time>
-      </summary>
-      <div className="observed-activity-details">
-        <a href={entry.object.canonical_url} target="_blank" rel="noreferrer">
-          {entry.object.canonical_url}
-        </a>
-        <ul>
-          {entry.activity.changes.map((change, index) => (
-            <li key={`${change.kind}-${change.key ?? ""}-${index}`}>
-              {externalChangeDescription(change)}
-            </li>
-          ))}
-        </ul>
-      </div>
-    </details>
-  );
-}
-
-function externalChangeDescription(change: ExternalChange): string {
-  const label =
-    change.kind === "title"
-      ? "Title"
-      : change.kind === "state"
-        ? "State"
-        : `Metadata ${change.key ?? "value"}`;
-  if (change.previous !== null && change.current !== null) {
-    return `${label} changed from ${change.previous} to ${change.current}`;
-  }
-  if (change.current !== null) return `${label} added as ${change.current}`;
-  if (change.previous !== null) return `${label} removed (was ${change.previous})`;
-  return `${label} changed`;
-}
-
-
-function auditActionLabel(action: AuditAction): string {
-  switch (action.action) {
-    case "itemCreated":
-      return `Created Item #${action.item_id}`;
-    case "itemStatusChanged":
-      return `Moved Item #${action.item_id} from ${action.from} to ${action.to}`;
-    case "itemNotesChanged":
-      return `Updated notes on Item #${action.item_id}`;
-    case "itemRemindersChanged":
-      return `Updated reminders on Item #${action.item_id}`;
-    case "itemDeleted":
-      return `Deleted Item #${
-        action.summary && "itemId" in action.summary
-          ? action.summary.itemId
-          : action.item_id
-      }${
-        action.summary && "itemId" in action.summary
-          ? ` · ${itemDeletionSummary(action.summary)}`
-          : ""
-      }`;
-    case "projectDeleted":
-      return `Deleted Project #${
-        action.summary && "projectId" in action.summary
-          ? action.summary.projectId
-          : action.project_id
-      }${
-        action.summary && "projectId" in action.summary
-          ? ` · ${parentDeletionSummary(action.summary)}`
-          : ""
-      }`;
-    case "contextDeleted":
-      return `Deleted Context #${
-        action.summary && "contextId" in action.summary
-          ? action.summary.contextId
-          : action.context_id
-      }${
-        action.summary && "contextId" in action.summary
-          ? ` · ${parentDeletionSummary(action.summary)}`
-          : ""
-      }`;
-    case "itemRelationChanged":
-      return `Updated the relationship between Items #${action.from_item_id} and #${action.to_item_id}`;
-    case "worksetCreated":
-      return `Created Workset #${action.workset_id}`;
-    case "worksetArchived":
-      return `${action.archived ? "Archived" : "Restored"} Workset #${action.workset_id}`;
-    case "worksetRemoved":
-      return `Removed Workset #${action.workset_id} · ${countLabel(
-        action.repository_count,
-        "Repository",
-      )}`;
-    case "worksetUpdated":
-      return `Updated Workset #${action.workset_id}`;
-    case "runCreated":
-      return `Created Run #${action.run_id}`;
-    case "runStopped":
-      return `Stopped Run #${action.run_id}`;
-    case "runDeleted":
-      return `Deleted Run #${action.run_id} · no local descendants`;
-    case "runStateChanged":
-      return `Run #${action.run_id} changed from ${action.from} to ${action.to}`;
-    case "runPaneStatusChanged":
-      return `Run #${action.run_id} Pane changed from ${action.from} to ${action.to}`;
-    case "externalObjectCreated":
-      return `Added External Object #${action.external_object_id}`;
-    case "externalObjectRefreshed":
-      return `Refreshed External Object #${action.external_object_id}`;
-    case "linkCreated":
-      return `Linked External Object through Link #${action.link_id}`;
-    case "linkUpdated":
-      return `Updated Link #${action.link_id}`;
-    case "linkDeleted":
-      return `Removed Link #${action.link_id} · ${
-        action.external_object_deleted === true
-          ? `orphaned External Object #${action.external_object_id ?? "?"} removed`
-          : action.external_object_deleted === false
-            ? "shared External Object retained"
-            : "External Object cascade details unavailable"
-      }`;
-    case "externalObjectDeleted":
-      return `Removed External Object #${action.external_object_id} locally · ${externalObjectDeletionSummary(action)}`;
-    case "contextCreated":
-      return `Created Context #${action.context_id}`;
-    case "projectCreated":
-      return `Created Project #${action.project_id}`;
-    case "repositoryRegistered":
-      return `Registered Repository #${action.repository_id}`;
-    case "repositoryDeleted":
-      return `Deleted Repository #${action.repository_id} · ${countLabel(
-        action.workset_count,
-        "Workset",
-      )}`;
-    case "machineRegistered":
-      return `Registered Machine #${action.machine_id}`;
-    case "machineObserved":
-      return `Observed Machine #${action.machine_id} as ${action.observation}`;
-    case "machineDeleted":
-      return `Deleted Machine #${action.machine_id} · ${countLabel(action.run_count, "Run")}`;
-    case "contextAttentionDefaultChanged":
-      return `Updated attention defaults for Context #${action.context_id}`;
-    case "resetBoundary":
-      return `Reset local data · new Personal Context #${action.context_id}, Default Project #${action.project_id}`;
-    default:
-      return "Recorded action";
-  }
-}
-
-function itemDeletionSummary(summary: ItemDeletionResult["summary"]): string {
-  return cascadeCounts([
-    [summary.reminderCount, "reminder"],
-    [summary.relationshipCount, "relationship"],
-    [summary.worksetCount, "Workset"],
-    [summary.runCount, "Run"],
-    [summary.linkCount, "Link"],
-    [summary.externalObjectCount, "orphaned External Object"],
-    [summary.snapshotCount, "snapshot"],
-    [summary.activityCount, "Activity record"],
-  ]);
-}
-
-function externalObjectDeletionSummary(action: AuditAction): string {
-  if (
-    action.link_count === null ||
-    action.link_count === undefined ||
-    action.snapshot_count === null ||
-    action.snapshot_count === undefined ||
-    action.activity_count === null ||
-    action.activity_count === undefined
-  ) {
-    return "cascade details unavailable";
-  }
-  return cascadeCounts([
-    [action.link_count ?? 0, "Link"],
-    [action.snapshot_count ?? 0, "snapshot"],
-    [action.activity_count ?? 0, "Activity record"],
-  ]);
-}
-
-function parentDeletionSummary(summary: ParentDeletionResult["summary"]): string {
-  return cascadeCounts([
-    [summary.projectCount, "Project"],
-    [summary.itemCount, "Item"],
-    [summary.repositoryCount, "Repository"],
-    [summary.machineCount, "Machine"],
-    [summary.worksetCount, "Workset"],
-    [summary.runCount, "Run"],
-    [summary.reminderCount, "reminder"],
-    [summary.relationshipCount, "relationship"],
-    [summary.linkCount, "Link"],
-    [summary.attentionDefaultCount, "attention default"],
-    [summary.externalObjectCount, "orphaned External Object"],
-    [summary.snapshotCount, "snapshot"],
-    [summary.activityCount, "Activity record"],
-  ]);
-}
-
-function cascadeCounts(counts: [number, string][]): string {
-  const nonEmpty = counts
-    .filter(([count]) => count > 0)
-    .map(([count, label]) => `${count} ${label}${count === 1 ? "" : "s"}`);
-  return nonEmpty.length > 0 ? nonEmpty.join(", ") : "no local descendants";
-}
-
-function countLabel(count: number | null | undefined, label: string): string {
-  if (count === null || count === undefined) return `${label} count unavailable`;
-  if (!count) return `no ${label.toLowerCase()} records`;
-  return `${count} ${label}${count === 1 ? "" : "s"}`;
 }
