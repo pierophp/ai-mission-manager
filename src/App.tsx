@@ -10,6 +10,13 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import {
+  applyTheme,
+  loadStoredTheme,
+  loadTheme,
+  saveTheme,
+  type Theme,
+} from "./theme";
 
 type Context = {
   id: number;
@@ -758,6 +765,8 @@ export function App() {
   const [showHealthDetails, setShowHealthDetails] = useState(false);
   const [initialStateLoaded, setInitialStateLoaded] = useState(false);
   const [selectedTab, setSelectedTab] = useState<AppTab>(loadSelectedTab);
+  const [theme, setTheme] = useState<Theme>(loadTheme);
+  const themePreferenceRef = useRef<Theme | undefined>(loadStoredTheme());
   const [terminalRequest, setTerminalRequest] = useState<{
     worksetId: number;
     pane: PaneTab;
@@ -772,6 +781,10 @@ export function App() {
   );
   const selectedTabDetails =
     appTabs.find((tab) => tab.id === selectedTab) ?? appTabs[0];
+  const isDarkTheme = theme === "dark";
+  const themeToggleLabel = isDarkTheme ? "Switch to light mode" : "Switch to dark mode";
+  const themeModeLabel = isDarkTheme ? "Light mode" : "Dark mode";
+  const themeIcon = isDarkTheme ? "☼" : "☾";
 
   useEffect(() => {
     void loadAppState();
@@ -780,6 +793,13 @@ export function App() {
   useEffect(() => {
     saveSelectedTab(selectedTab);
   }, [selectedTab]);
+
+  useEffect(() => {
+    applyTheme(theme);
+    if (themePreferenceRef.current) {
+      saveTheme(theme);
+    }
+  }, [theme]);
 
   useEffect(() => {
     if (!initialStateLoaded) return;
@@ -1609,20 +1629,36 @@ export function App() {
           <h1>{selectedTabDetails.label}</h1>
           <p className="subtitle">{selectedTabDetails.description}</p>
         </div>
-        <button
-          type="button"
-          className="health-indicator health-button"
-          aria-label="Runtime and provider health"
-          aria-expanded={showHealthDetails}
-          onClick={() => setShowHealthDetails((current) => !current)}
-        >
-          <span
-            className={`status-dot health-${healthStatus ? healthStatus.runtime.state : "unavailable"}`}
-          />
-          <span>Runtime: {healthStatus ? dependencyStateLabel(healthStatus.runtime.state) : "Checking"}</span>
-          <span className="health-separator">·</span>
-          <span>GitHub: {healthStatus ? dependencyStateLabel(healthStatus.provider.state) : "Checking"}</span>
-        </button>
+        <div className="app-header-actions">
+          <button
+            type="button"
+            className="theme-toggle secondary-button"
+            aria-label={themeToggleLabel}
+            aria-pressed={isDarkTheme}
+            onClick={() => {
+              const nextTheme = isDarkTheme ? "light" : "dark";
+              themePreferenceRef.current = nextTheme;
+              setTheme(nextTheme);
+            }}
+          >
+            <span aria-hidden="true">{themeIcon}</span>
+            <span>{themeModeLabel}</span>
+          </button>
+          <button
+            type="button"
+            className="health-indicator health-button"
+            aria-label="Runtime and provider health"
+            aria-expanded={showHealthDetails}
+            onClick={() => setShowHealthDetails((current) => !current)}
+          >
+            <span
+              className={`status-dot health-${healthStatus ? healthStatus.runtime.state : "unavailable"}`}
+            />
+            <span>Runtime: {healthStatus ? dependencyStateLabel(healthStatus.runtime.state) : "Checking"}</span>
+            <span className="health-separator">·</span>
+            <span>GitHub: {healthStatus ? dependencyStateLabel(healthStatus.provider.state) : "Checking"}</span>
+          </button>
+        </div>
       </header>
 
       <TabNavigation selectedTab={selectedTab} onSelect={setSelectedTab} />
