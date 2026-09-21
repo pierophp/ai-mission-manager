@@ -38,6 +38,24 @@ pub enum GitError {
     },
     #[error("no child Git repositories found in Workset root: {path}")]
     NoRepositories { path: PathBuf },
+    #[error("Repository remote does not match the configured remote: expected {expected}, found {actual}")]
+    RemoteMismatch { expected: String, actual: String },
+    #[error("Repository has no configured remote matching {expected}")]
+    RemoteNotConfigured { expected: String },
+    #[error("configured remote base branch does not exist: {remote}/{branch}")]
+    BaseBranchNotFound { remote: String, branch: String },
+    #[error("target branch already exists: {branch}")]
+    BranchAlreadyExists { branch: String },
+    #[error("target branch is already attached to a Worktree: {branch} at {path}")]
+    BranchAlreadyAttached { branch: String, path: PathBuf },
+    #[error("target branch does not exist for reuse: {branch}")]
+    BranchNotFound { branch: String },
+    #[error("path is not a registered Git Worktree: {path}")]
+    NotAWorktree { path: PathBuf },
+    #[error("Git Worktree branch does not match: expected {expected}, found {actual}")]
+    WorktreeBranchMismatch { expected: String, actual: String },
+    #[error("Git Worktree is dirty and needs explicit confirmation: {path}")]
+    DirtyWorktree { path: PathBuf },
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +79,12 @@ pub struct CheckoutInspection {
     pub remote_url: Option<String>,
     pub current_branch: String,
     pub is_dirty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitWorktreeEntry {
+    pub path: PathBuf,
+    pub branch: Option<String>,
 }
 
 impl GitCli {
@@ -217,6 +241,288 @@ impl GitCli {
         }
         let destination = destination.to_string_lossy().into_owned();
         self.run("clone the repository", &["clone", remote_url, &destination])
+    }
+
+    pub fn prepare_worktree(
+        &self,
+        repository: &Repository,
+        canonical_checkout: &Path,
+        destination: &Path,
+        branch: &str,
+        base_branch: &str,
+        reuse_existing_branch: bool,
+    ) -> Result<CheckoutInspection, GitError> {
+        if branch.trim().is_empty() {
+            return Err(GitError::Failed {
+                operation: "prepare the Git Worktree",
+                details: "target branch cannot be blank".into(),
+            });
+        }
+        if base_branch.trim().is_empty() {
+            return Err(GitError::Failed {
+                operation: "prepare the Git Worktree",
+                details: "base branch cannot be blank".into(),
+            });
+        }
+        if destination.exists() {
+            return Err(GitError::DestinationExists {
+                path: destination.to_owned(),
+            });
+        }
+
+        let remote = self.configured_remote(canonical_checkout, &repository.remote_url)?;
+        let canonical = canonical_checkout.to_string_lossy().into_owned();
+        self.run(
+            "fetch the configured remote",
+            &["-C", &canonical, "fetch", &remote],
+        )?;
+
+        let base_ref = format!("refs/remotes/{remote}/{base_branch}");
+        if self
+            .run_optional_output(
+                "check the configured remote base branch",
+                &["-C", &canonical, "rev-parse", "--verify", &base_ref],
+            )?
+            .is_none()
+        {
+            return Err(GitError::BaseBranchNotFound {
+                remote,
+                branch: base_branch.to_owned(),
+            });
+        }
+
+        if let Some(entry) = self
+            .list_worktrees(canonical_checkout)?
+            .into_iter()
+            .find(|entry| entry.branch.as_deref() == Some(branch))
+        {
+            return Err(GitError::BranchAlreadyAttached {
+                branch: branch.to_owned(),
+                path: entry.path,
+            });
+        }
+
+        let local_ref = format!("refs/heads/{branch}");
+        let remote_ref = format!("refs/remotes/{remote}/{branch}");
+        let local_exists = self
+            .run_optional_output(
+                "check the target branch",
+                &["-C", &canonical, "show-ref", "--verify", &local_ref],
+            )?
+            .is_some();
+        let remote_exists = self
+            .run_optional_output(
+                "check the target remote branch",
+                &["-C", &canonical, "show-ref", "--verify", &remote_ref],
+            )?
+            .is_some();
+
+        let destination_string = destination.to_string_lossy().into_owned();
+        if reuse_existing_branch {
+            if local_exists {
+                self.run(
+                    "attach the existing target branch",
+                    &[
+                        "-C",
+                        &canonical,
+                        "worktree",
+                        "add",
+                        &destination_string,
+                        branch,
+                    ],
+                )?;
+            } else if remote_exists {
+                self.run(
+                    "attach the existing remote target branch",
+                    &[
+                        "-C",
+                        &canonical,
+                        "worktree",
+                        "add",
+                        "--track",
+                        "-b",
+                        branch,
+                        &destination_string,
+                        &remote_ref,
+                    ],
+                )?;
+            } else {
+                return Err(GitError::BranchNotFound {
+                    branch: branch.to_owned(),
+                });
+            }
+        } else {
+            if local_exists || remote_exists {
+                return Err(GitError::BranchAlreadyExists {
+                    branch: branch.to_owned(),
+                });
+            }
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).map_err(|source| GitError::ReadWorksetRoot {
+                    path: parent.to_owned(),
+                    source,
+                })?;
+            }
+            self.run(
+                "create the target Git Worktree",
+                &[
+                    "-C",
+                    &canonical,
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    &destination_string,
+                    &base_ref,
+                ],
+            )?;
+            // Make the eventual same-name upstream explicit without contacting or mutating it.
+            self.run(
+                "configure the target branch upstream",
+                &[
+                    "-C",
+                    &destination_string,
+                    "config",
+                    &format!("branch.{branch}.remote"),
+                    &remote,
+                ],
+            )?;
+            self.run(
+                "configure the target branch merge name",
+                &[
+                    "-C",
+                    &destination_string,
+                    "config",
+                    &format!("branch.{branch}.merge"),
+                    &format!("refs/heads/{branch}"),
+                ],
+            )?;
+        }
+
+        self.validate_worktree_attachment(repository, canonical_checkout, destination, branch)
+    }
+
+    pub fn validate_worktree_attachment(
+        &self,
+        repository: &Repository,
+        canonical_checkout: &Path,
+        worktree_path: &Path,
+        expected_branch: &str,
+    ) -> Result<CheckoutInspection, GitError> {
+        let canonical = canonical_checkout.to_string_lossy().into_owned();
+        let canonical_worktree =
+            fs::canonicalize(worktree_path).map_err(|source| GitError::ReadWorksetRoot {
+                path: worktree_path.to_owned(),
+                source,
+            })?;
+        let is_registered = self
+            .list_worktrees(canonical_checkout)?
+            .into_iter()
+            .any(|entry| {
+                fs::canonicalize(entry.path)
+                    .map(|path| path == canonical_worktree && path != canonical_checkout)
+                    .unwrap_or(false)
+            });
+        if !is_registered {
+            return Err(GitError::NotAWorktree {
+                path: worktree_path.to_owned(),
+            });
+        }
+
+        let inspection = self.inspect_checkout(worktree_path)?;
+        let actual_remote = inspection.remote_url.clone().unwrap_or_default();
+        if actual_remote != repository.remote_url {
+            return Err(GitError::RemoteMismatch {
+                expected: repository.remote_url.clone(),
+                actual: actual_remote,
+            });
+        }
+        if inspection.current_branch != expected_branch {
+            return Err(GitError::WorktreeBranchMismatch {
+                expected: expected_branch.to_owned(),
+                actual: inspection.current_branch,
+            });
+        }
+        let _ = canonical;
+        Ok(inspection)
+    }
+
+    pub fn list_worktrees(
+        &self,
+        canonical_checkout: &Path,
+    ) -> Result<Vec<GitWorktreeEntry>, GitError> {
+        let canonical = canonical_checkout.to_string_lossy().into_owned();
+        let output = self.run_with_output(
+            "list Git Worktrees",
+            &["-C", &canonical, "worktree", "list", "--porcelain"],
+        )?;
+        let mut entries = Vec::new();
+        let mut path = None;
+        let mut branch = None;
+        for line in output.lines().chain(std::iter::once("")) {
+            if let Some(value) = line.strip_prefix("worktree ") {
+                path = Some(PathBuf::from(value));
+            } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
+                branch = Some(value.to_owned());
+            } else if line.is_empty() {
+                if let Some(path) = path.take() {
+                    entries.push(GitWorktreeEntry {
+                        path,
+                        branch: branch.take(),
+                    });
+                }
+            }
+        }
+        Ok(entries)
+    }
+
+    fn configured_remote(
+        &self,
+        canonical_checkout: &Path,
+        expected_remote_url: &str,
+    ) -> Result<String, GitError> {
+        let canonical = canonical_checkout.to_string_lossy().into_owned();
+        let remotes =
+            self.run_with_output("list configured Git remotes", &["-C", &canonical, "remote"])?;
+        for remote in remotes
+            .lines()
+            .map(str::trim)
+            .filter(|remote| !remote.is_empty())
+        {
+            let actual = self.run_with_output(
+                "read configured Git remote",
+                &["-C", &canonical, "remote", "get-url", remote],
+            )?;
+            if actual.trim() == expected_remote_url {
+                return Ok(remote.to_owned());
+            }
+        }
+        if remotes
+            .lines()
+            .map(str::trim)
+            .any(|remote| !remote.is_empty())
+        {
+            let actual = self
+                .run_with_output(
+                    "read configured Git remote",
+                    &[
+                        "-C",
+                        &canonical,
+                        "remote",
+                        "get-url",
+                        remotes.lines().next().unwrap(),
+                    ],
+                )?
+                .trim()
+                .to_owned();
+            return Err(GitError::RemoteMismatch {
+                expected: expected_remote_url.to_owned(),
+                actual,
+            });
+        }
+        Err(GitError::RemoteNotConfigured {
+            expected: expected_remote_url.to_owned(),
+        })
     }
 
     pub fn inspect_workset(&self, root: &Path) -> Result<Vec<GitRepositoryState>, GitError> {
@@ -672,6 +978,219 @@ mod tests {
         assert_eq!(inspected[0].current_branch, "main");
         assert!(!inspected[0].is_dirty);
         assert!(inspected[0].unpushed_commits_unknown);
+    }
+
+    #[test]
+    fn prepare_worktree_fetches_remote_and_leaves_canonical_checkout_on_its_branch() {
+        let directory = tempdir().expect("temporary Git directory should exist");
+        let (canonical, repository) = remote_fixture(directory.path());
+        let destination = directory
+            .path()
+            .join("worktrees")
+            .join("workspace-42")
+            .join("feature-fix")
+            .join("service-a");
+
+        let inspection = GitCli::system()
+            .prepare_worktree(
+                &repository,
+                &canonical,
+                &destination,
+                "feature/fix",
+                "main",
+                false,
+            )
+            .expect("a new Worktree should be created");
+
+        assert_eq!(inspection.current_branch, "feature/fix");
+        assert!(!inspection.is_dirty);
+        assert_eq!(
+            run_git_output(&canonical, &["branch", "--show-current"]),
+            "main"
+        );
+        assert_eq!(
+            run_git_output(
+                &destination,
+                &["config", "--get", "branch.feature/fix.merge"]
+            ),
+            "refs/heads/feature/fix"
+        );
+        assert_eq!(
+            run_git_output(&canonical, &["worktree", "list", "--porcelain"])
+                .lines()
+                .filter(|line| line.starts_with("worktree "))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn prepare_worktree_fails_when_fetch_fails() {
+        let directory = tempdir().expect("temporary Git directory should exist");
+        let canonical = directory.path().join("canonical");
+        run_git(
+            directory.path(),
+            &["init", "--initial-branch=main", "canonical"],
+        );
+        run_git(&canonical, &["config", "user.email", "test@example.com"]);
+        run_git(&canonical, &["config", "user.name", "Test User"]);
+        fs::write(canonical.join("README.md"), "canonical\n")
+            .expect("canonical file should be written");
+        run_git(&canonical, &["add", "README.md"]);
+        run_git(&canonical, &["commit", "-m", "initial"]);
+        let repository = Repository {
+            id: 1,
+            project_id: 1,
+            name: "service-a".into(),
+            remote_url: directory
+                .path()
+                .join("missing.git")
+                .to_string_lossy()
+                .into_owned(),
+            base_branch: "main".into(),
+        };
+        run_git(
+            &canonical,
+            &["remote", "add", "origin", &repository.remote_url],
+        );
+
+        let error = GitCli::system()
+            .prepare_worktree(
+                &repository,
+                &canonical,
+                &directory.path().join("worktree"),
+                "feature/fix",
+                "main",
+                false,
+            )
+            .expect_err("a failed fetch must stop preparation");
+
+        assert!(matches!(
+            error,
+            GitError::Failed {
+                operation: "fetch the configured remote",
+                ..
+            }
+        ));
+        assert!(!directory.path().join("worktree").exists());
+    }
+
+    #[test]
+    fn prepare_worktree_does_not_fall_back_when_configured_base_branch_is_missing() {
+        let directory = tempdir().expect("temporary Git directory should exist");
+        let (canonical, repository) = remote_fixture(directory.path());
+
+        let error = GitCli::system()
+            .prepare_worktree(
+                &repository,
+                &canonical,
+                &directory.path().join("worktree"),
+                "feature/fix",
+                "develop",
+                false,
+            )
+            .expect_err("a missing configured base must stop preparation");
+
+        assert!(matches!(
+            error,
+            GitError::BaseBranchNotFound { remote, branch }
+                if remote == "origin" && branch == "develop"
+        ));
+    }
+
+    #[test]
+    fn prepare_worktree_reports_an_already_attached_branch_instead_of_duplicating_it() {
+        let directory = tempdir().expect("temporary Git directory should exist");
+        let (canonical, repository) = remote_fixture(directory.path());
+        let first = directory.path().join("first");
+        GitCli::system()
+            .prepare_worktree(
+                &repository,
+                &canonical,
+                &first,
+                "feature/fix",
+                "main",
+                false,
+            )
+            .expect("the first Worktree should be created");
+
+        let error = GitCli::system()
+            .prepare_worktree(
+                &repository,
+                &canonical,
+                &directory.path().join("second"),
+                "feature/fix",
+                "main",
+                true,
+            )
+            .expect_err("a branch already attached to a Worktree must not be duplicated");
+
+        assert!(
+            matches!(
+                error,
+                GitError::BranchAlreadyAttached { ref branch, ref path }
+                    if branch == "feature/fix"
+                        && path == &fs::canonicalize(&first).expect("first Worktree should canonicalize")
+            ),
+            "unexpected error: {error:?}"
+        );
+    }
+
+    #[test]
+    fn validate_worktree_attachment_checks_remote_branch_and_reports_dirty_state() {
+        let directory = tempdir().expect("temporary Git directory should exist");
+        let (canonical, repository) = remote_fixture(directory.path());
+        let destination = directory.path().join("attached");
+        GitCli::system()
+            .prepare_worktree(
+                &repository,
+                &canonical,
+                &destination,
+                "feature/fix",
+                "main",
+                false,
+            )
+            .expect("the Worktree should be created");
+        fs::write(destination.join("notes.txt"), "uncommitted\n")
+            .expect("dirty file should be written");
+
+        let inspection = GitCli::system()
+            .validate_worktree_attachment(&repository, &canonical, &destination, "feature/fix")
+            .expect("the existing Worktree should be validatable");
+
+        assert!(inspection.is_dirty);
+        assert_eq!(inspection.current_branch, "feature/fix");
+    }
+
+    fn remote_fixture(directory: &Path) -> (PathBuf, Repository) {
+        let seed = directory.join("seed");
+        run_git(directory, &["init", "--initial-branch=main", "seed"]);
+        run_git(&seed, &["config", "user.email", "test@example.com"]);
+        run_git(&seed, &["config", "user.name", "Test User"]);
+        fs::write(seed.join("README.md"), "seed\n").expect("seed file should be written");
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-m", "initial"]);
+        let origin = directory.join("origin.git");
+        run_git(directory, &["init", "--bare", "origin.git"]);
+        let origin_url = path_arg(&origin);
+        run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run_git(&seed, &["remote", "add", "origin", &origin_url]);
+        run_git(&seed, &["push", "origin", "main"]);
+        let canonical = directory.join("canonical");
+        run_git(directory, &["clone", &origin_url, &path_arg(&canonical)]);
+        run_git(&canonical, &["config", "user.email", "test@example.com"]);
+        run_git(&canonical, &["config", "user.name", "Test User"]);
+
+        (
+            canonical,
+            Repository {
+                id: 1,
+                project_id: 1,
+                name: "service-a".into(),
+                remote_url: origin_url,
+                base_branch: "main".into(),
+            },
+        )
     }
 
     fn run_git(directory: &Path, args: &[&str]) {
