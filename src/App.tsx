@@ -1,5 +1,6 @@
 import {
   FormEvent,
+  ReactNode,
   useRef,
   useEffect,
   useMemo,
@@ -10,7 +11,15 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
+import { Moon, Sun } from "lucide-react";
 import "@xterm/xterm/css/xterm.css";
+import { Alert, AlertDescription } from "./components/ui/alert";
+import { Badge } from "./components/ui/badge";
+import { Button } from "./components/ui/button";
+import { Card } from "./components/ui/card";
+import { Empty, EmptyDescription } from "./components/ui/empty";
+import { Spinner } from "./components/ui/spinner";
+import { appShellLayoutClassName } from "./components/app-shell-layout";
 import {
   applyTheme,
   loadStoredTheme,
@@ -681,6 +690,9 @@ const appTabs: {
   },
 ];
 
+const warmOutlineButtonClass =
+  "border-[var(--input-border)] bg-transparent text-[var(--warm-text)] hover:border-[var(--accent)] hover:bg-[var(--surface-warm)] hover:text-[var(--accent-strong)]";
+
 const itemStatuses: ItemStatus[] = ["Inbox", "Active", "Waiting", "Done"];
 const relationKinds: ItemRelationKind[] = [
   "Blocks",
@@ -777,7 +789,7 @@ export function AppShell() {
   const isDarkTheme = theme === "dark";
   const themeToggleLabel = isDarkTheme ? "Switch to light mode" : "Switch to dark mode";
   const themeModeLabel = isDarkTheme ? "Light mode" : "Dark mode";
-  const themeIcon = isDarkTheme ? "☼" : "☾";
+  const runtimeState = healthStatus?.runtime.state ?? "unavailable";
 
   useEffect(() => {
     void loadAppState();
@@ -1612,17 +1624,19 @@ export function AppShell() {
   }
 
   return (
-    <main className="app-shell">
-      <header className="app-header">
+    <main className={appShellLayoutClassName}>
+      <header className="flex items-start justify-between gap-6 max-[510px]:flex-col">
         <div>
           <p className="eyebrow">AI Mission Manager</p>
           <h1>{activeTabDetails.label}</h1>
           <p className="subtitle">{activeTabDetails.description}</p>
         </div>
-        <div className="app-header-actions">
-          <button
+        <div className="flex items-start gap-3.5 max-[510px]:w-full max-[510px]:flex-wrap">
+          <Button
             type="button"
-            className="theme-toggle secondary-button"
+            variant="outline"
+            size="sm"
+            className={`h-[34px] gap-1.5 px-2.5 text-xs ${warmOutlineButtonClass}`}
             aria-label={themeToggleLabel}
             aria-pressed={isDarkTheme}
             onClick={() => {
@@ -1631,23 +1645,32 @@ export function AppShell() {
               setTheme(nextTheme);
             }}
           >
-            <span aria-hidden="true">{themeIcon}</span>
+            {isDarkTheme ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
             <span>{themeModeLabel}</span>
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            className="health-indicator health-button"
+            variant="ghost"
+            size="sm"
+            className="h-auto min-h-8 gap-2 px-2 text-xs text-[var(--subtle)] hover:bg-[var(--surface-warm)] hover:text-[var(--accent-strong)] max-[510px]:whitespace-normal"
             aria-label="Runtime and provider health"
             aria-expanded={showHealthDetails}
             onClick={() => setShowHealthDetails((current) => !current)}
           >
             <span
-              className={`status-dot health-${healthStatus ? healthStatus.runtime.state : "unavailable"}`}
+              aria-hidden="true"
+              className={`size-2 shrink-0 rounded-full ring-4 ${
+                runtimeState === "available"
+                  ? "bg-[var(--success)] ring-[rgb(var(--success-rgb)/0.14)]"
+                  : runtimeState === "unavailable"
+                    ? "bg-[var(--danger)] ring-[rgb(var(--danger-rgb)/0.14)]"
+                    : "bg-[var(--warning)] ring-[rgb(var(--warning-rgb)/0.14)]"
+              }`}
             />
             <span>Runtime: {healthStatus ? dependencyStateLabel(healthStatus.runtime.state) : "Checking"}</span>
-            <span className="health-separator">·</span>
+            <span className="text-[var(--muted-light)]">·</span>
             <span>GitHub: {healthStatus ? dependencyStateLabel(healthStatus.provider.state) : "Checking"}</span>
-          </button>
+          </Button>
         </div>
       </header>
 
@@ -1675,7 +1698,7 @@ export function AppShell() {
         />
       )}
 
-      {error && <p className="error-message" role="alert">{error}</p>}
+      {error && <ErrorAlert message={error} />}
 
       {terminalRequest && (
         <EmbeddedTerminal
@@ -1710,13 +1733,15 @@ export function AppShell() {
             placeholder="Search Items, notes, or identifiers"
           />
           </label>
-          <button
+          <Button
             type="button"
-            className="secondary-button"
+            variant="outline"
+            size="sm"
+            className={warmOutlineButtonClass}
             onClick={() => void pollExternalObjects(true)}
           >
             Refresh linked objects
-          </button>
+          </Button>
         </section>
       )}
 
@@ -1760,7 +1785,7 @@ export function AppShell() {
             <span className="item-count">{searchResults.length} matches</span>
           </div>
           {searchResults.length === 0 ? (
-            <p className="empty-state">No Items match that search.</p>
+            <EmptyState>No Items match that search.</EmptyState>
           ) : (
             <div className="search-results">
               {searchResults.map((view) => (
@@ -1782,7 +1807,7 @@ export function AppShell() {
               <span className="item-count">{auditHistory.length} entries</span>
             </div>
             {auditHistory.length === 0 ? (
-              <p className="empty-state">No actions have been recorded yet.</p>
+              <EmptyState>No actions have been recorded yet.</EmptyState>
             ) : (
               <ol className="audit-record-list">
                 {auditHistory.slice(0, 50).map((entry) => (
@@ -1806,7 +1831,7 @@ export function AppShell() {
               <span className="item-count">{observedActivities.length} observations</span>
             </div>
             {observedActivities.length === 0 ? (
-              <p className="empty-state">No External Object changes have been observed yet.</p>
+              <EmptyState>No External Object changes have been observed yet.</EmptyState>
             ) : (
               <div className="observed-activity-list">
                 {observedActivities.slice(0, 50).map((entry) => (
@@ -1832,7 +1857,10 @@ export function AppShell() {
           <span className="key-hint">Statuses are yours to move</span>
         </div>
         {isLoading || !home ? (
-          <p className="empty-state">Loading your home view…</p>
+          <Empty className="items-start border-0 p-0 py-8 text-left">
+            <Spinner className="text-[var(--accent)]" />
+            <EmptyDescription>Loading your home view…</EmptyDescription>
+          </Empty>
         ) : (
           <>
             {home.attention_entries.length > 0 && (
@@ -2089,8 +2117,12 @@ export function AppShell() {
               </form>
               <ul className="entity-list">
                 {captureProjects.length === 0 ? (
-                  <li className="empty-state">
-                    No Projects remain in this Context. Create one above to add Items here.
+                  <li>
+                    <Empty className="items-start border-0 p-0 text-left">
+                      <EmptyDescription>
+                        No Projects remain in this Context. Create one above to add Items here.
+                      </EmptyDescription>
+                    </Empty>
                   </li>
                 ) : (
                   captureProjects.map((project) => (
@@ -2603,21 +2635,45 @@ export function AppShell() {
   );
 }
 
+function EmptyState({ children }: { children: ReactNode }) {
+  return (
+    <Empty className="items-start border-0 p-0 py-8 text-left">
+      <EmptyDescription>{children}</EmptyDescription>
+    </Empty>
+  );
+}
+
+function ErrorAlert({ message }: { message: string }) {
+  return (
+    <Alert
+      variant="destructive"
+      className="mt-4 border-[var(--danger-border)] bg-[var(--danger-surface)]"
+    >
+      <AlertDescription className="text-[var(--danger)]">{message}</AlertDescription>
+    </Alert>
+  );
+}
+
 function TabNavigation({ activeTab }: { activeTab: AppTab }) {
   return (
-    <nav className="app-tabs" aria-label="Home sections">
-      <div className="app-tab-list" role="tablist" aria-label="Home sections">
+    <nav className="mt-8 border-b border-[var(--line)]" aria-label="Home sections">
+      <div className="flex gap-6 overflow-x-auto" aria-label="Home sections">
         {appTabs.map((tab) => (
-          <Link
-            to={tab.path}
-            className={`app-tab${activeTab === tab.id ? " app-tab-selected" : ""}`}
+          <Button
+            asChild
             key={tab.id}
-            role="tab"
-            aria-selected={activeTab === tab.id}
-            tabIndex={activeTab === tab.id ? 0 : -1}
+            variant="ghost"
+            size="sm"
+            className={`h-auto shrink-0 rounded-none border-b-2 px-0.5 py-3 text-xs font-bold uppercase tracking-[0.08em] hover:bg-transparent hover:text-[var(--accent-strong)] ${
+              activeTab === tab.id
+                ? "border-[var(--accent)] text-[var(--ink)]"
+                : "border-transparent text-[var(--muted)]"
+            }`}
           >
-            {tab.label}
-          </Link>
+            <Link to={tab.path} aria-current={activeTab === tab.id ? "page" : undefined}>
+              {tab.label}
+            </Link>
+          </Button>
         ))}
       </div>
     </nav>
@@ -2880,20 +2936,21 @@ function SetupWizard({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   return (
-    <section className="setup-wizard" aria-labelledby="setup-heading">
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">First run</p>
-          <h2 id="setup-heading">Make the app ready for your work</h2>
-          <p className="setup-intro">
-            Choose your first Context, decide whether to connect GitHub, and check the tools
-            already installed on this Machine. Mission Manager never installs or authenticates
-            anything on your behalf.
-          </p>
+    <section className="mt-8" aria-labelledby="setup-heading">
+      <Card className="gap-0 rounded-2xl border border-[var(--setup-border)] bg-[var(--surface-setup)] p-6 shadow-none ring-0">
+        <div className="section-heading">
+          <div>
+            <p className="eyebrow">First run</p>
+            <h2 id="setup-heading">Make the app ready for your work</h2>
+            <p className="setup-intro">
+              Choose your first Context, decide whether to connect GitHub, and check the tools
+              already installed on this Machine. Mission Manager never installs or authenticates
+              anything on your behalf.
+            </p>
+          </div>
+          <span className="item-count">Three quick checks</span>
         </div>
-        <span className="item-count">Three quick checks</span>
-      </div>
-      <form className="setup-form" onSubmit={onSubmit}>
+        <form className="setup-form" onSubmit={onSubmit}>
         <div className="setup-step">
           <span className="setup-step-number">1</span>
           <div>
@@ -2950,25 +3007,28 @@ function SetupWizard({
                 <h3>Check dependencies</h3>
                 <p className="column-hint">Missing or unauthenticated tools do not stop the rest of the app.</p>
               </div>
-              <button
+              <Button
                 type="button"
-                className="secondary-button"
+                variant="outline"
+                size="sm"
+                className={warmOutlineButtonClass}
                 onClick={onCheckDependencies}
                 disabled={isCheckingDependencies || isSaving}
               >
                 {isCheckingDependencies ? "Checking…" : "Check again"}
-              </button>
+              </Button>
             </div>
             <DependencyList health={health} />
           </div>
         </div>
         <div className="setup-actions">
           <p className="column-hint">You can revisit tool setup from the health indicator at any time.</p>
-          <button type="submit" disabled={isSaving || !contextName.trim()}>
+          <Button type="submit" disabled={isSaving || !contextName.trim()}>
             {isSaving ? "Saving setup…" : "Finish setup"}
-          </button>
+          </Button>
         </div>
-      </form>
+        </form>
+      </Card>
     </section>
   );
 }
@@ -2983,22 +3043,28 @@ function HealthDetails({
   onCheckDependencies: () => void;
 }) {
   return (
-    <section className="health-details" aria-label="Tool health details">
-      <div className="health-details-heading">
-        <div>
-          <p className="eyebrow">Tool health</p>
-          <h2>Runtime and provider status</h2>
+    <section className="mt-6" aria-label="Tool health details">
+      <Card className="gap-0 rounded-[14px] border border-[var(--line)] bg-[rgb(var(--surface-rgb)/0.72)] p-5 shadow-none ring-0">
+        <div className="flex items-start justify-between gap-4 border-b border-[var(--line-soft)] pb-3 max-[760px]:flex-col max-[760px]:items-stretch">
+          <div>
+            <p className="eyebrow">Tool health</p>
+            <h2 className="text-xl">Runtime and provider status</h2>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className={warmOutlineButtonClass}
+            onClick={onCheckDependencies}
+            disabled={isCheckingDependencies}
+          >
+            {isCheckingDependencies ? "Checking…" : "Check again"}
+          </Button>
         </div>
-        <button
-          type="button"
-          className="secondary-button"
-          onClick={onCheckDependencies}
-          disabled={isCheckingDependencies}
-        >
-          {isCheckingDependencies ? "Checking…" : "Check again"}
-        </button>
-      </div>
-      <DependencyList health={health} />
+        <div className="mt-1">
+          <DependencyList health={health} />
+        </div>
+      </Card>
     </section>
   );
 }
@@ -3015,9 +3081,12 @@ function DependencyList({ health }: { health: HealthStatus | undefined }) {
       ) : (
         dependencies.map((dependency) => (
           <li className="dependency-row" key={dependency.key}>
-            <span className={`dependency-state dependency-${dependency.state}`}>
+            <Badge
+              variant={dependency.state === "available" ? "secondary" : "outline"}
+              className={`dependency-state dependency-${dependency.state}`}
+            >
               {dependencyStateLabel(dependency.state)}
-            </span>
+            </Badge>
             <span className="dependency-copy">
               <strong>{dependency.label}</strong>
               <span>{dependency.message}</span>
@@ -3209,7 +3278,7 @@ function EmbeddedTerminal({
         ))}
       </div>
       <div className="terminal-surface" ref={terminalContainerRef} />
-      {terminalError && <p className="error-message">{terminalError}</p>}
+      {terminalError && <ErrorAlert message={terminalError} />}
     </section>
   );
 }

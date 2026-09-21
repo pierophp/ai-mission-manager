@@ -8,6 +8,8 @@ import {
 } from "@tanstack/react-router";
 
 import { AppShell } from "./App";
+import { appShellLayoutClassName } from "./components/app-shell-layout";
+import { Empty, EmptyDescription } from "./components/ui/empty";
 
 function UnknownRoute() {
   const router = useRouter();
@@ -17,8 +19,10 @@ function UnknownRoute() {
   }, [router]);
 
   return (
-    <main className="app-shell">
-      <p className="empty-state">That route is not available. Returning to Work…</p>
+    <main className={appShellLayoutClassName}>
+      <Empty className="items-start border-0 p-0 py-8 text-left">
+        <EmptyDescription>That route is not available. Returning to Work…</EmptyDescription>
+      </Empty>
     </main>
   );
 }
