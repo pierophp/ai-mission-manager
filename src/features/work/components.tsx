@@ -60,6 +60,7 @@ import type {
   RunState,
   RunSuggestion,
   Workspace,
+  WorkspaceRemovalReport,
   WorkspaceRepositoryInput,
   Workset,
   WorksetRemovalReport,
@@ -228,6 +229,13 @@ export function ItemCard({
   const [directRunSharedConfirmed, setDirectRunSharedConfirmed] =
     useState(false);
   const [worktreeMachineId, setWorktreeMachineId] = useState<number>();
+  const [workspaceRemovalReport, setWorkspaceRemovalReport] =
+    useState<WorkspaceRemovalReport>();
+  const [workspaceRemovalSelection, setWorkspaceRemovalSelection] = useState<
+    Record<number, boolean>
+  >({});
+  const [workspaceRemovalDestructive, setWorkspaceRemovalDestructive] =
+    useState<Record<number, boolean>>({});
   const [isSaving, setIsSaving] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const workCommand = useWorkCommand();
@@ -794,6 +802,37 @@ export function ItemCard({
     );
   }
 
+  async function reviewWorkspaceRemoval(workspaceId: number) {
+    const report = await saveItem(
+      workActions.prepareWorkspaceRemoval(workspaceId),
+      false,
+    );
+    if (!report) return;
+    setWorkspaceRemovalReport(report);
+    setWorkspaceRemovalSelection(
+      Object.fromEntries(report.worktrees.map((worktree) => [worktree.worktreeId, false])),
+    );
+    setWorkspaceRemovalDestructive({});
+  }
+
+  async function removeWorkspace() {
+    if (!workspaceRemovalReport) return;
+    const confirmedWorktreeIds = workspaceRemovalReport.worktrees
+      .filter((worktree) => workspaceRemovalSelection[worktree.worktreeId])
+      .map((worktree) => worktree.worktreeId);
+    const destructiveWorktreeIds = workspaceRemovalReport.worktrees
+      .filter((worktree) => workspaceRemovalDestructive[worktree.worktreeId])
+      .map((worktree) => worktree.worktreeId);
+    await saveItem(
+      workActions.removeWorkspace(
+        workspaceRemovalReport.workspaceId,
+        confirmedWorktreeIds,
+        destructiveWorktreeIds,
+      ),
+    );
+    setWorkspaceRemovalReport(undefined);
+  }
+
   async function handleStartRun(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!runPreviewWorksetId || !runPrompt.trim() || runPromptNeedsCompose)
@@ -979,6 +1018,108 @@ export function ItemCard({
               </div>
             ))}
           </div>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={isSaving}
+            onClick={() => void reviewWorkspaceRemoval(workspace.id)}
+          >
+            Review Worktree cleanup
+          </Button>
+          {workspaceRemovalReport?.workspaceId === workspace.id && (
+            <div className="grid gap-3 rounded-lg border border-destructive/30 p-4">
+              <div>
+                <h4 className="m-0 text-base font-medium">
+                  Confirm each Worktree to remove
+                </h4>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  Physical cleanup is explicit. Git branches are preserved.
+                </p>
+              </div>
+              {workspaceRemovalReport.blockers.length > 0 && (
+                <Alert variant="destructive">
+                  <AlertTitle>Workspace cleanup is blocked</AlertTitle>
+                  <AlertDescription>
+                    {workspaceRemovalReport.blockers.map((blocker) => (
+                      <div key={blocker}>{blocker}</div>
+                    ))}
+                  </AlertDescription>
+                </Alert>
+              )}
+              {workspaceRemovalReport.worktrees.map((worktree) => (
+                <label
+                  className="grid gap-2 rounded-md border p-3 text-sm"
+                  key={worktree.worktreeId}
+                >
+                  <span className="flex items-center gap-2 font-medium">
+                    <Checkbox
+                      checked={
+                        workspaceRemovalSelection[worktree.worktreeId] === true
+                      }
+                      onCheckedChange={(checked) =>
+                        setWorkspaceRemovalSelection((current) => ({
+                          ...current,
+                          [worktree.worktreeId]: checked === true,
+                        }))
+                      }
+                      disabled={isSaving || !workspaceRemovalReport.safe}
+                    />
+                    {worktree.repositoryName} · {worktree.branch}
+                  </span>
+                  <code className="break-all text-xs text-muted-foreground">
+                    {worktree.path}
+                  </code>
+                  {worktree.requiresDestructiveConfirmation && (
+                    <span className="flex items-center gap-2 font-normal text-destructive">
+                      <Checkbox
+                        checked={
+                          workspaceRemovalDestructive[worktree.worktreeId] ===
+                          true
+                        }
+                        onCheckedChange={(checked) =>
+                          setWorkspaceRemovalDestructive((current) => ({
+                            ...current,
+                            [worktree.worktreeId]: checked === true,
+                          }))
+                        }
+                        disabled={isSaving || !workspaceRemovalReport.safe}
+                      />
+                      Confirm destructive removal of dirty files.
+                    </span>
+                  )}
+                </label>
+              ))}
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  variant="destructive"
+                  disabled={
+                    isSaving ||
+                    !workspaceRemovalReport.safe ||
+                    workspaceRemovalReport.worktrees.length === 0 ||
+                    workspaceRemovalReport.worktrees.some(
+                      (worktree) =>
+                        !workspaceRemovalSelection[worktree.worktreeId] ||
+                        (worktree.requiresDestructiveConfirmation &&
+                          !workspaceRemovalDestructive[worktree.worktreeId]),
+                    )
+                  }
+                  onClick={() => void removeWorkspace()}
+                >
+                  {isSaving ? "Removing…" : "Remove selected Worktrees"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  disabled={isSaving}
+                  onClick={() => setWorkspaceRemovalReport(undefined)}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
           {directRunWorkspaceId === workspace.id && directRunPreview && (
             <form
               className="grid gap-4 rounded-lg border border-primary/30 bg-primary/5 p-4"

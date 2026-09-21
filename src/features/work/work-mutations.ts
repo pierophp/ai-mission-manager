@@ -60,6 +60,19 @@ export const workActions = {
         path,
         confirmDirtyAttachment,
       ),
+  prepareWorkspaceRemoval: (workspaceId: number) =>
+    () => workAdapter.prepareWorkspaceRemoval(workspaceId),
+  removeWorkspace: (
+    workspaceId: number,
+    confirmedWorktreeIds: number[],
+    destructiveWorktreeIds: number[],
+  ) =>
+    () =>
+      workAdapter.removeWorkspace(
+        workspaceId,
+        confirmedWorktreeIds,
+        destructiveWorktreeIds,
+      ),
   prepareDirectRun: (itemId: number, workspaceId: number, machineId: number | null) =>
     () => workAdapter.prepareDirectRun(itemId, workspaceId, machineId),
   attachWorkset: (itemId: number, rootDirectory: string) =>

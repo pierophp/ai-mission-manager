@@ -142,6 +142,31 @@ export type Worktree = {
   is_dirty: boolean;
 };
 
+export type WorktreeRemovalReport = {
+  worktreeId: number;
+  workspaceId: number;
+  repositoryId: number;
+  repositoryName: string;
+  machineId: number;
+  path: string;
+  branch: string;
+  isDirty: boolean;
+  requiresDestructiveConfirmation: boolean;
+};
+
+export type WorkspaceRemovalReport = {
+  workspaceId: number;
+  worktrees: WorktreeRemovalReport[];
+  safe: boolean;
+  blockers: string[];
+};
+
+export type WorkspaceRemovalResult = {
+  workspaceId: number;
+  worktreeCount: number;
+  branchesPreserved: boolean;
+};
+
 export type MachineTransport =
   | { kind: "local" }
   | {

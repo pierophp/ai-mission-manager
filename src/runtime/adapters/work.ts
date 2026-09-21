@@ -23,6 +23,8 @@ import type {
   WorksetRemovalResult,
   WorksetRepositoryInput,
   Workspace,
+  WorkspaceRemovalReport,
+  WorkspaceRemovalResult,
   WorkspaceRepositoryInput,
   Worktree,
 } from "../types";
@@ -122,6 +124,21 @@ export const workAdapter = {
       machineId,
       path,
       confirmDirtyAttachment,
+    }),
+  prepareWorkspaceRemoval: (workspaceId: number) =>
+    command<WorkspaceRemovalReport>("prepare_workspace_removal", {
+      workspaceId,
+    }),
+  removeWorkspace: (
+    workspaceId: number,
+    confirmedWorktreeIds: number[],
+    destructiveWorktreeIds: number[],
+  ) =>
+    command<WorkspaceRemovalResult>("remove_workspace", {
+      workspaceId,
+      confirmedWorktreeIds,
+      destructiveWorktreeIds,
+      confirmed: true,
     }),
   attachWorkset: (itemId: number, rootDirectory: string) =>
     command<Workset>("attach_workset", { itemId, rootDirectory }),
