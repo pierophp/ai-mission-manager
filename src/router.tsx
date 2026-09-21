@@ -11,6 +11,7 @@ import { AppShell } from "./App";
 import { appShellLayoutClassName } from "./components/app-shell-layout";
 import { Empty, EmptyDescription } from "./components/ui/empty";
 import { AppRuntimeProvider } from "./runtime/AppRuntimeProvider";
+import { parseWorkSearch } from "./features/work/work-search";
 
 function RootLayout() {
   return (
@@ -52,6 +53,7 @@ const indexRoute = createRoute({
 const workRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/work",
+  validateSearch: parseWorkSearch,
 });
 
 const structureRoute = createRoute({
