@@ -1,5 +1,5 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Link, useRouterState } from "@tanstack/react-router";
+import { Link, useRouter, useRouterState } from "@tanstack/react-router";
 import { Moon, Sun } from "lucide-react";
 
 import { ActivityPage } from "../features/activity/ActivityPage";
@@ -25,6 +25,7 @@ import { Alert, AlertDescription } from "./ui/alert";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
+import { Empty, EmptyDescription } from "./ui/empty";
 import { Input } from "./ui/input";
 import { appShellLayoutClassName } from "./app-shell-layout";
 
@@ -90,6 +91,9 @@ export function AppShell() {
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
+  const router = useRouter();
+  const isUnknownRoute =
+    pathname !== "/" && !appTabs.some((tab) => tab.path === pathname);
   const activeTab = appTabForPath(pathname);
   const activeTabDetails = appTabs.find((tab) => tab.id === activeTab) ?? appTabs[0];
   const isDarkTheme = theme === "dark";
@@ -111,6 +115,11 @@ export function AppShell() {
   useEffect(() => {
     if (setupState) setSetupProvider(setupState.completed ? setupState.provider : "github");
   }, [setupState]);
+
+  useEffect(() => {
+    if (!isUnknownRoute) return;
+    void router.navigate({ to: "/work", replace: true });
+  }, [isUnknownRoute, router]);
 
   async function handleCompleteSetup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -217,17 +226,25 @@ export function AppShell() {
         />
       )}
 
-      {activeTab === "activity" && <ActivityPage />}
+      {isUnknownRoute ? (
+        <Empty className="mt-6 items-start border-0 p-0 py-8 text-left">
+          <EmptyDescription>That route is not available. Returning to Work…</EmptyDescription>
+        </Empty>
+      ) : (
+        <>
+          {activeTab === "activity" && <ActivityPage />}
 
-      {activeTab === "work" && (
-        <WorkPage
-          onChanged={() => refreshAll().then(() => undefined)}
-          onOpenTerminal={(worksetId, pane) => setTerminalRequest({ worksetId, pane })}
-        />
-      )}
+          {activeTab === "work" && (
+            <WorkPage
+              onChanged={() => refreshAll().then(() => undefined)}
+              onOpenTerminal={(worksetId, pane) => setTerminalRequest({ worksetId, pane })}
+            />
+          )}
 
-      {activeTab === "structure" && (
-        <StructurePage onResetComplete={() => setTerminalRequest(undefined)} />
+          {activeTab === "structure" && (
+            <StructurePage onResetComplete={() => setTerminalRequest(undefined)} />
+          )}
+        </>
       )}
     </main>
   );

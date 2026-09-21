@@ -1,15 +1,11 @@
-import { useEffect } from "react";
 import {
   createRootRoute,
   createRoute,
   createRouter,
   redirect,
-  useRouter,
 } from "@tanstack/react-router";
 
 import { AppShell } from "./components/app-shell";
-import { appShellLayoutClassName } from "./components/app-shell-layout";
-import { Empty, EmptyDescription } from "./components/ui/empty";
 import { AppRuntimeProvider } from "./runtime/AppRuntimeProvider";
 import { parseWorkSearch } from "./features/work/work-search";
 
@@ -21,25 +17,8 @@ function RootLayout() {
   );
 }
 
-function UnknownRoute() {
-  const router = useRouter();
-
-  useEffect(() => {
-    void router.navigate({ to: "/work", replace: true });
-  }, [router]);
-
-  return (
-    <main className={appShellLayoutClassName}>
-      <Empty className="items-start border-0 p-0 py-8 text-left">
-        <EmptyDescription>That route is not available. Returning to Work…</EmptyDescription>
-      </Empty>
-    </main>
-  );
-}
-
 const rootRoute = createRootRoute({
   component: RootLayout,
-  notFoundComponent: UnknownRoute,
 });
 
 const indexRoute = createRoute({
