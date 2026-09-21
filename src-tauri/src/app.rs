@@ -13,8 +13,8 @@ use crate::{
     dependencies::{check_command, resolve_executable, DependencyState, DependencyStatus},
     domain::{
         activity_tab_view, compose_run_prompt as build_run_prompt, decide, external_link_view,
-        home_view, plan_context_deletion, plan_external_object_deletion, plan_item_deletion,
-        plan_machine_deletion, plan_project_deletion, plan_repository_deletion,
+        home_view, normalize_machine_path, plan_context_deletion, plan_external_object_deletion,
+        plan_item_deletion, plan_machine_deletion, plan_project_deletion, plan_repository_deletion,
         plan_reset_local_data, search_items, suggest_untracked_runs, ActivityTabView, AgentKind,
         AgentPaneObservation, AttachedRepositoryInput, AuditAction, AuditEntry, Context,
         ContextAttentionDefault, DomainState, Effect, Event, ExecutionMode, ExecutionProfile,
@@ -39,6 +39,28 @@ use crate::{
 };
 
 pub const RESET_CONFIRMATION_PHRASE: &str = "RESET ALL LOCAL DATA";
+
+fn machine_home_directory(machine: &Machine) -> String {
+    match &machine.transport {
+        MachineTransport::Local => env::var("HOME").unwrap_or_else(|_| "/".into()),
+        MachineTransport::Ssh { .. } => "~".into(),
+    }
+}
+
+fn resolve_machine_path(path: &str, machine_home: &str) -> PathBuf {
+    if path == "~" {
+        return PathBuf::from(machine_home);
+    }
+    if let Some(relative) = path.strip_prefix("~/") {
+        return Path::new(machine_home).join(relative);
+    }
+    let path = Path::new(path);
+    if path.is_absolute() {
+        path.to_owned()
+    } else {
+        Path::new(machine_home).join(path)
+    }
+}
 
 pub struct Runtime {
     store: SqliteStore,
@@ -454,6 +476,108 @@ impl Runtime {
             .state
             .repositories
             .last()
+            .cloned()
+            .ok_or_else(|| "Repository registration produced no Repository".to_owned())?;
+        self.commit(decision)?;
+        Ok(repository)
+    }
+
+    fn register_repository_at_location(
+        &mut self,
+        project_id: i64,
+        name: String,
+        remote_url: Option<String>,
+        base_branch: String,
+        machine_id: i64,
+        checkout_path: String,
+        worktree_root: Option<String>,
+        clone_into_destination: bool,
+    ) -> Result<Repository, String> {
+        let project = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .ok_or_else(|| format!("Project {project_id} does not exist"))?;
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
+        if machine.context_id != project.context_id {
+            return Err(format!(
+                "Machine {} is not available in Project {}'s Context",
+                machine.name, project.name
+            ));
+        }
+
+        let machine_home = machine_home_directory(&machine);
+        let normalized_checkout_path = normalize_machine_path(&checkout_path, &machine_home)
+            .map_err(|error| error.to_string())?;
+        let resolved_checkout_path = resolve_machine_path(&normalized_checkout_path, &machine_home);
+        let worktree_root = worktree_root
+            .filter(|root| !root.trim().is_empty())
+            .unwrap_or_else(|| "~/worktrees".into());
+        let normalized_worktree_root = normalize_machine_path(&worktree_root, &machine_home)
+            .map_err(|error| error.to_string())?;
+        let git = GitCli::system();
+        let effective_remote = if clone_into_destination {
+            let remote_url = remote_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|remote| !remote.is_empty())
+                .ok_or_else(|| "A remote URL is required when cloning a Repository".to_owned())?;
+            git.clone_repository(remote_url, &resolved_checkout_path)
+                .map_err(|error| error.to_string())?;
+            remote_url.to_owned()
+        } else {
+            let inspection = git
+                .inspect_checkout(&resolved_checkout_path)
+                .map_err(|error| error.to_string())?;
+            let detected_remote = inspection
+                .remote_url
+                .ok_or_else(|| "The existing checkout has no Git remote".to_owned())?;
+            if let Some(configured_remote) = remote_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|remote| !remote.is_empty())
+            {
+                if configured_remote != detected_remote {
+                    return Err(format!(
+                        "The existing checkout remote does not match the configured Repository: {configured_remote} != {detected_remote}"
+                    ));
+                }
+            }
+            detected_remote
+        };
+
+        let existing_repository_id = self
+            .state
+            .repositories
+            .iter()
+            .find(|repository| repository.project_id == project_id && repository.name == name)
+            .map(|repository| repository.id);
+        let decision = decide(
+            self.state.clone(),
+            Event::RegisterRepositoryAtLocation {
+                project_id,
+                name: name.clone(),
+                remote_url: effective_remote,
+                base_branch,
+                machine_id,
+                checkout_path: normalized_checkout_path,
+                worktree_root: normalized_worktree_root,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let repository = decision
+            .state
+            .repositories
+            .iter()
+            .find(|repository| Some(repository.id) == existing_repository_id)
+            .or_else(|| decision.state.repositories.last())
             .cloned()
             .ok_or_else(|| "Repository registration produced no Repository".to_owned())?;
         self.commit(decision)?;
@@ -3185,7 +3309,10 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
                         to: run.pane_status,
                     })
             }
-            Effect::PersistWorkspace { .. } | Effect::PersistWorktree { .. } => None,
+            Effect::PersistWorkspace { .. }
+            | Effect::PersistWorktree { .. }
+            | Effect::UpdateRepository { .. }
+            | Effect::PersistRepositoryLocation { .. } => None,
             Effect::PersistItemRelation { relation } => Some(AuditAction::ItemRelationChanged {
                 from_item_id: relation.from_item_id,
                 to_item_id: relation.to_item_id,
@@ -3646,6 +3773,16 @@ pub fn list_repositories(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Reposit
         .map(|runtime| runtime.state.repositories.clone())
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn list_repository_locations(
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Vec<crate::domain::RepositoryLocation>, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())
+        .map(|runtime| runtime.state.repository_locations.clone())
+}
+
 #[tauri::command]
 pub fn list_machines(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Machine>, String> {
     state
@@ -3944,6 +4081,33 @@ pub fn register_repository(
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .register_repository(project_id, name, remote_url)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn register_repository_at_location(
+    project_id: i64,
+    name: String,
+    remote_url: Option<String>,
+    base_branch: String,
+    machine_id: i64,
+    checkout_path: String,
+    worktree_root: Option<String>,
+    clone_into_destination: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Repository, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .register_repository_at_location(
+            project_id,
+            name,
+            remote_url,
+            base_branch,
+            machine_id,
+            checkout_path,
+            worktree_root,
+            clone_into_destination,
+        )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5985,6 +6149,67 @@ fi
             home_view(&reopened.state, None, "2026-09-19T13:00").attention_entries[0].kind,
             crate::domain::AttentionEntryKind::BlockedRun
         );
+    }
+
+    #[test]
+    fn repository_registration_adopts_a_checkout_or_clones_an_empty_destination() {
+        let directory = tempdir().expect("temporary repository directory should exist");
+        let seed = directory.path().join("seed");
+        run_git(directory.path(), &["init", "--initial-branch=main", "seed"]);
+        run_git(&seed, &["config", "user.email", "test@example.com"]);
+        run_git(&seed, &["config", "user.name", "Test User"]);
+        fs::write(seed.join("README.md"), "safe\n").expect("README should be written");
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-m", "initial"]);
+        let origin = directory.path().join("service.git");
+        run_git(directory.path(), &["init", "--bare", "service.git"]);
+        let origin_url = origin.to_string_lossy().into_owned();
+        run_git(&seed, &["remote", "add", "origin", &origin_url]);
+        run_git(&seed, &["push", "origin", "main"]);
+
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .register_machine(
+                1,
+                "Local Mac".into(),
+                "mission".into(),
+                MachineTransport::Local,
+            )
+            .expect("Machine should register");
+        let adopted = runtime
+            .register_repository_at_location(
+                1,
+                "service".into(),
+                None,
+                "main".into(),
+                1,
+                seed.to_string_lossy().into_owned(),
+                None,
+                false,
+            )
+            .expect("existing checkout should be adopted");
+        assert_eq!(adopted.remote_url, origin_url);
+        assert_eq!(adopted.base_branch, "main");
+        assert!(runtime.state.repository_locations[0]
+            .checkout_path
+            .ends_with("/seed"));
+
+        let clone_destination = directory.path().join("clone");
+        let cloned = runtime
+            .register_repository_at_location(
+                1,
+                "cloned-service".into(),
+                Some(origin_url.clone()),
+                "main".into(),
+                1,
+                clone_destination.to_string_lossy().into_owned(),
+                Some("worktrees".into()),
+                true,
+            )
+            .expect("clone destination should be prepared");
+        assert_eq!(cloned.remote_url, origin_url);
+        assert!(clone_destination.join(".git").is_dir());
     }
 
     fn run_git(directory: &Path, args: &[&str]) {

@@ -43,6 +43,15 @@ pub struct Repository {
     pub project_id: i64,
     pub name: String,
     pub remote_url: String,
+    pub base_branch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RepositoryLocation {
+    pub repository_id: i64,
+    pub machine_id: i64,
+    pub checkout_path: String,
+    pub worktree_root: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -929,6 +938,7 @@ pub struct DomainState {
     pub contexts: Vec<Context>,
     pub projects: Vec<Project>,
     pub repositories: Vec<Repository>,
+    pub repository_locations: Vec<RepositoryLocation>,
     pub items: Vec<Item>,
     pub worksets: Vec<Workset>,
     pub workspaces: Vec<Workspace>,
@@ -1098,6 +1108,21 @@ pub enum Event {
         project_id: i64,
         name: String,
         remote_url: String,
+    },
+    RegisterRepositoryAtLocation {
+        project_id: i64,
+        name: String,
+        remote_url: String,
+        base_branch: String,
+        machine_id: i64,
+        checkout_path: String,
+        worktree_root: String,
+    },
+    ConfigureRepositoryLocation {
+        repository_id: i64,
+        machine_id: i64,
+        checkout_path: String,
+        worktree_root: String,
     },
     ResetLocalData,
     DeleteRepository {
@@ -1289,6 +1314,12 @@ pub enum Effect {
     PersistRepository {
         repository: Repository,
         next_repository_id: i64,
+    },
+    UpdateRepository {
+        repository: Repository,
+    },
+    PersistRepositoryLocation {
+        location: RepositoryLocation,
     },
     ResetLocalData {
         context: Context,
@@ -1885,6 +1916,12 @@ pub enum DomainError {
     InvalidRepositoryName,
     #[error("a Repository remote URL cannot be blank")]
     EmptyRepositoryRemoteUrl,
+    #[error("a Repository base branch cannot be blank")]
+    EmptyRepositoryBaseBranch,
+    #[error("a Repository checkout path cannot be blank")]
+    EmptyRepositoryCheckoutPath,
+    #[error("a Repository Worktree root cannot be blank")]
+    EmptyRepositoryWorktreeRoot,
     #[error("Repository name already exists in Project {project_id}: {name}")]
     RepositoryNameTaken { project_id: i64, name: String },
     #[error("Repository {name} in Project {project_id} has a different remote URL")]
@@ -1893,6 +1930,8 @@ pub enum DomainError {
     RepositoryNotFound { repository_id: i64 },
     #[error("Repository {repository_id} belongs to another Project than {project_id}")]
     RepositoryProjectMismatch { repository_id: i64, project_id: i64 },
+    #[error("Repository {repository_id} has already been configured on Machine {machine_id}")]
+    RepositoryLocationAlreadyExists { repository_id: i64, machine_id: i64 },
     #[error(
         "Repository {repository_id} deletion must include Worksets {expected_workset_ids:?}; received {provided_workset_ids:?}"
     )]
@@ -2027,6 +2066,33 @@ pub enum DomainError {
     ReminderNotFound { item_id: i64, reminder_id: i64 },
 }
 
+/// Stores machine paths in a stable form while keeping paths under the machine home readable.
+pub fn normalize_machine_path(input: &str, machine_home: &str) -> Result<String, DomainError> {
+    let input = input.trim().trim_end_matches('/');
+    if input.is_empty() {
+        return Err(DomainError::EmptyRepositoryCheckoutPath);
+    }
+    if input == "~" || input.starts_with("~/") {
+        return Ok(input.to_owned());
+    }
+
+    let home = machine_home.trim().trim_end_matches('/');
+    if !home.is_empty() && (input == home || input.starts_with(&format!("{home}/"))) {
+        let relative = input[home.len()..].trim_start_matches('/');
+        return Ok(if relative.is_empty() {
+            "~".into()
+        } else {
+            format!("~/{relative}")
+        });
+    }
+
+    if input.starts_with('/') {
+        Ok(input.to_owned())
+    } else {
+        Ok(format!("~/{input}"))
+    }
+}
+
 pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainError> {
     match event {
         Event::CreateContext { name } => {
@@ -2133,6 +2199,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 project_id,
                 name,
                 remote_url,
+                base_branch: "main".into(),
             };
             state.next_repository_id = next_repository_id;
             state.repositories.push(repository.clone());
@@ -2143,6 +2210,154 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     repository,
                     next_repository_id,
                 }],
+            })
+        }
+        Event::RegisterRepositoryAtLocation {
+            project_id,
+            name,
+            remote_url,
+            base_branch,
+            machine_id,
+            checkout_path,
+            worktree_root,
+        } => {
+            let name = clean_repository_name(name)?;
+            let remote_url = clean_name(remote_url, DomainError::EmptyRepositoryRemoteUrl)?;
+            let base_branch = clean_name(base_branch, DomainError::EmptyRepositoryBaseBranch)?;
+            let project = state
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .ok_or(DomainError::ProjectNotFound { project_id })?;
+            let machine = state
+                .machines
+                .iter()
+                .find(|machine| machine.id == machine_id)
+                .ok_or(DomainError::MachineNotFound { machine_id })?;
+            if machine.context_id != project.context_id {
+                return Err(DomainError::MachineContextMismatch {
+                    machine_id,
+                    context_id: project.context_id,
+                });
+            }
+            let checkout_path =
+                clean_name(checkout_path, DomainError::EmptyRepositoryCheckoutPath)?;
+            let worktree_root =
+                clean_name(worktree_root, DomainError::EmptyRepositoryWorktreeRoot)?;
+            let location = RepositoryLocation {
+                repository_id: 0,
+                machine_id,
+                checkout_path,
+                worktree_root,
+            };
+
+            if let Some(repository) = state
+                .repositories
+                .iter_mut()
+                .find(|repository| repository.project_id == project_id && repository.name == name)
+            {
+                if repository.remote_url != remote_url {
+                    return Err(DomainError::RepositoryRemoteMismatch { project_id, name });
+                }
+                if state.repository_locations.iter().any(|candidate| {
+                    candidate.repository_id == repository.id && candidate.machine_id == machine_id
+                }) {
+                    return Err(DomainError::RepositoryLocationAlreadyExists {
+                        repository_id: repository.id,
+                        machine_id,
+                    });
+                }
+                repository.base_branch = base_branch;
+                let repository = repository.clone();
+                let location = RepositoryLocation {
+                    repository_id: repository.id,
+                    ..location
+                };
+                state.repository_locations.push(location.clone());
+                return Ok(Decision {
+                    state,
+                    effects: vec![
+                        Effect::UpdateRepository { repository },
+                        Effect::PersistRepositoryLocation { location },
+                    ],
+                });
+            }
+
+            let id = state.next_repository_id;
+            let next_repository_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let repository = Repository {
+                id,
+                project_id,
+                name,
+                remote_url,
+                base_branch,
+            };
+            let location = RepositoryLocation {
+                repository_id: id,
+                ..location
+            };
+            state.next_repository_id = next_repository_id;
+            state.repositories.push(repository.clone());
+            state.repository_locations.push(location.clone());
+
+            Ok(Decision {
+                state,
+                effects: vec![
+                    Effect::PersistRepository {
+                        repository,
+                        next_repository_id,
+                    },
+                    Effect::PersistRepositoryLocation { location },
+                ],
+            })
+        }
+        Event::ConfigureRepositoryLocation {
+            repository_id,
+            machine_id,
+            checkout_path,
+            worktree_root,
+        } => {
+            let repository = state
+                .repositories
+                .iter()
+                .find(|repository| repository.id == repository_id)
+                .ok_or(DomainError::RepositoryNotFound { repository_id })?;
+            let project = state
+                .projects
+                .iter()
+                .find(|project| project.id == repository.project_id)
+                .ok_or(DomainError::ProjectNotFound {
+                    project_id: repository.project_id,
+                })?;
+            let machine = state
+                .machines
+                .iter()
+                .find(|machine| machine.id == machine_id)
+                .ok_or(DomainError::MachineNotFound { machine_id })?;
+            if machine.context_id != project.context_id {
+                return Err(DomainError::MachineContextMismatch {
+                    machine_id,
+                    context_id: project.context_id,
+                });
+            }
+            if state.repository_locations.iter().any(|candidate| {
+                candidate.repository_id == repository_id && candidate.machine_id == machine_id
+            }) {
+                return Err(DomainError::RepositoryLocationAlreadyExists {
+                    repository_id,
+                    machine_id,
+                });
+            }
+            let location = RepositoryLocation {
+                repository_id,
+                machine_id,
+                checkout_path: clean_name(checkout_path, DomainError::EmptyRepositoryCheckoutPath)?,
+                worktree_root: clean_name(worktree_root, DomainError::EmptyRepositoryWorktreeRoot)?,
+            };
+            state.repository_locations.push(location.clone());
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRepositoryLocation { location }],
             })
         }
         Event::ResetLocalData => {
@@ -2181,6 +2396,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             state.contexts = vec![context.clone()];
             state.projects = vec![project.clone()];
             state.repositories.clear();
+            state.repository_locations.clear();
             state.items.clear();
             state.worksets.clear();
             state.machines.clear();
@@ -2240,6 +2456,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             state
                 .repositories
                 .retain(|repository| repository.id != repository_id);
+            state
+                .repository_locations
+                .retain(|location| location.repository_id != repository_id);
 
             let mut effects = plan
                 .worksets
@@ -2323,6 +2542,14 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     .iter()
                     .any(|candidate| candidate.id == repository.id)
             });
+            let repository_ids = plan
+                .repositories
+                .iter()
+                .map(|repository| repository.id)
+                .collect::<Vec<_>>();
+            state
+                .repository_locations
+                .retain(|location| !repository_ids.contains(&location.repository_id));
             state.projects.retain(|project| project.id != project_id);
 
             Ok(Decision {
@@ -2418,6 +2645,14 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     .iter()
                     .any(|candidate| candidate.id == repository.id)
             });
+            let repository_ids = plan
+                .repositories
+                .iter()
+                .map(|repository| repository.id)
+                .collect::<Vec<_>>();
+            state
+                .repository_locations
+                .retain(|location| !repository_ids.contains(&location.repository_id));
             state.worksets.retain(|workset| {
                 !plan
                     .worksets
@@ -2495,6 +2730,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
 
             state.runs.retain(|run| run.machine_id != machine_id);
             state.machines.retain(|machine| machine.id != machine_id);
+            state
+                .repository_locations
+                .retain(|location| location.machine_id != machine_id);
             let mut effects = plan
                 .runs
                 .iter()
@@ -2742,6 +2980,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                             project_id,
                             name,
                             remote_url,
+                            base_branch: "main".into(),
                         };
                         state.repositories.push(repository.clone());
                         new_repositories.push((repository.clone(), next_repository_id));
@@ -4209,6 +4448,14 @@ fn clean_optional_branch(branch: Option<String>) -> Result<Option<String>, Domai
         .transpose()
 }
 
+fn clean_repository_name(name: String) -> Result<String, DomainError> {
+    let name = clean_name(name, DomainError::EmptyRepositoryName)?;
+    if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
+        return Err(DomainError::InvalidRepositoryName);
+    }
+    Ok(name)
+}
+
 fn item_context_id(state: &DomainState, item_id: i64) -> Result<i64, DomainError> {
     let item = state
         .items
@@ -4458,6 +4705,7 @@ mod tests {
             project_id: 1,
             name: "app".into(),
             remote_url: "https://example.com/app.git".into(),
+            base_branch: "main".into(),
         });
         state.items.push(Item {
             id: 1,
@@ -5177,18 +5425,21 @@ mod tests {
                 project_id: 3,
                 name: "billing-api".into(),
                 remote_url: "https://example.com/billing-api.git".into(),
+                base_branch: "main".into(),
             },
             Repository {
                 id: 2,
                 project_id: 3,
                 name: "billing-web".into(),
                 remote_url: "https://example.com/billing-web.git".into(),
+                base_branch: "main".into(),
             },
             Repository {
                 id: 3,
                 project_id: 1,
                 name: "platform".into(),
                 remote_url: "https://example.com/platform.git".into(),
+                base_branch: "main".into(),
             },
         ];
         state.next_repository_id = 4;
@@ -6678,6 +6929,7 @@ mod tests {
                 project_id: 1,
                 name: "service-a".into(),
                 remote_url: "git@github.com:acme/service-a.git".into(),
+                base_branch: "main".into(),
             }]
         );
         assert_eq!(
@@ -6686,6 +6938,67 @@ mod tests {
                 repository: decision.state.repositories[0].clone(),
                 next_repository_id: 2,
             }]
+        );
+    }
+
+    #[test]
+    fn registering_a_repository_at_a_machine_location_keeps_defaults_and_normalizes_paths() {
+        let mut state = state_with_item(7, "Work");
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 7,
+            name: "Local Mac".into(),
+            socket_name: "mission".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+
+        let decision = decide(
+            state,
+            Event::RegisterRepositoryAtLocation {
+                project_id: 1,
+                name: "service-a".into(),
+                remote_url: "git@github.com:acme/service-a.git".into(),
+                base_branch: "trunk".into(),
+                machine_id: 1,
+                checkout_path: normalize_machine_path("/Users/me/src/service-a", "/Users/me")
+                    .expect("checkout path should normalize"),
+                worktree_root: normalize_machine_path("worktrees", "/Users/me")
+                    .expect("worktree root should normalize"),
+            },
+        )
+        .expect("repository registration should succeed");
+
+        assert_eq!(decision.state.repositories[0].base_branch, "trunk");
+        assert_eq!(
+            decision.state.repository_locations,
+            vec![RepositoryLocation {
+                repository_id: 1,
+                machine_id: 1,
+                checkout_path: "~/src/service-a".into(),
+                worktree_root: "~/worktrees".into(),
+            }]
+        );
+        assert!(decision
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PersistRepositoryLocation { .. })));
+    }
+
+    #[test]
+    fn machine_paths_normalize_relative_and_home_paths_for_display() {
+        assert_eq!(
+            normalize_machine_path("src/service-a", "/Users/me").expect("relative path"),
+            "~/src/service-a"
+        );
+        assert_eq!(
+            normalize_machine_path("/Users/me/src/service-a", "/Users/me").expect("home path"),
+            "~/src/service-a"
+        );
+        assert_eq!(
+            normalize_machine_path("/Volumes/work/service-a", "/Users/me").expect("absolute path"),
+            "/Volumes/work/service-a"
         );
     }
 
@@ -6713,6 +7026,7 @@ mod tests {
                 project_id: 1,
                 name: "service-a".into(),
                 remote_url: "git@github.com:acme/service-a.git".into(),
+                base_branch: "main".into(),
             }]
         );
         assert_eq!(
@@ -6794,12 +7108,14 @@ mod tests {
                 project_id: 1,
                 name: "service-a".into(),
                 remote_url: "https://example.com/service-a.git".into(),
+                base_branch: "main".into(),
             },
             Repository {
                 id: 2,
                 project_id: 1,
                 name: "service-b".into(),
                 remote_url: "https://example.com/service-b.git".into(),
+                base_branch: "main".into(),
             },
         ];
         state.next_repository_id = 3;
@@ -6872,12 +7188,14 @@ mod tests {
                 project_id: 1,
                 name: "service-a".into(),
                 remote_url: "https://example.com/service-a.git".into(),
+                base_branch: "main".into(),
             },
             Repository {
                 id: 2,
                 project_id: 1,
                 name: "service-b".into(),
                 remote_url: "https://example.com/service-b.git".into(),
+                base_branch: "main".into(),
             },
         ];
         state.next_repository_id = 3;
@@ -6947,6 +7265,7 @@ mod tests {
             project_id: 1,
             name: "service-a".into(),
             remote_url: "https://example.com/service-a.git".into(),
+            base_branch: "main".into(),
         });
         let created = decide(
             state,
@@ -7001,6 +7320,7 @@ mod tests {
             project_id: 1,
             name: "service".into(),
             remote_url: "https://example.com/service.git".into(),
+            base_branch: "main".into(),
         });
         state.next_repository_id = 2;
         state.worksets.extend([
@@ -7101,6 +7421,7 @@ mod tests {
             project_id: 2,
             name: "personal-repo".into(),
             remote_url: "https://example.com/personal.git".into(),
+            base_branch: "main".into(),
         });
 
         assert_eq!(
@@ -7660,6 +7981,7 @@ mod tests {
             project_id: 1,
             name: "mission-manager".into(),
             remote_url: "https://example.com/mission-manager.git".into(),
+            base_branch: "main".into(),
         });
         state.next_repository_id = 2;
         state.machines.push(Machine {
@@ -7772,6 +8094,7 @@ mod tests {
                 })
                 .collect(),
             repositories: Vec::new(),
+            repository_locations: Vec::new(),
             items: Vec::new(),
             worksets: Vec::new(),
             workspaces: Vec::new(),
@@ -7806,6 +8129,7 @@ mod tests {
             contexts: Vec::new(),
             projects: Vec::new(),
             repositories: Vec::new(),
+            repository_locations: Vec::new(),
             items: Vec::new(),
             worksets: Vec::new(),
             workspaces: Vec::new(),

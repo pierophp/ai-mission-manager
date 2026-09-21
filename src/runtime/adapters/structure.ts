@@ -10,6 +10,7 @@ import type {
   Project,
   Project as ProjectRecord,
   Repository,
+  RepositoryLocation,
   RepositoryDeletionPreview,
   RepositoryDeletionResult,
   ResetLocalDataPreview,
@@ -25,6 +26,7 @@ export const structureAdapter = {
   listContexts: () => command<Context[]>("list_contexts"),
   listProjects: () => command<Project[]>("list_projects"),
   listRepositories: () => command<Repository[]>("list_repositories"),
+  listRepositoryLocations: () => command<RepositoryLocation[]>("list_repository_locations"),
   listMachines: () => command<Machine[]>("list_machines"),
   listAttentionDefaults: () =>
     command<ContextAttentionDefault[]>("list_context_attention_defaults"),
@@ -95,6 +97,16 @@ export const structureAdapter = {
     }),
   registerRepository: (projectId: number, name: string, remoteUrl: string) =>
     command<Repository>("register_repository", { projectId, name, remoteUrl }),
+  registerRepositoryAtLocation: (input: {
+    projectId: number;
+    name: string;
+    remoteUrl: string | null;
+    baseBranch: string;
+    machineId: number;
+    checkoutPath: string;
+    worktreeRoot: string | null;
+    cloneIntoDestination: boolean;
+  }) => command<Repository>("register_repository_at_location", input),
   prepareRepositoryDeletion: (repositoryId: number) =>
     command<RepositoryDeletionPreview>("prepare_repository_deletion", {
       repositoryId,

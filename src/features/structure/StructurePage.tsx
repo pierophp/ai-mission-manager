@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { type ChangeEvent, type FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 
 import { Alert, AlertDescription } from "../../components/ui/alert";
@@ -46,6 +46,7 @@ import type {
   ExternalChangePolicy,
   ExternalObjectKind,
   ItemStatus,
+  ExecutionMode,
   MachineDeletionPreview,
   MachineTransport,
   ParentDeletionPreview,
@@ -86,7 +87,7 @@ export function StructurePage() {
   const structure = useStructureData().data;
   const home = useHomeQuery(undefined).data;
   const [error, setError] = useState<string>();
-  const { contexts, projects, repositories, machines, attentionDefaults } = structure;
+  const { contexts, projects, repositories, repositoryLocations, machines, attentionDefaults } = structure;
   const allItems = useMemo(
     () => uniqueItems(home ? flattenHome(home) : []),
     [home],
@@ -98,8 +99,16 @@ export function StructurePage() {
   const [projectName, setProjectName] = useState("");
   const [projectDefaultStatus, setProjectDefaultStatus] =
     useState<ItemStatus>("Inbox");
+  const [projectExecutionMode, setProjectExecutionMode] =
+    useState<ExecutionMode>("worktree");
   const [repositoryName, setRepositoryName] = useState("");
   const [repositoryRemoteUrl, setRepositoryRemoteUrl] = useState("");
+  const [repositoryBaseBranch, setRepositoryBaseBranch] = useState("main");
+  const [repositoryCheckoutPath, setRepositoryCheckoutPath] = useState("");
+  const [repositoryWorktreeRoot, setRepositoryWorktreeRoot] = useState("~/worktrees");
+  const [repositoryMachineId, setRepositoryMachineId] = useState<number>();
+  const [repositoryPreparation, setRepositoryPreparation] = useState<"existing" | "clone">("existing");
+  const repositoryDirectoryInput = useRef<HTMLInputElement>(null);
   const [machineName, setMachineName] = useState("");
   const [machineSocketName, setMachineSocketName] = useState(
     "ai-mission-manager",
@@ -153,7 +162,12 @@ export function StructurePage() {
 
     if (nextContextId !== selectedContextId) setSelectedContextId(nextContextId);
     if (nextProjectId !== selectedProjectId) setSelectedProjectId(nextProjectId);
-  }, [contexts, projects, selectedContextId, selectedProjectId]);
+    if (!selectedMachines.some((machine) => machine.id === repositoryMachineId)) {
+      setRepositoryMachineId(
+        machines.find((machine) => machine.context_id === nextContextId)?.id,
+      );
+    }
+  }, [contexts, machines, projects, repositoryMachineId, selectedContextId, selectedProjectId, selectedMachines]);
 
   useEffect(() => {
     const configured = attentionDefaults.find(
@@ -214,12 +228,14 @@ export function StructurePage() {
           projectName.trim(),
           selectedContextId,
           projectDefaultStatus,
+          projectExecutionMode,
         ),
       );
       await refreshAfterEdit();
       setSelectedProjectId(project.id);
       setProjectName("");
       setProjectDefaultStatus("Inbox");
+      setProjectExecutionMode("worktree");
       setError(undefined);
     } catch (saveError) {
       setError(errorMessage(saveError));
@@ -374,29 +390,54 @@ export function StructurePage() {
 
   async function handleRegisterRepository(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedProjectId || !repositoryName.trim() || !repositoryRemoteUrl.trim()) {
-      setError("Choose a Project and provide the Repository details.");
+    if (
+      !selectedProjectId ||
+      !repositoryMachineId ||
+      !repositoryName.trim() ||
+      !repositoryCheckoutPath.trim() ||
+      !repositoryBaseBranch.trim() ||
+      (repositoryPreparation === "clone" && !repositoryRemoteUrl.trim())
+    ) {
+      setError("Choose a Project and Machine, then provide the checkout details.");
       return;
     }
 
     setIsSaving(true);
     try {
       await structureCommand.execute(
-        structureActions.registerRepository(
-          selectedProjectId,
-          repositoryName.trim(),
-          repositoryRemoteUrl.trim(),
-        ),
+        structureActions.registerRepositoryAtLocation({
+          projectId: selectedProjectId,
+          name: repositoryName.trim(),
+          remoteUrl: repositoryRemoteUrl.trim() || null,
+          baseBranch: repositoryBaseBranch.trim(),
+          machineId: repositoryMachineId,
+          checkoutPath: repositoryCheckoutPath.trim(),
+          worktreeRoot: repositoryWorktreeRoot.trim() || null,
+          cloneIntoDestination: repositoryPreparation === "clone",
+        }),
       );
       await refreshAfterEdit();
       setRepositoryName("");
       setRepositoryRemoteUrl("");
+      setRepositoryBaseBranch("main");
+      setRepositoryCheckoutPath("");
+      setRepositoryWorktreeRoot("~/worktrees");
       setError(undefined);
     } catch (saveError) {
       setError(errorMessage(saveError));
     } finally {
       setIsSaving(false);
     }
+  }
+
+  function handleRepositoryDirectoryPick(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const selectedPath = (file as File & { path?: string }).path;
+    const relativeDirectory = file.webkitRelativePath.split("/")[0];
+    setRepositoryCheckoutPath(selectedPath ?? relativeDirectory);
+    setError(undefined);
+    event.target.value = "";
   }
 
   async function handlePrepareRepositoryDeletion(repositoryId: number) {
@@ -752,13 +793,19 @@ export function StructurePage() {
           <EntitySection title="Projects" description="Projects supply defaults for new Items.">
             <form className="grid gap-3" onSubmit={handleCreateProject}>
               <ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} />
-              <div className="grid gap-3 sm:grid-cols-2">
+              <div className="grid gap-3 sm:grid-cols-3">
                 <Field label="New Project">
                   <Input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="Billing" disabled={isSaving} />
                 </Field>
                 <Field label="New Item starts as">
                   <NativeSelect value={projectDefaultStatus} onChange={(event) => setProjectDefaultStatus(event.target.value as ItemStatus)} disabled={isSaving}>
                     {itemStatuses.map((status) => <NativeSelectOption value={status} key={status}>{status}</NativeSelectOption>)}
+                  </NativeSelect>
+                </Field>
+                <Field label="Default execution mode">
+                  <NativeSelect value={projectExecutionMode} onChange={(event) => setProjectExecutionMode(event.target.value as ExecutionMode)} disabled={isSaving}>
+                    <NativeSelectOption value="worktree">Worktree</NativeSelectOption>
+                    <NativeSelectOption value="direct">Direct checkout</NativeSelectOption>
                   </NativeSelect>
                 </Field>
               </div>
@@ -769,7 +816,7 @@ export function StructurePage() {
                 <EmptyDescription>No Projects remain in this Context.</EmptyDescription>
               ) : (
                 selectedProjects.map((project) => (
-                  <EntityRow key={project.id} title={project.name} detail={`${allItems.filter((item) => item.item.project_id === project.id).length} Items · starts ${project.defaults.item_status}`}>
+                  <EntityRow key={project.id} title={project.name} detail={`${allItems.filter((item) => item.item.project_id === project.id).length} Items · starts ${project.defaults.item_status} · ${project.defaults.execution_mode === "worktree" ? "Worktree" : "Direct"} default`}>
                     <Button type="button" variant="outline" size="sm" disabled={isSaving} onClick={() => void handlePrepareProjectDeletion(project.id)}>
                       Review deletion
                     </Button>
@@ -788,7 +835,7 @@ export function StructurePage() {
         <Card>
           <CardHeader className="border-b border-border/70">
             <CardTitle>Repositories</CardTitle>
-            <CardDescription>Register the repositories that Projects use in Worksets.</CardDescription>
+            <CardDescription>Register a Repository identity and its checkout on a Machine.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4 p-4">
             <form className="grid gap-3" onSubmit={handleRegisterRepository}>
@@ -798,19 +845,48 @@ export function StructurePage() {
                   {selectedProjects.map((project) => <NativeSelectOption value={project.id} key={project.id}>{project.name}</NativeSelectOption>)}
                 </NativeSelect>
               </Field>
+              <Field label="Machine">
+                <NativeSelect value={repositoryMachineId ?? ""} onChange={(event) => setRepositoryMachineId(Number(event.target.value) || undefined)} disabled={isSaving || selectedMachines.length === 0}>
+                  <NativeSelectOption value="">Choose a Machine</NativeSelectOption>
+                  {selectedMachines.map((machine) => <NativeSelectOption value={machine.id} key={machine.id}>{machine.name}</NativeSelectOption>)}
+                </NativeSelect>
+              </Field>
               <div className="grid gap-3 sm:grid-cols-2">
                 <Field label="Directory name">
                   <Input value={repositoryName} onChange={(event) => setRepositoryName(event.target.value)} placeholder="service-a" disabled={isSaving} />
                 </Field>
-                <Field label="Remote URL">
-                  <Input value={repositoryRemoteUrl} onChange={(event) => setRepositoryRemoteUrl(event.target.value)} placeholder="git@github.com:acme/service-a.git" disabled={isSaving} />
+                <Field label="Preparation">
+                  <NativeSelect value={repositoryPreparation} onChange={(event) => setRepositoryPreparation(event.target.value as "existing" | "clone")} disabled={isSaving}>
+                    <NativeSelectOption value="existing">Adopt existing checkout</NativeSelectOption>
+                    <NativeSelectOption value="clone">Clone into destination</NativeSelectOption>
+                  </NativeSelect>
                 </Field>
               </div>
-              <Button type="submit" className="w-fit" disabled={isSaving || !selectedProjectId || !repositoryName.trim() || !repositoryRemoteUrl.trim()}>Register Repository</Button>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Checkout path">
+                  <div className="flex gap-2">
+                    <Input value={repositoryCheckoutPath} onChange={(event) => setRepositoryCheckoutPath(event.target.value)} placeholder="~/src/service-a or relative/path" disabled={isSaving} />
+                    <Button type="button" variant="outline" onClick={() => repositoryDirectoryInput.current?.click()} disabled={isSaving}>Browse</Button>
+                    <input ref={(input) => { if (input) (input as HTMLInputElement & { webkitdirectory?: boolean }).webkitdirectory = true; repositoryDirectoryInput.current = input; }} type="file" className="hidden" onChange={handleRepositoryDirectoryPick} />
+                  </div>
+                </Field>
+                <Field label="Default base branch">
+                  <Input value={repositoryBaseBranch} onChange={(event) => setRepositoryBaseBranch(event.target.value)} placeholder="main" disabled={isSaving} />
+                </Field>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field label="Remote URL">
+                  <Input value={repositoryRemoteUrl} onChange={(event) => setRepositoryRemoteUrl(event.target.value)} placeholder={repositoryPreparation === "existing" ? "Optional; detected from checkout" : "git@github.com:acme/service-a.git"} disabled={isSaving} />
+                </Field>
+                <Field label="Default Worktree root">
+                  <Input value={repositoryWorktreeRoot} onChange={(event) => setRepositoryWorktreeRoot(event.target.value)} placeholder="~/worktrees" disabled={isSaving} />
+                </Field>
+              </div>
+              <Button type="submit" className="w-fit" disabled={isSaving || !selectedProjectId || !repositoryMachineId || !repositoryName.trim() || !repositoryCheckoutPath.trim() || !repositoryBaseBranch.trim() || (repositoryPreparation === "clone" && !repositoryRemoteUrl.trim())}>Register Repository</Button>
             </form>
             <EntityList>
               {selectedRepositories.length === 0 ? <EmptyDescription>No Repositories are registered under this Project.</EmptyDescription> : selectedRepositories.map((repository) => (
-                <EntityRow key={repository.id} title={repository.name} detail={repository.remote_url}>
+                <EntityRow key={repository.id} title={repository.name} detail={`${repository.remote_url} · base ${repository.base_branch} · ${repositoryLocations.filter((location) => location.repository_id === repository.id).length} Machine location(s)`}>
                   <Button type="button" variant="outline" size="sm" disabled={isSaving} onClick={() => void handlePrepareRepositoryDeletion(repository.id)}>Review deletion</Button>
                   {repositoryDeletionPreview?.plan.repositoryId === repository.id && (
                     <RepositoryDeletionPreviewCard preview={repositoryDeletionPreview} disabled={isSaving} onConfirm={() => void handleDeleteRepository(repository.id)} onCancel={() => setRepositoryDeletionPreview(undefined)} />

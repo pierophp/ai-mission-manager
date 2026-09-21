@@ -11,7 +11,8 @@ export const structureActions = {
     name: string,
     contextId: number,
     defaultItemStatus: Parameters<typeof structureAdapter.createProject>[2],
-  ) => () => structureAdapter.createProject(name, contextId, defaultItemStatus),
+    executionMode: Parameters<typeof structureAdapter.createProject>[3] = "worktree",
+  ) => () => structureAdapter.createProject(name, contextId, defaultItemStatus, executionMode),
   prepareProjectDeletion: (projectId: number) =>
     () => structureAdapter.prepareProjectDeletion(projectId),
   prepareContextDeletion: (contextId: number) =>
@@ -35,6 +36,8 @@ export const structureActions = {
     () => structureAdapter.deleteContext(input),
   registerRepository: (projectId: number, name: string, remoteUrl: string) =>
     () => structureAdapter.registerRepository(projectId, name, remoteUrl),
+  registerRepositoryAtLocation: (input: Parameters<typeof structureAdapter.registerRepositoryAtLocation>[0]) =>
+    () => structureAdapter.registerRepositoryAtLocation(input),
   prepareRepositoryDeletion: (repositoryId: number) =>
     () => structureAdapter.prepareRepositoryDeletion(repositoryId),
   deleteRepository: (

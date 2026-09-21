@@ -23,6 +23,10 @@ pub enum GitError {
     },
     #[error("checkout destination already exists: {path}")]
     DestinationExists { path: PathBuf },
+    #[error("checkout destination is not empty: {path}")]
+    DestinationNotEmpty { path: PathBuf },
+    #[error("checkout path is not a directory: {path}")]
+    InvalidCheckoutPath { path: PathBuf },
     #[error("Workset root is not a directory: {path}")]
     InvalidWorksetRoot { path: PathBuf },
     #[error("could not inspect Workset root {path}: {source}")]
@@ -49,6 +53,13 @@ pub struct GitRepositoryState {
     pub unpushed_commits: Vec<String>,
     pub unpushed_commits_unknown: bool,
     pub uncommitted_changes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckoutInspection {
+    pub remote_url: Option<String>,
+    pub current_branch: String,
+    pub is_dirty: bool,
 }
 
 impl GitCli {
@@ -103,6 +114,71 @@ impl GitCli {
             )?;
         }
         Ok(())
+    }
+
+    pub fn inspect_checkout(&self, checkout_path: &Path) -> Result<CheckoutInspection, GitError> {
+        if !checkout_path.is_dir() {
+            return Err(GitError::InvalidCheckoutPath {
+                path: checkout_path.to_owned(),
+            });
+        }
+        let checkout = checkout_path.to_string_lossy().into_owned();
+        self.run_with_output(
+            "validate the checkout Git repository",
+            &["-C", &checkout, "rev-parse", "--show-toplevel"],
+        )?;
+        let remote_url = self.read_optional_repository_remote(&checkout)?;
+        let current_branch = self
+            .run_optional_output(
+                "read the checkout branch",
+                &["-C", &checkout, "symbolic-ref", "--short", "HEAD"],
+            )?
+            .map(|branch| branch.trim().to_owned())
+            .unwrap_or_else(|| "HEAD (detached)".into());
+        let status = self.run_with_output(
+            "read the checkout status",
+            &[
+                "-C",
+                &checkout,
+                "status",
+                "--porcelain",
+                "--untracked-files=all",
+            ],
+        )?;
+        Ok(CheckoutInspection {
+            remote_url,
+            current_branch,
+            is_dirty: !status.trim().is_empty(),
+        })
+    }
+
+    pub fn clone_repository(&self, remote_url: &str, destination: &Path) -> Result<(), GitError> {
+        if destination.exists() {
+            if !destination.is_dir() {
+                return Err(GitError::DestinationExists {
+                    path: destination.to_owned(),
+                });
+            }
+            let mut entries =
+                fs::read_dir(destination).map_err(|source| GitError::ReadWorksetRoot {
+                    path: destination.to_owned(),
+                    source,
+                })?;
+            if entries.next().is_some() {
+                return Err(GitError::DestinationNotEmpty {
+                    path: destination.to_owned(),
+                });
+            }
+        }
+        let remote_url = remote_url.trim();
+        if remote_url.is_empty() {
+            return Err(GitError::Failed {
+                operation: "clone the repository",
+                details: "remote URL cannot be blank".into(),
+            });
+        }
+        let destination = destination.to_string_lossy().into_owned();
+        self.run("clone the repository", &["clone", remote_url, &destination])
     }
 
     pub fn inspect_workset(&self, root: &Path) -> Result<Vec<GitRepositoryState>, GitError> {
@@ -282,6 +358,24 @@ impl GitCli {
         }
     }
 
+    fn read_optional_repository_remote(&self, checkout: &str) -> Result<Option<String>, GitError> {
+        let remotes =
+            self.run_with_output("list checkout Git remotes", &["-C", checkout, "remote"])?;
+        let remote_name = remotes
+            .lines()
+            .map(str::trim)
+            .find(|remote| !remote.is_empty());
+        remote_name
+            .map(|remote_name| {
+                self.run_with_output(
+                    "read the checkout Git remote",
+                    &["-C", checkout, "remote", "get-url", remote_name],
+                )
+                .map(|remote| remote.trim().to_owned())
+            })
+            .transpose()
+    }
+
     fn run(&self, operation: &'static str, args: &[&str]) -> Result<(), GitError> {
         self.run_with_output(operation, args).map(|_| ())
     }
@@ -356,6 +450,7 @@ mod tests {
             project_id: 1,
             name: "service-a".into(),
             remote_url: origin.to_string_lossy().into_owned(),
+            base_branch: "main".into(),
         };
         let root = directory.path().join("workset-root");
         fs::create_dir(&root).expect("Workset root should exist");
@@ -422,6 +517,52 @@ mod tests {
             remote_before
         );
         assert!(repository_path.join("notes.txt").is_file());
+    }
+
+    #[test]
+    fn inspect_checkout_reports_git_identity_branch_and_dirty_state() {
+        let directory = tempdir().expect("temporary Git directory should exist");
+        run_git(
+            directory.path(),
+            &["init", "--initial-branch=main", "checkout"],
+        );
+        let checkout = directory.path().join("checkout");
+        run_git(&checkout, &["config", "user.email", "test@example.com"]);
+        run_git(&checkout, &["config", "user.name", "Test User"]);
+        fs::write(checkout.join("README.md"), "safe\n").expect("file should be written");
+        run_git(&checkout, &["add", "README.md"]);
+        run_git(&checkout, &["commit", "-m", "initial"]);
+        let origin = directory.path().join("origin.git");
+        run_git(directory.path(), &["init", "--bare", "origin.git"]);
+        let origin_url = path_arg(&origin);
+        run_git(&checkout, &["remote", "add", "origin", &origin_url]);
+        fs::write(checkout.join("notes.txt"), "keep\n").expect("file should be written");
+
+        let inspected = GitCli::system()
+            .inspect_checkout(&checkout)
+            .expect("checkout should be inspectable");
+        assert_eq!(inspected.remote_url, Some(origin_url));
+        assert_eq!(inspected.current_branch, "main");
+        assert!(inspected.is_dirty);
+    }
+
+    #[test]
+    fn clone_repository_accepts_an_empty_destination_and_rejects_non_empty_one() {
+        let directory = tempdir().expect("temporary Git directory should exist");
+        run_git(directory.path(), &["init", "--bare", "origin.git"]);
+        let origin = directory.path().join("origin.git");
+        let destination = directory.path().join("clone");
+        fs::create_dir(&destination).expect("empty destination should exist");
+
+        GitCli::system()
+            .clone_repository(&path_arg(&origin), &destination)
+            .expect("clone should accept an empty destination");
+        assert!(destination.join(".git").is_dir());
+
+        let error = GitCli::system()
+            .clone_repository(&path_arg(&origin), &destination)
+            .expect_err("clone should reject a non-empty destination");
+        assert!(matches!(error, GitError::DestinationNotEmpty { .. }));
     }
 
     #[test]

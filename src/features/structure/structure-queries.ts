@@ -7,12 +7,14 @@ import type {
   Machine,
   Project,
   Repository,
+  RepositoryLocation,
 } from "../../runtime/types";
 
 export type StructureData = {
   contexts: Context[];
   projects: Project[];
   repositories: Repository[];
+  repositoryLocations: RepositoryLocation[];
   machines: Machine[];
   attentionDefaults: ContextAttentionDefault[];
 };
@@ -22,6 +24,7 @@ export const structureKeys = {
   contexts: () => [...structureKeys.all, "contexts"] as const,
   projects: () => [...structureKeys.all, "projects"] as const,
   repositories: () => [...structureKeys.all, "repositories"] as const,
+  repositoryLocations: () => [...structureKeys.all, "repositoryLocations"] as const,
   machines: () => [...structureKeys.all, "machines"] as const,
   attentionDefaults: () => [...structureKeys.all, "attentionDefaults"] as const,
 };
@@ -47,6 +50,12 @@ export const structureQueryOptions = {
       queryFn: structureAdapter.listRepositories,
       staleTime: structureStaleTime,
     }),
+  repositoryLocations: () =>
+    queryOptions({
+      queryKey: structureKeys.repositoryLocations(),
+      queryFn: structureAdapter.listRepositoryLocations,
+      staleTime: structureStaleTime,
+    }),
   machines: () =>
     queryOptions({
       queryKey: structureKeys.machines(),
@@ -65,6 +74,7 @@ export function useStructureData() {
   const contexts = useQuery(structureQueryOptions.contexts());
   const projects = useQuery(structureQueryOptions.projects());
   const repositories = useQuery(structureQueryOptions.repositories());
+  const repositoryLocations = useQuery(structureQueryOptions.repositoryLocations());
   const machines = useQuery(structureQueryOptions.machines());
   const attentionDefaults = useQuery(structureQueryOptions.attentionDefaults());
 
@@ -73,16 +83,18 @@ export function useStructureData() {
       contexts: contexts.data ?? [],
       projects: projects.data ?? [],
       repositories: repositories.data ?? [],
+      repositoryLocations: repositoryLocations.data ?? [],
       machines: machines.data ?? [],
       attentionDefaults: attentionDefaults.data ?? [],
     } satisfies StructureData,
-    isPending: [contexts, projects, repositories, machines, attentionDefaults].some(
+    isPending: [contexts, projects, repositories, repositoryLocations, machines, attentionDefaults].some(
       (query) => query.isPending,
     ),
     error:
       contexts.error ??
       projects.error ??
       repositories.error ??
+      repositoryLocations.error ??
       machines.error ??
       attentionDefaults.error,
   };

@@ -8,8 +8,8 @@ use crate::domain::{
     Effect, ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalMetadata,
     ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, Item, ItemRelation,
     ItemRelationKind, ItemStatus, Link, Machine, MachineObservation, Project, ProjectDefaults,
-    Reminder, Repository, Run, RunPaneStatus, RunState, Workset, WorksetRepository, Workspace,
-    WorkspaceRepository, Worktree,
+    Reminder, Repository, RepositoryLocation, Run, RunPaneStatus, RunState, Workset,
+    WorksetRepository, Workspace, WorkspaceRepository, Worktree,
 };
 
 #[derive(Debug, Error)]
@@ -194,7 +194,7 @@ impl SqliteStore {
         };
         let repositories = {
             let mut statement = self.connection.prepare(
-                "SELECT id, project_id, name, remote_url
+                "SELECT id, project_id, name, remote_url, base_branch
                  FROM repositories
                  ORDER BY id",
             )?;
@@ -204,6 +204,23 @@ impl SqliteStore {
                     project_id: row.get(1)?,
                     name: row.get(2)?,
                     remote_url: row.get(3)?,
+                    base_branch: row.get(4)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let repository_locations = {
+            let mut statement = self.connection.prepare(
+                "SELECT repository_id, machine_id, checkout_path, worktree_root
+                 FROM repository_locations
+                 ORDER BY repository_id, machine_id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                Ok(RepositoryLocation {
+                    repository_id: row.get(0)?,
+                    machine_id: row.get(1)?,
+                    checkout_path: row.get(2)?,
+                    worktree_root: row.get(3)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -639,6 +656,7 @@ impl SqliteStore {
             contexts,
             projects,
             repositories,
+            repository_locations,
             items,
             worksets,
             workspaces,
@@ -739,18 +757,40 @@ impl SqliteStore {
                     next_repository_id,
                 } => {
                     transaction.execute(
-                        "INSERT INTO repositories (id, project_id, name, remote_url)
-                         VALUES (?1, ?2, ?3, ?4)",
+                        "INSERT INTO repositories (id, project_id, name, remote_url, base_branch)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
                         params![
                             repository.id,
                             repository.project_id,
                             repository.name,
                             repository.remote_url,
+                            repository.base_branch,
                         ],
                     )?;
                     transaction.execute(
                         "UPDATE metadata SET value = ?1 WHERE key = 'next_repository_id'",
                         params![next_repository_id],
+                    )?;
+                }
+                Effect::UpdateRepository { repository } => {
+                    transaction.execute(
+                        "UPDATE repositories
+                         SET remote_url = ?1, base_branch = ?2
+                         WHERE id = ?3",
+                        params![repository.remote_url, repository.base_branch, repository.id],
+                    )?;
+                }
+                Effect::PersistRepositoryLocation { location } => {
+                    transaction.execute(
+                        "INSERT INTO repository_locations
+                            (repository_id, machine_id, checkout_path, worktree_root)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            location.repository_id,
+                            location.machine_id,
+                            location.checkout_path,
+                            location.worktree_root,
+                        ],
                     )?;
                 }
                 Effect::ResetLocalData {
@@ -775,6 +815,7 @@ impl SqliteStore {
                          DELETE FROM workspaces;
                          DELETE FROM workset_repositories;
                          DELETE FROM worksets;
+                         DELETE FROM repository_locations;
                          DELETE FROM items;
                          DELETE FROM repositories;
                          DELETE FROM machines;
@@ -1015,6 +1056,10 @@ impl SqliteStore {
                         .execute("DELETE FROM worksets WHERE id = ?1", params![workset_id])?;
                 }
                 Effect::RemoveRepository { repository_id } => {
+                    transaction.execute(
+                        "DELETE FROM repository_locations WHERE repository_id = ?1",
+                        params![repository_id],
+                    )?;
                     transaction.execute(
                         "DELETE FROM worktrees
                          WHERE repository_id = ?1
@@ -1623,6 +1668,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              project_id INTEGER NOT NULL REFERENCES projects(id),
              name TEXT NOT NULL,
              remote_url TEXT NOT NULL,
+             base_branch TEXT NOT NULL DEFAULT 'main',
              UNIQUE (project_id, name)
          );
          CREATE INDEX IF NOT EXISTS repositories_by_project
@@ -1639,6 +1685,15 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          );
          CREATE INDEX IF NOT EXISTS machines_by_context
              ON machines (context_id, id);
+         CREATE TABLE IF NOT EXISTS repository_locations (
+             repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
+             machine_id INTEGER NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+             checkout_path TEXT NOT NULL,
+             worktree_root TEXT NOT NULL,
+             PRIMARY KEY (repository_id, machine_id)
+         );
+         CREATE INDEX IF NOT EXISTS repository_locations_by_machine
+             ON repository_locations (machine_id, repository_id);
          CREATE TABLE IF NOT EXISTS worksets (
              id INTEGER PRIMARY KEY NOT NULL,
              item_id INTEGER NOT NULL REFERENCES items(id),
@@ -1781,6 +1836,18 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          CREATE INDEX IF NOT EXISTS audit_entries_by_recorded_at
              ON audit_entries (recorded_at, id);",
     )?;
+
+    let repository_columns = table_columns(connection, "repositories")?;
+    if !repository_columns.is_empty()
+        && !repository_columns
+            .iter()
+            .any(|column| column == "base_branch")
+    {
+        connection.execute(
+            "ALTER TABLE repositories ADD COLUMN base_branch TEXT NOT NULL DEFAULT 'main'",
+            [],
+        )?;
+    }
     let run_columns = table_columns(connection, "runs")?;
     if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "state") {
         connection.execute(
@@ -3969,5 +4036,53 @@ mod tests {
         );
         assert_eq!(state.next_workspace_id, 2);
         assert_eq!(state.next_worktree_id, 2);
+    }
+
+    #[test]
+    fn repository_base_branch_and_machine_location_survive_reopening() {
+        let directory = tempdir().expect("temporary database directory should exist");
+        let path = directory.path().join("mission-manager.sqlite");
+        let mut store = SqliteStore::open(&path).expect("database should open");
+
+        let machine = decide(
+            store.load_state().expect("initial state should load"),
+            Event::RegisterMachine {
+                context_id: 1,
+                name: "Local Mac".into(),
+                socket_name: "mission".into(),
+                transport: MachineTransport::Local,
+            },
+        )
+        .expect("Machine should be registered");
+        store
+            .apply(&machine.effects)
+            .expect("Machine should persist");
+
+        let repository = decide(
+            machine.state,
+            Event::RegisterRepositoryAtLocation {
+                project_id: 1,
+                name: "service-a".into(),
+                remote_url: "https://example.com/service-a.git".into(),
+                base_branch: "trunk".into(),
+                machine_id: 1,
+                checkout_path: "~/src/service-a".into(),
+                worktree_root: "~/worktrees".into(),
+            },
+        )
+        .expect("Repository should register");
+        store
+            .apply(&repository.effects)
+            .expect("Repository location should persist");
+
+        let reopened = SqliteStore::open(&path).expect("database should reopen");
+        let state = reopened.load_state().expect("state should reload");
+        assert_eq!(state.repositories[0].base_branch, "trunk");
+        assert_eq!(state.repository_locations.len(), 1);
+        assert_eq!(
+            state.repository_locations[0].checkout_path,
+            "~/src/service-a"
+        );
+        assert_eq!(state.repository_locations[0].worktree_root, "~/worktrees");
     }
 }

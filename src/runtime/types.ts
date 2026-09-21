@@ -52,6 +52,14 @@ export type Repository = {
   project_id: number;
   name: string;
   remote_url: string;
+  base_branch: string;
+};
+
+export type RepositoryLocation = {
+  repository_id: number;
+  machine_id: number;
+  checkout_path: string;
+  worktree_root: string;
 };
 
 export type WorksetRepository = {
