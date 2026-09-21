@@ -269,6 +269,7 @@ button {
   background: transparent;
   color: var(--muted);
   padding: 12px 2px 11px;
+  text-decoration: none;
   font-size: 0.78rem;
   font-weight: 750;
   letter-spacing: 0.08em;

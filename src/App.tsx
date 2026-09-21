@@ -5,6 +5,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { Link, useRouter, useRouterState } from "@tanstack/react-router";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
@@ -658,25 +659,27 @@ const appTabs: {
   id: AppTab;
   label: string;
   description: string;
+  path: `/${AppTab}`;
 }[] = [
   {
     id: "work",
     label: "Work",
     description: "One calm view of what needs your attention, what is moving, and what is waiting.",
+    path: "/work",
   },
   {
     id: "structure",
     label: "Structure",
     description: "Contexts, Projects, Repositories, and Machines that support your work.",
+    path: "/structure",
   },
   {
     id: "activity",
-    label: "History",
+    label: "Activity",
     description: "A record of the actions the app has taken and the changes it has observed.",
+    path: "/activity",
   },
 ];
-
-const selectedTabStorageKey = "ai-mission-manager.selected-tab";
 
 const itemStatuses: ItemStatus[] = ["Inbox", "Active", "Waiting", "Done"];
 const relationKinds: ItemRelationKind[] = [
@@ -685,30 +688,17 @@ const relationKinds: ItemRelationKind[] = [
   "RelatedTo",
 ];
 
-function isAppTab(value: string | null): value is AppTab {
-  return value === "work" || value === "structure" || value === "activity";
+function appTabForPath(pathname: string): AppTab {
+  if (pathname === "/structure") return "structure";
+  if (pathname === "/activity") return "activity";
+  return "work";
 }
 
-function loadSelectedTab(): AppTab {
-  if (typeof window === "undefined") return "work";
-
-  try {
-    const storedTab = window.localStorage.getItem(selectedTabStorageKey);
-    return isAppTab(storedTab) ? storedTab : "work";
-  } catch {
-    return "work";
-  }
+function isAppRoutePath(pathname: string): boolean {
+  return pathname === "/work" || pathname === "/structure" || pathname === "/activity";
 }
 
-function saveSelectedTab(tab: AppTab) {
-  try {
-    window.localStorage.setItem(selectedTabStorageKey, tab);
-  } catch {
-    // Local persistence is a convenience; tab navigation still works when it is unavailable.
-  }
-}
-
-export function App() {
+export function AppShell() {
   const [contexts, setContexts] = useState<Context[]>([]);
   const [setupState, setSetupState] = useState<SetupState>();
   const [healthStatus, setHealthStatus] = useState<HealthStatus>();
@@ -764,7 +754,6 @@ export function App() {
   const [isCheckingDependencies, setIsCheckingDependencies] = useState(false);
   const [showHealthDetails, setShowHealthDetails] = useState(false);
   const [initialStateLoaded, setInitialStateLoaded] = useState(false);
-  const [selectedTab, setSelectedTab] = useState<AppTab>(loadSelectedTab);
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const themePreferenceRef = useRef<Theme | undefined>(loadStoredTheme());
   const [terminalRequest, setTerminalRequest] = useState<{
@@ -779,8 +768,12 @@ export function App() {
     () => uniqueItems(home ? flattenHome(home) : []),
     [home],
   );
-  const selectedTabDetails =
-    appTabs.find((tab) => tab.id === selectedTab) ?? appTabs[0];
+  const router = useRouter();
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
+  const activeTab = appTabForPath(pathname);
+  const activeTabDetails = appTabs.find((tab) => tab.id === activeTab) ?? appTabs[0];
   const isDarkTheme = theme === "dark";
   const themeToggleLabel = isDarkTheme ? "Switch to light mode" : "Switch to dark mode";
   const themeModeLabel = isDarkTheme ? "Light mode" : "Dark mode";
@@ -791,8 +784,9 @@ export function App() {
   }, []);
 
   useEffect(() => {
-    saveSelectedTab(selectedTab);
-  }, [selectedTab]);
+    if (isAppRoutePath(pathname)) return;
+    void router.navigate({ to: "/work", replace: true });
+  }, [pathname, router]);
 
   useEffect(() => {
     applyTheme(theme);
@@ -1622,8 +1616,8 @@ export function App() {
       <header className="app-header">
         <div>
           <p className="eyebrow">AI Mission Manager</p>
-          <h1>{selectedTabDetails.label}</h1>
-          <p className="subtitle">{selectedTabDetails.description}</p>
+          <h1>{activeTabDetails.label}</h1>
+          <p className="subtitle">{activeTabDetails.description}</p>
         </div>
         <div className="app-header-actions">
           <button
@@ -1657,7 +1651,7 @@ export function App() {
         </div>
       </header>
 
-      <TabNavigation selectedTab={selectedTab} onSelect={setSelectedTab} />
+      <TabNavigation activeTab={activeTab} />
 
       {showHealthDetails && setupState?.completed && healthStatus && (
         <HealthDetails
@@ -1692,7 +1686,7 @@ export function App() {
         />
       )}
 
-      {selectedTab === "work" && (
+      {activeTab === "work" && (
         <section className="home-controls" aria-label="Work view controls">
           <label>
           <span>Context</span>
@@ -1726,7 +1720,7 @@ export function App() {
         </section>
       )}
 
-      {selectedTab === "work" && runSuggestions.filter(
+      {activeTab === "work" && runSuggestions.filter(
         (suggestion) =>
           contextFilterId === undefined || suggestion.contextId === contextFilterId,
       ).length > 0 && (
@@ -1756,7 +1750,7 @@ export function App() {
         </section>
       )}
 
-      {selectedTab === "work" && searchQuery.trim() && (
+      {activeTab === "work" && searchQuery.trim() && (
         <section className="search-section" aria-labelledby="search-heading">
           <div className="section-heading">
             <div>
@@ -1777,7 +1771,7 @@ export function App() {
         </section>
       )}
 
-      {selectedTab === "activity" && (
+      {activeTab === "activity" && (
         <section className="activity-page" aria-labelledby="activity-heading">
           <section className="activity-section audit-record">
             <div className="section-heading">
@@ -1824,7 +1818,7 @@ export function App() {
         </section>
       )}
 
-      {selectedTab === "work" && (
+      {activeTab === "work" && (
         <section className="home-board" aria-labelledby="board-heading">
           <div className="section-heading board-heading">
           <div>
@@ -1921,7 +1915,7 @@ export function App() {
         </section>
       )}
 
-      {selectedTab === "work" && (
+      {activeTab === "work" && (
         <section className="capture-card" aria-labelledby="capture-heading">
           <div className="section-heading">
           <div>
@@ -1983,7 +1977,7 @@ export function App() {
         </section>
       )}
 
-      {selectedTab === "structure" && (
+      {activeTab === "structure" && (
         <section className="organise-card" aria-labelledby="organise-heading">
           <div className="section-heading">
           <div>
@@ -2609,28 +2603,21 @@ export function App() {
   );
 }
 
-function TabNavigation({
-  selectedTab,
-  onSelect,
-}: {
-  selectedTab: AppTab;
-  onSelect: (tab: AppTab) => void;
-}) {
+function TabNavigation({ activeTab }: { activeTab: AppTab }) {
   return (
     <nav className="app-tabs" aria-label="Home sections">
       <div className="app-tab-list" role="tablist" aria-label="Home sections">
         {appTabs.map((tab) => (
-          <button
-            className={`app-tab${selectedTab === tab.id ? " app-tab-selected" : ""}`}
+          <Link
+            to={tab.path}
+            className={`app-tab${activeTab === tab.id ? " app-tab-selected" : ""}`}
             key={tab.id}
-            type="button"
             role="tab"
-            aria-selected={selectedTab === tab.id}
-            tabIndex={selectedTab === tab.id ? 0 : -1}
-            onClick={() => onSelect(tab.id)}
+            aria-selected={activeTab === tab.id}
+            tabIndex={activeTab === tab.id ? 0 : -1}
           >
             {tab.label}
-          </button>
+          </Link>
         ))}
       </div>
     </nav>
