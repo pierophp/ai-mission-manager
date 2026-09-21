@@ -1,10 +1,14 @@
 import { type FormEvent, useEffect, useRef, useState } from "react";
-import { Link, useRouter, useRouterState } from "@tanstack/react-router";
+import { createContext, useContext } from "react";
+import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { Moon, Sun } from "lucide-react";
 
-import { ActivityPage } from "../features/activity/ActivityPage";
-import { StructurePage } from "../features/structure/StructurePage";
-import { WorkPage } from "../features/work/WorkPage";
+import { useHealthStatusQuery, useSetupStateQuery } from "../features/setup/setup-queries";
+import {
+  useCompleteSetupMutation,
+  useHealthCheckMutation,
+} from "../features/setup/setup-mutations";
+import { useStructureData } from "../features/structure/structure-queries";
 import {
   applyTheme,
   loadStoredTheme,
@@ -12,7 +16,6 @@ import {
   saveTheme,
   type Theme,
 } from "../theme";
-import { useAppRuntime } from "../runtime/AppRuntimeProvider";
 import { errorMessage } from "../runtime/errors";
 import type {
   DependencyState,
@@ -25,9 +28,23 @@ import { Alert, AlertDescription } from "./ui/alert";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
-import { Empty, EmptyDescription } from "./ui/empty";
 import { Input } from "./ui/input";
 import { appShellLayoutClassName } from "./app-shell-layout";
+
+type AppShellContextValue = {
+  openTerminal: (worksetId: number, pane: PaneTab) => void;
+  closeTerminal: () => void;
+};
+
+const AppShellContext = createContext<AppShellContextValue | undefined>(
+  undefined,
+);
+
+export function useAppShell() {
+  const value = useContext(AppShellContext);
+  if (!value) throw new Error("useAppShell must be used inside AppShell");
+  return value;
+}
 
 type AppTab = "work" | "structure" | "activity";
 
@@ -67,20 +84,10 @@ function appTabForPath(pathname: string): AppTab {
 }
 
 export function AppShell() {
-  const {
-    setupState,
-    healthStatus,
-    structure,
-    error,
-    isCheckingDependencies,
-    setError,
-    refreshAll,
-    refreshHealthStatus,
-    completeSetup,
-  } = useAppRuntime();
+  const setupQuery = useSetupStateQuery();
   const [setupContextName, setSetupContextName] = useState("Personal");
   const [setupProvider, setSetupProvider] = useState<ProviderChoice>("github");
-  const [isSaving, setIsSaving] = useState(false);
+  const [error, setError] = useState<string>();
   const [showHealthDetails, setShowHealthDetails] = useState(false);
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const themePreferenceRef = useRef<Theme | undefined>(loadStoredTheme());
@@ -88,18 +95,28 @@ export function AppShell() {
     worksetId: number;
     pane: PaneTab;
   }>();
+  const setupState = setupQuery.data;
+  const structureQuery = useStructureData();
+  const structure = structureQuery.data;
+  const healthQuery = useHealthStatusQuery(
+    setupState?.completed ? null : setupProvider,
+  );
+  const healthStatus = healthQuery.data;
+  const queryError =
+    setupQuery.error ?? structureQuery.error ?? healthQuery.error;
+  const setupMutation = useCompleteSetupMutation();
+  const healthMutation = useHealthCheckMutation();
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
-  const router = useRouter();
-  const isUnknownRoute =
-    pathname !== "/" && !appTabs.some((tab) => tab.path === pathname);
   const activeTab = appTabForPath(pathname);
   const activeTabDetails = appTabs.find((tab) => tab.id === activeTab) ?? appTabs[0];
   const isDarkTheme = theme === "dark";
   const themeToggleLabel = isDarkTheme ? "Switch to light mode" : "Switch to dark mode";
   const themeModeLabel = isDarkTheme ? "Light mode" : "Dark mode";
   const runtimeState = healthStatus?.runtime.state ?? "unavailable";
+  const isSaving = setupMutation.isPending;
+  const isCheckingDependencies = healthMutation.isPending;
 
   useEffect(() => {
     applyTheme(theme);
@@ -116,21 +133,16 @@ export function AppShell() {
     if (setupState) setSetupProvider(setupState.completed ? setupState.provider : "github");
   }, [setupState]);
 
-  useEffect(() => {
-    if (!isUnknownRoute) return;
-    void router.navigate({ to: "/work", replace: true });
-  }, [isUnknownRoute, router]);
-
   async function handleCompleteSetup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    setIsSaving(true);
     try {
-      await completeSetup(setupContextName, setupProvider);
+      await setupMutation.mutateAsync({
+        contextName: setupContextName,
+        provider: setupProvider,
+      });
       setError(undefined);
     } catch (setupError) {
       setError(errorMessage(setupError));
-    } finally {
-      setIsSaving(false);
     }
   }
 
@@ -197,7 +209,7 @@ export function AppShell() {
         <HealthDetails
           health={healthStatus}
           isCheckingDependencies={isCheckingDependencies}
-          onCheckDependencies={() => void refreshHealthStatus(null)}
+          onCheckDependencies={() => void healthMutation.mutateAsync(null)}
         />
       )}
 
@@ -210,12 +222,14 @@ export function AppShell() {
           isCheckingDependencies={isCheckingDependencies}
           onContextNameChange={setSetupContextName}
           onProviderChange={setSetupProvider}
-          onCheckDependencies={() => void refreshHealthStatus(setupProvider)}
+          onCheckDependencies={() => void healthMutation.mutateAsync(setupProvider)}
           onSubmit={handleCompleteSetup}
         />
       )}
 
-      {error && <ErrorAlert message={error} />}
+      {(error ?? (queryError ? errorMessage(queryError) : undefined)) && (
+        <ErrorAlert message={error ?? errorMessage(queryError)} />
+      )}
 
       {terminalRequest && (
         <EmbeddedTerminal
@@ -226,26 +240,14 @@ export function AppShell() {
         />
       )}
 
-      {isUnknownRoute ? (
-        <Empty className="mt-6 items-start border-0 p-0 py-8 text-left">
-          <EmptyDescription>That route is not available. Returning to Work…</EmptyDescription>
-        </Empty>
-      ) : (
-        <>
-          {activeTab === "activity" && <ActivityPage />}
-
-          {activeTab === "work" && (
-            <WorkPage
-              onChanged={() => refreshAll().then(() => undefined)}
-              onOpenTerminal={(worksetId, pane) => setTerminalRequest({ worksetId, pane })}
-            />
-          )}
-
-          {activeTab === "structure" && (
-            <StructurePage onResetComplete={() => setTerminalRequest(undefined)} />
-          )}
-        </>
-      )}
+      <AppShellContext.Provider
+        value={{
+          openTerminal: (worksetId, pane) => setTerminalRequest({ worksetId, pane }),
+          closeTerminal: () => setTerminalRequest(undefined),
+        }}
+      >
+        <Outlet />
+      </AppShellContext.Provider>
     </main>
   );
 }

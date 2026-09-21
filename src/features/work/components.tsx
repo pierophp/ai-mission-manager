@@ -18,7 +18,6 @@ import {
 import { Textarea } from "../../components/ui/textarea";
 import { currentMinute } from "../../runtime/time";
 import { errorMessage } from "../../runtime/errors";
-import { workAdapter } from "../../runtime/adapters";
 import type {
   AgentKind,
   AttentionEntry,
@@ -50,6 +49,7 @@ import {
   relationshipLabel,
   repositoryName,
 } from "./work-utils";
+import { type WorkAction, useWorkCommand, workActions } from "./work-mutations";
 
 const itemStatuses: ItemStatus[] = ["Inbox", "Active", "Waiting", "Done"];
 const relationKinds: ItemRelationKind[] = ["Blocks", "BlockedBy", "RelatedTo"];
@@ -167,6 +167,7 @@ export function ItemCard({
   const [runPrompt, setRunPrompt] = useState("");
   const [runPromptNeedsCompose, setRunPromptNeedsCompose] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const workCommand = useWorkCommand();
 
   const itemRepositories = repositories.filter(
     (repository) => repository.project_id === view.item.project_id,
@@ -176,13 +177,18 @@ export function ItemCard({
     setNotes(view.item.notes);
   }, [view.item.notes]);
 
-  async function saveItem(update: () => Promise<unknown>) {
+  async function saveItem<TData>(
+    update: WorkAction<TData>,
+    invalidate = true,
+  ): Promise<TData | undefined> {
     setIsSaving(true);
     try {
-      await update();
+      const result = await workCommand.execute(update, invalidate);
       await onChanged();
+      return result;
     } catch (saveError) {
       window.alert(errorMessage(saveError));
+      return undefined;
     } finally {
       setIsSaving(false);
     }
@@ -191,8 +197,8 @@ export function ItemCard({
   async function handleRelation(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!targetItemId) return;
-    await saveItem(() =>
-      workAdapter.setRelation(view.item.id, targetItemId, relationKind),
+    await saveItem(
+      workActions.setRelation(view.item.id, targetItemId, relationKind),
     );
     setTargetItemId(undefined);
   }
@@ -200,11 +206,10 @@ export function ItemCard({
   async function handleExternalLink(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!externalUrl.trim()) return;
-    setIsSaving(true);
     try {
-      const result = await workAdapter.linkExternalObject(
-        view.item.id,
-        externalUrl,
+      setIsSaving(true);
+      const result = await workCommand.execute(
+        workActions.linkExternalObject(view.item.id, externalUrl),
       );
       setExternalUrl("");
       await onChanged();
@@ -227,58 +232,56 @@ export function ItemCard({
     ) {
       return;
     }
-    await saveItem(async () => {
-      const selected: WorksetRepositoryInput[] = selectedRepositoryIds.map(
-        (repositoryId) => ({
-          repositoryId,
-          branchOverride: worksetBranchOverrides[repositoryId]?.trim() || null,
-          baseBranchOverride:
-            worksetBaseBranchOverrides[repositoryId]?.trim() || null,
-        }),
-      );
-      await workAdapter.createWorkset(
+    const selected: WorksetRepositoryInput[] = selectedRepositoryIds.map(
+      (repositoryId) => ({
+        repositoryId,
+        branchOverride: worksetBranchOverrides[repositoryId]?.trim() || null,
+        baseBranchOverride:
+          worksetBaseBranchOverrides[repositoryId]?.trim() || null,
+      }),
+    );
+    await saveItem(
+      workActions.createWorkset(
         view.item.id,
         worksetRoot,
         worksetBranch,
         selected,
-      );
-      setWorksetRoot("");
-      setWorksetBranch("");
-      setSelectedRepositoryIds([]);
-      setWorksetBranchOverrides({});
-      setWorksetBaseBranchOverrides({});
-    });
+      ),
+    );
+    setWorksetRoot("");
+    setWorksetBranch("");
+    setSelectedRepositoryIds([]);
+    setWorksetBranchOverrides({});
+    setWorksetBaseBranchOverrides({});
   }
 
   async function handleAttachWorkset(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!attachWorksetRoot.trim()) return;
-    await saveItem(async () => {
-      await workAdapter.attachWorkset(view.item.id, attachWorksetRoot);
-      setAttachWorksetRoot("");
-    });
+    await saveItem(workActions.attachWorkset(view.item.id, attachWorksetRoot));
+    setAttachWorksetRoot("");
   }
 
   async function handleAddRepositoryToWorkset(worksetId: number) {
     if (!additionalRepositoryId) return;
-    await saveItem(async () => {
-      await workAdapter.addRepositoryToWorkset(
+    await saveItem(
+      workActions.addRepositoryToWorkset(
         worksetId,
         additionalRepositoryId,
         additionalBranchOverride.trim() || null,
         additionalBaseBranchOverride.trim() || null,
-      );
-      setAdditionalRepositoryId(undefined);
-      setAdditionalBranchOverride("");
-      setAdditionalBaseBranchOverride("");
-    });
+      ),
+    );
+    setAdditionalRepositoryId(undefined);
+    setAdditionalBranchOverride("");
+    setAdditionalBaseBranchOverride("");
   }
 
   async function handleSetWorksetArchived(
     worksetId: number,
     archived: boolean,
   ) {
-    await saveItem(() => workAdapter.setWorksetArchived(worksetId, archived));
+    await saveItem(workActions.setWorksetArchived(worksetId, archived));
     if (removalReport?.workset_id === worksetId) {
       setRemovalReport(undefined);
     }
@@ -292,7 +295,7 @@ export function ItemCard({
     ) {
       return;
     }
-    await saveItem(() => workAdapter.stopRun(run.id));
+    await saveItem(workActions.stopRun(run.id));
   }
 
   async function handleDeleteRun(run: Run) {
@@ -304,15 +307,16 @@ export function ItemCard({
     ) {
       return;
     }
-    await saveItem(async () => {
-      await workAdapter.deleteRun(run.id);
-    });
+    await saveItem(workActions.deleteRun(run.id));
   }
 
   async function handlePrepareRemoval(worksetId: number) {
     setIsSaving(true);
     try {
-      const report = await workAdapter.prepareWorksetRemoval(worksetId);
+      const report = await workCommand.execute(
+        workActions.prepareWorksetRemoval(worksetId),
+        false,
+      );
       setRemovalReport(report);
     } catch (reportError) {
       window.alert(errorMessage(reportError));
@@ -325,19 +329,21 @@ export function ItemCard({
     if (removalReport?.workset_id !== worksetId) return;
     if (!window.confirm("Remove this Workset and its directory from disk?"))
       return;
-    await saveItem(async () => {
-      const result = await workAdapter.removeWorkset(worksetId);
-      setRemovalReport(undefined);
-      if (result.physicalCleanupWarning) {
-        window.alert(result.physicalCleanupWarning);
-      }
-    });
+    const result = await saveItem(workActions.removeWorkset(worksetId));
+    if (!result) return;
+    setRemovalReport(undefined);
+    if (result.physicalCleanupWarning) {
+      window.alert(result.physicalCleanupWarning);
+    }
   }
 
   async function handlePrepareItemDeletion() {
     setIsSaving(true);
     try {
-      const preview = await workAdapter.prepareItemDeletion(view.item.id);
+      const preview = await workCommand.execute(
+        workActions.prepareItemDeletion(view.item.id),
+        false,
+      );
       setDeletionPreview(preview);
     } catch (previewError) {
       window.alert(errorMessage(previewError));
@@ -363,9 +369,8 @@ export function ItemCard({
 
     setIsSaving(true);
     try {
-      const result = await workAdapter.deleteItem(
-        view.item.id,
-        deleteWorksetDirectories,
+      const result = await workCommand.execute(
+        workActions.deleteItem(view.item.id, deleteWorksetDirectories),
       );
       setDeletionPreview(undefined);
       await onChanged();
@@ -392,21 +397,22 @@ export function ItemCard({
     ) {
       return;
     }
-    await saveItem(async () => {
-      const result = await workAdapter.unlinkExternalLink(linkId);
-      if (result.externalObjectDeleted) {
-        window.alert(
-          "The Link was removed. It was the last Link, so its local External Object snapshot and Activity cache were also removed. The provider-owned object was not deleted.",
-        );
-      }
-    });
+    const result = await saveItem(workActions.unlinkExternalLink(linkId));
+    if (!result) return;
+    if (result.externalObjectDeleted) {
+      window.alert(
+        "The Link was removed. It was the last Link, so its local External Object snapshot and Activity cache were also removed. The provider-owned object was not deleted.",
+      );
+    }
   }
 
   async function handlePrepareExternalObjectDeletion(externalObjectId: number) {
     setIsSaving(true);
     try {
-      const preview =
-        await workAdapter.prepareExternalObjectDeletion(externalObjectId);
+      const preview = await workCommand.execute(
+        workActions.prepareExternalObjectDeletion(externalObjectId),
+        false,
+      );
       setExternalObjectDeletionPreview(preview);
     } catch (previewError) {
       window.alert(errorMessage(previewError));
@@ -427,8 +433,8 @@ export function ItemCard({
     }
     setIsSaving(true);
     try {
-      const result = await workAdapter.deleteExternalObject(
-        plan.externalObjectId,
+      const result = await workCommand.execute(
+        workActions.deleteExternalObject(plan.externalObjectId),
       );
       setExternalObjectDeletionPreview(undefined);
       await onChanged();
@@ -455,11 +461,14 @@ export function ItemCard({
     if (!runPreviewWorksetId) return;
     setIsSaving(true);
     try {
-      const composed = await workAdapter.composeRunPrompt(
-        view.item.id,
-        runProfile,
-        runPromptSelection(),
-        runProfile === "custom" ? runCustomPrompt : null,
+      const composed = await workCommand.execute(
+        workActions.composeRunPrompt(
+          view.item.id,
+          runProfile,
+          runPromptSelection(),
+          runProfile === "custom" ? runCustomPrompt : null,
+        ),
+        false,
       );
       setRunPrompt(composed);
       setRunPromptNeedsCompose(false);
@@ -481,15 +490,18 @@ export function ItemCard({
     setRunCustomPrompt("");
     setIsSaving(true);
     try {
-      const composed = await workAdapter.composeRunPrompt(
-        view.item.id,
-        "implement",
-        {
-          includeObjective: true,
-          includeNotes: Boolean(view.item.notes.trim()),
-          externalObjectIds: [],
-        },
-        null,
+      const composed = await workCommand.execute(
+        workActions.composeRunPrompt(
+          view.item.id,
+          "implement",
+          {
+            includeObjective: true,
+            includeNotes: Boolean(view.item.notes.trim()),
+            externalObjectIds: [],
+          },
+          null,
+        ),
+        false,
       );
       setRunPrompt(composed);
       setRunPromptNeedsCompose(false);
@@ -505,8 +517,8 @@ export function ItemCard({
     event.preventDefault();
     if (!runPreviewWorksetId || !runPrompt.trim() || runPromptNeedsCompose)
       return;
-    await saveItem(async () => {
-      await workAdapter.startRun({
+    await saveItem(
+      workActions.startRun({
         itemId: view.item.id,
         worksetId: runPreviewWorksetId,
         machineId: runMachineId ?? null,
@@ -514,16 +526,18 @@ export function ItemCard({
         executionProfile: runProfile,
         prompt: runPrompt,
         promptSelection: runPromptSelection(),
-      });
-      setRunPreviewWorksetId(undefined);
-      setRunPrompt("");
-    });
+      }),
+    );
+    setRunPreviewWorksetId(undefined);
+    setRunPrompt("");
   }
 
   async function refreshExternalObject(externalObjectId: number) {
     setIsSaving(true);
     try {
-      await workAdapter.refreshExternalObject(externalObjectId);
+      await workCommand.execute(
+        workActions.refreshExternalObject(externalObjectId),
+      );
       await onChanged();
     } catch (refreshError) {
       window.alert(errorMessage(refreshError));
@@ -543,11 +557,13 @@ export function ItemCard({
     if (!issueRepository.trim() || !issueTitle.trim()) return;
     setIsSaving(true);
     try {
-      const result = await workAdapter.createGithubIssue(
-        view.item.id,
-        issueRepository,
-        issueTitle,
-        issueBody,
+      const result = await workCommand.execute(
+        workActions.createGithubIssue(
+          view.item.id,
+          issueRepository,
+          issueTitle,
+          issueBody,
+        ),
       );
       setIsIssuePreviewOpen(false);
       setIssueRepository("");
@@ -995,9 +1011,9 @@ export function ItemCard({
                   return;
                 }
               }
-              void saveItem(() =>
-                workAdapter.setItemStatus(view.item.id, nextStatus),
-              );
+                void saveItem(
+                  workActions.setItemStatus(view.item.id, nextStatus),
+                );
             }}
             disabled={isSaving}
           >
@@ -1123,7 +1139,7 @@ export function ItemCard({
             variant="outline"
             disabled={isSaving || notes === view.item.notes}
             onClick={() =>
-              void saveItem(() => workAdapter.setItemNotes(view.item.id, notes))
+              void saveItem(workActions.setItemNotes(view.item.id, notes))
             }
           >
             Save notes
@@ -1143,9 +1159,7 @@ export function ItemCard({
             variant="outline"
             disabled={isSaving || !reminderAt}
             onClick={() =>
-              void saveItem(() =>
-                workAdapter.addReminder(view.item.id, reminderAt),
-              )
+              void saveItem(workActions.addReminder(view.item.id, reminderAt))
             }
           >
             Add reminder
@@ -1170,8 +1184,8 @@ export function ItemCard({
                     variant="ghost"
                     disabled={isSaving}
                     onClick={() =>
-                      void saveItem(() =>
-                        workAdapter.removeReminder(view.item.id, reminder.id),
+                      void saveItem(
+                        workActions.removeReminder(view.item.id, reminder.id),
                       )
                     }
                   >
@@ -1241,8 +1255,9 @@ export function ItemCard({
                           variant="outline"
                           disabled={isSaving || run.pane_status === "missing"}
                           onClick={() =>
-                            void saveItem(() =>
-                              workAdapter.openExternalTerminal(run.id),
+                            void saveItem(
+                              workActions.openExternalTerminal(run.id),
+                              false,
                             )
                           }
                         >
@@ -1467,42 +1482,40 @@ export function ItemCard({
               onPrepareDeleteObject={() =>
                 handlePrepareExternalObjectDeletion(externalLink.object.id)
               }
-              onSavePolicy={(policy) =>
-                saveItem(() =>
-                  workAdapter.setLinkAttentionPolicy(
+              onSavePolicy={async (policy) => {
+                await saveItem(
+                  workActions.setLinkAttentionPolicy(
                     externalLink.link.id,
                     policy,
                   ),
-                )
-              }
-              onMarkReviewed={() =>
-                saveItem(() =>
-                  workAdapter.markLinkReviewed(externalLink.link.id),
-                )
-              }
-              onSaveWatchUntil={(watchUntil) =>
-                saveItem(() =>
-                  workAdapter.setLinkWatchUntil(
+                );
+              }}
+              onMarkReviewed={async () => {
+                await saveItem(workActions.markLinkReviewed(externalLink.link.id));
+              }}
+              onSaveWatchUntil={async (watchUntil) => {
+                await saveItem(
+                  workActions.setLinkWatchUntil(
                     externalLink.link.id,
                     watchUntil,
                   ),
-                )
-              }
-              onSaveReviewAt={(reviewAt) =>
-                saveItem(() =>
-                  workAdapter.setLinkReviewAt(externalLink.link.id, reviewAt),
-                )
-              }
-              onClearReviewAt={() =>
-                saveItem(() =>
-                  workAdapter.clearLinkReviewAt(externalLink.link.id),
-                )
-              }
-              onAddComment={(body) =>
-                saveItem(() =>
-                  workAdapter.addExternalComment(externalLink.link.id, body),
-                )
-              }
+                );
+              }}
+              onSaveReviewAt={async (reviewAt) => {
+                await saveItem(
+                  workActions.setLinkReviewAt(externalLink.link.id, reviewAt),
+                );
+              }}
+              onClearReviewAt={async () => {
+                await saveItem(
+                  workActions.clearLinkReviewAt(externalLink.link.id),
+                );
+              }}
+              onAddComment={async (body) => {
+                await saveItem(
+                  workActions.addExternalComment(externalLink.link.id, body),
+                );
+              }}
             />
           ))}
           {externalObjectDeletionPreview && (
@@ -2051,11 +2064,12 @@ export function AttentionEntryCard({
   onMarkedReviewed: () => Promise<void>;
 }) {
   const [isSaving, setIsSaving] = useState(false);
+  const workCommand = useWorkCommand();
 
   async function markReviewed() {
     setIsSaving(true);
     try {
-      await workAdapter.markLinkReviewed(entry.link_id);
+      await workCommand.execute(workActions.markLinkReviewed(entry.link_id));
       await onMarkedReviewed();
     } catch (reviewError) {
       window.alert(errorMessage(reviewError));
@@ -2121,7 +2135,7 @@ export function AttentionEntryCard({
   async function saveReminder(itemId: number, reminderId: number) {
     setIsSaving(true);
     try {
-      await workAdapter.removeReminder(itemId, reminderId);
+      await workCommand.execute(workActions.removeReminder(itemId, reminderId));
       await onMarkedReviewed();
     } catch (dismissError) {
       window.alert(errorMessage(dismissError));
@@ -2133,7 +2147,7 @@ export function AttentionEntryCard({
   async function clearReviewDate() {
     setIsSaving(true);
     try {
-      await workAdapter.clearLinkReviewAt(entry.link_id);
+      await workCommand.execute(workActions.clearLinkReviewAt(entry.link_id));
       await onMarkedReviewed();
     } catch (clearError) {
       window.alert(errorMessage(clearError));

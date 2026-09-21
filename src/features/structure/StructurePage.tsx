@@ -1,6 +1,8 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { Alert, AlertDescription } from "../../components/ui/alert";
+import { useAppShell } from "../../components/app-shell";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import {
@@ -17,9 +19,27 @@ import {
   NativeSelect,
   NativeSelectOption,
 } from "../../components/ui/native-select";
-import { structureAdapter } from "../../runtime/adapters";
-import { useAppRuntime } from "../../runtime/AppRuntimeProvider";
 import { errorMessage } from "../../runtime/errors";
+import { invalidateStructureQueries } from "../../runtime/query-invalidation";
+import {
+  structureKeys,
+  useStructureData,
+  structureQueryOptions,
+} from "./structure-queries";
+import {
+  activityQueryOptions,
+  homeQueryOptions,
+  runSuggestionsQueryOptions,
+  useHomeQuery,
+} from "../work/work-queries";
+import {
+  healthStatusQueryOptions,
+  setupStateQueryOptions,
+} from "../setup/setup-queries";
+import {
+  structureActions,
+  useStructureCommand,
+} from "./structure-mutations";
 import type {
   Context,
   ExternalChangePolicy,
@@ -46,22 +66,13 @@ const defaultAttentionPolicy: ExternalChangePolicy = {
   metadata: true,
 };
 
-type StructurePageProps = {
-  onResetComplete?: () => void;
-};
-
-export function StructurePage({ onResetComplete }: StructurePageProps) {
-  const {
-    structure,
-    home,
-    setError,
-    refreshStructure,
-    refreshHome,
-    refreshSearch,
-    refreshRunSuggestions,
-    refreshActivity,
-    refreshAll,
-  } = useAppRuntime();
+export function StructurePage() {
+  const { closeTerminal } = useAppShell();
+  const queryClient = useQueryClient();
+  const structureCommand = useStructureCommand();
+  const structure = useStructureData().data;
+  const home = useHomeQuery(undefined).data;
+  const [error, setError] = useState<string>();
   const { contexts, projects, repositories, machines, attentionDefaults } = structure;
   const allItems = useMemo(
     () => uniqueItems(home ? flattenHome(home) : []),
@@ -137,14 +148,11 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
   }, [attentionDefaults, attentionObjectKind, selectedContextId]);
 
   async function refreshAfterEdit() {
-    const [nextStructure] = await Promise.all([
-      refreshStructure(),
-      refreshHome(),
-      refreshSearch(),
-      refreshRunSuggestions(),
-      refreshActivity(),
-    ]);
-    return nextStructure;
+    await invalidateStructureQueries(queryClient);
+    await queryClient.refetchQueries({
+      queryKey: structureKeys.all,
+      type: "active",
+    });
   }
 
   function handleContextChange(contextId: number) {
@@ -160,13 +168,12 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
 
     setIsSaving(true);
     try {
-      const context = await structureAdapter.createContext(contextName.trim());
-      const nextStructure = await refreshAfterEdit();
-      setSelectedContextId(context.id);
-      setSelectedProjectId(
-        nextStructure.projects.find((project) => project.context_id === context.id)
-          ?.id,
+      const context = await structureCommand.execute(
+        structureActions.createContext(contextName.trim()),
       );
+      await refreshAfterEdit();
+      setSelectedContextId(context.id);
+      setSelectedProjectId(undefined);
       setContextName("");
       setError(undefined);
     } catch (saveError) {
@@ -185,10 +192,12 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
 
     setIsSaving(true);
     try {
-      const project = await structureAdapter.createProject(
-        projectName.trim(),
-        selectedContextId,
-        projectDefaultStatus,
+      const project = await structureCommand.execute(
+        structureActions.createProject(
+          projectName.trim(),
+          selectedContextId,
+          projectDefaultStatus,
+        ),
       );
       await refreshAfterEdit();
       setSelectedProjectId(project.id);
@@ -205,7 +214,12 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
   async function handlePrepareProjectDeletion(projectId: number) {
     setIsSaving(true);
     try {
-      setParentDeletionPreview(await structureAdapter.prepareProjectDeletion(projectId));
+      setParentDeletionPreview(
+        await structureCommand.execute(
+          structureActions.prepareProjectDeletion(projectId),
+          false,
+        ),
+      );
       setError(undefined);
     } catch (previewError) {
       setError(errorMessage(previewError));
@@ -217,7 +231,12 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
   async function handlePrepareContextDeletion(contextId: number) {
     setIsSaving(true);
     try {
-      setParentDeletionPreview(await structureAdapter.prepareContextDeletion(contextId));
+      setParentDeletionPreview(
+        await structureCommand.execute(
+          structureActions.prepareContextDeletion(contextId),
+          false,
+        ),
+      );
       setError(undefined);
     } catch (previewError) {
       setError(errorMessage(previewError));
@@ -243,12 +262,14 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
 
     setIsSaving(true);
     try {
-      const result = await structureAdapter.deleteProject(
-        projectId,
-        plan.items.map((item) => item.id),
-        plan.repositories.map((repository) => repository.id),
-        plan.worksets.map((workset) => workset.id),
-        deleteWorksetDirectories,
+      const result = await structureCommand.execute(
+        structureActions.deleteProject(
+          projectId,
+          plan.items.map((item) => item.id),
+          plan.repositories.map((repository) => repository.id),
+          plan.worksets.map((workset) => workset.id),
+          deleteWorksetDirectories,
+        ),
       );
       setParentDeletionPreview(undefined);
       await refreshAfterEdit();
@@ -278,15 +299,17 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
 
     setIsSaving(true);
     try {
-      const result = await structureAdapter.deleteContext({
-        contextId,
-        projectIds: plan.projects.map((project) => project.id),
-        itemIds: plan.items.map((item) => item.id),
-        repositoryIds: plan.repositories.map((repository) => repository.id),
-        worksetIds: plan.worksets.map((workset) => workset.id),
-        machineIds: plan.machines.map((machine) => machine.id),
-        deleteWorksetDirectories,
-      });
+      const result = await structureCommand.execute(
+        structureActions.deleteContext({
+          contextId,
+          projectIds: plan.projects.map((project) => project.id),
+          itemIds: plan.items.map((item) => item.id),
+          repositoryIds: plan.repositories.map((repository) => repository.id),
+          worksetIds: plan.worksets.map((workset) => workset.id),
+          machineIds: plan.machines.map((machine) => machine.id),
+          deleteWorksetDirectories,
+        }),
+      );
       setParentDeletionPreview(undefined);
       await refreshAfterEdit();
       showParentDeletionResult("Context", result);
@@ -307,10 +330,12 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
 
     setIsSaving(true);
     try {
-      await structureAdapter.registerRepository(
-        selectedProjectId,
-        repositoryName.trim(),
-        repositoryRemoteUrl.trim(),
+      await structureCommand.execute(
+        structureActions.registerRepository(
+          selectedProjectId,
+          repositoryName.trim(),
+          repositoryRemoteUrl.trim(),
+        ),
       );
       await refreshAfterEdit();
       setRepositoryName("");
@@ -327,7 +352,10 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
     setIsSaving(true);
     try {
       setRepositoryDeletionPreview(
-        await structureAdapter.prepareRepositoryDeletion(repositoryId),
+        await structureCommand.execute(
+          structureActions.prepareRepositoryDeletion(repositoryId),
+          false,
+        ),
       );
       setError(undefined);
     } catch (previewError) {
@@ -362,10 +390,12 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
 
     setIsSaving(true);
     try {
-      const result = await structureAdapter.deleteRepository(
-        repositoryId,
-        plan.worksets.map((workset) => workset.id),
-        deleteWorksetDirectories,
+      const result = await structureCommand.execute(
+        structureActions.deleteRepository(
+          repositoryId,
+          plan.worksets.map((workset) => workset.id),
+          deleteWorksetDirectories,
+        ),
       );
       setRepositoryDeletionPreview(undefined);
       await refreshAfterEdit();
@@ -400,11 +430,13 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
 
     setIsSaving(true);
     try {
-      await structureAdapter.registerMachine(
-        selectedContextId,
-        machineName.trim(),
-        machineSocketName.trim(),
-        transport,
+      await structureCommand.execute(
+        structureActions.registerMachine(
+          selectedContextId,
+          machineName.trim(),
+          machineSocketName.trim(),
+          transport,
+        ),
       );
       await refreshAfterEdit();
       setMachineName("");
@@ -424,7 +456,7 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
   async function handleCheckMachine(machineId: number) {
     setIsSaving(true);
     try {
-      await structureAdapter.checkMachine(machineId);
+      await structureCommand.execute(structureActions.checkMachine(machineId));
       await refreshAfterEdit();
       setError(undefined);
     } catch (checkError) {
@@ -438,7 +470,10 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
     setIsSaving(true);
     try {
       setMachineDeletionPreview(
-        await structureAdapter.prepareMachineDeletion(machineId),
+        await structureCommand.execute(
+          structureActions.prepareMachineDeletion(machineId),
+          false,
+        ),
       );
       setError(undefined);
     } catch (previewError) {
@@ -467,9 +502,11 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
 
     setIsSaving(true);
     try {
-      const result = await structureAdapter.deleteMachine(
-        machineId,
-        plan.runs.map((run) => run.id),
+      const result = await structureCommand.execute(
+        structureActions.deleteMachine(
+          machineId,
+          plan.runs.map((run) => run.id),
+        ),
       );
       setMachineDeletionPreview(undefined);
       await refreshAfterEdit();
@@ -490,7 +527,7 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
     }
     setIsSaving(true);
     try {
-      await structureAdapter.deleteRun(runId);
+      await structureCommand.execute(structureActions.deleteRun(runId));
       setMachineDeletionPreview(undefined);
       await refreshAfterEdit();
     } catch (deleteError) {
@@ -507,10 +544,12 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
 
     setIsSaving(true);
     try {
-      await structureAdapter.setAttentionDefault(
-        selectedContextId,
-        attentionObjectKind,
-        attentionDefaultPolicy,
+      await structureCommand.execute(
+        structureActions.setAttentionDefault(
+          selectedContextId,
+          attentionObjectKind,
+          attentionDefaultPolicy,
+        ),
       );
       await refreshAfterEdit();
       setError(undefined);
@@ -524,7 +563,9 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
   async function handlePrepareReset() {
     setIsSaving(true);
     try {
-      setResetLocalDataPreview(await structureAdapter.prepareReset());
+      setResetLocalDataPreview(
+        await structureCommand.execute(structureActions.prepareReset(), false),
+      );
       setError(undefined);
     } catch (previewError) {
       setError(errorMessage(previewError));
@@ -548,13 +589,24 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
 
     setIsSaving(true);
     try {
-      const result = await structureAdapter.reset(
-        confirmation,
-        deleteWorksetDirectories,
+      const result = await structureCommand.execute(
+        structureActions.reset(confirmation, deleteWorksetDirectories),
       );
       setResetLocalDataPreview(undefined);
-      onResetComplete?.();
-      await refreshAll();
+      closeTerminal();
+      queryClient.clear();
+      await Promise.all([
+        queryClient.fetchQuery(setupStateQueryOptions()),
+        queryClient.fetchQuery(healthStatusQueryOptions(null)),
+        queryClient.fetchQuery(structureQueryOptions.contexts()),
+        queryClient.fetchQuery(structureQueryOptions.projects()),
+        queryClient.fetchQuery(structureQueryOptions.repositories()),
+        queryClient.fetchQuery(structureQueryOptions.machines()),
+        queryClient.fetchQuery(structureQueryOptions.attentionDefaults()),
+        queryClient.fetchQuery(homeQueryOptions(undefined)),
+        queryClient.fetchQuery(runSuggestionsQueryOptions()),
+        queryClient.fetchQuery(activityQueryOptions()),
+      ]);
       const summary = result.summary;
       window.alert(
         `Reset local data. Removed ${summary.contextCount} Context(s), ${summary.projectCount} Project(s), ${summary.repositoryCount} Repository record(s), ${summary.itemCount} Item(s), ${summary.worksetCount} Workset(s), ${summary.machineCount} Machine(s), ${summary.runCount} Run(s), ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.linkCount} Link(s), ${summary.externalObjectCount} External Object(s), ${summary.snapshotCount} snapshot(s), ${summary.activityCount} Activity record(s), ${summary.attentionDefaultCount} attention default(s), and ${result.auditEntryCount} prior audit entr${result.auditEntryCount === 1 ? "y" : "ies"}. A new Personal Context and Default Project are ready.`,
@@ -569,6 +621,11 @@ export function StructurePage({ onResetComplete }: StructurePageProps) {
 
   return (
     <div className="mt-6 space-y-6">
+      {error && (
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      )}
       <Card>
         <CardHeader className="border-b border-border/70">
           <div className="flex items-start justify-between gap-4">

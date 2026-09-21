@@ -26,8 +26,11 @@ import { command } from "./tauri";
 export const workAdapter = {
   getHome: (contextId: number | undefined, now: string) =>
     command<HomeView>("get_home", { contextId: contextId ?? null, now }),
-  searchItems: (query: string) =>
-    command<ItemView[]>("search_items_command", { query, contextId: null }),
+  searchItems: (query: string, contextId: number | undefined) =>
+    command<ItemView[]>("search_items_command", {
+      query,
+      contextId: contextId ?? null,
+    }),
   reconcileRuns: () => command<void>("reconcile_runs"),
   listRunSuggestions: () => command<RunSuggestion[]>("list_run_suggestions"),
   attachRun: (suggestion: RunSuggestion) =>

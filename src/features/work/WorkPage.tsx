@@ -1,4 +1,5 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 
 import { Button } from "../../components/ui/button";
@@ -13,11 +14,14 @@ import { Empty, EmptyDescription } from "../../components/ui/empty";
 import { Input } from "../../components/ui/input";
 import { NativeSelect, NativeSelectOption } from "../../components/ui/native-select";
 import { Spinner } from "../../components/ui/spinner";
-import { structureAdapter, workAdapter } from "../../runtime/adapters";
+import { useAppShell } from "../../components/app-shell";
 import { errorMessage } from "../../runtime/errors";
-import { useAppRuntime } from "../../runtime/AppRuntimeProvider";
+import {
+  invalidateWorkQueries,
+} from "../../runtime/query-invalidation";
+import { usePollExternalObjects } from "../../runtime/RuntimeEventsBridge";
+import { structureActions, useStructureCommand } from "../structure/structure-mutations";
 import type { Context, Project, RunSuggestion } from "../../runtime/types";
-import type { PaneTab } from "../../runtime/terminal-types";
 import {
   AttentionEntryCard,
   HomeColumn,
@@ -27,40 +31,42 @@ import {
 import type { WorkSearch } from "./work-search";
 import { parseWorkSearch } from "./work-search";
 import { flattenHome, uniqueItems } from "./work-utils";
+import {
+  useHomeQuery,
+  useRunSuggestionsQuery,
+  useSearchQuery,
+} from "./work-queries";
+import { useWorkCommand, workActions } from "./work-mutations";
+import { useStructureData } from "../structure/structure-queries";
 
-type WorkPageProps = {
-  onChanged: () => Promise<void>;
-  onOpenTerminal: (worksetId: number, pane: PaneTab) => void;
-};
-
-export function WorkPage({
-  onChanged,
-  onOpenTerminal,
-}: WorkPageProps) {
-  const {
-    structure,
-    home,
-    runSuggestions,
-    searchResults,
-    contextFilterId: runtimeContextFilterId,
-    searchQuery: runtimeSearchQuery,
-    isLoading,
-    initialStateLoaded,
-    setError,
-    setSearchQuery,
-    setContextFilter,
-    pollExternalObjects,
-  } = useAppRuntime();
+export function WorkPage() {
+  const { openTerminal: onOpenTerminal } = useAppShell();
+  const queryClient = useQueryClient();
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
+  const structure = useStructureData().data;
   const { contexts, projects, repositories, machines } = structure;
   const search = useSearch({ from: "/work" });
   const navigate = useNavigate({ from: "/work" });
   const normalizedSearch = parseWorkSearch(search);
   const contextFilterId = normalizedSearch.contextId;
   const searchQuery = normalizedSearch.q ?? "";
+  const homeQuery = useHomeQuery(contextFilterId);
+  const suggestionsQuery = useRunSuggestionsQuery();
+  const searchResultsQuery = useSearchQuery(
+    debouncedSearchQuery,
+    contextFilterId,
+  );
+  const home = homeQuery.data;
+  const runSuggestions = suggestionsQuery.data ?? [];
+  const searchResults = searchResultsQuery.data ?? [];
+  const isLoading = homeQuery.isPending;
+  const pollExternalObjects = usePollExternalObjects();
+  const workCommand = useWorkCommand();
+  const structureCommand = useStructureCommand();
   const [captureContextId, setCaptureContextId] = useState<number>();
   const [captureProjectId, setCaptureProjectId] = useState<number>();
   const [title, setTitle] = useState("");
-  const [isSaving, setIsSaving] = useState(false);
+  const isSaving = workCommand.isPending || structureCommand.isPending;
 
   const captureProjects = projects.filter(
     (project) => project.context_id === captureContextId,
@@ -91,29 +97,21 @@ export function WorkPage({
   ]);
 
   useEffect(() => {
-    if (runtimeContextFilterId !== contextFilterId) {
-      void setContextFilter(contextFilterId);
-    }
-    if (runtimeSearchQuery !== searchQuery) {
-      setSearchQuery(searchQuery);
-    }
-  }, [
-    contextFilterId,
-    runtimeContextFilterId,
-    runtimeSearchQuery,
-    searchQuery,
-    setContextFilter,
-    setSearchQuery,
-  ]);
+    const timer = window.setTimeout(
+      () => setDebouncedSearchQuery(searchQuery),
+      250,
+    );
+    return () => window.clearTimeout(timer);
+  }, [searchQuery]);
 
   useEffect(() => {
-    if (!initialStateLoaded || contextFilterId === undefined) return;
+    if (contextFilterId === undefined || contexts.length === 0) return;
     if (contexts.some((context) => context.id === contextFilterId)) return;
     void navigate({
       search: (current) => ({ ...current, contextId: undefined }),
       replace: true,
     });
-  }, [contextFilterId, contexts, initialStateLoaded, navigate]);
+  }, [contextFilterId, contexts, navigate]);
 
   useEffect(() => {
     const nextContextId =
@@ -147,29 +145,21 @@ export function WorkPage({
     event.preventDefault();
     if (!title.trim() || !captureContextId || !captureProjectId) return;
 
-    setIsSaving(true);
     try {
-      await structureAdapter.createItem(title, captureContextId, captureProjectId);
+      await structureCommand.execute(
+        structureActions.createItem(title, captureContextId, captureProjectId),
+      );
       setTitle("");
-      setError(undefined);
-      await onChanged();
     } catch (createError) {
-      setError(errorMessage(createError));
-    } finally {
-      setIsSaving(false);
+      window.alert(errorMessage(createError));
     }
   }
 
   async function handleAttachRun(suggestion: RunSuggestion) {
-    setIsSaving(true);
     try {
-      await workAdapter.attachRun(suggestion);
-      setError(undefined);
-      await onChanged();
+      await workCommand.execute(workActions.attachRun(suggestion));
     } catch (attachError) {
-      setError(errorMessage(attachError));
-    } finally {
-      setIsSaving(false);
+      window.alert(errorMessage(attachError));
     }
   }
 
@@ -205,9 +195,16 @@ export function WorkPage({
           <Button
             type="button"
             variant="outline"
-            onClick={() => void pollExternalObjects(true)}
+            onClick={() =>
+              void pollExternalObjects.mutateAsync().catch((pollError) =>
+                window.alert(errorMessage(pollError)),
+              )
+            }
+            disabled={pollExternalObjects.isPending}
           >
-            Refresh linked objects
+            {pollExternalObjects.isPending
+              ? "Refreshing linked objects…"
+              : "Refresh linked objects"}
           </Button>
         </CardContent>
       </Card>
@@ -287,7 +284,7 @@ export function WorkPage({
                       key={`${entry.kind}-${entry.link_id}-${entry.reminder_id ?? ""}-${entry.run_id ?? ""}`}
                       entry={entry}
                       item={allItems.find((candidate) => candidate.item.id === entry.item_id)}
-                      onMarkedReviewed={onChanged}
+                      onMarkedReviewed={() => invalidateWorkQueries(queryClient)}
                     />
                   ))}
                 </div>
@@ -301,7 +298,7 @@ export function WorkPage({
                 allItems={allItems}
                 repositories={repositories}
                 machines={machines}
-                onChanged={onChanged}
+                onChanged={() => invalidateWorkQueries(queryClient)}
                 onOpenTerminal={onOpenTerminal}
               />
               <HomeColumn
@@ -311,7 +308,7 @@ export function WorkPage({
                 allItems={allItems}
                 repositories={repositories}
                 machines={machines}
-                onChanged={onChanged}
+                onChanged={() => invalidateWorkQueries(queryClient)}
                 onOpenTerminal={onOpenTerminal}
               />
               <HomeColumn
@@ -321,7 +318,7 @@ export function WorkPage({
                 allItems={allItems}
                 repositories={repositories}
                 machines={machines}
-                onChanged={onChanged}
+                onChanged={() => invalidateWorkQueries(queryClient)}
                 onOpenTerminal={onOpenTerminal}
               />
               <HomeColumn
@@ -331,7 +328,7 @@ export function WorkPage({
                 allItems={allItems}
                 repositories={repositories}
                 machines={machines}
-                onChanged={onChanged}
+                onChanged={() => invalidateWorkQueries(queryClient)}
                 onOpenTerminal={onOpenTerminal}
               />
               <HomeColumn
@@ -341,7 +338,7 @@ export function WorkPage({
                 allItems={allItems}
                 repositories={repositories}
                 machines={machines}
-                onChanged={onChanged}
+                onChanged={() => invalidateWorkQueries(queryClient)}
                 onOpenTerminal={onOpenTerminal}
               />
             </div>

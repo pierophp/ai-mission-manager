@@ -7,7 +7,6 @@ import {
   CardTitle,
 } from "../../components/ui/card";
 import { Empty, EmptyDescription } from "../../components/ui/empty";
-import { useAppRuntime } from "../../runtime/AppRuntimeProvider";
 import type {
   ActivityTabView,
   AuditAction,
@@ -17,9 +16,11 @@ import type {
   ParentDeletionResult,
 } from "../../runtime/types";
 import { externalObjectKindLabel } from "../work/work-utils";
+import { useActivityQuery } from "../work/work-queries";
 
 export function ActivityPage() {
-  const { activity } = useAppRuntime();
+  const activityQuery = useActivityQuery();
+  const activity = activityQuery.data ?? { audit_entries: [], activities: [] };
 
   return (
     <div className="mt-6 grid gap-5">
