@@ -7,7 +7,7 @@ import {
   useRouter,
 } from "@tanstack/react-router";
 
-import { AppShell } from "./App";
+import { AppShell } from "./components/app-shell";
 import { appShellLayoutClassName } from "./components/app-shell-layout";
 import { Empty, EmptyDescription } from "./components/ui/empty";
 import { AppRuntimeProvider } from "./runtime/AppRuntimeProvider";

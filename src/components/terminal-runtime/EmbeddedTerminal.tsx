@@ -170,38 +170,50 @@ export function EmbeddedTerminal({
   }, [initialPane, terminalId, worksetId]);
 
   return (
-    <section className="embedded-terminal" aria-labelledby="embedded-terminal-heading">
-      <div className="embedded-terminal-heading">
+    <section
+      className="mt-7 grid gap-3.5 rounded-2xl border border-[var(--terminal-border)] bg-[var(--terminal-bg)] p-[18px] shadow-[0_18px_50px_rgb(var(--terminal-shadow-rgb)/0.16)]"
+      aria-labelledby="embedded-terminal-heading"
+    >
+      <div className="flex items-start justify-between gap-4 max-[560px]:flex-col">
         <div>
-          <p className="eyebrow">Embedded terminal</p>
-          <h2 id="embedded-terminal-heading">{activePane.label}</h2>
-          <p className="embedded-terminal-status">{status}</p>
+          <p className="mb-2 text-xs font-bold uppercase tracking-[0.14em] text-[var(--terminal-muted)]">
+            Embedded terminal
+          </p>
+          <h2 id="embedded-terminal-heading" className="font-heading text-xl font-medium text-[var(--terminal-heading)]">
+            {activePane.label}
+          </h2>
+          <p className="mt-1.5 text-xs text-[var(--terminal-muted)]">{status}</p>
         </div>
         <Button type="button" variant="secondary" onClick={onClose}>
           Close view
         </Button>
       </div>
-      <div className="terminal-tabs" role="tablist" aria-label="Panes in this Workset">
+      <div className="flex gap-1.5 overflow-x-auto pb-0.5" role="tablist" aria-label="Panes in this Workset">
         {panes.map((pane) => (
           <button
             type="button"
             role="tab"
             aria-selected={pane.paneId === activePane.paneId}
-            className={
+            className={`grid gap-0.5 rounded-lg border px-2.5 py-2 text-left text-[var(--terminal-tab-text)] disabled:cursor-not-allowed disabled:opacity-50 ${
               pane.paneId === activePane.paneId
-                ? "terminal-tab active"
-                : "terminal-tab"
-            }
+                ? "border-[var(--terminal-active-border)] bg-[var(--terminal-active)] text-[var(--terminal-heading)]"
+                : "border-[var(--terminal-tab-border)] bg-[var(--terminal-tab)] hover:border-[var(--terminal-active-border)] hover:bg-[var(--terminal-active)] hover:text-[var(--terminal-heading)]"
+            }`}
             key={`${pane.sessionName}-${pane.paneId}`}
             disabled={!pane.available}
             onClick={() => void attachPaneRef.current?.(pane)}
           >
             {pane.label}
-            <small>{pane.currentCommand || pane.currentPath || "unavailable"}</small>
+            <small className="max-w-[190px] overflow-hidden text-ellipsis whitespace-nowrap text-[0.63rem] font-medium text-[var(--terminal-tab-muted)]">
+              {pane.currentCommand || pane.currentPath || "unavailable"}
+            </small>
           </button>
         ))}
       </div>
-      <div className="terminal-surface" ref={terminalContainerRef} />
+      <div
+        className="terminal-surface min-h-[420px] overflow-hidden rounded-[10px] border border-[var(--terminal-surface-border)] bg-[var(--terminal-bg)] p-3"
+        ref={terminalContainerRef}
+      />
       {terminalError && (
         <Alert variant="destructive">
           <AlertDescription>{terminalError}</AlertDescription>
