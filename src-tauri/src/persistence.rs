@@ -3950,8 +3950,21 @@ mod tests {
             .apply(&repository.effects)
             .expect("Repository should persist");
 
-        let item = decide(
+        let second_repository = decide(
             repository.state,
+            Event::RegisterRepository {
+                project_id: 1,
+                name: "mission-manager-web".into(),
+                remote_url: "https://example.com/mission-manager-web.git".into(),
+            },
+        )
+        .expect("the second Repository should be registered");
+        store
+            .apply(&second_repository.effects)
+            .expect("the second Repository should persist");
+
+        let item = decide(
+            second_repository.state,
             Event::CreateItem {
                 title: "Implement execution contract".into(),
                 context_id: 1,
@@ -3991,8 +4004,24 @@ mod tests {
             .apply(&workspace.effects)
             .expect("Workspace should persist");
 
-        let worktree = decide(
+        let second_workspace = decide(
             workspace.state,
+            Event::CreateWorkspace {
+                item_id: 1,
+                repositories: vec![WorkspaceRepositoryInput {
+                    repository_id: 2,
+                    branch: "feature/web-contracts".into(),
+                    base_branch: "main".into(),
+                }],
+            },
+        )
+        .expect("the second Workspace should be created");
+        store
+            .apply(&second_workspace.effects)
+            .expect("the second Workspace should persist");
+
+        let worktree = decide(
+            second_workspace.state,
             Event::CreateWorktree {
                 workspace_id: 1,
                 repository_id: 1,
@@ -4025,16 +4054,23 @@ mod tests {
                 .execution_mode,
             ExecutionMode::Direct
         );
-        assert_eq!(state.workspaces.len(), 1);
+        assert_eq!(state.workspaces.len(), 2);
         assert_eq!(state.workspaces[0].repositories.len(), 1);
         assert_eq!(state.workspaces[0].repositories[0].base_branch, "main");
+        assert_eq!(state.workspaces[1].id, 2);
+        assert_eq!(state.workspaces[1].item_id, 1);
+        assert_eq!(state.workspaces[1].repositories[0].repository_id, 2);
+        assert_eq!(
+            state.workspaces[1].repositories[0].branch,
+            "feature/web-contracts"
+        );
         assert_eq!(state.worktrees.len(), 1);
         assert_eq!(state.worktrees[0].workspace_id, state.workspaces[0].id);
         assert_eq!(
             state.worktrees[0].path,
             "/Users/piero/worktrees/feature-contracts/mission-manager"
         );
-        assert_eq!(state.next_workspace_id, 2);
+        assert_eq!(state.next_workspace_id, 3);
         assert_eq!(state.next_worktree_id, 2);
     }
 

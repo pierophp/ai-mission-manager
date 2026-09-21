@@ -4736,6 +4736,67 @@ mod tests {
     }
 
     #[test]
+    fn creating_multiple_workspaces_through_the_application_persists_them_for_the_item() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .register_repository(
+                1,
+                "service-a".into(),
+                "https://example.com/service-a.git".into(),
+            )
+            .expect("first Repository should register");
+        runtime
+            .register_repository(
+                1,
+                "service-b".into(),
+                "https://example.com/service-b.git".into(),
+            )
+            .expect("second Repository should register");
+        runtime
+            .create_item("Keep two lines of work reusable".into(), 1, 1)
+            .expect("Item should be created");
+
+        let first = runtime
+            .create_workspace(
+                1,
+                vec![WorkspaceRepositoryInput {
+                    repository_id: 1,
+                    branch: "feature/api".into(),
+                    base_branch: "main".into(),
+                }],
+            )
+            .expect("first Workspace should be created");
+        let second = runtime
+            .create_workspace(
+                1,
+                vec![WorkspaceRepositoryInput {
+                    repository_id: 2,
+                    branch: "feature/web".into(),
+                    base_branch: "main".into(),
+                }],
+            )
+            .expect("second Workspace should be created");
+
+        assert_eq!((first.id, second.id), (1, 2));
+        assert_eq!(runtime.state.workspaces.len(), 2);
+        assert!(runtime
+            .state
+            .workspaces
+            .iter()
+            .all(|workspace| workspace.item_id == 1));
+
+        let reopened = Runtime::open(&database).expect("runtime should reopen");
+        assert_eq!(reopened.state.workspaces, runtime.state.workspaces);
+        let item_view = search_items(&reopened.state, "two lines", None)
+            .into_iter()
+            .next()
+            .expect("the Item view should be searchable after reopening");
+        assert_eq!(item_view.workspaces, reopened.state.workspaces);
+    }
+
+    #[test]
     fn reset_requires_the_typed_confirmation_and_keeps_the_model_when_rejected() {
         let directory = tempdir().expect("temporary app directory should exist");
         let database = directory.path().join("mission-manager.sqlite");

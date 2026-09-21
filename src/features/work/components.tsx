@@ -58,6 +58,8 @@ import type {
   RunPromptSelection,
   RunState,
   RunSuggestion,
+  Workspace,
+  WorkspaceRepositoryInput,
   Workset,
   WorksetRemovalReport,
   WorksetRepositoryInput,
@@ -184,6 +186,15 @@ export function ItemCard({
   const [worksetBaseBranchOverrides, setWorksetBaseBranchOverrides] = useState<
     Record<number, string>
   >({});
+  const [workspaceRepositoryIds, setWorkspaceRepositoryIds] = useState<
+    number[]
+  >([]);
+  const [workspaceBranches, setWorkspaceBranches] = useState<
+    Record<number, string>
+  >({});
+  const [workspaceBaseBranches, setWorkspaceBaseBranches] = useState<
+    Record<number, string>
+  >({});
   const [additionalRepositoryId, setAdditionalRepositoryId] =
     useState<number>();
   const [additionalBranchOverride, setAdditionalBranchOverride] = useState("");
@@ -301,6 +312,31 @@ export function ItemCard({
     setSelectedRepositoryIds([]);
     setWorksetBranchOverrides({});
     setWorksetBaseBranchOverrides({});
+  }
+
+  async function handleCreateWorkspace(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (workspaceRepositoryIds.length === 0) return;
+
+    const selected: WorkspaceRepositoryInput[] = workspaceRepositoryIds.map(
+      (repositoryId) => ({
+        repositoryId,
+        branch: workspaceBranches[repositoryId]?.trim() ?? "",
+        baseBranch: workspaceBaseBranches[repositoryId]?.trim() ?? "",
+      }),
+    );
+    if (
+      selected.some(
+        (repository) => !repository.branch || !repository.baseBranch,
+      )
+    ) {
+      return;
+    }
+
+    await saveItem(workActions.createWorkspace(view.item.id, selected));
+    setWorkspaceRepositoryIds([]);
+    setWorkspaceBranches({});
+    setWorkspaceBaseBranches({});
   }
 
   async function handleAttachWorkset(event: FormEvent<HTMLFormElement>) {
@@ -702,6 +738,38 @@ export function ItemCard({
       <p>
         {values.length === 0 ? emptyMessage : `${label}: ${values.join("; ")}`}
       </p>
+    );
+  }
+
+  function renderWorkspaceCard(workspace: Workspace) {
+    return (
+      <Card size="sm" key={workspace.id}>
+        <CardHeader className="border-b border-border/70">
+          <CardTitle className="text-sm">Workspace #{workspace.id}</CardTitle>
+          <CardDescription>
+            Persistent logical grouping for later Runs. It has no shared root
+            directory.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3 pt-4">
+          <div className="flex flex-wrap gap-2">
+            {workspace.repositories.map((selected) => (
+              <Badge
+                variant="secondary"
+                className="h-auto items-start gap-1 py-1"
+                key={selected.repository_id}
+              >
+                <span className="font-medium">
+                  {repositoryName(repositories, selected.repository_id)}
+                </span>
+                <span className="text-muted-foreground">
+                  {selected.branch} · base {selected.base_branch}
+                </span>
+              </Badge>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
     );
   }
 
@@ -1348,6 +1416,132 @@ export function ItemCard({
             })}
           </div>
         )}
+        <div className="grid gap-3">
+          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
+            Workspaces
+          </span>
+          {view.workspaces.map(renderWorkspaceCard)}
+          <Card size="sm">
+            <CardHeader>
+              <CardTitle className="text-sm">Create a Workspace</CardTitle>
+              <CardDescription>
+                Save a reusable Repository subset and its branch
+                configuration. Workspaces do not create a shared
+                multi-Repository root.
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form className="grid gap-3" onSubmit={handleCreateWorkspace}>
+                <span className="text-sm font-medium">
+                  Select repositories
+                </span>
+                {itemRepositories.length === 0 ? (
+                  <span className="text-sm text-muted-foreground">
+                    Register a Repository under this Project first.
+                  </span>
+                ) : (
+                  <div className="grid gap-2">
+                    {itemRepositories.map((repository) => {
+                      const selected = workspaceRepositoryIds.includes(
+                        repository.id,
+                      );
+                      return (
+                        <div
+                          className="grid gap-2 rounded-md border p-3"
+                          key={repository.id}
+                        >
+                          <label className="flex items-center gap-2 text-sm font-normal">
+                            <Checkbox
+                              checked={selected}
+                              onCheckedChange={(checked) => {
+                                setWorkspaceRepositoryIds((current) =>
+                                  checked === true
+                                    ? [...current, repository.id]
+                                    : current.filter(
+                                        (id) => id !== repository.id,
+                                      ),
+                                );
+                                if (checked === true) {
+                                  setWorkspaceBranches((current) => ({
+                                    ...current,
+                                    [repository.id]:
+                                      current[repository.id] ??
+                                      repository.base_branch,
+                                  }));
+                                  setWorkspaceBaseBranches((current) => ({
+                                    ...current,
+                                    [repository.id]:
+                                      current[repository.id] ??
+                                      repository.base_branch,
+                                  }));
+                                }
+                              }}
+                              disabled={isSaving}
+                            />
+                            {repository.name}
+                          </label>
+                          {selected && (
+                            <div className="grid gap-2 sm:grid-cols-2">
+                              <label className="grid gap-1.5 text-sm font-medium">
+                                <span>Workspace branch</span>
+                                <Input
+                                  aria-label={`${repository.name} workspace branch`}
+                                  value={
+                                    workspaceBranches[repository.id] ?? ""
+                                  }
+                                  onChange={(event) =>
+                                    setWorkspaceBranches((current) => ({
+                                      ...current,
+                                      [repository.id]: event.target.value,
+                                    }))
+                                  }
+                                  placeholder={repository.base_branch}
+                                  disabled={isSaving}
+                                />
+                              </label>
+                              <label className="grid gap-1.5 text-sm font-medium">
+                                <span>Base branch</span>
+                                <Input
+                                  aria-label={`${repository.name} workspace base branch`}
+                                  value={
+                                    workspaceBaseBranches[repository.id] ??
+                                    ""
+                                  }
+                                  onChange={(event) =>
+                                    setWorkspaceBaseBranches((current) => ({
+                                      ...current,
+                                      [repository.id]: event.target.value,
+                                    }))
+                                  }
+                                  placeholder={repository.base_branch}
+                                  disabled={isSaving}
+                                />
+                              </label>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                <Button
+                  type="submit"
+                  disabled={
+                    isSaving ||
+                    workspaceRepositoryIds.length === 0 ||
+                    workspaceRepositoryIds.some(
+                      (repositoryId) =>
+                        !workspaceBranches[repositoryId]?.trim() ||
+                        !workspaceBaseBranches[repositoryId]?.trim(),
+                    )
+                  }
+                >
+                  {isSaving ? "Saving…" : "Create Workspace"}
+                </Button>
+              </form>
+            </CardContent>
+          </Card>
+        </div>
         <div className="grid gap-3">
           <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
             Worksets

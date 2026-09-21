@@ -26,6 +26,10 @@ export const workActions = {
     branch: string,
     repositories: Parameters<typeof workAdapter.createWorkset>[3],
   ) => () => workAdapter.createWorkset(itemId, rootDirectory, branch, repositories),
+  createWorkspace: (
+    itemId: number,
+    repositories: Parameters<typeof workAdapter.createWorkspace>[1],
+  ) => () => workAdapter.createWorkspace(itemId, repositories),
   attachWorkset: (itemId: number, rootDirectory: string) =>
     () => workAdapter.attachWorkset(itemId, rootDirectory),
   addRepositoryToWorkset: (

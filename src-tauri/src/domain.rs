@@ -7974,6 +7974,74 @@ mod tests {
     }
 
     #[test]
+    fn an_item_can_own_multiple_workspaces_with_independent_repository_subsets() {
+        let mut state = state_with_item(1, "Work");
+        state.repositories.extend([
+            Repository {
+                id: 1,
+                project_id: 1,
+                name: "service-a".into(),
+                remote_url: "https://example.com/service-a.git".into(),
+                base_branch: "main".into(),
+            },
+            Repository {
+                id: 2,
+                project_id: 1,
+                name: "service-b".into(),
+                remote_url: "https://example.com/service-b.git".into(),
+                base_branch: "trunk".into(),
+            },
+        ]);
+        state.next_repository_id = 3;
+
+        let first = decide(
+            state,
+            Event::CreateWorkspace {
+                item_id: 1,
+                repositories: vec![WorkspaceRepositoryInput {
+                    repository_id: 1,
+                    branch: "feature/one".into(),
+                    base_branch: "main".into(),
+                }],
+            },
+        )
+        .expect("the first Workspace should be created");
+        let second = decide(
+            first.state,
+            Event::CreateWorkspace {
+                item_id: 1,
+                repositories: vec![WorkspaceRepositoryInput {
+                    repository_id: 2,
+                    branch: "feature/two".into(),
+                    base_branch: "trunk".into(),
+                }],
+            },
+        )
+        .expect("the second Workspace should be created");
+
+        assert_eq!(second.state.workspaces.len(), 2);
+        assert_eq!(second.state.workspaces[0].id, 1);
+        assert_eq!(second.state.workspaces[1].id, 2);
+        assert_eq!(second.state.workspaces[0].item_id, 1);
+        assert_eq!(second.state.workspaces[1].item_id, 1);
+        assert_eq!(second.state.workspaces[0].repositories[0].repository_id, 1);
+        assert_eq!(second.state.workspaces[1].repositories[0].repository_id, 2);
+        assert_eq!(
+            second.state.workspaces[0].repositories[0].branch,
+            "feature/one"
+        );
+        assert_eq!(
+            second.state.workspaces[1].repositories[0].branch,
+            "feature/two"
+        );
+        assert!(second.state.workspaces.iter().all(|workspace| {
+            workspace.repositories.iter().all(|repository| {
+                !repository.branch.is_empty() && !repository.base_branch.is_empty()
+            })
+        }));
+    }
+
+    #[test]
     fn workspace_and_worktree_execution_contract_is_decided_in_memory() {
         let mut state = state_with_item(1, "Work");
         state.repositories.push(Repository {
