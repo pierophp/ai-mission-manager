@@ -84,7 +84,7 @@ The initial provider is GitHub. The initial Terminal Runtime is tmux. Both are b
 ## Requirements
 
 - macOS
-- Node.js and npm
+- Node.js 20.19+ (20.x), 22.18+ (22.x) or 24.11+ and npm
 - Rust and Cargo
 - tmux
 - GitHub CLI (gh), authenticated with gh auth login for GitHub integration

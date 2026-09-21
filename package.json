@@ -3,9 +3,12 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "engines": {
+    "node": "^20.19.0 || ^22.18.0 || >=24.11.0"
+  },
   "scripts": {
-    "build": "tsc --noEmit && vite build",
-    "dev": "vite --host 127.0.0.1",
+    "build": "tsc --noEmit && vp build",
+    "dev": "vp dev --host 127.0.0.1",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && npm run build"
@@ -23,6 +26,10 @@
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^6.1.1",
     "typescript": "^5.8.3",
-    "vite": "^8.3.0"
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.3.3",
+    "vite-plus": "0.3.3"
+  },
+  "overrides": {
+    "vite": "npm:@voidzero-dev/vite-plus-core@0.3.3"
   }
 }

@@ -1110,7 +1110,9 @@ export function App() {
     try {
       const preview = await invoke<ParentDeletionPreview>(
         "prepare_project_deletion",
-        { projectId },
+        {
+          projectId,
+        },
       );
       setParentDeletionPreview(preview);
       setError(undefined);
@@ -1126,7 +1128,9 @@ export function App() {
     try {
       const preview = await invoke<ParentDeletionPreview>(
         "prepare_context_deletion",
-        { contextId },
+        {
+          contextId,
+        },
       );
       setParentDeletionPreview(preview);
       setError(undefined);
@@ -1310,7 +1314,9 @@ export function App() {
     try {
       const preview = await invoke<RepositoryDeletionPreview>(
         "prepare_repository_deletion",
-        { repositoryId },
+        {
+          repositoryId,
+        },
       );
       setRepositoryDeletionPreview(preview);
       setError(undefined);
@@ -1369,7 +1375,9 @@ export function App() {
     try {
       const preview = await invoke<MachineDeletionPreview>(
         "prepare_machine_deletion",
-        { machineId },
+        {
+          machineId,
+        },
       );
       setMachineDeletionPreview(preview);
       setError(undefined);
