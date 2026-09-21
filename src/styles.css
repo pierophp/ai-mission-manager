@@ -755,105 +755,6 @@ button:not([data-slot="button"]):disabled {
   font-size: 0.72rem;
 }
 
-.deletion-preview {
-  display: grid;
-  gap: 8px;
-  margin: 10px 0 13px;
-  padding: 10px;
-  border: 1px solid var(--danger-border);
-  border-radius: 8px;
-  background: var(--danger-surface);
-  color: var(--danger-text);
-  font-size: 0.7rem;
-  line-height: 1.4;
-}
-
-.deletion-preview > p,
-.deletion-preview ul,
-.deletion-blockers p {
-  margin: 0;
-}
-
-.deletion-preview ul {
-  display: grid;
-  gap: 2px;
-  padding-left: 18px;
-}
-
-.deletion-worksets,
-.deletion-blockers {
-  display: grid;
-  gap: 6px;
-  padding-top: 8px;
-  border-top: 1px solid var(--attention-line);
-}
-
-.deletion-workset {
-  display: grid;
-  gap: 2px;
-  padding: 7px;
-  border: 1px solid var(--attention-line);
-  border-radius: 7px;
-  background: var(--surface);
-}
-
-.deletion-workset strong,
-.deletion-blockers strong {
-  color: var(--danger-strong);
-}
-
-.deletion-workset code {
-  overflow: hidden;
-  color: var(--muted);
-  font-size: 0.64rem;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.deletion-workset span,
-.deletion-blockers span {
-  color: var(--danger-strong);
-  font-size: 0.68rem;
-}
-
-.deletion-preview-actions {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding-top: 2px;
-}
-
-.parent-deletion-summary {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-  gap: 5px 10px;
-  padding: 8px 0;
-  border-top: 1px solid var(--attention-line);
-  border-bottom: 1px solid var(--attention-line);
-}
-
-.parent-deletion-summary strong {
-  color: var(--danger-strong);
-}
-
-.danger-zone {
-  display: grid;
-  gap: 12px;
-  margin-top: 24px;
-  padding: 16px;
-  border: 1px solid var(--danger-border);
-  border-radius: 12px;
-  background: var(--surface-warm);
-}
-
-.danger-zone h3 {
-  color: var(--danger-strong);
-}
-
-.reset-preview {
-  margin: 0;
-}
-
 .item-context span,
 .search-result p span {
   color: var(--separator);
@@ -1587,122 +1488,6 @@ button:not([data-slot="button"]):disabled {
   font-size: 0.74rem;
 }
 
-.capture-card,
-.organise-card {
-  padding: 28px;
-  border: 1px solid var(--line);
-  border-radius: 18px;
-}
-
-.capture-card {
-  margin-top: 48px;
-  background: var(--surface);
-  box-shadow: 0 18px 50px rgb(var(--shadow-rgb) / 0.07);
-}
-
-.organise-card {
-  margin-top: 30px;
-  background: rgb(var(--surface-rgb) / 0.7);
-}
-
-.capture-form {
-  align-items: end;
-  gap: 14px;
-  margin-top: 28px;
-}
-
-.capture-form label {
-  flex: 1;
-}
-
-.organisation-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
-  gap: 32px;
-  margin-top: 28px;
-}
-
-.attention-default-form {
-  display: grid;
-  grid-template-columns: minmax(170px, 1fr) minmax(150px, 0.7fr) minmax(220px, 1.2fr) auto;
-  align-items: end;
-  gap: 14px;
-  margin-top: 30px;
-  padding-top: 22px;
-  border-top: 1px solid var(--line-soft);
-}
-
-.attention-default-form h3 {
-  color: var(--ink);
-}
-
-.attention-default-options {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 12px;
-}
-
-.attention-default-options label {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 0.68rem;
-}
-
-.attention-default-options input[type="checkbox"] {
-  width: auto;
-  accent-color: var(--accent);
-}
-
-.compact-form {
-  display: grid;
-  gap: 12px;
-}
-
-.compact-form button {
-  justify-self: start;
-}
-
-.entity-list {
-  list-style: none;
-  margin: 20px 0 0;
-  padding: 0;
-}
-
-.entity-row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 11px 0;
-  border-bottom: 1px solid var(--line-soft);
-  font-size: 0.88rem;
-}
-
-.entity-meta {
-  color: var(--muted);
-  font-size: 0.74rem;
-  text-align: right;
-}
-
-.entity-row > div:first-child {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-}
-
-.entity-actions {
-  display: flex;
-  gap: 8px;
-  margin-left: auto;
-}
-
-.entity-row > .deletion-preview {
-  flex-basis: 100%;
-}
-
 .activity-page {
   display: grid;
   gap: 20px;
@@ -1835,25 +1620,12 @@ button:not([data-slot="button"]):disabled {
     grid-template-columns: 1fr;
   }
 
-  .organisation-grid {
-    grid-template-columns: 1fr;
-    gap: 30px;
-  }
-
-  .attention-default-form {
-    grid-template-columns: 1fr;
-  }
-
   .setup-actions,
   .setup-dependency-heading {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .capture-form button,
-  .compact-form button {
-    width: 100%;
-  }
 }
 
 @media (max-width: 510px) {
@@ -1867,10 +1639,6 @@ button:not([data-slot="button"]):disabled {
     grid-template-columns: 1fr;
   }
 
-  .capture-card,
-  .organise-card {
-    padding: 20px;
-  }
 }
 
 @theme inline {
