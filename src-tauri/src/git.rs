@@ -185,33 +185,7 @@ impl GitCli {
         if matches!(machine.transport, MachineTransport::Local) {
             return self.inspect_checkout(checkout_path);
         }
-
-        let checkout = shell_quote(&checkout_path.to_string_lossy());
-        let run = |operation: &'static str, command: String| {
-            run_machine_shell(machine, &command)
-                .map_err(|details| GitError::Failed { operation, details })
-        };
-        run(
-            "validate the remote checkout Git repository",
-            format!("git -C {checkout} rev-parse --show-toplevel"),
-        )?;
-        let current_branch = run(
-            "read the remote checkout branch",
-            format!(
-                "git -C {checkout} symbolic-ref --short HEAD 2>/dev/null || printf '%s' 'HEAD (detached)'"
-            ),
-        )?
-        .trim()
-        .to_owned();
-        let status = run(
-            "read the remote checkout status",
-            format!("git -C {checkout} status --porcelain --untracked-files=all"),
-        )?;
-        Ok(CheckoutInspection {
-            remote_url: None,
-            current_branch,
-            is_dirty: !status.trim().is_empty(),
-        })
+        self.inspect_remote_checkout(machine, checkout_path)
     }
 
     pub fn clone_repository(&self, remote_url: &str, destination: &Path) -> Result<(), GitError> {
@@ -243,6 +217,421 @@ impl GitCli {
         self.run("clone the repository", &["clone", remote_url, &destination])
     }
 
+    pub fn prepare_worktree_on_machine(
+        &self,
+        machine: &Machine,
+        repository: &Repository,
+        canonical_checkout: &Path,
+        destination: &Path,
+        branch: &str,
+        base_branch: &str,
+        reuse_existing_branch: bool,
+        confirm_dirty_attachment: bool,
+    ) -> Result<CheckoutInspection, GitError> {
+        if matches!(machine.transport, MachineTransport::Local) {
+            return self.prepare_worktree(
+                repository,
+                canonical_checkout,
+                destination,
+                branch,
+                base_branch,
+                reuse_existing_branch,
+                confirm_dirty_attachment,
+            );
+        }
+
+        if branch.trim().is_empty() || base_branch.trim().is_empty() {
+            return Err(GitError::Failed {
+                operation: "prepare the Git Worktree",
+                details: "target and base branches cannot be blank".into(),
+            });
+        }
+        if self.remote_path_exists(machine, destination)? {
+            return Err(GitError::DestinationExists {
+                path: destination.to_owned(),
+            });
+        }
+        let remote =
+            self.configured_remote_on_machine(machine, canonical_checkout, &repository.remote_url)?;
+        self.remote_git(
+            machine,
+            "fetch the configured remote",
+            canonical_checkout,
+            &format!("fetch {}", shell_quote(&remote)),
+        )?;
+        let base_ref = format!("refs/remotes/{remote}/{base_branch}");
+        if self
+            .remote_git_optional(
+                machine,
+                "check the configured remote base branch",
+                canonical_checkout,
+                &format!("rev-parse --verify {}", shell_quote(&base_ref)),
+            )?
+            .is_none()
+        {
+            return Err(GitError::BaseBranchNotFound {
+                remote,
+                branch: base_branch.into(),
+            });
+        }
+        if let Some(entry) = self
+            .list_worktrees_on_machine(machine, canonical_checkout)?
+            .into_iter()
+            .find(|entry| entry.branch.as_deref() == Some(branch))
+        {
+            return Err(GitError::BranchAlreadyAttached {
+                branch: branch.into(),
+                path: entry.path,
+            });
+        }
+        let local_ref = format!("refs/heads/{branch}");
+        let remote_ref = format!("refs/remotes/{remote}/{branch}");
+        let local_exists = self
+            .remote_git_optional(
+                machine,
+                "check the target branch",
+                canonical_checkout,
+                &format!("show-ref --verify {}", shell_quote(&local_ref)),
+            )?
+            .is_some();
+        let remote_exists = self
+            .remote_git_optional(
+                machine,
+                "check the target remote branch",
+                canonical_checkout,
+                &format!("show-ref --verify {}", shell_quote(&remote_ref)),
+            )?
+            .is_some();
+        if let Some(parent) = destination.parent() {
+            self.remote_command(
+                machine,
+                "create the Worktree parent directory",
+                &format!("mkdir -p {}", machine_path_arg(parent)),
+            )?;
+        }
+        if reuse_existing_branch {
+            if local_exists {
+                self.remote_git_with_path(
+                    machine,
+                    "attach the existing target branch",
+                    canonical_checkout,
+                    &format!(
+                        "worktree add {} {}",
+                        machine_path_arg(destination),
+                        shell_quote(branch)
+                    ),
+                )?;
+            } else if remote_exists {
+                self.remote_git_with_path(
+                    machine,
+                    "attach the existing remote target branch",
+                    canonical_checkout,
+                    &format!(
+                        "worktree add --track -b {} {} {}",
+                        shell_quote(branch),
+                        machine_path_arg(destination),
+                        shell_quote(&remote_ref)
+                    ),
+                )?;
+            } else {
+                return Err(GitError::BranchNotFound {
+                    branch: branch.into(),
+                });
+            }
+        } else {
+            if local_exists || remote_exists {
+                return Err(GitError::BranchAlreadyExists {
+                    branch: branch.into(),
+                });
+            }
+            self.remote_git_with_path(
+                machine,
+                "create the target Git Worktree",
+                canonical_checkout,
+                &format!(
+                    "worktree add -b {} {} {}",
+                    shell_quote(branch),
+                    machine_path_arg(destination),
+                    shell_quote(&base_ref)
+                ),
+            )?;
+            self.remote_git_with_path(
+                machine,
+                "configure the target branch upstream",
+                destination,
+                &format!(
+                    "config {} {}",
+                    shell_quote(&format!("branch.{branch}.remote")),
+                    shell_quote(&remote)
+                ),
+            )?;
+            self.remote_git_with_path(
+                machine,
+                "configure the target branch merge name",
+                destination,
+                &format!(
+                    "config {} {}",
+                    shell_quote(&format!("branch.{branch}.merge")),
+                    shell_quote(&format!("refs/heads/{branch}"))
+                ),
+            )?;
+        }
+        self.validate_worktree_attachment_on_machine(
+            machine,
+            repository,
+            canonical_checkout,
+            destination,
+            branch,
+            confirm_dirty_attachment,
+        )
+    }
+
+    pub fn validate_worktree_attachment_on_machine(
+        &self,
+        machine: &Machine,
+        repository: &Repository,
+        canonical_checkout: &Path,
+        worktree_path: &Path,
+        expected_branch: &str,
+        confirm_dirty_attachment: bool,
+    ) -> Result<CheckoutInspection, GitError> {
+        if matches!(machine.transport, MachineTransport::Local) {
+            return self.validate_worktree_attachment(
+                repository,
+                canonical_checkout,
+                worktree_path,
+                expected_branch,
+                confirm_dirty_attachment,
+            );
+        }
+        let requested_path = self.remote_canonical_path(machine, worktree_path)?;
+        let canonical_path = self.remote_canonical_path(machine, canonical_checkout)?;
+        let registered = self
+            .list_worktrees_on_machine(machine, canonical_checkout)?
+            .into_iter()
+            .any(|entry| {
+                self.remote_canonical_path(machine, &entry.path)
+                    .map(|path| path == requested_path && path != canonical_path)
+                    .unwrap_or(false)
+            });
+        if !registered {
+            return Err(GitError::NotAWorktree {
+                path: worktree_path.to_owned(),
+            });
+        }
+        let inspection = self.inspect_remote_checkout(machine, worktree_path)?;
+        if inspection.remote_url.as_deref() != Some(repository.remote_url.as_str()) {
+            return Err(GitError::RemoteMismatch {
+                expected: repository.remote_url.clone(),
+                actual: inspection.remote_url.unwrap_or_default(),
+            });
+        }
+        if inspection.current_branch != expected_branch {
+            return Err(GitError::WorktreeBranchMismatch {
+                expected: expected_branch.into(),
+                actual: inspection.current_branch,
+            });
+        }
+        if inspection.is_dirty && !confirm_dirty_attachment {
+            return Err(GitError::DirtyWorktree {
+                path: worktree_path.to_owned(),
+            });
+        }
+        Ok(inspection)
+    }
+
+    fn inspect_remote_checkout(
+        &self,
+        machine: &Machine,
+        checkout_path: &Path,
+    ) -> Result<CheckoutInspection, GitError> {
+        self.remote_git(
+            machine,
+            "validate the remote checkout Git repository",
+            checkout_path,
+            "rev-parse --show-toplevel",
+        )?;
+        let remote_url = self.remote_repository_url(machine, checkout_path)?;
+        let current_branch = self
+            .remote_git_optional(
+                machine,
+                "read the remote checkout branch",
+                checkout_path,
+                "symbolic-ref --short HEAD",
+            )?
+            .map(|branch| branch.trim().to_owned())
+            .unwrap_or_else(|| "HEAD (detached)".into());
+        let status = self.remote_git(
+            machine,
+            "read the remote checkout status",
+            checkout_path,
+            "status --porcelain --untracked-files=all",
+        )?;
+        Ok(CheckoutInspection {
+            remote_url,
+            current_branch,
+            is_dirty: !status.trim().is_empty(),
+        })
+    }
+
+    fn remote_repository_url(
+        &self,
+        machine: &Machine,
+        checkout_path: &Path,
+    ) -> Result<Option<String>, GitError> {
+        let remotes = self.remote_git(
+            machine,
+            "list remote checkout remotes",
+            checkout_path,
+            "remote",
+        )?;
+        remotes
+            .lines()
+            .map(str::trim)
+            .find(|remote| !remote.is_empty())
+            .map(|remote| {
+                self.remote_git(
+                    machine,
+                    "read remote checkout URL",
+                    checkout_path,
+                    &format!("remote get-url {}", shell_quote(remote)),
+                )
+                .map(|url| url.trim().to_owned())
+            })
+            .transpose()
+    }
+
+    fn configured_remote_on_machine(
+        &self,
+        machine: &Machine,
+        checkout_path: &Path,
+        expected: &str,
+    ) -> Result<String, GitError> {
+        let remotes = self.remote_git(
+            machine,
+            "list configured Git remotes",
+            checkout_path,
+            "remote",
+        )?;
+        for remote in remotes
+            .lines()
+            .map(str::trim)
+            .filter(|remote| !remote.is_empty())
+        {
+            if self
+                .remote_git(
+                    machine,
+                    "read configured Git remote",
+                    checkout_path,
+                    &format!("remote get-url {}", shell_quote(remote)),
+                )?
+                .trim()
+                == expected
+            {
+                return Ok(remote.to_owned());
+            }
+        }
+        if let Some(remote) = remotes
+            .lines()
+            .map(str::trim)
+            .find(|remote| !remote.is_empty())
+        {
+            let actual = self
+                .remote_git(
+                    machine,
+                    "read configured Git remote",
+                    checkout_path,
+                    &format!("remote get-url {}", shell_quote(remote)),
+                )?
+                .trim()
+                .to_owned();
+            return Err(GitError::RemoteMismatch {
+                expected: expected.into(),
+                actual,
+            });
+        }
+        Err(GitError::RemoteNotConfigured {
+            expected: expected.into(),
+        })
+    }
+
+    fn list_worktrees_on_machine(
+        &self,
+        machine: &Machine,
+        canonical_checkout: &Path,
+    ) -> Result<Vec<GitWorktreeEntry>, GitError> {
+        let output = self.remote_git(
+            machine,
+            "list Git Worktrees",
+            canonical_checkout,
+            "worktree list --porcelain",
+        )?;
+        Ok(parse_worktree_list(&output))
+    }
+
+    fn remote_path_exists(&self, machine: &Machine, path: &Path) -> Result<bool, GitError> {
+        Ok(run_machine_shell(machine, &format!("test -e {}", machine_path_arg(path))).is_ok())
+    }
+
+    fn remote_canonical_path(&self, machine: &Machine, path: &Path) -> Result<PathBuf, GitError> {
+        let output =
+            run_machine_shell(machine, &format!("cd {} && pwd -P", machine_path_arg(path)))
+                .map_err(|details| GitError::Failed {
+                    operation: "canonicalize a remote Worktree path",
+                    details,
+                })?;
+        Ok(PathBuf::from(output.trim()))
+    }
+
+    fn remote_command(
+        &self,
+        machine: &Machine,
+        operation: &'static str,
+        command: &str,
+    ) -> Result<String, GitError> {
+        run_machine_shell(machine, command)
+            .map_err(|details| GitError::Failed { operation, details })
+    }
+
+    fn remote_git(
+        &self,
+        machine: &Machine,
+        operation: &'static str,
+        checkout_path: &Path,
+        arguments: &str,
+    ) -> Result<String, GitError> {
+        self.remote_command(
+            machine,
+            operation,
+            &format!("git -C {} {}", machine_path_arg(checkout_path), arguments),
+        )
+    }
+
+    fn remote_git_with_path(
+        &self,
+        machine: &Machine,
+        operation: &'static str,
+        checkout_path: &Path,
+        arguments: &str,
+    ) -> Result<String, GitError> {
+        self.remote_git(machine, operation, checkout_path, arguments)
+    }
+
+    fn remote_git_optional(
+        &self,
+        machine: &Machine,
+        operation: &'static str,
+        checkout_path: &Path,
+        arguments: &str,
+    ) -> Result<Option<String>, GitError> {
+        let _ = operation;
+        Ok(run_machine_shell(
+            machine,
+            &format!("git -C {} {}", machine_path_arg(checkout_path), arguments),
+        )
+        .ok())
+    }
+
     pub fn prepare_worktree(
         &self,
         repository: &Repository,
@@ -251,6 +640,7 @@ impl GitCli {
         branch: &str,
         base_branch: &str,
         reuse_existing_branch: bool,
+        confirm_dirty_attachment: bool,
     ) -> Result<CheckoutInspection, GitError> {
         if branch.trim().is_empty() {
             return Err(GitError::Failed {
@@ -318,6 +708,12 @@ impl GitCli {
             .is_some();
 
         let destination_string = destination.to_string_lossy().into_owned();
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|source| GitError::ReadWorksetRoot {
+                path: parent.to_owned(),
+                source,
+            })?;
+        }
         if reuse_existing_branch {
             if local_exists {
                 self.run(
@@ -357,12 +753,6 @@ impl GitCli {
                     branch: branch.to_owned(),
                 });
             }
-            if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent).map_err(|source| GitError::ReadWorksetRoot {
-                    path: parent.to_owned(),
-                    source,
-                })?;
-            }
             self.run(
                 "create the target Git Worktree",
                 &[
@@ -399,7 +789,13 @@ impl GitCli {
             )?;
         }
 
-        self.validate_worktree_attachment(repository, canonical_checkout, destination, branch)
+        self.validate_worktree_attachment(
+            repository,
+            canonical_checkout,
+            destination,
+            branch,
+            confirm_dirty_attachment,
+        )
     }
 
     pub fn validate_worktree_attachment(
@@ -408,8 +804,8 @@ impl GitCli {
         canonical_checkout: &Path,
         worktree_path: &Path,
         expected_branch: &str,
+        confirm_dirty_attachment: bool,
     ) -> Result<CheckoutInspection, GitError> {
-        let canonical = canonical_checkout.to_string_lossy().into_owned();
         let canonical_worktree =
             fs::canonicalize(worktree_path).map_err(|source| GitError::ReadWorksetRoot {
                 path: worktree_path.to_owned(),
@@ -443,7 +839,11 @@ impl GitCli {
                 actual: inspection.current_branch,
             });
         }
-        let _ = canonical;
+        if inspection.is_dirty && !confirm_dirty_attachment {
+            return Err(GitError::DirtyWorktree {
+                path: worktree_path.to_owned(),
+            });
+        }
         Ok(inspection)
     }
 
@@ -999,6 +1399,7 @@ mod tests {
                 "feature/fix",
                 "main",
                 false,
+                false,
             )
             .expect("a new Worktree should be created");
 
@@ -1062,6 +1463,7 @@ mod tests {
                 "feature/fix",
                 "main",
                 false,
+                false,
             )
             .expect_err("a failed fetch must stop preparation");
 
@@ -1088,6 +1490,7 @@ mod tests {
                 "feature/fix",
                 "develop",
                 false,
+                false,
             )
             .expect_err("a missing configured base must stop preparation");
 
@@ -1111,6 +1514,7 @@ mod tests {
                 "feature/fix",
                 "main",
                 false,
+                false,
             )
             .expect("the first Worktree should be created");
 
@@ -1122,6 +1526,7 @@ mod tests {
                 "feature/fix",
                 "main",
                 true,
+                false,
             )
             .expect_err("a branch already attached to a Worktree must not be duplicated");
 
@@ -1149,17 +1554,147 @@ mod tests {
                 "feature/fix",
                 "main",
                 false,
+                false,
             )
             .expect("the Worktree should be created");
         fs::write(destination.join("notes.txt"), "uncommitted\n")
             .expect("dirty file should be written");
 
+        let error = GitCli::system()
+            .validate_worktree_attachment(
+                &repository,
+                &canonical,
+                &destination,
+                "feature/fix",
+                false,
+            )
+            .expect_err("dirty attachment should need confirmation");
+        assert!(matches!(error, GitError::DirtyWorktree { path } if path == destination));
+
         let inspection = GitCli::system()
-            .validate_worktree_attachment(&repository, &canonical, &destination, "feature/fix")
+            .validate_worktree_attachment(
+                &repository,
+                &canonical,
+                &destination,
+                "feature/fix",
+                true,
+            )
             .expect("the existing Worktree should be validatable");
 
         assert!(inspection.is_dirty);
         assert_eq!(inspection.current_branch, "feature/fix");
+    }
+
+    #[test]
+    fn prepare_worktree_reuses_existing_local_and_remote_branches_only_when_requested() {
+        let directory = tempdir().expect("temporary Git directory should exist");
+        let (canonical, repository) = remote_fixture(directory.path());
+        run_git(&canonical, &["branch", "feature/local"]);
+        let local_destination = directory.path().join("local");
+        GitCli::system()
+            .prepare_worktree(
+                &repository,
+                &canonical,
+                &local_destination,
+                "feature/local",
+                "main",
+                true,
+                false,
+            )
+            .expect("an existing local branch should be attachable when requested");
+        assert_eq!(
+            run_git_output(&local_destination, &["branch", "--show-current"]),
+            "feature/local"
+        );
+
+        let seed = directory.path().join("seed");
+        run_git(&seed, &["switch", "-c", "feature/remote"]);
+        run_git(&seed, &["push", "origin", "feature/remote"]);
+        let remote_destination = directory.path().join("remote");
+        GitCli::system()
+            .prepare_worktree(
+                &repository,
+                &canonical,
+                &remote_destination,
+                "feature/remote",
+                "main",
+                true,
+                false,
+            )
+            .expect("an existing remote branch should be attachable when requested");
+        assert_eq!(
+            run_git_output(&remote_destination, &["branch", "--show-current"]),
+            "feature/remote"
+        );
+        assert_eq!(
+            run_git_output(
+                &remote_destination,
+                &["config", "--get", "branch.feature/remote.remote"]
+            ),
+            "origin"
+        );
+    }
+
+    #[test]
+    fn attachment_validation_reports_remote_branch_and_path_mismatches() {
+        let directory = tempdir().expect("temporary Git directory should exist");
+        let (canonical, repository) = remote_fixture(directory.path());
+        let destination = directory.path().join("attached");
+        GitCli::system()
+            .prepare_worktree(
+                &repository,
+                &canonical,
+                &destination,
+                "feature/fix",
+                "main",
+                false,
+                false,
+            )
+            .expect("the Worktree should be created");
+
+        let branch_error = GitCli::system()
+            .validate_worktree_attachment(
+                &repository,
+                &canonical,
+                &destination,
+                "feature/other",
+                false,
+            )
+            .expect_err("a branch mismatch should be reported");
+        assert!(matches!(
+            branch_error,
+            GitError::WorktreeBranchMismatch { expected, actual }
+                if expected == "feature/other" && actual == "feature/fix"
+        ));
+
+        let wrong_remote = Repository {
+            remote_url: directory
+                .path()
+                .join("another.git")
+                .to_string_lossy()
+                .into_owned(),
+            ..repository.clone()
+        };
+        let remote_error = GitCli::system()
+            .validate_worktree_attachment(
+                &wrong_remote,
+                &canonical,
+                &destination,
+                "feature/fix",
+                false,
+            )
+            .expect_err("a remote mismatch should be reported");
+        assert!(matches!(remote_error, GitError::RemoteMismatch { .. }));
+
+        let wrong_path = directory.path().join("not-attached");
+        run_git(
+            directory.path(),
+            &["clone", &repository.remote_url, &path_arg(&wrong_path)],
+        );
+        let path_error = GitCli::system()
+            .validate_worktree_attachment(&repository, &canonical, &wrong_path, "main", false)
+            .expect_err("an unregistered path should be reported");
+        assert!(matches!(path_error, GitError::NotAWorktree { path } if path == wrong_path));
     }
 
     fn remote_fixture(directory: &Path) -> (PathBuf, Repository) {
@@ -1223,4 +1758,29 @@ mod tests {
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn machine_path_arg(path: &Path) -> String {
+    shell_quote(&path.to_string_lossy())
+}
+
+fn parse_worktree_list(output: &str) -> Vec<GitWorktreeEntry> {
+    let mut entries = Vec::new();
+    let mut path = None;
+    let mut branch = None;
+    for line in output.lines().chain(std::iter::once("")) {
+        if let Some(value) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(value));
+        } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
+            branch = Some(value.to_owned());
+        } else if line.is_empty() {
+            if let Some(path) = path.take() {
+                entries.push(GitWorktreeEntry {
+                    path,
+                    branch: branch.take(),
+                });
+            }
+        }
+    }
+    entries
 }

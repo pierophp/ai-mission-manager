@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -124,6 +126,39 @@ pub struct Worktree {
     pub branch: String,
     pub base_branch: String,
     pub is_dirty: bool,
+}
+
+pub fn sanitize_worktree_branch(branch: &str) -> String {
+    let mut sanitized = String::new();
+    let mut last_was_separator = false;
+    for character in branch.trim().chars() {
+        let allowed = character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.');
+        if allowed {
+            sanitized.push(character);
+            last_was_separator = false;
+        } else if !last_was_separator {
+            sanitized.push('-');
+            last_was_separator = true;
+        }
+    }
+    let sanitized = sanitized.trim_matches(['-', '.']).to_owned();
+    if sanitized.is_empty() || sanitized == "." || sanitized == ".." {
+        "branch".into()
+    } else {
+        sanitized
+    }
+}
+
+pub fn worktree_path(
+    worktree_root: &Path,
+    workspace_id: i64,
+    branch: &str,
+    repository_name: &str,
+) -> PathBuf {
+    worktree_root
+        .join(format!("workspace-{workspace_id}"))
+        .join(sanitize_worktree_branch(branch))
+        .join(repository_name)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1180,6 +1215,7 @@ pub enum Event {
         path: String,
         branch: String,
         base_branch: String,
+        is_dirty: bool,
     },
     AttachWorkset {
         item_id: i64,
@@ -2899,6 +2935,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             path,
             branch,
             base_branch,
+            is_dirty,
         } => {
             let workspace = state
                 .workspaces
@@ -2948,7 +2985,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 path,
                 branch,
                 base_branch,
-                is_dirty: false,
+                is_dirty,
             };
             state.next_worktree_id = next_worktree_id;
             state.worktrees.push(worktree.clone());
@@ -4862,6 +4899,25 @@ fn format_change(change: &ExternalChange) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worktree_paths_are_stable_and_keep_repository_names_at_the_leaf() {
+        assert_eq!(
+            worktree_path(
+                Path::new("/Users/me/worktrees"),
+                42,
+                "feature/mission 51",
+                "mission-manager"
+            ),
+            PathBuf::from("/Users/me/worktrees/workspace-42/feature-mission-51/mission-manager")
+        );
+    }
+
+    #[test]
+    fn worktree_branch_sanitization_never_produces_a_path_traversal_component() {
+        assert_eq!(sanitize_worktree_branch("../../"), "branch");
+        assert_eq!(sanitize_worktree_branch("bug fix/v2"), "bug-fix-v2");
+    }
 
     #[test]
     fn creating_a_context_creates_its_default_project() {
@@ -8421,6 +8477,7 @@ mod tests {
                 path: "/Users/piero/worktrees/feature-contracts/mission-manager".into(),
                 branch: "feature/contracts".into(),
                 base_branch: "main".into(),
+                is_dirty: false,
             },
         )
         .expect("a Workspace should own a physical Worktree");

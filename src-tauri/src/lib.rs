@@ -53,6 +53,8 @@ pub fn run() {
             app::create_workset,
             app::create_workspace,
             app::create_worktree,
+            app::prepare_worktree,
+            app::attach_worktree,
             app::attach_workset,
             app::add_repository_to_workset,
             app::set_workset_archived,

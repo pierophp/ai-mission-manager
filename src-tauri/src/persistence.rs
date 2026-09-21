@@ -4099,6 +4099,7 @@ mod tests {
                 path: "/Users/piero/worktrees/feature-contracts/mission-manager".into(),
                 branch: "feature/contracts".into(),
                 base_branch: "main".into(),
+                is_dirty: false,
             },
         )
         .expect("Worktree should be created");

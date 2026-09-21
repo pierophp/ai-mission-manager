@@ -95,6 +95,34 @@ export const workAdapter = {
       branch,
       baseBranch,
     }),
+  prepareWorktree: (
+    workspaceId: number,
+    repositoryId: number,
+    machineId: number,
+    reuseExistingBranch: boolean,
+    confirmDirtyAttachment: boolean,
+  ) =>
+    command<Worktree>("prepare_worktree", {
+      workspaceId,
+      repositoryId,
+      machineId,
+      reuseExistingBranch,
+      confirmDirtyAttachment,
+    }),
+  attachWorktree: (
+    workspaceId: number,
+    repositoryId: number,
+    machineId: number,
+    path: string,
+    confirmDirtyAttachment: boolean,
+  ) =>
+    command<Worktree>("attach_worktree", {
+      workspaceId,
+      repositoryId,
+      machineId,
+      path,
+      confirmDirtyAttachment,
+    }),
   attachWorkset: (itemId: number, rootDirectory: string) =>
     command<Workset>("attach_workset", { itemId, rootDirectory }),
   addRepositoryToWorkset: (

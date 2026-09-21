@@ -227,6 +227,7 @@ export function ItemCard({
     useState(false);
   const [directRunSharedConfirmed, setDirectRunSharedConfirmed] =
     useState(false);
+  const [worktreeMachineId, setWorktreeMachineId] = useState<number>();
   const [isSaving, setIsSaving] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const workCommand = useWorkCommand();
@@ -767,6 +768,32 @@ export function ItemCard({
     }
   }
 
+  async function prepareWorkspaceWorktree(
+    workspace: Workspace,
+    repositoryId: number,
+    reuseExistingBranch: boolean,
+  ) {
+    const machineId = worktreeMachineId ?? itemMachines[0]?.id;
+    if (!machineId) {
+      window.alert("Configure a Machine-specific Repository checkout first.");
+      return;
+    }
+    const confirmDirtyAttachment = reuseExistingBranch
+      ? window.confirm(
+          "Reuse this branch and attach the Git Worktree? If it is dirty, existing files will be preserved.",
+        )
+      : false;
+    await saveItem(
+      workActions.prepareWorktree(
+        workspace.id,
+        repositoryId,
+        machineId,
+        reuseExistingBranch,
+        confirmDirtyAttachment,
+      ),
+    );
+  }
+
   async function handleStartRun(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!runPreviewWorksetId || !runPrompt.trim() || runPromptNeedsCompose)
@@ -888,6 +915,70 @@ export function ItemCard({
           >
             Start Direct Run
           </Button>
+          <div className="grid gap-2 rounded-md border p-3">
+            <label className="grid gap-1.5 text-sm font-medium md:max-w-sm">
+              <span>Worktree Machine</span>
+              <NativeSelect
+                value={worktreeMachineId ?? ""}
+                onChange={(event) =>
+                  setWorktreeMachineId(Number(event.target.value) || undefined)
+                }
+                disabled={isSaving}
+              >
+                <NativeSelectOption value="">
+                  First configured Machine
+                </NativeSelectOption>
+                {itemMachines.map((machine) => (
+                  <NativeSelectOption value={machine.id} key={machine.id}>
+                    {machine.name} · {machine.last_observed}
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+            </label>
+            {workspace.repositories.map((selected) => (
+              <div
+                className="flex flex-wrap items-center justify-between gap-2 text-sm"
+                key={selected.repository_id}
+              >
+                <span>
+                  {repositoryName(repositories, selected.repository_id)} ·{" "}
+                  <code>{selected.branch}</code>
+                </span>
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="outline"
+                    disabled={isSaving}
+                    onClick={() =>
+                      void prepareWorkspaceWorktree(
+                        workspace,
+                        selected.repository_id,
+                        false,
+                      )
+                    }
+                  >
+                    Create Worktree
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={isSaving}
+                    onClick={() =>
+                      void prepareWorkspaceWorktree(
+                        workspace,
+                        selected.repository_id,
+                        true,
+                      )
+                    }
+                  >
+                    Reuse branch / attach
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </div>
           {directRunWorkspaceId === workspace.id && directRunPreview && (
             <form
               className="grid gap-4 rounded-lg border border-primary/30 bg-primary/5 p-4"

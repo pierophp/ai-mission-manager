@@ -30,6 +30,36 @@ export const workActions = {
     itemId: number,
     repositories: Parameters<typeof workAdapter.createWorkspace>[1],
     ) => () => workAdapter.createWorkspace(itemId, repositories),
+  prepareWorktree: (
+    workspaceId: number,
+    repositoryId: number,
+    machineId: number,
+    reuseExistingBranch: boolean,
+    confirmDirtyAttachment: boolean,
+  ) =>
+    () =>
+      workAdapter.prepareWorktree(
+        workspaceId,
+        repositoryId,
+        machineId,
+        reuseExistingBranch,
+        confirmDirtyAttachment,
+      ),
+  attachWorktree: (
+    workspaceId: number,
+    repositoryId: number,
+    machineId: number,
+    path: string,
+    confirmDirtyAttachment: boolean,
+  ) =>
+    () =>
+      workAdapter.attachWorktree(
+        workspaceId,
+        repositoryId,
+        machineId,
+        path,
+        confirmDirtyAttachment,
+      ),
   prepareDirectRun: (itemId: number, workspaceId: number, machineId: number | null) =>
     () => workAdapter.prepareDirectRun(itemId, workspaceId, machineId),
   attachWorkset: (itemId: number, rootDirectory: string) =>
