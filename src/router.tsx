@@ -10,6 +10,15 @@ import {
 import { AppShell } from "./App";
 import { appShellLayoutClassName } from "./components/app-shell-layout";
 import { Empty, EmptyDescription } from "./components/ui/empty";
+import { AppRuntimeProvider } from "./runtime/AppRuntimeProvider";
+
+function RootLayout() {
+  return (
+    <AppRuntimeProvider>
+      <AppShell />
+    </AppRuntimeProvider>
+  );
+}
 
 function UnknownRoute() {
   const router = useRouter();
@@ -28,7 +37,7 @@ function UnknownRoute() {
 }
 
 const rootRoute = createRootRoute({
-  component: AppShell,
+  component: RootLayout,
   notFoundComponent: UnknownRoute,
 });
 

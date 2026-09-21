@@ -7,8 +7,6 @@ import {
   useState,
 } from "react";
 import { Link, useRouter, useRouterState } from "@tanstack/react-router";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import { Moon, Sun } from "lucide-react";
@@ -27,26 +25,34 @@ import {
   saveTheme,
   type Theme,
 } from "./theme";
+import {
+  structureAdapter,
+  terminalRuntimeAdapter,
+  workAdapter,
+} from "./runtime/adapters";
+import { useAppRuntime } from "./runtime/AppRuntimeProvider";
+import { errorMessage } from "./runtime/errors";
+import { currentMinute } from "./runtime/time";
 
-type Context = {
+export type Context = {
   id: number;
   name: string;
 };
 
-type ProviderChoice = "github" | "none";
-type DependencyState =
+export type ProviderChoice = "github" | "none";
+export type DependencyState =
   | "available"
   | "missing"
   | "unauthenticated"
   | "notConfigured"
   | "unavailable";
 
-type SetupState = {
+export type SetupState = {
   completed: boolean;
   provider: ProviderChoice;
 };
 
-type DependencyStatus = {
+export type DependencyStatus = {
   key: string;
   label: string;
   state: DependencyState;
@@ -55,16 +61,16 @@ type DependencyStatus = {
   action: string | null;
 };
 
-type HealthStatus = {
+export type HealthStatus = {
   runtime: DependencyStatus;
   provider: DependencyStatus;
   agents: DependencyStatus[];
   checkedAt: number;
 };
 
-type ItemStatus = "Inbox" | "Active" | "Waiting" | "Done";
+export type ItemStatus = "Inbox" | "Active" | "Waiting" | "Done";
 
-type Project = {
+export type Project = {
   id: number;
   context_id: number;
   name: string;
@@ -73,14 +79,14 @@ type Project = {
   };
 };
 
-type Repository = {
+export type Repository = {
   id: number;
   project_id: number;
   name: string;
   remote_url: string;
 };
 
-type WorksetRepository = {
+export type WorksetRepository = {
   repository_id: number;
   branch_override: string | null;
   base_branch_override: string | null;
@@ -88,7 +94,7 @@ type WorksetRepository = {
   is_dirty: boolean;
 };
 
-type Workset = {
+export type Workset = {
   id: number;
   item_id: number;
   root_directory: string;
@@ -97,13 +103,13 @@ type Workset = {
   repositories: WorksetRepository[];
 };
 
-type WorksetRepositoryInput = {
+export type WorksetRepositoryInput = {
   repositoryId: number;
   branchOverride: string | null;
   baseBranchOverride: string | null;
 };
 
-type MachineTransport =
+export type MachineTransport =
   | { kind: "local" }
   | {
       kind: "ssh";
@@ -115,7 +121,7 @@ type MachineTransport =
       strictHostKeyChecking: string | null;
     };
 
-type Machine = {
+export type Machine = {
   id: number;
   context_id: number;
   name: string;
@@ -125,12 +131,12 @@ type Machine = {
   last_observed_at: number | null;
 };
 
-type AgentKind = "claude" | "codex";
-type ExecutionProfile = "investigate" | "implement" | "review" | "custom";
-type RunState = "unknown" | "working" | "blocked" | "finished";
-type RunPaneStatus = "unknown" | "available" | "missing";
+export type AgentKind = "claude" | "codex";
+export type ExecutionProfile = "investigate" | "implement" | "review" | "custom";
+export type RunState = "unknown" | "working" | "blocked" | "finished";
+export type RunPaneStatus = "unknown" | "available" | "missing";
 
-type Run = {
+export type Run = {
   id: number;
   item_id: number;
   workset_id: number;
@@ -146,7 +152,7 @@ type Run = {
   pane_status: RunPaneStatus;
 };
 
-type RunSuggestion = {
+export type RunSuggestion = {
   machineId: number;
   machineName: string;
   agent: AgentKind;
@@ -163,7 +169,7 @@ type RunSuggestion = {
   contextName: string;
 };
 
-type PaneTab = {
+export type PaneTab = {
   paneId: string;
   sessionName: string;
   runId: number;
@@ -178,7 +184,7 @@ type PaneTab = {
   currentPath: string;
 };
 
-type TerminalAttachment = {
+export type TerminalAttachment = {
   terminalId: string;
   sessionName: string;
   paneId: string;
@@ -186,25 +192,25 @@ type TerminalAttachment = {
   panes: PaneTab[];
 };
 
-type TerminalOutputEvent = {
+export type TerminalOutputEvent = {
   terminalId: string;
   paneId: string;
   data: number[];
 };
 
-type TerminalExitEvent = {
+export type TerminalExitEvent = {
   terminalId: string;
   paneId: string;
   code: number | null;
 };
 
-type RunPromptSelection = {
+export type RunPromptSelection = {
   includeObjective: boolean;
   includeNotes: boolean;
   externalObjectIds: number[];
 };
 
-type Item = {
+export type Item = {
   id: number;
   human_identifier: string;
   title: string;
@@ -214,15 +220,15 @@ type Item = {
   reminders: { id: number; remind_at: string }[];
 };
 
-type ItemRelationKind = "Blocks" | "BlockedBy" | "RelatedTo";
+export type ItemRelationKind = "Blocks" | "BlockedBy" | "RelatedTo";
 
-type ItemRelation = {
+export type ItemRelation = {
   from_item_id: number;
   to_item_id: number;
   kind: ItemRelationKind;
 };
 
-type ExternalObject = {
+export type ExternalObject = {
   id: number;
   provider: "github" | "generic";
   kind: "issue" | "pull_request" | "generic";
@@ -230,14 +236,14 @@ type ExternalObject = {
   canonical_url: string;
 };
 
-type ExternalObjectKind = ExternalObject["kind"];
+export type ExternalObjectKind = ExternalObject["kind"];
 
-type ExternalMetadata = {
+export type ExternalMetadata = {
   key: string;
   value: string;
 };
 
-type ExternalSnapshot = {
+export type ExternalSnapshot = {
   external_object_id: number;
   title: string;
   state: string;
@@ -245,39 +251,39 @@ type ExternalSnapshot = {
   fetched_at: number;
 };
 
-type ExternalChangeKind = "title" | "state" | "metadata";
+export type ExternalChangeKind = "title" | "state" | "metadata";
 
-type ExternalChange = {
+export type ExternalChange = {
   kind: ExternalChangeKind;
   key: string | null;
   previous: string | null;
   current: string | null;
 };
 
-type Activity = {
+export type Activity = {
   id: number;
   external_object_id: number;
   observed_at: number;
   changes: ExternalChange[];
 };
 
-type ObservedActivity = {
+export type ObservedActivity = {
   activity: Activity;
   object: ExternalObject;
 };
 
-type ActivityTabView = {
+export type ActivityTabView = {
   audit_entries: AuditEntry[];
   activities: ObservedActivity[];
 };
 
-type ExternalChangePolicy = {
+export type ExternalChangePolicy = {
   title: boolean;
   state: boolean;
   metadata: boolean;
 };
 
-type AttentionEntry = {
+export type AttentionEntry = {
   kind: "external_change" | "review" | "reminder" | "blocked_run";
   link_id: number;
   reminder_id: number | null;
@@ -290,7 +296,7 @@ type AttentionEntry = {
   summary: string;
 };
 
-type ExternalLink = {
+export type ExternalLink = {
   id: number;
   item_id: number;
   external_object_id: number;
@@ -300,7 +306,7 @@ type ExternalLink = {
   review_at: string | null;
 };
 
-type ExternalLinkView = {
+export type ExternalLinkView = {
   link: ExternalLink;
   object: ExternalObject;
   snapshot: ExternalSnapshot | null;
@@ -308,12 +314,12 @@ type ExternalLinkView = {
   attention_entry: AttentionEntry | null;
 };
 
-type ExternalLinkAction = {
+export type ExternalLinkAction = {
   link: ExternalLinkView;
   warning: string | null;
 };
 
-type ItemView = {
+export type ItemView = {
   item: Item;
   context_id: number;
   context_name: string;
@@ -325,7 +331,7 @@ type ItemView = {
   links: ExternalLinkView[];
 };
 
-type RepositoryRemovalReport = {
+export type RepositoryRemovalReport = {
   repository_id: number;
   name: string;
   path: string;
@@ -335,7 +341,7 @@ type RepositoryRemovalReport = {
   uncommitted_changes: string[];
 };
 
-type WorksetRemovalReport = {
+export type WorksetRemovalReport = {
   workset_id: number;
   root_directory: string;
   repositories: RepositoryRemovalReport[];
@@ -343,7 +349,7 @@ type WorksetRemovalReport = {
   blockers: string[];
 };
 
-type ItemDeletionPlan = {
+export type ItemDeletionPlan = {
   itemId: number;
   humanIdentifier: string;
   title: string;
@@ -363,7 +369,7 @@ type ItemDeletionPlan = {
   orphanedActivityCount: number;
 };
 
-type WorksetDeletionPreview = {
+export type WorksetDeletionPreview = {
   worksetId: number;
   rootDirectory: string;
   branch: string;
@@ -373,13 +379,13 @@ type WorksetDeletionPreview = {
   safetyReport: WorksetRemovalReport | null;
 };
 
-type ItemDeletionPreview = {
+export type ItemDeletionPreview = {
   plan: ItemDeletionPlan;
   worksets: WorksetDeletionPreview[];
   blockers: string[];
 };
 
-type ItemDeletionResult = {
+export type ItemDeletionResult = {
   summary: {
     itemId: number;
     reminderCount: number;
@@ -395,7 +401,7 @@ type ItemDeletionResult = {
   physicalCleanupWarning: string | null;
 };
 
-type ExternalObjectDeletionPlan = {
+export type ExternalObjectDeletionPlan = {
   externalObjectId: number;
   provider: ExternalObject["provider"];
   kind: ExternalObject["kind"];
@@ -406,7 +412,7 @@ type ExternalObjectDeletionPlan = {
   activityCount: number;
 };
 
-type ExternalObjectDeletionPreview = {
+export type ExternalObjectDeletionPreview = {
   plan: ExternalObjectDeletionPlan;
   links: {
     linkId: number;
@@ -417,7 +423,7 @@ type ExternalObjectDeletionPreview = {
   providerWarning: string;
 };
 
-type ExternalObjectDeletionResult = {
+export type ExternalObjectDeletionResult = {
   summary: {
     externalObjectId: number;
     linkCount: number;
@@ -426,13 +432,13 @@ type ExternalObjectDeletionResult = {
   };
 };
 
-type ExternalLinkDeletionResult = {
+export type ExternalLinkDeletionResult = {
   linkId: number;
   externalObjectId: number;
   externalObjectDeleted: boolean;
 };
 
-type RepositoryDeletionPlan = {
+export type RepositoryDeletionPlan = {
   repositoryId: number;
   name: string;
   remoteUrl: string;
@@ -444,13 +450,13 @@ type RepositoryDeletionPlan = {
   }[];
 };
 
-type RepositoryDeletionPreview = {
+export type RepositoryDeletionPreview = {
   plan: RepositoryDeletionPlan;
   worksets: WorksetDeletionPreview[];
   blockers: string[];
 };
 
-type MachineDeletionRun = {
+export type MachineDeletionRun = {
   id: number;
   itemId: number;
   itemIdentifier: string;
@@ -460,7 +466,7 @@ type MachineDeletionRun = {
   paneStatus: RunPaneStatus;
 };
 
-type MachineDeletionPreview = {
+export type MachineDeletionPreview = {
   plan: {
     machineId: number;
     name: string;
@@ -470,12 +476,12 @@ type MachineDeletionPreview = {
   blockers: string[];
 };
 
-type MachineDeletionResult = {
+export type MachineDeletionResult = {
   machineId: number;
   runCount: number;
 };
 
-type ParentDeletionPlan = {
+export type ParentDeletionPlan = {
   contextId: number | null;
   projectId: number | null;
   name: string;
@@ -520,13 +526,13 @@ type ParentDeletionPlan = {
   orphanedActivityCount: number;
 };
 
-type ParentDeletionPreview = {
+export type ParentDeletionPreview = {
   plan: ParentDeletionPlan;
   worksets: WorksetDeletionPreview[];
   blockers: string[];
 };
 
-type ParentDeletionResult = {
+export type ParentDeletionResult = {
   summary: {
     contextId: number | null;
     projectId: number | null;
@@ -548,7 +554,7 @@ type ParentDeletionResult = {
   physicalCleanupWarning: string | null;
 };
 
-type ResetLocalDataSummary = {
+export type ResetLocalDataSummary = {
   contextCount: number;
   projectCount: number;
   repositoryCount: number;
@@ -565,13 +571,13 @@ type ResetLocalDataSummary = {
   attentionDefaultCount: number;
 };
 
-type ResetLocalDataRecord = {
+export type ResetLocalDataRecord = {
   kind: string;
   id: number;
   label: string;
 };
 
-type ResetLocalDataPreview = {
+export type ResetLocalDataPreview = {
   plan: {
     summary: ResetLocalDataSummary;
     affectedRecords: ResetLocalDataRecord[];
@@ -583,31 +589,31 @@ type ResetLocalDataPreview = {
   confirmationPhrase: string;
 };
 
-type ResetLocalDataResult = {
+export type ResetLocalDataResult = {
   summary: ResetLocalDataSummary;
   auditEntryCount: number;
   worksetDirectoriesDeleted: boolean;
   physicalCleanupWarning: string | null;
 };
 
-type RunDeletionResult = {
+export type RunDeletionResult = {
   runId: number;
 };
 
-type RepositoryDeletionResult = {
+export type RepositoryDeletionResult = {
   repositoryId: number;
   worksetCount: number;
   worksetDirectoriesDeleted: boolean;
   physicalCleanupWarning: string | null;
 };
 
-type WorksetRemovalResult = {
+export type WorksetRemovalResult = {
   worksetId: number;
   worksetDirectoriesDeleted: boolean;
   physicalCleanupWarning: string | null;
 };
 
-type HomeView = {
+export type HomeView = {
   needs_attention: ItemView[];
   attention_entries: AttentionEntry[];
   running: ItemView[];
@@ -616,12 +622,12 @@ type HomeView = {
   completed: ItemView[];
 };
 
-type PollResult = {
+export type PollResult = {
   refreshed: number;
   failures: { external_object_id: number; error: string }[];
 };
 
-type AuditAction = {
+export type AuditAction = {
   action: string;
   context_id?: number;
   project_id?: number;
@@ -650,19 +656,19 @@ type AuditAction = {
     | ParentDeletionResult["summary"];
 };
 
-type AuditEntry = {
+export type AuditEntry = {
   id: number;
   recorded_at: number;
   action: AuditAction;
 };
 
-type ContextAttentionDefault = {
+export type ContextAttentionDefault = {
   context_id: number;
   object_kind: ExternalObjectKind;
   policy: ExternalChangePolicy;
 };
 
-type AppTab = "work" | "structure" | "activity";
+export type AppTab = "work" | "structure" | "activity";
 
 const appTabs: {
   id: AppTab;
@@ -711,11 +717,36 @@ function isAppRoutePath(pathname: string): boolean {
 }
 
 export function AppShell() {
-  const [contexts, setContexts] = useState<Context[]>([]);
-  const [setupState, setSetupState] = useState<SetupState>();
-  const [healthStatus, setHealthStatus] = useState<HealthStatus>();
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [repositories, setRepositories] = useState<Repository[]>([]);
+  const {
+    setupState,
+    healthStatus,
+    structure,
+    home,
+    runSuggestions,
+    activity,
+    searchResults,
+    contextFilterId,
+    searchQuery,
+    error,
+    isLoading,
+    isCheckingDependencies,
+    setError,
+    setSearchQuery,
+    setContextFilter,
+    refreshHome,
+    refreshSearch,
+    refreshRunSuggestions,
+    refreshActivity,
+    refreshStructure,
+    refreshAll,
+    pollExternalObjects,
+    refreshHealthStatus,
+    completeSetup,
+  } = useAppRuntime();
+  const { contexts, projects, repositories, machines, attentionDefaults } = structure;
+  const auditHistory = activity.audit_entries;
+  const observedActivities = activity.activities;
+  const refreshAuditHistory = refreshActivity;
   const [repositoryDeletionPreview, setRepositoryDeletionPreview] =
     useState<RepositoryDeletionPreview>();
   const [machineDeletionPreview, setMachineDeletionPreview] =
@@ -724,16 +755,6 @@ export function AppShell() {
     useState<ParentDeletionPreview>();
   const [resetLocalDataPreview, setResetLocalDataPreview] =
     useState<ResetLocalDataPreview>();
-  const [machines, setMachines] = useState<Machine[]>([]);
-  const [attentionDefaults, setAttentionDefaults] = useState<
-    ContextAttentionDefault[]
-  >([]);
-  const [home, setHome] = useState<HomeView>();
-  const [runSuggestions, setRunSuggestions] = useState<RunSuggestion[]>([]);
-  const [auditHistory, setAuditHistory] = useState<AuditEntry[]>([]);
-  const [observedActivities, setObservedActivities] = useState<ObservedActivity[]>([]);
-  const [searchResults, setSearchResults] = useState<ItemView[]>([]);
-  const [contextFilterId, setContextFilterId] = useState<number>();
   const [captureContextId, setCaptureContextId] = useState<number>();
   const [captureProjectId, setCaptureProjectId] = useState<number>();
   const [title, setTitle] = useState("");
@@ -759,13 +780,8 @@ export function AppShell() {
     useState<ExternalObjectKind>("pull_request");
   const [attentionDefaultPolicy, setAttentionDefaultPolicy] =
     useState<ExternalChangePolicy>({ title: true, state: true, metadata: true });
-  const [searchQuery, setSearchQuery] = useState("");
-  const [error, setError] = useState<string>();
-  const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
-  const [isCheckingDependencies, setIsCheckingDependencies] = useState(false);
   const [showHealthDetails, setShowHealthDetails] = useState(false);
-  const [initialStateLoaded, setInitialStateLoaded] = useState(false);
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const themePreferenceRef = useRef<Theme | undefined>(loadStoredTheme());
   const [terminalRequest, setTerminalRequest] = useState<{
@@ -792,10 +808,6 @@ export function AppShell() {
   const runtimeState = healthStatus?.runtime.state ?? "unavailable";
 
   useEffect(() => {
-    void loadAppState();
-  }, []);
-
-  useEffect(() => {
     if (isAppRoutePath(pathname)) return;
     void router.navigate({ to: "/work", replace: true });
   }, [pathname, router]);
@@ -808,183 +820,39 @@ export function AppShell() {
   }, [theme]);
 
   useEffect(() => {
-    if (!initialStateLoaded) return;
-    let disposed = false;
-    void (async () => {
-      try {
-        await invoke("reconcile_runs");
-        if (!disposed) {
-          await refreshHome();
-          await refreshRunSuggestions();
-          await refreshAuditHistory();
-          if (searchQuery.trim()) {
-            await refreshSearch();
-          }
-        }
-      } catch (reconcileError) {
-        if (!disposed) {
-          setError(errorMessage(reconcileError));
-        }
-      }
-      if (!disposed) {
-        await pollExternalObjects(false);
-      }
-    })();
-    return () => {
-      disposed = true;
-    };
-  }, [initialStateLoaded]);
-
-  useEffect(() => {
-    if (!home || !searchQuery.trim()) {
-      setSearchResults([]);
-      return;
+    if (contexts[0] && (!setupContextName.trim() || setupContextName === "Personal")) {
+      setSetupContextName(contexts[0].name);
     }
-    void refreshSearch();
-  }, [searchQuery, contextFilterId]);
+  }, [contexts, setupContextName]);
 
   useEffect(() => {
-    const interval = window.setInterval(() => {
-      void pollExternalObjects(false);
-    }, 5 * 60 * 1000);
-    return () => window.clearInterval(interval);
-  }, [contextFilterId, searchQuery]);
+    if (setupState) {
+      setSetupProvider(setupState.completed ? setupState.provider : "github");
+    }
+  }, [setupState]);
 
   useEffect(() => {
-    let unlisten: UnlistenFn | undefined;
-    let disposed = false;
-    void listen("run-state-changed", () => {
-      void refreshHome();
-      void refreshAuditHistory();
-      if (searchQuery.trim()) {
-        void refreshSearch();
-      }
-    }).then((cleanup) => {
-      if (disposed) {
-        cleanup();
-      } else {
-        unlisten = cleanup;
-      }
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [contextFilterId, searchQuery]);
-
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      void refreshHome().catch(() => undefined);
-      if (searchQuery.trim()) {
-        void refreshSearch().catch(() => undefined);
-      }
-    }, 3_000);
-    return () => window.clearInterval(interval);
-  }, [contextFilterId, searchQuery]);
-
-  useEffect(() => {
-    if (!initialStateLoaded) return;
-    const interval = window.setInterval(() => {
-      void refreshRunSuggestions().catch(() => undefined);
-    }, 10_000);
-    return () => window.clearInterval(interval);
-  }, [initialStateLoaded]);
-
-  async function loadAppState() {
-    setIsLoading(true);
-    try {
-      const [
-        loadedContexts,
-        loadedProjects,
-        loadedSetupState,
-        loadedHealthStatus,
-        loadedAttentionDefaults,
-        loadedMachines,
-        loadedRepositories,
-        loadedHome,
-        loadedRunSuggestions,
-        loadedActivityTab,
-      ] = await Promise.all([
-        invoke<Context[]>("list_contexts"),
-        invoke<Project[]>("list_projects"),
-        invoke<SetupState>("get_setup_state"),
-        invoke<HealthStatus>("get_health_status", { provider: null }),
-        invoke<ContextAttentionDefault[]>("list_context_attention_defaults"),
-        invoke<Machine[]>("list_machines"),
-        invoke<Repository[]>("list_repositories"),
-        invoke<HomeView>("get_home", {
-          contextId: contextFilterId ?? null,
-          now: currentMinute(),
-        }),
-        invoke<RunSuggestion[]>("list_run_suggestions"),
-        invoke<ActivityTabView>("get_activity_tab"),
-      ]);
-      const nextCaptureContextId =
-        loadedContexts.find((context) => context.id === captureContextId)?.id ??
-        loadedContexts[0]?.id;
-      const nextCaptureProjectId =
-        loadedProjects.find(
-          (project) =>
-            project.id === captureProjectId &&
-            project.context_id === nextCaptureContextId,
-        )?.id ??
-        loadedProjects.find(
-          (project) => project.context_id === nextCaptureContextId,
-        )?.id;
-      setContexts(loadedContexts);
-      setProjects(loadedProjects);
-      setSetupState(loadedSetupState);
-      setHealthStatus(loadedHealthStatus);
-      if (!setupContextName.trim() || setupContextName === "Personal") {
-        setSetupContextName(loadedContexts[0]?.name ?? "Personal");
-      }
-      setSetupProvider(loadedSetupState.completed ? loadedSetupState.provider : "github");
-      setRepositories(loadedRepositories);
-      setMachines(loadedMachines);
-      setAttentionDefaults(loadedAttentionDefaults);
-      setRunSuggestions(loadedRunSuggestions);
-      setAuditHistory(loadedActivityTab.audit_entries);
-      setObservedActivities(loadedActivityTab.activities);
+    const nextCaptureContextId =
+      contexts.find((context) => context.id === captureContextId)?.id ?? contexts[0]?.id;
+    const nextCaptureProjectId = projects.find(
+      (project) =>
+        project.id === captureProjectId && project.context_id === nextCaptureContextId,
+    )?.id ?? projects.find(
+      (project) => project.context_id === nextCaptureContextId,
+    )?.id;
+    if (nextCaptureContextId !== captureContextId) {
       setCaptureContextId(nextCaptureContextId);
+    }
+    if (nextCaptureProjectId !== captureProjectId) {
       setCaptureProjectId(nextCaptureProjectId);
-      setHome(loadedHome);
-      setError(undefined);
-      setInitialStateLoaded(true);
-      if (searchQuery.trim()) {
-        await refreshSearch();
-      }
-    } catch (loadError) {
-      setError(errorMessage(loadError));
-    } finally {
-      setIsLoading(false);
     }
-  }
-
-  async function refreshHealthStatus() {
-    setIsCheckingDependencies(true);
-    try {
-      const loadedHealthStatus = await invoke<HealthStatus>("get_health_status", {
-        provider: setupState?.completed ? null : setupProvider,
-      });
-      setHealthStatus(loadedHealthStatus);
-      setError(undefined);
-    } catch (healthError) {
-      setError(errorMessage(healthError));
-    } finally {
-      setIsCheckingDependencies(false);
-    }
-  }
+  }, [captureContextId, captureProjectId, contexts, projects]);
 
   async function handleCompleteSetup(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setIsSaving(true);
     try {
-      const completed = await invoke<SetupState>("complete_setup", {
-        contextName: setupContextName,
-        provider: setupProvider,
-      });
-      setSetupState(completed);
-      await loadAppState();
+      await completeSetup(setupContextName, setupProvider);
       setError(undefined);
     } catch (setupError) {
       setError(errorMessage(setupError));
@@ -1004,55 +872,6 @@ export function AppShell() {
     );
   }, [attentionDefaults, attentionObjectKind, captureContextId]);
 
-  async function refreshHome(nextContextFilterId = contextFilterId) {
-    const loadedHome = await invoke<HomeView>("get_home", {
-      contextId: nextContextFilterId ?? null,
-      now: currentMinute(),
-    });
-    setHome(loadedHome);
-  }
-
-  async function refreshRunSuggestions() {
-    const suggestions = await invoke<RunSuggestion[]>("list_run_suggestions");
-    setRunSuggestions(suggestions);
-  }
-
-  async function refreshAuditHistory() {
-    const activityTab = await invoke<ActivityTabView>("get_activity_tab");
-    setAuditHistory(activityTab.audit_entries);
-    setObservedActivities(activityTab.activities);
-  }
-
-  async function refreshSearch() {
-    if (!searchQuery.trim()) {
-      setSearchResults([]);
-      return;
-    }
-    const results = await invoke<ItemView[]>("search_items_command", {
-      query: searchQuery,
-      contextId: null,
-    });
-    setSearchResults(results);
-  }
-
-  async function pollExternalObjects(showErrors: boolean) {
-    try {
-      const result = await invoke<PollResult>("poll_external_objects");
-      if (result.refreshed > 0) {
-        await refreshHome();
-        await refreshSearch();
-        await refreshAuditHistory();
-      }
-      if (showErrors && result.failures.length > 0) {
-        setError(`Some External Objects could not be refreshed (${result.failures.length}).`);
-      }
-    } catch (pollError) {
-      if (showErrors) {
-        setError(errorMessage(pollError));
-      }
-    }
-  }
-
   function handleCaptureContextChange(nextContextId: number) {
     setCaptureContextId(nextContextId);
     setCaptureProjectId(
@@ -1064,15 +883,11 @@ export function AppShell() {
     event.preventDefault();
     setIsSaving(true);
     try {
-      const context = await invoke<Context>("create_context", {
-        name: contextName,
-      });
-      const loadedProjects = await invoke<Project[]>("list_projects");
-      setContexts((current) => [...current, context]);
-      setProjects(loadedProjects);
+      const context = await structureAdapter.createContext(contextName);
+      const nextStructure = await refreshStructure();
       setCaptureContextId(context.id);
       setCaptureProjectId(
-        loadedProjects.find((project) => project.context_id === context.id)?.id,
+        nextStructure.projects.find((project) => project.context_id === context.id)?.id,
       );
       setContextName("");
       await refreshAuditHistory();
@@ -1093,12 +908,12 @@ export function AppShell() {
 
     setIsSaving(true);
     try {
-      const project = await invoke<Project>("create_project", {
-        name: projectName,
-        contextId: captureContextId,
-        defaultItemStatus: projectDefaultStatus,
-      });
-      setProjects((current) => [...current, project]);
+      const project = await structureAdapter.createProject(
+        projectName,
+        captureContextId,
+        projectDefaultStatus,
+      );
+      await refreshStructure();
       setCaptureProjectId(project.id);
       setProjectName("");
       setProjectDefaultStatus("Inbox");
@@ -1114,12 +929,7 @@ export function AppShell() {
   async function handlePrepareProjectDeletion(projectId: number) {
     setIsSaving(true);
     try {
-      const preview = await invoke<ParentDeletionPreview>(
-        "prepare_project_deletion",
-        {
-          projectId,
-        },
-      );
+      const preview = await structureAdapter.prepareProjectDeletion(projectId);
       setParentDeletionPreview(preview);
       setError(undefined);
     } catch (previewError) {
@@ -1132,12 +942,7 @@ export function AppShell() {
   async function handlePrepareContextDeletion(contextId: number) {
     setIsSaving(true);
     try {
-      const preview = await invoke<ParentDeletionPreview>(
-        "prepare_context_deletion",
-        {
-          contextId,
-        },
-      );
+      const preview = await structureAdapter.prepareContextDeletion(contextId);
       setParentDeletionPreview(preview);
       setError(undefined);
     } catch (previewError) {
@@ -1150,7 +955,7 @@ export function AppShell() {
   async function handlePrepareResetLocalData() {
     setIsSaving(true);
     try {
-      const preview = await invoke<ResetLocalDataPreview>("prepare_reset_local_data");
+      const preview = await structureAdapter.prepareReset();
       setResetLocalDataPreview(preview);
       setError(undefined);
     } catch (previewError) {
@@ -1175,14 +980,11 @@ export function AppShell() {
 
     setIsSaving(true);
     try {
-      const result = await invoke<ResetLocalDataResult>("reset_all_local_data", {
-        confirmation,
-        deleteWorksetDirectories,
-      });
+      const result = await structureAdapter.reset(confirmation, deleteWorksetDirectories);
       setResetLocalDataPreview(undefined);
-      setContextFilterId(undefined);
+      await setContextFilter(undefined);
       setTerminalRequest(undefined);
-      await loadAppState();
+      await refreshAll();
       const summary = result.summary;
       window.alert(
         `Reset local data. Removed ${summary.contextCount} Context(s), ${summary.projectCount} Project(s), ${summary.repositoryCount} Repository record(s), ${summary.itemCount} Item(s), ${summary.worksetCount} Workset(s), ${summary.machineCount} Machine(s), ${summary.runCount} Run(s), ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.linkCount} Link(s), ${summary.externalObjectCount} External Object(s), ${summary.snapshotCount} snapshot(s), ${summary.activityCount} Activity record(s), ${summary.attentionDefaultCount} attention default(s), and ${result.auditEntryCount} prior audit entr${result.auditEntryCount === 1 ? "y" : "ies"}. A new Personal Context and Default Project are ready.`,
@@ -1215,14 +1017,13 @@ export function AppShell() {
 
     setIsSaving(true);
     try {
-      const result = await invoke<ParentDeletionResult>("delete_project", {
+      const result = await structureAdapter.deleteProject(
         projectId,
-        itemIds: plan.items.map((item) => item.id),
-        repositoryIds: plan.repositories.map((repository) => repository.id),
-        worksetIds: plan.worksets.map((workset) => workset.id),
-        confirmed: true,
+        plan.items.map((item) => item.id),
+        plan.repositories.map((repository) => repository.id),
+        plan.worksets.map((workset) => workset.id),
         deleteWorksetDirectories,
-      });
+      );
       setParentDeletionPreview(undefined);
       await updateHomeAfterEdit();
       showParentDeletionResult("Project", result);
@@ -1252,18 +1053,17 @@ export function AppShell() {
 
     setIsSaving(true);
     try {
-      const result = await invoke<ParentDeletionResult>("delete_context", {
+      const result = await structureAdapter.deleteContext({
         contextId,
         projectIds: plan.projects.map((project) => project.id),
         itemIds: plan.items.map((item) => item.id),
         repositoryIds: plan.repositories.map((repository) => repository.id),
         worksetIds: plan.worksets.map((workset) => workset.id),
         machineIds: plan.machines.map((machine) => machine.id),
-        confirmed: true,
         deleteWorksetDirectories,
       });
       if (contextFilterId === contextId) {
-        setContextFilterId(undefined);
+        await setContextFilter(undefined);
       }
       setParentDeletionPreview(undefined);
       await updateHomeAfterEdit(contextFilterId === contextId ? undefined : contextFilterId);
@@ -1298,12 +1098,12 @@ export function AppShell() {
 
     setIsSaving(true);
     try {
-      const repository = await invoke<Repository>("register_repository", {
-        projectId: captureProjectId,
-        name: repositoryName,
-        remoteUrl: repositoryRemoteUrl,
-      });
-      setRepositories((current) => [...current, repository]);
+      await structureAdapter.registerRepository(
+        captureProjectId,
+        repositoryName,
+        repositoryRemoteUrl,
+      );
+      await refreshStructure();
       setRepositoryName("");
       setRepositoryRemoteUrl("");
       await refreshAuditHistory();
@@ -1318,12 +1118,7 @@ export function AppShell() {
   async function handlePrepareRepositoryDeletion(repositoryId: number) {
     setIsSaving(true);
     try {
-      const preview = await invoke<RepositoryDeletionPreview>(
-        "prepare_repository_deletion",
-        {
-          repositoryId,
-        },
-      );
+      const preview = await structureAdapter.prepareRepositoryDeletion(repositoryId);
       setRepositoryDeletionPreview(preview);
       setError(undefined);
     } catch (previewError) {
@@ -1357,12 +1152,11 @@ export function AppShell() {
 
     setIsSaving(true);
     try {
-      const result = await invoke<RepositoryDeletionResult>("delete_repository", {
+      const result = await structureAdapter.deleteRepository(
         repositoryId,
-        worksetIds: plan.worksets.map((workset) => workset.id),
-        confirmed: true,
+        plan.worksets.map((workset) => workset.id),
         deleteWorksetDirectories,
-      });
+      );
       setRepositoryDeletionPreview(undefined);
       await updateHomeAfterEdit();
       if (result.physicalCleanupWarning) {
@@ -1379,12 +1173,7 @@ export function AppShell() {
   async function handlePrepareMachineDeletion(machineId: number) {
     setIsSaving(true);
     try {
-      const preview = await invoke<MachineDeletionPreview>(
-        "prepare_machine_deletion",
-        {
-          machineId,
-        },
-      );
+      const preview = await structureAdapter.prepareMachineDeletion(machineId);
       setMachineDeletionPreview(preview);
       setError(undefined);
     } catch (previewError) {
@@ -1413,11 +1202,10 @@ export function AppShell() {
 
     setIsSaving(true);
     try {
-      const result = await invoke<MachineDeletionResult>("delete_machine", {
+      const result = await structureAdapter.deleteMachine(
         machineId,
-        runIds: plan.runs.map((run) => run.id),
-        confirmed: true,
-      });
+        plan.runs.map((run) => run.id),
+      );
       setMachineDeletionPreview(undefined);
       await updateHomeAfterEdit();
       window.alert(
@@ -1437,10 +1225,7 @@ export function AppShell() {
     }
     setIsSaving(true);
     try {
-      await invoke<RunDeletionResult>("delete_run", {
-        runId,
-        confirmed: true,
-      });
+      await structureAdapter.deleteRun(runId);
       setMachineDeletionPreview(undefined);
       await updateHomeAfterEdit();
     } catch (deleteError) {
@@ -1472,13 +1257,13 @@ export function AppShell() {
           };
     setIsSaving(true);
     try {
-      const machine = await invoke<Machine>("register_machine", {
-        contextId: captureContextId,
-        name: machineName,
-        socketName: machineSocketName,
+      await structureAdapter.registerMachine(
+        captureContextId,
+        machineName,
+        machineSocketName,
         transport,
-      });
-      setMachines((current) => [...current, machine]);
+      );
+      await refreshStructure();
       setMachineName("");
       setMachineHost("");
       setMachineUser("");
@@ -1496,10 +1281,8 @@ export function AppShell() {
 
   async function handleCheckMachine(machineId: number) {
     try {
-      const checked = await invoke<Machine>("check_machine", { machineId });
-      setMachines((current) =>
-        current.map((machine) => (machine.id === checked.id ? checked : machine)),
-      );
+      await structureAdapter.checkMachine(machineId);
+      await refreshStructure();
       await refreshAuditHistory();
     } catch (checkError) {
       setError(errorMessage(checkError));
@@ -1511,22 +1294,12 @@ export function AppShell() {
     if (!captureContextId) return;
     setIsSaving(true);
     try {
-      const saved = await invoke<ContextAttentionDefault>(
-        "set_context_attention_default",
-        {
-          contextId: captureContextId,
-          objectKind: attentionObjectKind,
-          policy: attentionDefaultPolicy,
-        },
+      await structureAdapter.setAttentionDefault(
+        captureContextId,
+        attentionObjectKind,
+        attentionDefaultPolicy,
       );
-      setAttentionDefaults((current) => [
-        ...current.filter(
-          (attentionDefault) =>
-            attentionDefault.context_id !== saved.context_id ||
-            attentionDefault.object_kind !== saved.object_kind,
-        ),
-        saved,
-      ]);
+      await refreshStructure();
       await updateHomeAfterEdit();
       setError(undefined);
     } catch (saveError) {
@@ -1545,11 +1318,7 @@ export function AppShell() {
 
     setIsSaving(true);
     try {
-      await invoke<Item>("create_item", {
-        title,
-        contextId: captureContextId,
-        projectId: captureProjectId,
-      });
+      await structureAdapter.createItem(title, captureContextId, captureProjectId);
       setTitle("");
       setError(undefined);
       await updateHomeAfterEdit();
@@ -1563,7 +1332,7 @@ export function AppShell() {
   async function handleAttachRun(suggestion: RunSuggestion) {
     setIsSaving(true);
     try {
-      await invoke<Run>("attach_run", { suggestion });
+      await workAdapter.attachRun(suggestion);
       await updateHomeAfterEdit();
       setError(undefined);
     } catch (attachError) {
@@ -1575,48 +1344,25 @@ export function AppShell() {
 
   async function handleContextFilterChange(value: string) {
     const nextContextFilterId = value === "all" ? undefined : Number(value);
-    setContextFilterId(nextContextFilterId);
-    setIsLoading(true);
-    try {
-      const loadedHome = await invoke<HomeView>("get_home", {
-        contextId: nextContextFilterId ?? null,
-        now: currentMinute(),
-      });
-      setHome(loadedHome);
-      setError(undefined);
-    } catch (loadError) {
-      setError(errorMessage(loadError));
-    } finally {
-      setIsLoading(false);
-    }
+    await setContextFilter(nextContextFilterId);
   }
 
   async function updateHomeAfterEdit(nextContextFilterId = contextFilterId) {
-    const [loadedContexts, loadedProjects, loadedAttentionDefaults, loadedRepositories, loadedMachines] =
-      await Promise.all([
-      invoke<Context[]>("list_contexts"),
-      invoke<Project[]>("list_projects"),
-      invoke<ContextAttentionDefault[]>("list_context_attention_defaults"),
-      invoke<Repository[]>("list_repositories"),
-      invoke<Machine[]>("list_machines"),
+    const [nextStructure] = await Promise.all([
+      refreshStructure(),
       refreshHome(nextContextFilterId),
       refreshSearch(),
       refreshRunSuggestions(),
       refreshAuditHistory(),
-      ]);
-    setContexts(loadedContexts);
-    setProjects(loadedProjects);
-    setAttentionDefaults(loadedAttentionDefaults);
-    setRepositories(loadedRepositories);
-    setMachines(loadedMachines);
+    ]);
     const nextCaptureContextId =
-      loadedContexts.find((context) => context.id === captureContextId)?.id ??
-      loadedContexts[0]?.id;
-    const nextCaptureProjectId = loadedProjects.find(
+      nextStructure.contexts.find((context) => context.id === captureContextId)?.id ??
+      nextStructure.contexts[0]?.id;
+    const nextCaptureProjectId = nextStructure.projects.find(
       (project) =>
         project.id === captureProjectId &&
         project.context_id === nextCaptureContextId,
-    )?.id ?? loadedProjects.find(
+    )?.id ?? nextStructure.projects.find(
       (project) => project.context_id === nextCaptureContextId,
     )?.id;
     setCaptureContextId(nextCaptureContextId);
@@ -1680,7 +1426,7 @@ export function AppShell() {
         <HealthDetails
           health={healthStatus}
           isCheckingDependencies={isCheckingDependencies}
-          onCheckDependencies={() => void refreshHealthStatus()}
+          onCheckDependencies={() => void refreshHealthStatus(null)}
         />
       )}
 
@@ -1693,7 +1439,7 @@ export function AppShell() {
           isCheckingDependencies={isCheckingDependencies}
           onContextNameChange={setSetupContextName}
           onProviderChange={setSetupProvider}
-          onCheckDependencies={() => void refreshHealthStatus()}
+          onCheckDependencies={() => void refreshHealthStatus(setupProvider)}
           onSubmit={handleCompleteSetup}
         />
       )}
@@ -3156,27 +2902,23 @@ function EmbeddedTerminal({
 
     const inputDisposable = terminal.onData((data) => {
       if (!attachedRef.current) return;
-      void invoke("terminal_input", {
+      void terminalRuntimeAdapter.input(
         terminalId,
-        input: Array.from(new TextEncoder().encode(data)),
-      }).catch((inputError) => {
+        Array.from(new TextEncoder().encode(data)),
+      ).catch((inputError) => {
         if (!disposed) setTerminalError(errorMessage(inputError));
       });
     });
     const resizeTerminal = () => {
       fitAddon.fit();
       if (!attachedRef.current || terminal.cols < 1 || terminal.rows < 1) return;
-      void invoke("terminal_resize", {
-        terminalId,
-        columns: terminal.cols,
-        rows: terminal.rows,
-      }).catch((resizeError) => {
+      void terminalRuntimeAdapter.resize(terminalId, terminal.cols, terminal.rows).catch((resizeError) => {
         if (!disposed) setTerminalError(errorMessage(resizeError));
       });
     };
     const resizeObserver = new ResizeObserver(resizeTerminal);
     resizeObserver.observe(container);
-    const unlisteners: UnlistenFn[] = [];
+    const unlisteners: (() => void)[] = [];
 
     const attachPane = async (pane: PaneTab) => {
       activePaneRef.current = pane;
@@ -3184,12 +2926,12 @@ function EmbeddedTerminal({
       attachedRef.current = false;
       setStatus(`Attaching ${pane.label}…`);
       setTerminalError(undefined);
-      const attachment = await invoke<TerminalAttachment>("open_terminal", {
+      const attachment = await terminalRuntimeAdapter.open(
         worksetId,
         terminalId,
-        sessionName: pane.sessionName,
-        paneId: pane.paneId,
-      });
+        pane.sessionName,
+        pane.paneId,
+      );
       if (disposed) return;
       setPanes(attachment.panes);
       const attachedPane =
@@ -3207,7 +2949,7 @@ function EmbeddedTerminal({
 
     const start = async () => {
       unlisteners.push(
-        await listen<TerminalOutputEvent>("terminal-output", (event) => {
+        await terminalRuntimeAdapter.listen<TerminalOutputEvent>("terminal-output", (event) => {
           const payload = event.payload;
           if (
             payload.terminalId === terminalId &&
@@ -3216,7 +2958,7 @@ function EmbeddedTerminal({
             terminal.write(Uint8Array.from(payload.data));
           }
         }),
-        await listen<TerminalExitEvent>("terminal-exit", (event) => {
+        await terminalRuntimeAdapter.listen<TerminalExitEvent>("terminal-exit", (event) => {
           if (
             event.payload.terminalId === terminalId &&
             event.payload.paneId === activePaneRef.current.paneId &&
@@ -3245,7 +2987,7 @@ function EmbeddedTerminal({
       resizeObserver.disconnect();
       terminal.dispose();
       unlisteners.forEach((unlisten) => unlisten());
-      void invoke("close_terminal", { terminalId }).catch(() => undefined);
+      void terminalRuntimeAdapter.close(terminalId).catch(() => undefined);
     };
   }, [initialPane, terminalId, worksetId]);
 
@@ -3411,11 +3153,7 @@ function ItemCard({
     event.preventDefault();
     if (!targetItemId) return;
     await saveItem(() =>
-      invoke("set_item_relation", {
-        fromItemId: view.item.id,
-        toItemId: targetItemId,
-        kind: relationKind,
-      }),
+      workAdapter.setRelation(view.item.id, targetItemId, relationKind),
     );
     setTargetItemId(undefined);
   }
@@ -3425,10 +3163,7 @@ function ItemCard({
     if (!externalUrl.trim()) return;
     setIsSaving(true);
     try {
-      const result = await invoke<ExternalLinkAction>("link_external_object", {
-        itemId: view.item.id,
-        url: externalUrl,
-      });
+      const result = await workAdapter.linkExternalObject(view.item.id, externalUrl);
       setExternalUrl("");
       await onChanged();
       if (result.warning) {
@@ -3455,12 +3190,12 @@ function ItemCard({
             worksetBaseBranchOverrides[repositoryId]?.trim() || null,
         }),
       );
-      await invoke<Workset>("create_workset", {
-        itemId: view.item.id,
-        rootDirectory: worksetRoot,
-        branch: worksetBranch,
-        repositories: selected,
-      });
+      await workAdapter.createWorkset(
+        view.item.id,
+        worksetRoot,
+        worksetBranch,
+        selected,
+      );
       setWorksetRoot("");
       setWorksetBranch("");
       setSelectedRepositoryIds([]);
@@ -3473,10 +3208,7 @@ function ItemCard({
     event.preventDefault();
     if (!attachWorksetRoot.trim()) return;
     await saveItem(async () => {
-      await invoke<Workset>("attach_workset", {
-        itemId: view.item.id,
-        rootDirectory: attachWorksetRoot,
-      });
+      await workAdapter.attachWorkset(view.item.id, attachWorksetRoot);
       setAttachWorksetRoot("");
     });
   }
@@ -3484,12 +3216,12 @@ function ItemCard({
   async function handleAddRepositoryToWorkset(worksetId: number) {
     if (!additionalRepositoryId) return;
     await saveItem(async () => {
-      await invoke<Workset>("add_repository_to_workset", {
+      await workAdapter.addRepositoryToWorkset(
         worksetId,
-        repositoryId: additionalRepositoryId,
-        branchOverride: additionalBranchOverride.trim() || null,
-        baseBranchOverride: additionalBaseBranchOverride.trim() || null,
-      });
+        additionalRepositoryId,
+        additionalBranchOverride.trim() || null,
+        additionalBaseBranchOverride.trim() || null,
+      );
       setAdditionalRepositoryId(undefined);
       setAdditionalBranchOverride("");
       setAdditionalBaseBranchOverride("");
@@ -3498,7 +3230,7 @@ function ItemCard({
 
   async function handleSetWorksetArchived(worksetId: number, archived: boolean) {
     await saveItem(() =>
-      invoke("set_workset_archived", { worksetId, archived }),
+      workAdapter.setWorksetArchived(worksetId, archived),
     );
     if (removalReport?.workset_id === worksetId) {
       setRemovalReport(undefined);
@@ -3513,7 +3245,7 @@ function ItemCard({
     ) {
       return;
     }
-    await saveItem(() => invoke<Run>("stop_run", { runId: run.id }));
+    await saveItem(() => workAdapter.stopRun(run.id));
   }
 
   async function handleDeleteRun(run: Run) {
@@ -3526,19 +3258,14 @@ function ItemCard({
       return;
     }
     await saveItem(async () => {
-      await invoke<RunDeletionResult>("delete_run", {
-        runId: run.id,
-        confirmed: true,
-      });
+      await workAdapter.deleteRun(run.id);
     });
   }
 
   async function handlePrepareRemoval(worksetId: number) {
     setIsSaving(true);
     try {
-      const report = await invoke<WorksetRemovalReport>("prepare_workset_removal", {
-        worksetId,
-      });
+      const report = await workAdapter.prepareWorksetRemoval(worksetId);
       setRemovalReport(report);
     } catch (reportError) {
       window.alert(errorMessage(reportError));
@@ -3551,10 +3278,7 @@ function ItemCard({
     if (removalReport?.workset_id !== worksetId) return;
     if (!window.confirm("Remove this Workset and its directory from disk?")) return;
     await saveItem(async () => {
-      const result = await invoke<WorksetRemovalResult>("remove_workset", {
-        worksetId,
-        confirmed: true,
-      });
+      const result = await workAdapter.removeWorkset(worksetId);
       setRemovalReport(undefined);
       if (result.physicalCleanupWarning) {
         window.alert(result.physicalCleanupWarning);
@@ -3565,9 +3289,7 @@ function ItemCard({
   async function handlePrepareItemDeletion() {
     setIsSaving(true);
     try {
-      const preview = await invoke<ItemDeletionPreview>("prepare_item_deletion", {
-        itemId: view.item.id,
-      });
+      const preview = await workAdapter.prepareItemDeletion(view.item.id);
       setDeletionPreview(preview);
     } catch (previewError) {
       window.alert(errorMessage(previewError));
@@ -3593,11 +3315,7 @@ function ItemCard({
 
     setIsSaving(true);
     try {
-      const result = await invoke<ItemDeletionResult>("delete_item", {
-        itemId: view.item.id,
-        confirmed: true,
-        deleteWorksetDirectories,
-      });
+      const result = await workAdapter.deleteItem(view.item.id, deleteWorksetDirectories);
       setDeletionPreview(undefined);
       await onChanged();
       const summary = result.summary;
@@ -3624,10 +3342,7 @@ function ItemCard({
       return;
     }
     await saveItem(async () => {
-      const result = await invoke<ExternalLinkDeletionResult>("unlink_external_link", {
-        linkId,
-        confirmed: true,
-      });
+      const result = await workAdapter.unlinkExternalLink(linkId);
       if (result.externalObjectDeleted) {
         window.alert(
           "The Link was removed. It was the last Link, so its local External Object snapshot and Activity cache were also removed. The provider-owned object was not deleted.",
@@ -3639,10 +3354,7 @@ function ItemCard({
   async function handlePrepareExternalObjectDeletion(externalObjectId: number) {
     setIsSaving(true);
     try {
-      const preview = await invoke<ExternalObjectDeletionPreview>(
-        "prepare_external_object_deletion",
-        { externalObjectId },
-      );
+      const preview = await workAdapter.prepareExternalObjectDeletion(externalObjectId);
       setExternalObjectDeletionPreview(preview);
     } catch (previewError) {
       window.alert(errorMessage(previewError));
@@ -3663,13 +3375,7 @@ function ItemCard({
     }
     setIsSaving(true);
     try {
-      const result = await invoke<ExternalObjectDeletionResult>(
-        "delete_external_object",
-        {
-          externalObjectId: plan.externalObjectId,
-          confirmed: true,
-        },
-      );
+      const result = await workAdapter.deleteExternalObject(plan.externalObjectId);
       setExternalObjectDeletionPreview(undefined);
       await onChanged();
       window.alert(
@@ -3695,12 +3401,12 @@ function ItemCard({
     if (!runPreviewWorksetId) return;
     setIsSaving(true);
     try {
-      const composed = await invoke<string>("compose_run_prompt", {
-        itemId: view.item.id,
-        executionProfile: runProfile,
-        promptSelection: runPromptSelection(),
-        customPrompt: runProfile === "custom" ? runCustomPrompt : null,
-      });
+      const composed = await workAdapter.composeRunPrompt(
+        view.item.id,
+        runProfile,
+        runPromptSelection(),
+        runProfile === "custom" ? runCustomPrompt : null,
+      );
       setRunPrompt(composed);
       setRunPromptNeedsCompose(false);
     } catch (composeError) {
@@ -3721,16 +3427,16 @@ function ItemCard({
     setRunCustomPrompt("");
     setIsSaving(true);
     try {
-      const composed = await invoke<string>("compose_run_prompt", {
-        itemId: view.item.id,
-        executionProfile: "implement",
-        promptSelection: {
+      const composed = await workAdapter.composeRunPrompt(
+        view.item.id,
+        "implement",
+        {
           includeObjective: true,
           includeNotes: Boolean(view.item.notes.trim()),
           externalObjectIds: [],
         },
-        customPrompt: null,
-      });
+        null,
+      );
       setRunPrompt(composed);
       setRunPromptNeedsCompose(false);
     } catch (composeError) {
@@ -3745,7 +3451,7 @@ function ItemCard({
     event.preventDefault();
     if (!runPreviewWorksetId || !runPrompt.trim() || runPromptNeedsCompose) return;
     await saveItem(async () => {
-      await invoke<Run>("start_run", {
+      await workAdapter.startRun({
         itemId: view.item.id,
         worksetId: runPreviewWorksetId,
         machineId: runMachineId ?? null,
@@ -3762,7 +3468,7 @@ function ItemCard({
   async function refreshExternalObject(externalObjectId: number) {
     setIsSaving(true);
     try {
-      await invoke("refresh_external_object", { externalObjectId });
+      await workAdapter.refreshExternalObject(externalObjectId);
       await onChanged();
     } catch (refreshError) {
       window.alert(errorMessage(refreshError));
@@ -3782,12 +3488,12 @@ function ItemCard({
     if (!issueRepository.trim() || !issueTitle.trim()) return;
     setIsSaving(true);
     try {
-      const result = await invoke<ExternalLinkAction>("create_github_issue", {
-        itemId: view.item.id,
-        repository: issueRepository,
-        title: issueTitle,
-        body: issueBody,
-      });
+      const result = await workAdapter.createGithubIssue(
+        view.item.id,
+        issueRepository,
+        issueTitle,
+        issueBody,
+      );
       setIsIssuePreviewOpen(false);
       setIssueRepository("");
       await onChanged();
@@ -4164,10 +3870,7 @@ function ItemCard({
               }
             }
             void saveItem(() =>
-              invoke("set_item_status", {
-                itemId: view.item.id,
-                status: nextStatus,
-              }),
+              workAdapter.setItemStatus(view.item.id, nextStatus),
             );
           }}
           disabled={isSaving}
@@ -4272,7 +3975,7 @@ function ItemCard({
           disabled={isSaving || notes === view.item.notes}
           onClick={() =>
             void saveItem(() =>
-              invoke("set_item_notes", { itemId: view.item.id, notes }),
+              workAdapter.setItemNotes(view.item.id, notes),
             )
           }
         >
@@ -4293,10 +3996,7 @@ function ItemCard({
           disabled={isSaving || !reminderAt}
           onClick={() =>
             void saveItem(() =>
-              invoke("add_item_reminder", {
-                itemId: view.item.id,
-                remindAt: reminderAt,
-              }),
+              workAdapter.addReminder(view.item.id, reminderAt),
             )
           }
         >
@@ -4315,10 +4015,7 @@ function ItemCard({
                 disabled={isSaving}
                 onClick={() =>
                   void saveItem(() =>
-                    invoke("remove_item_reminder", {
-                      itemId: view.item.id,
-                      reminderId: reminder.id,
-                    }),
+                    workAdapter.removeReminder(view.item.id, reminder.id),
                   )
                 }
               >
@@ -4375,9 +4072,9 @@ function ItemCard({
                       type="button"
                       className="secondary-button"
                       disabled={isSaving || run.pane_status === "missing"}
-                      onClick={() =>
-                        void saveItem(() =>
-                          invoke("open_external_terminal", { runId: run.id }),
+                        onClick={() =>
+                          void saveItem(() =>
+                            workAdapter.openExternalTerminal(run.id),
                         )
                       }
                     >
@@ -4553,48 +4250,32 @@ function ItemCard({
             }
             onSavePolicy={(policy) =>
               saveItem(() =>
-                invoke("set_link_attention_policy", {
-                  linkId: externalLink.link.id,
-                  policy,
-                }),
+                workAdapter.setLinkAttentionPolicy(externalLink.link.id, policy),
               )
             }
             onMarkReviewed={() =>
               saveItem(() =>
-                invoke("mark_link_reviewed", {
-                  linkId: externalLink.link.id,
-                }),
+                workAdapter.markLinkReviewed(externalLink.link.id),
               )
             }
             onSaveWatchUntil={(watchUntil) =>
               saveItem(() =>
-                invoke("set_link_watch_until", {
-                  linkId: externalLink.link.id,
-                  watchUntil,
-                }),
+                workAdapter.setLinkWatchUntil(externalLink.link.id, watchUntil),
               )
             }
             onSaveReviewAt={(reviewAt) =>
               saveItem(() =>
-                invoke("set_link_review_at", {
-                  linkId: externalLink.link.id,
-                  reviewAt,
-                }),
+                workAdapter.setLinkReviewAt(externalLink.link.id, reviewAt),
               )
             }
             onClearReviewAt={() =>
               saveItem(() =>
-                invoke("clear_link_review_at", {
-                  linkId: externalLink.link.id,
-                }),
+                workAdapter.clearLinkReviewAt(externalLink.link.id),
               )
             }
             onAddComment={(body) =>
               saveItem(() =>
-                invoke("add_external_comment", {
-                  linkId: externalLink.link.id,
-                  body,
-                }),
+                workAdapter.addExternalComment(externalLink.link.id, body),
               )
             }
           />
@@ -5070,7 +4751,7 @@ function AttentionEntryCard({
   async function markReviewed() {
     setIsSaving(true);
     try {
-      await invoke("mark_link_reviewed", { linkId: entry.link_id });
+      await workAdapter.markLinkReviewed(entry.link_id);
       await onMarkedReviewed();
     } catch (reviewError) {
       window.alert(errorMessage(reviewError));
@@ -5126,7 +4807,7 @@ function AttentionEntryCard({
   async function saveReminder(itemId: number, reminderId: number) {
     setIsSaving(true);
     try {
-      await invoke("remove_item_reminder", { itemId, reminderId });
+      await workAdapter.removeReminder(itemId, reminderId);
       await onMarkedReviewed();
     } catch (dismissError) {
       window.alert(errorMessage(dismissError));
@@ -5138,7 +4819,7 @@ function AttentionEntryCard({
   async function clearReviewDate() {
     setIsSaving(true);
     try {
-      await invoke("clear_link_review_at", { linkId: entry.link_id });
+      await workAdapter.clearLinkReviewAt(entry.link_id);
       await onMarkedReviewed();
     } catch (clearError) {
       window.alert(errorMessage(clearError));
@@ -5506,14 +5187,4 @@ function paneTabForRun(run: Run): PaneTab {
 
 function uniqueItems(items: ItemView[]): ItemView[] {
   return Array.from(new Map(items.map((item) => [item.item.id, item])).values());
-}
-
-function currentMinute(): string {
-  return new Date(Date.now() - new Date().getTimezoneOffset() * 60_000)
-    .toISOString()
-    .slice(0, 16);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
