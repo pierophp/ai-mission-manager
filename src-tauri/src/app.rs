@@ -1475,12 +1475,6 @@ impl Runtime {
                     &workset.branch,
                     workset.archived,
                 );
-                blockers.extend(
-                    preview
-                        .blockers
-                        .iter()
-                        .map(|blocker| format!("Workset #{}: {blocker}", workset.id)),
-                );
                 preview
             })
             .collect();
@@ -1710,6 +1704,25 @@ impl Runtime {
                 current.blockers.join("\n")
             ));
         }
+        if delete_workset_directories {
+            let physical_blockers = current
+                .worksets
+                .iter()
+                .flat_map(|workset| {
+                    workset
+                        .blockers
+                        .iter()
+                        .map(move |blocker| format!("Workset #{}: {blocker}", workset.workset_id))
+                })
+                .collect::<Vec<_>>();
+            if !physical_blockers.is_empty() {
+                return Err(format!(
+                    "{} Workset directory cleanup is blocked:\n{}",
+                    target.label(),
+                    physical_blockers.join("\n")
+                ));
+            }
+        }
 
         let mut staged = Vec::new();
         if delete_workset_directories {
@@ -1766,6 +1779,11 @@ impl Runtime {
             })
         } else if current.plan.worksets.is_empty() {
             None
+        } else if current.worksets.iter().any(|workset| !workset.safe) {
+            Some(format!(
+                "{} records were deleted; Workset directories were left on disk because physical cleanup was not safe.",
+                target.label()
+            ))
         } else {
             Some(format!(
                 "{} records were deleted; Workset directories were left on disk by choice.",
@@ -5409,6 +5427,79 @@ fi
         assert!(history
             .iter()
             .any(|entry| matches!(entry.action, AuditAction::ContextDeleted { .. })));
+    }
+
+    #[test]
+    fn project_deletion_can_keep_an_unsafe_workset_directory() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let seed = directory.path().join("seed");
+        run_git(directory.path(), &["init", "--initial-branch=main", "seed"]);
+        run_git(&seed, &["config", "user.email", "test@example.com"]);
+        run_git(&seed, &["config", "user.name", "Test User"]);
+        fs::write(seed.join("README.md"), "preserve this work\n")
+            .expect("seed file should be written");
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-m", "initial"]);
+        let origin = directory.path().join("service.git");
+        run_git(directory.path(), &["init", "--bare", "service.git"]);
+        let origin_url = origin.to_string_lossy().into_owned();
+        run_git(&seed, &["remote", "add", "origin", &origin_url]);
+        run_git(&seed, &["push", "origin", "main"]);
+
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .create_project(
+                "Billing".into(),
+                1,
+                ProjectDefaults {
+                    item_status: ItemStatus::Inbox,
+                },
+            )
+            .expect("Project should be created");
+        runtime
+            .register_repository(2, "service".into(), origin_url)
+            .expect("Repository should register");
+        runtime
+            .create_item("Delete the Project records".into(), 1, 2)
+            .expect("Item should be created");
+        let root = directory.path().join("workset-root");
+        runtime
+            .create_workset(
+                1,
+                root.to_string_lossy().into_owned(),
+                "feature/delete-project".into(),
+                vec![WorksetRepositoryInput {
+                    repository_id: 1,
+                    branch_override: None,
+                    base_branch_override: Some("main".into()),
+                }],
+            )
+            .expect("Workset should be created");
+
+        let preview = runtime
+            .prepare_project_deletion(2)
+            .expect("Project deletion preview should be available");
+        assert!(preview
+            .worksets
+            .iter()
+            .flat_map(|workset| &workset.blockers)
+            .any(|blocker| blocker.contains("unverified unpushed commits")));
+        assert!(runtime
+            .delete_project(2, vec![1], vec![1], vec![1], true, true)
+            .is_err());
+
+        let result = runtime
+            .delete_project(2, vec![1], vec![1], vec![1], true, false)
+            .expect("Project records should be deletable while keeping the directory");
+        assert!(!result.workset_directories_deleted);
+        assert!(result
+            .physical_cleanup_warning
+            .as_deref()
+            .is_some_and(|warning| warning.contains("physical cleanup was not safe")));
+        assert!(root.exists());
+        assert!(runtime.state.projects.iter().all(|project| project.id != 2));
+        assert!(runtime.state.items.is_empty());
     }
 
     #[test]

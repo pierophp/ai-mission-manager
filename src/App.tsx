@@ -1196,15 +1196,9 @@ export function App() {
       return;
     }
     const { plan } = parentDeletionPreview;
-    if (
-      !window.confirm(
-        `Delete Project ${plan.name} and all of its local records? This cannot be undone.`,
-      )
-    ) {
-      return;
-    }
     const deleteWorksetDirectories =
       plan.worksets.length > 0 &&
+      parentDeletionPreview.worksets.every((workset) => workset.safe) &&
       window.confirm(
         `Permanently delete these ${plan.worksets.length} Workset director${plan.worksets.length === 1 ? "y" : "ies"} from disk too? Choose Cancel to keep the directories while removing their records.`,
       );
@@ -1239,15 +1233,9 @@ export function App() {
       return;
     }
     const { plan } = parentDeletionPreview;
-    if (
-      !window.confirm(
-        `Delete Context ${plan.name} and all of its local records? This cannot be undone.`,
-      )
-    ) {
-      return;
-    }
     const deleteWorksetDirectories =
       plan.worksets.length > 0 &&
+      parentDeletionPreview.worksets.every((workset) => workset.safe) &&
       window.confirm(
         `Permanently delete these ${plan.worksets.length} Workset director${plan.worksets.length === 1 ? "y" : "ies"} from disk too? Choose Cancel to keep the directories while removing their records.`,
       );
@@ -2764,6 +2752,9 @@ function ParentDeletionPreviewCard({
   onCancel: () => void;
 }) {
   const { plan } = preview;
+  const physicalCleanupBlockers = preview.worksets.flatMap((workset) =>
+    workset.blockers.map((blocker) => `Workset #${workset.worksetId}: ${blocker}`),
+  );
   return (
     <div className="deletion-preview parent-deletion-preview" role="alert">
       <strong>{kind} deletion preview</strong>
@@ -2837,6 +2828,16 @@ function ParentDeletionPreviewCard({
           Eligible local External Objects: {plan.orphanedExternalObjectIds.map((id) => `#${id}`).join(", ")}.
           Their {plan.orphanedSnapshotCount} snapshot(s) and {plan.orphanedActivityCount} Activity record(s) will also be removed.
         </p>
+      )}
+      {physicalCleanupBlockers.length > 0 && (
+        <div className="deletion-blockers deletion-warnings">
+          <strong>Physical cleanup unavailable</strong>
+          <p>
+            The Project or Context records can still be deleted, but these Workset directories
+            will be kept on disk until their safety findings are resolved.
+          </p>
+          {physicalCleanupBlockers.map((blocker) => <span key={blocker}>{blocker}</span>)}
+        </div>
       )}
       {preview.blockers.length > 0 && (
         <div className="deletion-blockers">
