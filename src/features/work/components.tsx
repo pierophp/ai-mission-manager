@@ -10,6 +10,15 @@ import {
   CardTitle,
 } from "../../components/ui/card";
 import { Checkbox } from "../../components/ui/checkbox";
+import { ConfirmationDialog } from "../../components/ui/confirmation-dialog";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../../components/ui/dialog";
 import { Input } from "../../components/ui/input";
 import {
   NativeSelect,
@@ -53,6 +62,13 @@ import { type WorkAction, useWorkCommand, workActions } from "./work-mutations";
 
 const itemStatuses: ItemStatus[] = ["Inbox", "Active", "Waiting", "Done"];
 const relationKinds: ItemRelationKind[] = ["Blocks", "BlockedBy", "RelatedTo"];
+
+type WorkConfirmation = {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  onConfirm: () => void;
+};
 
 export function HomeColumn({
   title,
@@ -153,6 +169,9 @@ export function ItemCard({
     useState("");
   const [removalReport, setRemovalReport] = useState<WorksetRemovalReport>();
   const [deletionPreview, setDeletionPreview] = useState<ItemDeletionPreview>();
+  const [deleteWorksetDirectories, setDeleteWorksetDirectories] =
+    useState(false);
+  const [confirmation, setConfirmation] = useState<WorkConfirmation>();
   const [externalObjectDeletionPreview, setExternalObjectDeletionPreview] =
     useState<ExternalObjectDeletionPreview>();
   const [runPreviewWorksetId, setRunPreviewWorksetId] = useState<number>();
@@ -287,27 +306,30 @@ export function ItemCard({
     }
   }
 
-  async function handleStopRun(run: Run) {
-    if (
-      !window.confirm(
-        `Stop Run #${run.id}? This is separate from completing the Item and will leave the Run in its history.`,
-      )
-    ) {
-      return;
-    }
-    await saveItem(workActions.stopRun(run.id));
+  function handleStopRun(run: Run) {
+    setConfirmation({
+      title: `Stop Run #${run.id}?`,
+      description:
+        "This is separate from completing the Item and will leave the Run in its history.",
+      confirmLabel: "Stop Run",
+      onConfirm: () => {
+        setConfirmation(undefined);
+        void saveItem(workActions.stopRun(run.id));
+      },
+    });
   }
 
-  async function handleDeleteRun(run: Run) {
+  function handleDeleteRun(run: Run) {
     if (run.state !== "finished") return;
-    if (
-      !window.confirm(
-        `Delete finished Run #${run.id} from Run history? This cannot be undone.`,
-      )
-    ) {
-      return;
-    }
-    await saveItem(workActions.deleteRun(run.id));
+    setConfirmation({
+      title: `Delete finished Run #${run.id}?`,
+      description: "This removes the Run from history and cannot be undone.",
+      confirmLabel: "Delete Run",
+      onConfirm: () => {
+        setConfirmation(undefined);
+        void saveItem(workActions.deleteRun(run.id));
+      },
+    });
   }
 
   async function handlePrepareRemoval(worksetId: number) {
@@ -325,16 +347,26 @@ export function ItemCard({
     }
   }
 
-  async function handleRemoveWorkset(worksetId: number) {
-    if (removalReport?.workset_id !== worksetId) return;
-    if (!window.confirm("Remove this Workset and its directory from disk?"))
-      return;
+  async function executeRemoveWorkset(worksetId: number) {
     const result = await saveItem(workActions.removeWorkset(worksetId));
     if (!result) return;
     setRemovalReport(undefined);
     if (result.physicalCleanupWarning) {
       window.alert(result.physicalCleanupWarning);
     }
+  }
+
+  function handleRemoveWorkset(worksetId: number) {
+    if (removalReport?.workset_id !== worksetId) return;
+    setConfirmation({
+      title: "Remove this Workset?",
+      description: "The Workset record and its directory will be removed from disk.",
+      confirmLabel: "Remove Workset",
+      onConfirm: () => {
+        setConfirmation(undefined);
+        void executeRemoveWorkset(worksetId);
+      },
+    });
   }
 
   async function handlePrepareItemDeletion() {
@@ -344,6 +376,7 @@ export function ItemCard({
         workActions.prepareItemDeletion(view.item.id),
         false,
       );
+      setDeleteWorksetDirectories(false);
       setDeletionPreview(preview);
     } catch (previewError) {
       window.alert(errorMessage(previewError));
@@ -354,25 +387,13 @@ export function ItemCard({
 
   async function handleDeleteItem() {
     if (!deletionPreview || deletionPreview.blockers.length > 0) return;
-    if (
-      !window.confirm(
-        `Delete ${deletionPreview.plan.humanIdentifier} and its local records? This cannot be undone.`,
-      )
-    ) {
-      return;
-    }
-    const deleteWorksetDirectories =
-      deletionPreview.worksets.length > 0 &&
-      window.confirm(
-        `Permanently delete these ${deletionPreview.worksets.length} Workset director${deletionPreview.worksets.length === 1 ? "y" : "ies"} from disk too? Choose Cancel to delete the Item records while leaving the directories in place.`,
-      );
-
     setIsSaving(true);
     try {
       const result = await workCommand.execute(
         workActions.deleteItem(view.item.id, deleteWorksetDirectories),
       );
       setDeletionPreview(undefined);
+      setDeleteWorksetDirectories(false);
       await onChanged();
       const summary = result.summary;
       const physicalWarning = result.physicalCleanupWarning
@@ -383,20 +404,14 @@ export function ItemCard({
       );
     } catch (deleteError) {
       setDeletionPreview(undefined);
+      setDeleteWorksetDirectories(false);
       window.alert(errorMessage(deleteError));
     } finally {
       setIsSaving(false);
     }
   }
 
-  async function handleUnlinkExternalLink(linkId: number) {
-    if (
-      !window.confirm(
-        "Remove this Link from the Item? Its Link-scoped attention state will be removed. The GitHub Issue, pull request, or other provider-owned object will not be deleted.",
-      )
-    ) {
-      return;
-    }
+  async function executeUnlinkExternalLink(linkId: number) {
     const result = await saveItem(workActions.unlinkExternalLink(linkId));
     if (!result) return;
     if (result.externalObjectDeleted) {
@@ -404,6 +419,19 @@ export function ItemCard({
         "The Link was removed. It was the last Link, so its local External Object snapshot and Activity cache were also removed. The provider-owned object was not deleted.",
       );
     }
+  }
+
+  function handleUnlinkExternalLink(linkId: number) {
+    setConfirmation({
+      title: "Remove this Link from the Item?",
+      description:
+        "Its Link-scoped attention state will be removed. The GitHub Issue, pull request, or other provider-owned object will not be deleted.",
+      confirmLabel: "Remove Link",
+      onConfirm: () => {
+        setConfirmation(undefined);
+        void executeUnlinkExternalLink(linkId);
+      },
+    });
   }
 
   async function handlePrepareExternalObjectDeletion(externalObjectId: number) {
@@ -424,17 +452,22 @@ export function ItemCard({
   async function handleDeleteExternalObject() {
     if (!externalObjectDeletionPreview) return;
     const { plan } = externalObjectDeletionPreview;
-    if (
-      !window.confirm(
-        `Remove this ${externalObjectKindLabel(plan.kind)} and its local records from Mission Manager? This will remove ${plan.linkIds.length} Link(s), ${plan.snapshotCount} snapshot(s), and ${plan.activityCount} Activity record(s). Provider-owned objects are never deleted.`,
-      )
-    ) {
-      return;
-    }
+    setConfirmation({
+      title: `Remove this ${externalObjectKindLabel(plan.kind)} locally?`,
+      description: `This will remove ${plan.linkIds.length} Link(s), ${plan.snapshotCount} snapshot(s), and ${plan.activityCount} Activity record(s). Provider-owned objects are never deleted.`,
+      confirmLabel: "Remove locally",
+      onConfirm: () => {
+        setConfirmation(undefined);
+        void executeDeleteExternalObject(plan.externalObjectId);
+      },
+    });
+  }
+
+  async function executeDeleteExternalObject(externalObjectId: number) {
     setIsSaving(true);
     try {
       const result = await workCommand.execute(
-        workActions.deleteExternalObject(plan.externalObjectId),
+        workActions.deleteExternalObject(externalObjectId),
       );
       setExternalObjectDeletionPreview(undefined);
       await onChanged();
@@ -447,6 +480,29 @@ export function ItemCard({
     } finally {
       setIsSaving(false);
     }
+  }
+
+  function handleItemStatusChange(nextStatus: ItemStatus) {
+    if (nextStatus === "Done" && view.item.status !== "Done") {
+      const activeRuns = view.runs.filter(
+        (run) => run.state !== "finished" && run.pane_status !== "missing",
+      );
+      if (activeRuns.length > 0) {
+        setConfirmation({
+          title: "Complete this Item with active Runs?",
+          description: `${activeRuns.length} Run${activeRuns.length === 1 ? " is" : "s are"} still active. Completing the Item will not stop them.`,
+          confirmLabel: "Complete Item",
+          onConfirm: () => {
+            setConfirmation(undefined);
+            void saveItem(
+              workActions.setItemStatus(view.item.id, nextStatus),
+            );
+          },
+        });
+        return;
+      }
+    }
+    void saveItem(workActions.setItemStatus(view.item.id, nextStatus));
   }
 
   function runPromptSelection(): RunPromptSelection {
@@ -988,33 +1044,17 @@ export function ItemCard({
   }
 
   return (
-    <Card size="sm" className="h-full">
+    <>
+      <Card size="sm" className="h-full">
       <CardHeader className="border-b border-border/70">
         <div className="flex flex-wrap items-center gap-2">
           <Badge variant="outline">{view.item.human_identifier}</Badge>
           <NativeSelect
             aria-label={`Status for ${view.item.human_identifier}`}
             value={view.item.status}
-            onChange={(event) => {
-              const nextStatus = event.target.value as ItemStatus;
-              if (nextStatus === "Done" && view.item.status !== "Done") {
-                const activeRuns = view.runs.filter(
-                  (run) =>
-                    run.state !== "finished" && run.pane_status !== "missing",
-                );
-                if (
-                  activeRuns.length > 0 &&
-                  !window.confirm(
-                    `${activeRuns.length} Run${activeRuns.length === 1 ? " is" : "s are"} still active. Complete the Item without stopping them?`,
-                  )
-                ) {
-                  return;
-                }
-              }
-                void saveItem(
-                  workActions.setItemStatus(view.item.id, nextStatus),
-                );
-            }}
+            onChange={(event) =>
+              handleItemStatusChange(event.target.value as ItemStatus)
+            }
             disabled={isSaving}
           >
             {itemStatuses.map((status) => (
@@ -1039,89 +1079,6 @@ export function ItemCard({
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-5 pt-4">
-        {deletionPreview && (
-          <Alert
-            variant={
-              deletionPreview.blockers.length > 0 ? "destructive" : "default"
-            }
-          >
-            <AlertTitle>Item deletion preview</AlertTitle>
-            <AlertDescription className="space-y-3">
-              <p>
-                This removes <b>{deletionPreview.plan.humanIdentifier}</b> ·{" "}
-                {deletionPreview.plan.title} and its local descendants. External
-                Issues and pull requests are never changed.
-              </p>
-              <ul className="grid gap-1 pl-5">
-                <li>{deletionPreview.plan.reminderCount} reminder(s)</li>
-                <li>
-                  {deletionPreview.plan.relationshipCount} Item relationship(s)
-                </li>
-                <li>{deletionPreview.plan.worksets.length} Workset(s)</li>
-                <li>{deletionPreview.plan.runIds.length} Run(s)</li>
-                <li>{deletionPreview.plan.linkIds.length} Link(s)</li>
-                <li>
-                  {deletionPreview.plan.orphanedExternalObjectIds.length}{" "}
-                  orphaned External Object(s),{" "}
-                  {deletionPreview.plan.orphanedSnapshotCount} snapshot(s), and{" "}
-                  {deletionPreview.plan.orphanedActivityCount} Activity
-                  record(s)
-                </li>
-              </ul>
-              {deletionPreview.worksets.length > 0 && (
-                <div className="grid gap-2">
-                  <span className="font-medium">Workset directories</span>
-                  {deletionPreview.worksets.map((workset) => (
-                    <div
-                      className="grid gap-1 rounded-md border p-2"
-                      key={workset.worksetId}
-                    >
-                      <strong>
-                        {workset.branch} {workset.archived ? "· Archived" : ""}
-                      </strong>
-                      <code className="break-all font-mono text-xs">
-                        {workset.rootDirectory}
-                      </code>
-                      {!workset.safe &&
-                        workset.blockers.map((blocker) => (
-                          <span key={blocker}>{blocker}</span>
-                        ))}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {deletionPreview.blockers.length > 0 && (
-                <div className="grid gap-1">
-                  <strong>Deletion blocked</strong>
-                  {deletionPreview.blockers.map((blocker) => (
-                    <span key={blocker}>{blocker}</span>
-                  ))}
-                  <p>Resolve each blocker, then create a fresh preview.</p>
-                </div>
-              )}
-            </AlertDescription>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="destructive"
-                disabled={isSaving || deletionPreview.blockers.length > 0}
-                onClick={() => void handleDeleteItem()}
-              >
-                Confirm logical deletion
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                disabled={isSaving}
-                onClick={() => setDeletionPreview(undefined)}
-              >
-                Cancel
-              </Button>
-            </div>
-          </Alert>
-        )}
         <label className="grid gap-1.5 text-sm font-medium">
           <span>Notes</span>
           <Textarea
@@ -1733,7 +1690,135 @@ export function ItemCard({
           </form>
         )}
       </CardContent>
-    </Card>
+      </Card>
+      {confirmation && (
+        <ConfirmationDialog
+          open
+          title={confirmation.title}
+          description={confirmation.description}
+          confirmLabel={confirmation.confirmLabel}
+          disabled={isSaving}
+          onOpenChange={(open) => {
+            if (!open && !isSaving) setConfirmation(undefined);
+          }}
+          onConfirm={confirmation.onConfirm}
+        />
+      )}
+      {deletionPreview && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open && !isSaving) {
+              setDeletionPreview(undefined);
+              setDeleteWorksetDirectories(false);
+            }
+          }}
+        >
+          <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-2xl">
+            <DialogHeader>
+              <DialogTitle>
+                Delete {deletionPreview.plan.humanIdentifier}?
+              </DialogTitle>
+              <DialogDescription>
+                This removes the Item and its local descendants. External Issues
+                and pull requests are never changed.
+              </DialogDescription>
+            </DialogHeader>
+            <div className="grid gap-4 text-sm">
+              <ul className="grid gap-1 pl-5">
+                <li>{deletionPreview.plan.reminderCount} reminder(s)</li>
+                <li>
+                  {deletionPreview.plan.relationshipCount} Item relationship(s)
+                </li>
+                <li>{deletionPreview.plan.worksets.length} Workset(s)</li>
+                <li>{deletionPreview.plan.runIds.length} Run(s)</li>
+                <li>{deletionPreview.plan.linkIds.length} Link(s)</li>
+                <li>
+                  {deletionPreview.plan.orphanedExternalObjectIds.length}{" "}
+                  orphaned External Object(s),{" "}
+                  {deletionPreview.plan.orphanedSnapshotCount} snapshot(s), and{" "}
+                  {deletionPreview.plan.orphanedActivityCount} Activity record(s)
+                </li>
+              </ul>
+              {deletionPreview.worksets.length > 0 && (
+                <div className="grid gap-2">
+                  <span className="font-medium">Workset directories</span>
+                  {deletionPreview.worksets.map((workset) => (
+                    <div
+                      className="grid gap-1 rounded-md border p-2"
+                      key={workset.worksetId}
+                    >
+                      <strong>
+                        {workset.branch} {workset.archived ? "· Archived" : ""}
+                      </strong>
+                      <code className="break-all font-mono text-xs">
+                        {workset.rootDirectory}
+                      </code>
+                      {!workset.safe &&
+                        workset.blockers.map((blocker) => (
+                          <span className="text-destructive" key={blocker}>
+                            {blocker}
+                          </span>
+                        ))}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {deletionPreview.worksets.length > 0 &&
+                deletionPreview.blockers.length === 0 && (
+                  <label className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+                    <Checkbox
+                      checked={deleteWorksetDirectories}
+                      onCheckedChange={(checked) =>
+                        setDeleteWorksetDirectories(checked === true)
+                      }
+                      disabled={isSaving}
+                    />
+                    <span className="grid gap-1">
+                      <span className="font-medium">
+                        Also delete Workset directories from disk
+                      </span>
+                      <span className="text-muted-foreground">
+                        Leave this unchecked to remove only the local records.
+                      </span>
+                    </span>
+                  </label>
+                )}
+              {deletionPreview.blockers.length > 0 && (
+                <div className="grid gap-1 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-destructive">
+                  <strong>Deletion blocked</strong>
+                  {deletionPreview.blockers.map((blocker) => (
+                    <span key={blocker}>{blocker}</span>
+                  ))}
+                  <span>Resolve each blocker, then create a fresh preview.</span>
+                </div>
+              )}
+            </div>
+            <DialogFooter>
+              <Button
+                type="button"
+                variant="outline"
+                disabled={isSaving}
+                onClick={() => {
+                  setDeletionPreview(undefined);
+                  setDeleteWorksetDirectories(false);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="destructive"
+                disabled={isSaving || deletionPreview.blockers.length > 0}
+                onClick={() => void handleDeleteItem()}
+              >
+                {isSaving ? "Deleting…" : "Confirm logical deletion"}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
+    </>
   );
 }
 
@@ -1753,7 +1838,7 @@ export function ExternalLinkCard({
   externalLink: ExternalLinkView;
   isSaving: boolean;
   onRefresh: () => Promise<void>;
-  onUnlink: () => Promise<void>;
+  onUnlink: () => void | Promise<void>;
   onPrepareDeleteObject: () => Promise<void>;
   onSavePolicy: (policy: ExternalChangePolicy | null) => Promise<void>;
   onMarkReviewed: () => Promise<void>;

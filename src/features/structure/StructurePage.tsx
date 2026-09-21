@@ -13,6 +13,7 @@ import {
   CardTitle,
 } from "../../components/ui/card";
 import { Checkbox } from "../../components/ui/checkbox";
+import { ConfirmationDialog } from "../../components/ui/confirmation-dialog";
 import { EmptyDescription } from "../../components/ui/empty";
 import { Input } from "../../components/ui/input";
 import {
@@ -66,6 +67,18 @@ const defaultAttentionPolicy: ExternalChangePolicy = {
   metadata: true,
 };
 
+type StructureConfirmation = {
+  title: string;
+  description: string;
+  confirmLabel: string;
+  includeWorksetDirectoryOption?: boolean;
+  confirmationPhrase?: string;
+  onConfirm: (
+    deleteWorksetDirectories: boolean,
+    confirmationPhrase: string,
+  ) => void;
+};
+
 export function StructurePage() {
   const { closeTerminal } = useAppShell();
   const queryClient = useQueryClient();
@@ -111,6 +124,10 @@ export function StructurePage() {
     useState<MachineDeletionPreview>();
   const [resetLocalDataPreview, setResetLocalDataPreview] =
     useState<ResetLocalDataPreview>();
+  const [confirmation, setConfirmation] = useState<StructureConfirmation>();
+  const [deleteWorksetDirectories, setDeleteWorksetDirectories] =
+    useState(false);
+  const [confirmationPhrase, setConfirmationPhrase] = useState("");
   const [isSaving, setIsSaving] = useState(false);
 
   const selectedProjects = projects.filter(
@@ -245,21 +262,11 @@ export function StructurePage() {
     }
   }
 
-  async function handleDeleteProject(projectId: number) {
-    if (
-      !parentDeletionPreview ||
-      parentDeletionPreview.plan.projectId !== projectId ||
-      parentDeletionPreview.blockers.length > 0
-    ) {
-      return;
-    }
-
-    const { plan } = parentDeletionPreview;
-    const deleteWorksetDirectories = confirmWorksetCleanup(
-      plan.worksets,
-      parentDeletionPreview.worksets,
-    );
-
+  async function executeDeleteProject(
+    projectId: number,
+    plan: ParentDeletionPreview["plan"],
+    deleteWorksetDirectories: boolean,
+  ) {
     setIsSaving(true);
     try {
       const result = await structureCommand.execute(
@@ -282,21 +289,38 @@ export function StructurePage() {
     }
   }
 
-  async function handleDeleteContext(contextId: number) {
+  function handleDeleteProject(projectId: number) {
     if (
       !parentDeletionPreview ||
-      parentDeletionPreview.plan.contextId !== contextId ||
+      parentDeletionPreview.plan.projectId !== projectId ||
       parentDeletionPreview.blockers.length > 0
     ) {
       return;
     }
 
     const { plan } = parentDeletionPreview;
-    const deleteWorksetDirectories = confirmWorksetCleanup(
-      plan.worksets,
-      parentDeletionPreview.worksets,
-    );
+    setDeleteWorksetDirectories(false);
+    setConfirmation({
+      title: "Delete Project " + plan.name + "?",
+      description:
+        "This removes the Project and its complete local dependency graph. Provider-owned Issues and pull requests are never deleted.",
+      confirmLabel: "Delete Project",
+      includeWorksetDirectoryOption: plan.worksets.length > 0,
+      onConfirm: (deleteWorksetDirectories) => {
+        void executeDeleteProject(
+          projectId,
+          plan,
+          deleteWorksetDirectories,
+        );
+      },
+    });
+  }
 
+  async function executeDeleteContext(
+    contextId: number,
+    plan: ParentDeletionPreview["plan"],
+    deleteWorksetDirectories: boolean,
+  ) {
     setIsSaving(true);
     try {
       const result = await structureCommand.execute(
@@ -319,6 +343,33 @@ export function StructurePage() {
     } finally {
       setIsSaving(false);
     }
+  }
+
+  function handleDeleteContext(contextId: number) {
+    if (
+      !parentDeletionPreview ||
+      parentDeletionPreview.plan.contextId !== contextId ||
+      parentDeletionPreview.blockers.length > 0
+    ) {
+      return;
+    }
+
+    const { plan } = parentDeletionPreview;
+    setDeleteWorksetDirectories(false);
+    setConfirmation({
+      title: "Delete Context " + plan.name + "?",
+      description:
+        "This removes the Context and its complete local dependency graph. Provider-owned Issues and pull requests are never deleted.",
+      confirmLabel: "Delete Context",
+      includeWorksetDirectoryOption: plan.worksets.length > 0,
+      onConfirm: (deleteWorksetDirectories) => {
+        void executeDeleteContext(
+          contextId,
+          plan,
+          deleteWorksetDirectories,
+        );
+      },
+    });
   }
 
   async function handleRegisterRepository(event: FormEvent<HTMLFormElement>) {
@@ -365,29 +416,11 @@ export function StructurePage() {
     }
   }
 
-  async function handleDeleteRepository(repositoryId: number) {
-    if (
-      !repositoryDeletionPreview ||
-      repositoryDeletionPreview.plan.repositoryId !== repositoryId ||
-      repositoryDeletionPreview.blockers.length > 0
-    ) {
-      return;
-    }
-
-    const { plan } = repositoryDeletionPreview;
-    if (
-      !window.confirm(
-        `Delete Repository ${plan.name} and its local Workset records? This cannot be undone.`,
-      )
-    ) {
-      return;
-    }
-    const deleteWorksetDirectories =
-      plan.worksets.length === 0 ||
-      window.confirm(
-        `Permanently delete these ${plan.worksets.length} Workset director${plan.worksets.length === 1 ? "y" : "ies"} from disk too? Choose Cancel to keep the directories while removing their records.`,
-      );
-
+  async function executeDeleteRepository(
+    repositoryId: number,
+    plan: RepositoryDeletionPreview["plan"],
+    deleteWorksetDirectories: boolean,
+  ) {
     setIsSaving(true);
     try {
       const result = await structureCommand.execute(
@@ -406,6 +439,33 @@ export function StructurePage() {
     } finally {
       setIsSaving(false);
     }
+  }
+
+  function handleDeleteRepository(repositoryId: number) {
+    if (
+      !repositoryDeletionPreview ||
+      repositoryDeletionPreview.plan.repositoryId !== repositoryId ||
+      repositoryDeletionPreview.blockers.length > 0
+    ) {
+      return;
+    }
+
+    const { plan } = repositoryDeletionPreview;
+    setDeleteWorksetDirectories(false);
+    setConfirmation({
+      title: "Delete Repository " + plan.name + "?",
+      description:
+        "This removes the Repository record and its local Workset records. Provider-owned data is never deleted.",
+      confirmLabel: "Delete Repository",
+      includeWorksetDirectoryOption: plan.worksets.length > 0,
+      onConfirm: (deleteWorksetDirectories) => {
+        void executeDeleteRepository(
+          repositoryId,
+          plan,
+          deleteWorksetDirectories,
+        );
+      },
+    });
   }
 
   async function handleRegisterMachine(event: FormEvent<HTMLFormElement>) {
@@ -483,7 +543,10 @@ export function StructurePage() {
     }
   }
 
-  async function handleDeleteMachine(machineId: number) {
+  async function handleDeleteMachine(
+    machineId: number,
+    confirmed = false,
+  ) {
     if (
       !machineDeletionPreview ||
       machineDeletionPreview.plan.machineId !== machineId ||
@@ -492,11 +555,15 @@ export function StructurePage() {
       return;
     }
     const { plan } = machineDeletionPreview;
-    if (
-      !window.confirm(
-        `Delete Machine ${plan.name} and its ${plan.runs.length} Run record${plan.runs.length === 1 ? "" : "s"}? This cannot be undone.`,
-      )
-    ) {
+    if (!confirmed) {
+      setConfirmation({
+        title: "Delete Machine " + plan.name + "?",
+        description: `This removes the Machine record and its ${plan.runs.length} Run record${plan.runs.length === 1 ? "" : "s"}. Panes remain owned by the Terminal Runtime.`,
+        confirmLabel: "Delete Machine",
+        onConfirm: () => {
+          void handleDeleteMachine(machineId, true);
+        },
+      });
       return;
     }
 
@@ -521,8 +588,16 @@ export function StructurePage() {
     }
   }
 
-  async function handleDeleteFinishedRun(runId: number) {
-    if (!window.confirm(`Delete finished Run #${runId} from Run history? This cannot be undone.`)) {
+  async function handleDeleteFinishedRun(runId: number, confirmed = false) {
+    if (!confirmed) {
+      setConfirmation({
+        title: `Delete finished Run #${runId}?`,
+        description: "This removes the Run from history and cannot be undone.",
+        confirmLabel: "Delete Run",
+        onConfirm: () => {
+          void handleDeleteFinishedRun(runId, true);
+        },
+      });
       return;
     }
     setIsSaving(true);
@@ -574,23 +649,33 @@ export function StructurePage() {
     }
   }
 
-  async function handleReset() {
+  async function handleReset(
+    confirmed = false,
+    typedConfirmation = "",
+    deleteWorksetDirectories = false,
+  ) {
     if (!resetLocalDataPreview || resetLocalDataPreview.blockers.length > 0) return;
-    const confirmation = window.prompt(
-      `This permanently resets all local records. Type ${resetLocalDataPreview.confirmationPhrase} to continue. Workset directories will be confirmed separately.`,
-      "",
-    );
-    if (confirmation === null) return;
-    const deleteWorksetDirectories =
-      resetLocalDataPreview.worksets.length === 0 ||
-      window.confirm(
-        `Permanently delete these ${resetLocalDataPreview.worksets.length} Workset director${resetLocalDataPreview.worksets.length === 1 ? "y" : "ies"} from disk too? Choose Cancel to keep the directories while removing their local records.`,
-      );
+    if (!confirmed) {
+      setConfirmationPhrase("");
+      setDeleteWorksetDirectories(false);
+      setConfirmation({
+        title: "Reset all local data?",
+        description: `This permanently resets all local records. Type ${resetLocalDataPreview.confirmationPhrase} to continue. Provider-owned Issues and pull requests are never deleted.`,
+        confirmLabel: "Reset all local data",
+        includeWorksetDirectoryOption: resetLocalDataPreview.worksets.length > 0,
+        confirmationPhrase: resetLocalDataPreview.confirmationPhrase,
+        onConfirm: (deleteDirectories, phrase) => {
+          void handleReset(true, phrase, deleteDirectories);
+        },
+      });
+      return;
+    }
+    if (typedConfirmation !== resetLocalDataPreview.confirmationPhrase) return;
 
     setIsSaving(true);
     try {
       const result = await structureCommand.execute(
-        structureActions.reset(confirmation, deleteWorksetDirectories),
+        structureActions.reset(typedConfirmation, deleteWorksetDirectories),
       );
       setResetLocalDataPreview(undefined);
       closeTerminal();
@@ -833,6 +918,67 @@ export function StructurePage() {
           {resetLocalDataPreview && <ResetLocalDataPreviewCard preview={resetLocalDataPreview} disabled={isSaving} onConfirm={() => void handleReset()} onCancel={() => setResetLocalDataPreview(undefined)} />}
         </CardContent>
       </Card>
+      {confirmation && (
+        <ConfirmationDialog
+          open
+          title={confirmation.title}
+          description={confirmation.description}
+          confirmLabel={confirmation.confirmLabel}
+          confirmDisabled={
+            confirmation.confirmationPhrase !== undefined &&
+            confirmationPhrase !== confirmation.confirmationPhrase
+          }
+          disabled={isSaving}
+          onOpenChange={(open) => {
+            if (!open && !isSaving) {
+              setConfirmation(undefined);
+              setDeleteWorksetDirectories(false);
+              setConfirmationPhrase("");
+            }
+          }}
+          onConfirm={() => {
+            const currentConfirmation = confirmation;
+            setConfirmation(undefined);
+            currentConfirmation.onConfirm(
+              deleteWorksetDirectories,
+              confirmationPhrase,
+            );
+          }}
+        >
+          {confirmation.includeWorksetDirectoryOption && (
+            <label className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
+              <Checkbox
+                checked={deleteWorksetDirectories}
+                onCheckedChange={(checked) =>
+                  setDeleteWorksetDirectories(checked === true)
+                }
+                disabled={isSaving}
+              />
+              <span className="grid gap-1">
+                <span className="font-medium">
+                  Also delete Workset directories from disk
+                </span>
+                <span className="text-muted-foreground">
+                  Leave this unchecked to remove only the local records.
+                </span>
+              </span>
+            </label>
+          )}
+          {confirmation.confirmationPhrase && (
+            <label className="grid gap-1.5 text-sm font-medium">
+              <span>
+                Type <code>{confirmation.confirmationPhrase}</code> to continue
+              </span>
+              <Input
+                value={confirmationPhrase}
+                onChange={(event) => setConfirmationPhrase(event.target.value)}
+                autoFocus
+                disabled={isSaving}
+              />
+            </label>
+          )}
+        </ConfirmationDialog>
+      )}
     </div>
   );
 }
@@ -975,10 +1121,4 @@ function showParentDeletionResult(kind: "Project" | "Context", result: ParentDel
   const { summary } = result;
   window.alert(`Deleted ${kind}: ${summary.projectCount} Project(s), ${summary.itemCount} Item(s), ${summary.repositoryCount} Repository record(s), ${summary.machineCount} Machine(s), ${summary.worksetCount} Workset(s), ${summary.runCount} Run(s), ${summary.linkCount} Link(s), and ${summary.externalObjectCount} orphaned External Object(s).`);
   if (result.physicalCleanupWarning) window.alert(result.physicalCleanupWarning);
-}
-
-function confirmWorksetCleanup(worksets: { id: number }[], previews: { safe: boolean }[]): boolean {
-  if (worksets.length === 0) return false;
-  if (!previews.every((workset) => workset.safe)) return false;
-  return window.confirm(`Permanently delete these ${worksets.length} Workset director${worksets.length === 1 ? "y" : "ies"} from disk too? Choose Cancel to keep the directories while removing their records.`);
 }
