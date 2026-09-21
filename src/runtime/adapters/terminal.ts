@@ -1,4 +1,4 @@
-import type { TerminalAttachment } from "../types";
+import type { TerminalAttachment } from "../terminal-types";
 import { command, listen } from "./tauri";
 
 export const terminalRuntimeAdapter = {

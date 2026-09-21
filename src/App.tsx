@@ -7,10 +7,7 @@ import {
   useState,
 } from "react";
 import { Link, useRouter, useRouterState } from "@tanstack/react-router";
-import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "@xterm/xterm";
 import { Moon, Sun } from "lucide-react";
-import "@xterm/xterm/css/xterm.css";
 import { Alert, AlertDescription } from "./components/ui/alert";
 import { Badge } from "./components/ui/badge";
 import { Button } from "./components/ui/button";
@@ -24,12 +21,16 @@ import {
   saveTheme,
   type Theme,
 } from "./theme";
-import {
-  structureAdapter,
-  terminalRuntimeAdapter,
-} from "./runtime/adapters";
+import { EmbeddedTerminal } from "./components/terminal-runtime/EmbeddedTerminal";
+import { structureAdapter } from "./runtime/adapters";
 import { useAppRuntime } from "./runtime/AppRuntimeProvider";
 import { errorMessage } from "./runtime/errors";
+import type {
+  Run,
+  RunPaneStatus,
+  RunState,
+} from "./runtime/execution-types";
+import type { PaneTab } from "./runtime/terminal-types";
 import { parseWorkSearch } from "./features/work/work-search";
 import { WorkPage } from "./features/work/WorkPage";
 import {
@@ -133,85 +134,6 @@ export type Machine = {
   transport: MachineTransport;
   last_observed: "unknown" | "available" | "offline";
   last_observed_at: number | null;
-};
-
-export type AgentKind = "claude" | "codex";
-export type ExecutionProfile = "investigate" | "implement" | "review" | "custom";
-export type RunState = "unknown" | "working" | "blocked" | "finished";
-export type RunPaneStatus = "unknown" | "available" | "missing";
-
-export type Run = {
-  id: number;
-  item_id: number;
-  workset_id: number;
-  machine_id: number;
-  agent: AgentKind;
-  execution_profile: ExecutionProfile;
-  prompt: string;
-  working_directory: string;
-  session_name: string;
-  pane_id: string;
-  started_at: number;
-  state: RunState;
-  pane_status: RunPaneStatus;
-};
-
-export type RunSuggestion = {
-  machineId: number;
-  machineName: string;
-  agent: AgentKind;
-  sessionName: string;
-  paneId: string;
-  currentPath: string;
-  worksetId: number;
-  worksetRootDirectory: string;
-  worksetBranch: string;
-  itemId: number;
-  itemIdentifier: string;
-  itemTitle: string;
-  contextId: number;
-  contextName: string;
-};
-
-export type PaneTab = {
-  paneId: string;
-  sessionName: string;
-  runId: number;
-  label: string;
-  available: boolean;
-  paneIndex: number;
-  pid: number;
-  columns: number;
-  rows: number;
-  title: string;
-  currentCommand: string;
-  currentPath: string;
-};
-
-export type TerminalAttachment = {
-  terminalId: string;
-  sessionName: string;
-  paneId: string;
-  snapshot: number[];
-  panes: PaneTab[];
-};
-
-export type TerminalOutputEvent = {
-  terminalId: string;
-  paneId: string;
-  data: number[];
-};
-
-export type TerminalExitEvent = {
-  terminalId: string;
-  paneId: string;
-  code: number | null;
-};
-
-export type RunPromptSelection = {
-  includeObjective: boolean;
-  includeNotes: boolean;
-  externalObjectIds: number[];
 };
 
 export type Item = {
@@ -2589,171 +2511,6 @@ function dependencyStateLabel(state: DependencyState): string {
       return "Unavailable";
   }
 }
-
-function EmbeddedTerminal({
-  worksetId,
-  initialPane,
-  onClose,
-}: {
-  worksetId: number;
-  initialPane: PaneTab;
-  onClose: () => void;
-}) {
-  const terminalContainerRef = useRef<HTMLDivElement>(null);
-  const attachPaneRef = useRef<((pane: PaneTab) => Promise<void>) | undefined>(undefined);
-  const activePaneRef = useRef(initialPane);
-  const attachedRef = useRef(false);
-  const terminalId = `workset-${worksetId}`;
-  const [activePane, setActivePane] = useState(initialPane);
-  const [panes, setPanes] = useState<PaneTab[]>([initialPane]);
-  const [status, setStatus] = useState("Attaching…");
-  const [terminalError, setTerminalError] = useState<string>();
-
-  useEffect(() => {
-    const container = terminalContainerRef.current;
-    if (!container) return;
-
-    let disposed = false;
-    const terminal = new Terminal({
-      cursorBlink: true,
-      fontFamily: "SFMono-Regular, Menlo, Monaco, Consolas, monospace",
-      fontSize: 13,
-      theme: {
-        background: "#201c19",
-        foreground: "#f7f0e6",
-        cursor: "#efb28e",
-      },
-    });
-    const fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
-    terminal.open(container);
-    fitAddon.fit();
-
-    const inputDisposable = terminal.onData((data) => {
-      if (!attachedRef.current) return;
-      void terminalRuntimeAdapter.input(
-        terminalId,
-        Array.from(new TextEncoder().encode(data)),
-      ).catch((inputError) => {
-        if (!disposed) setTerminalError(errorMessage(inputError));
-      });
-    });
-    const resizeTerminal = () => {
-      fitAddon.fit();
-      if (!attachedRef.current || terminal.cols < 1 || terminal.rows < 1) return;
-      void terminalRuntimeAdapter.resize(terminalId, terminal.cols, terminal.rows).catch((resizeError) => {
-        if (!disposed) setTerminalError(errorMessage(resizeError));
-      });
-    };
-    const resizeObserver = new ResizeObserver(resizeTerminal);
-    resizeObserver.observe(container);
-    const unlisteners: (() => void)[] = [];
-
-    const attachPane = async (pane: PaneTab) => {
-      activePaneRef.current = pane;
-      setActivePane(pane);
-      attachedRef.current = false;
-      setStatus(`Attaching ${pane.label}…`);
-      setTerminalError(undefined);
-      const attachment = await terminalRuntimeAdapter.open(
-        worksetId,
-        terminalId,
-        pane.sessionName,
-        pane.paneId,
-      );
-      if (disposed) return;
-      setPanes(attachment.panes);
-      const attachedPane =
-        attachment.panes.find((candidate) => candidate.paneId === attachment.paneId) ??
-        pane;
-      activePaneRef.current = attachedPane;
-      setActivePane(attachedPane);
-      terminal.reset();
-      terminal.write(Uint8Array.from(attachment.snapshot));
-      attachedRef.current = true;
-      setStatus("Connected · closing this view leaves the Run running");
-      resizeTerminal();
-    };
-    attachPaneRef.current = attachPane;
-
-    const start = async () => {
-      unlisteners.push(
-        await terminalRuntimeAdapter.listen<TerminalOutputEvent>("terminal-output", (event) => {
-          const payload = event.payload;
-          if (
-            payload.terminalId === terminalId &&
-            payload.paneId === activePaneRef.current.paneId
-          ) {
-            terminal.write(Uint8Array.from(payload.data));
-          }
-        }),
-        await terminalRuntimeAdapter.listen<TerminalExitEvent>("terminal-exit", (event) => {
-          if (
-            event.payload.terminalId === terminalId &&
-            event.payload.paneId === activePaneRef.current.paneId &&
-            !disposed
-          ) {
-            attachedRef.current = false;
-            setStatus("Pane connection closed; the Run was left untouched");
-          }
-        }),
-      );
-      await attachPane(initialPane);
-    };
-    void start().catch((attachError) => {
-      if (!disposed) {
-        attachedRef.current = false;
-        setStatus("Could not attach");
-        setTerminalError(errorMessage(attachError));
-      }
-    });
-
-    return () => {
-      disposed = true;
-      attachedRef.current = false;
-      attachPaneRef.current = undefined;
-      inputDisposable.dispose();
-      resizeObserver.disconnect();
-      terminal.dispose();
-      unlisteners.forEach((unlisten) => unlisten());
-      void terminalRuntimeAdapter.close(terminalId).catch(() => undefined);
-    };
-  }, [initialPane, terminalId, worksetId]);
-
-  return (
-    <section className="embedded-terminal" aria-labelledby="embedded-terminal-heading">
-      <div className="embedded-terminal-heading">
-        <div>
-          <p className="eyebrow">Embedded terminal</p>
-          <h2 id="embedded-terminal-heading">{activePane.label}</h2>
-          <p className="embedded-terminal-status">{status}</p>
-        </div>
-        <button type="button" className="secondary-button" onClick={onClose}>
-          Close view
-        </button>
-      </div>
-      <div className="terminal-tabs" role="tablist" aria-label="Panes in this Workset">
-        {panes.map((pane) => (
-          <button
-            type="button"
-            role="tab"
-            aria-selected={pane.paneId === activePane.paneId}
-            className={pane.paneId === activePane.paneId ? "terminal-tab active" : "terminal-tab"}
-            key={`${pane.sessionName}-${pane.paneId}`}
-            disabled={!pane.available}
-            onClick={() => void attachPaneRef.current?.(pane)}
-          >
-            {pane.label}
-            <small>{pane.currentCommand || pane.currentPath || "unavailable"}</small>
-          </button>
-        ))}
-      </div>
-      <div className="terminal-surface" ref={terminalContainerRef} />
-      {terminalError && <ErrorAlert message={terminalError} />}
-    </section>
-  );
-}
-
 
 function ObservedActivityCard({ entry }: { entry: ObservedActivity }) {
   const titleChange = entry.activity.changes.find((change) => change.kind === "title");

@@ -16,7 +16,8 @@ import { Spinner } from "../../components/ui/spinner";
 import { structureAdapter, workAdapter } from "../../runtime/adapters";
 import { errorMessage } from "../../runtime/errors";
 import { useAppRuntime } from "../../runtime/AppRuntimeProvider";
-import type { Context, PaneTab, Project, RunSuggestion } from "../../runtime/types";
+import type { Context, Project, RunSuggestion } from "../../runtime/types";
+import type { PaneTab } from "../../runtime/terminal-types";
 import {
   AttentionEntryCard,
   HomeColumn,

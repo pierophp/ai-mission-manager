@@ -5,11 +5,11 @@ import type {
   ItemRelation,
   ItemRelationKind,
   ItemView,
-  PaneTab,
   Repository,
   Run,
   Workset,
 } from "../../runtime/types";
+import type { PaneTab } from "../../runtime/terminal-types";
 
 export function attentionEntryLabel(entry: AttentionEntry): string {
   if (entry.kind === "reminder") return "Reminder due";

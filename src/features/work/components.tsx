@@ -31,7 +31,6 @@ import type {
   ItemRelationKind,
   ItemView,
   Machine,
-  PaneTab,
   Repository,
   Run,
   RunPromptSelection,
@@ -41,6 +40,7 @@ import type {
   WorksetRemovalReport,
   WorksetRepositoryInput,
 } from "../../runtime/types";
+import type { PaneTab } from "../../runtime/terminal-types";
 import {
   externalObjectKindLabel,
   findWorkset,
