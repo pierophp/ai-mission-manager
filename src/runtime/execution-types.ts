@@ -3,10 +3,18 @@ export type ExecutionProfile = "investigate" | "implement" | "review" | "custom"
 export type RunState = "unknown" | "working" | "blocked" | "finished";
 export type RunPaneStatus = "unknown" | "available" | "missing";
 
+export type RunCheckout = {
+  repositoryId: number;
+  path: string;
+  branch: string;
+  isDirty: boolean;
+};
+
 export type Run = {
   id: number;
   item_id: number;
-  workset_id: number;
+  workset_id: number | null;
+  workspace_id: number | null;
   machine_id: number;
   agent: AgentKind;
   execution_profile: ExecutionProfile;
@@ -17,6 +25,7 @@ export type Run = {
   started_at: number;
   state: RunState;
   pane_status: RunPaneStatus;
+  direct_checkouts: RunCheckout[];
 };
 
 export type RunSuggestion = {

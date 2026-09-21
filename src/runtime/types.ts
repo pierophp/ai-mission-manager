@@ -1,4 +1,5 @@
 import type { Run, RunPaneStatus, RunState } from "./execution-types";
+import type { RunCheckout } from "./execution-types";
 
 export type Context = {
   id: number;
@@ -101,6 +102,33 @@ export type Workspace = {
   id: number;
   item_id: number;
   repositories: WorkspaceRepository[];
+};
+
+export type DirectRunCheckoutPreview = {
+  repositoryId: number;
+  repositoryName: string;
+  path: string;
+  branch: string;
+  isDirty: boolean;
+};
+
+export type DirectRunSharedRun = {
+  runId: number;
+  itemId: number;
+  path: string;
+};
+
+export type DirectRunPreview = {
+  workspaceId: number;
+  machineId: number;
+  machineName: string;
+  workingDirectory: string;
+  checkouts: RunCheckout[];
+  checkoutDetails: DirectRunCheckoutPreview[];
+  currentBranches: string[];
+  dirtyRepositoryIds: number[];
+  sharedRuns: DirectRunSharedRun[];
+  sharedPaths: string[];
 };
 
 export type Worktree = {

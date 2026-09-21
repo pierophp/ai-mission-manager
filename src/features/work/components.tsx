@@ -44,6 +44,7 @@ import { errorMessage } from "../../runtime/errors";
 import type {
   AgentKind,
   AttentionEntry,
+  DirectRunPreview,
   ExecutionProfile,
   ExternalChangePolicy,
   ExternalLinkView,
@@ -108,7 +109,7 @@ export function HomeColumn({
   repositories: Repository[];
   machines: Machine[];
   onChanged: () => Promise<void>;
-  onOpenTerminal: (worksetId: number, pane: PaneTab) => void;
+  onOpenTerminal: (runId: number, pane: PaneTab) => void;
 }) {
   return (
     <section className="min-w-0 space-y-3" aria-labelledby={`${title}-heading`}>
@@ -160,7 +161,7 @@ export function ItemCard({
   repositories: Repository[];
   machines: Machine[];
   onChanged: () => Promise<void>;
-  onOpenTerminal: (worksetId: number, pane: PaneTab) => void;
+  onOpenTerminal: (runId: number, pane: PaneTab) => void;
 }) {
   const [notes, setNotes] = useState(view.item.notes);
   const [reminderAt, setReminderAt] = useState("");
@@ -218,6 +219,14 @@ export function ItemCard({
   const [runCustomPrompt, setRunCustomPrompt] = useState("");
   const [runPrompt, setRunPrompt] = useState("");
   const [runPromptNeedsCompose, setRunPromptNeedsCompose] = useState(false);
+  const [directRunWorkspaceId, setDirectRunWorkspaceId] = useState<number>();
+  const [directRunMachineId, setDirectRunMachineId] = useState<number>();
+  const [directRunPreview, setDirectRunPreview] =
+    useState<DirectRunPreview>();
+  const [directRunDirtyConfirmed, setDirectRunDirtyConfirmed] =
+    useState(false);
+  const [directRunSharedConfirmed, setDirectRunSharedConfirmed] =
+    useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const workCommand = useWorkCommand();
@@ -600,7 +609,7 @@ export function ItemCard({
   }
 
   async function composeRunPromptPreview() {
-    if (!runPreviewWorksetId) return;
+    if (!runPreviewWorksetId && !directRunWorkspaceId) return;
     setIsSaving(true);
     try {
       const composed = await workCommand.execute(
@@ -650,6 +659,109 @@ export function ItemCard({
     } catch (composeError) {
       setRunPreviewWorksetId(undefined);
       window.alert(errorMessage(composeError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function openDirectRunPreview(workspace: Workspace) {
+    setDirectRunWorkspaceId(workspace.id);
+    setDirectRunMachineId(undefined);
+    setDirectRunPreview(undefined);
+    setDirectRunDirtyConfirmed(false);
+    setDirectRunSharedConfirmed(false);
+    setRunAgent("claude");
+    setRunProfile("implement");
+    setIncludeRunObjective(true);
+    setIncludeRunNotes(Boolean(view.item.notes.trim()));
+    setSelectedRunExternalObjectIds([]);
+    setRunCustomPrompt("");
+    setIsSaving(true);
+    try {
+      const [prompt, preview] = await Promise.all([
+        workCommand.execute(
+          workActions.composeRunPrompt(
+            view.item.id,
+            "implement",
+            {
+              includeObjective: true,
+              includeNotes: Boolean(view.item.notes.trim()),
+              externalObjectIds: [],
+            },
+            null,
+          ),
+          false,
+        ),
+        workCommand.execute(
+          workActions.prepareDirectRun(view.item.id, workspace.id, null),
+          false,
+        ),
+      ]);
+      setRunPrompt(prompt);
+      setRunPromptNeedsCompose(false);
+      setDirectRunPreview(preview);
+    } catch (previewError) {
+      setDirectRunWorkspaceId(undefined);
+      window.alert(errorMessage(previewError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleStartDirectRun(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (
+      !directRunWorkspaceId ||
+      !directRunPreview ||
+      !runPrompt.trim() ||
+      runPromptNeedsCompose
+    ) {
+      return;
+    }
+    const dirtyConfirmed =
+      directRunPreview.dirtyRepositoryIds.length === 0 ||
+      directRunDirtyConfirmed;
+    const sharedConfirmed =
+      directRunPreview.sharedPaths.length === 0 || directRunSharedConfirmed;
+    if (!dirtyConfirmed || !sharedConfirmed) return;
+
+    await saveItem(
+      workActions.startDirectRun({
+        itemId: view.item.id,
+        workspaceId: directRunWorkspaceId,
+        machineId: directRunMachineId ?? null,
+        agent: runAgent,
+        executionProfile: runProfile,
+        prompt: runPrompt,
+        promptSelection: runPromptSelection(),
+        expectedCheckouts: directRunPreview.checkouts,
+        allowDirty: directRunPreview.dirtyRepositoryIds.length > 0,
+        allowSharedCheckouts: directRunPreview.sharedPaths.length > 0,
+      }),
+    );
+    setDirectRunWorkspaceId(undefined);
+    setDirectRunPreview(undefined);
+    setRunPrompt("");
+  }
+
+  async function refreshDirectRunPreview(machineId: number | undefined) {
+    if (!directRunWorkspaceId) return;
+    setDirectRunMachineId(machineId);
+    setDirectRunDirtyConfirmed(false);
+    setDirectRunSharedConfirmed(false);
+    setIsSaving(true);
+    try {
+      const preview = await workCommand.execute(
+        workActions.prepareDirectRun(
+          view.item.id,
+          directRunWorkspaceId,
+          machineId ?? null,
+        ),
+        false,
+      );
+      setDirectRunPreview(preview);
+    } catch (previewError) {
+      window.alert(errorMessage(previewError));
     } finally {
       setIsSaving(false);
     }
@@ -768,6 +880,222 @@ export function ItemCard({
               </Badge>
             ))}
           </div>
+          <Button
+            type="button"
+            size="sm"
+            disabled={isSaving}
+            onClick={() => void openDirectRunPreview(workspace)}
+          >
+            Start Direct Run
+          </Button>
+          {directRunWorkspaceId === workspace.id && directRunPreview && (
+            <form
+              className="grid gap-4 rounded-lg border border-primary/30 bg-primary/5 p-4"
+              onSubmit={handleStartDirectRun}
+            >
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <h4 className="m-0 text-base font-medium">
+                    Confirm Direct Run
+                  </h4>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    Context: {view.context_name} · Project: {view.project_name}
+                  </p>
+                </div>
+                <Badge variant="outline">
+                  Machine: {directRunPreview.machineName}
+                </Badge>
+              </div>
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Machine</span>
+                <NativeSelect
+                  value={directRunMachineId ?? ""}
+                  onChange={(event) =>
+                    void refreshDirectRunPreview(
+                      Number(event.target.value) || undefined,
+                    )
+                  }
+                  disabled={isSaving}
+                >
+                  <NativeSelectOption value="">
+                    Local Mac (default)
+                  </NativeSelectOption>
+                  {itemMachines.map((machine) => (
+                    <NativeSelectOption value={machine.id} key={machine.id}>
+                      {machine.name} · {machine.last_observed}
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+              </label>
+              <div className="grid gap-2 rounded-md border p-3 text-sm">
+                <p className="m-0 font-medium">Registered checkouts</p>
+                {directRunPreview.checkoutDetails.map((checkout) => (
+                  <div
+                    className="flex flex-wrap justify-between gap-2"
+                    key={checkout.repositoryId}
+                  >
+                    <span>
+                      {checkout.repositoryName} · {checkout.branch}
+                    </span>
+                    <code className="break-all text-xs text-muted-foreground">
+                      {checkout.path}
+                    </code>
+                  </div>
+                ))}
+              </div>
+              {[...new Set(directRunPreview.currentBranches)].length > 1 && (
+                <Alert>
+                  <AlertTitle>Repositories are on different branches</AlertTitle>
+                  <AlertDescription>
+                    {directRunPreview.currentBranches.join(", ")}. The Run
+                    will use each checkout's current branch without switching
+                    it.
+                  </AlertDescription>
+                </Alert>
+              )}
+              {directRunPreview.dirtyRepositoryIds.length > 0 && (
+                <Alert variant="destructive">
+                  <AlertTitle>Dirty checkouts detected</AlertTitle>
+                  <AlertDescription>
+                    Existing uncommitted changes will remain in the shared
+                    checkouts.
+                    <label className="mt-2 flex items-center gap-2 font-normal">
+                      <Checkbox
+                        checked={directRunDirtyConfirmed}
+                        onCheckedChange={(checked) =>
+                          setDirectRunDirtyConfirmed(checked === true)
+                        }
+                        disabled={isSaving}
+                      />
+                      I understand and want to use these dirty checkouts.
+                    </label>
+                  </AlertDescription>
+                </Alert>
+              )}
+              {directRunPreview.sharedPaths.length > 0 && (
+                <Alert variant="destructive">
+                  <AlertTitle>Checkouts are shared with active Runs</AlertTitle>
+                  <AlertDescription>
+                    {directRunPreview.sharedRuns.map((shared) => (
+                      <div key={`${shared.runId}-${shared.path}`}>
+                        Run #{shared.runId} · {shared.path}
+                      </div>
+                    ))}
+                    <label className="mt-2 flex items-center gap-2 font-normal">
+                      <Checkbox
+                        checked={directRunSharedConfirmed}
+                        onCheckedChange={(checked) =>
+                          setDirectRunSharedConfirmed(checked === true)
+                        }
+                        disabled={isSaving}
+                      />
+                      I understand and want to share these checkouts.
+                    </label>
+                  </AlertDescription>
+                </Alert>
+              )}
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Agent</span>
+                  <NativeSelect
+                    value={runAgent}
+                    onChange={(event) =>
+                      setRunAgent(event.target.value as AgentKind)
+                    }
+                    disabled={isSaving}
+                  >
+                    <NativeSelectOption value="claude">
+                      Claude Code
+                    </NativeSelectOption>
+                    <NativeSelectOption value="codex">Codex</NativeSelectOption>
+                  </NativeSelect>
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Execution Profile</span>
+                  <NativeSelect
+                    value={runProfile}
+                    onChange={(event) => {
+                      setRunProfile(event.target.value as ExecutionProfile);
+                      setRunPromptNeedsCompose(true);
+                    }}
+                    disabled={isSaving}
+                  >
+                    <NativeSelectOption value="investigate">
+                      Investigate
+                    </NativeSelectOption>
+                    <NativeSelectOption value="implement">
+                      Implement
+                    </NativeSelectOption>
+                    <NativeSelectOption value="review">Review</NativeSelectOption>
+                    <NativeSelectOption value="custom">
+                      Custom prompt
+                    </NativeSelectOption>
+                  </NativeSelect>
+                </label>
+              </div>
+              {runProfile === "custom" && (
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Custom prompt source</span>
+                  <Textarea
+                    value={runCustomPrompt}
+                    onChange={(event) => {
+                      setRunCustomPrompt(event.target.value);
+                      setRunPromptNeedsCompose(true);
+                    }}
+                    rows={3}
+                    placeholder="Tell the agent exactly what to do"
+                    disabled={isSaving}
+                  />
+                </label>
+              )}
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Editable composed prompt</span>
+                <Textarea
+                  value={runPrompt}
+                  onChange={(event) => setRunPrompt(event.target.value)}
+                  rows={6}
+                  disabled={isSaving}
+                />
+              </label>
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={isSaving}
+                  onClick={() => void composeRunPromptPreview()}
+                >
+                  Compose from selection
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={
+                    isSaving ||
+                    !runPrompt.trim() ||
+                    runPromptNeedsCompose ||
+                    (directRunPreview.dirtyRepositoryIds.length > 0 &&
+                      !directRunDirtyConfirmed) ||
+                    (directRunPreview.sharedPaths.length > 0 &&
+                      !directRunSharedConfirmed)
+                  }
+                >
+                  {isSaving ? "Starting…" : "Confirm and start Direct Run"}
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={isSaving}
+                  onClick={() => {
+                    setDirectRunWorkspaceId(undefined);
+                    setDirectRunPreview(undefined);
+                  }}
+                >
+                  Cancel
+                </Button>
+              </div>
+            </form>
+          )}
         </CardContent>
       </Card>
     );
@@ -1312,7 +1640,10 @@ export function ItemCard({
               Run history
             </span>
             {view.runs.map((run) => {
-              const runWorkset = findWorkset(view, run.workset_id);
+              const runWorkset =
+                run.workset_id === null
+                  ? undefined
+                  : findWorkset(view, run.workset_id);
               return (
                 <Card size="sm" className="bg-muted/20" key={run.id}>
                   <CardContent className="grid gap-2 pt-4">
@@ -1346,7 +1677,7 @@ export function ItemCard({
                         Pane status not confirmed.
                       </span>
                     )}
-                    {runWorkset && (
+                    {(runWorkset || run.workspace_id !== null) && (
                       <div className="flex flex-wrap gap-2">
                         <Button
                           type="button"
@@ -1354,7 +1685,7 @@ export function ItemCard({
                           variant="outline"
                           disabled={isSaving || run.pane_status === "missing"}
                           onClick={() =>
-                            onOpenTerminal(run.workset_id, paneTabForRun(run))
+                            onOpenTerminal(run.id, paneTabForRun(run))
                           }
                         >
                           Open embedded terminal
@@ -1397,6 +1728,7 @@ export function ItemCard({
                           </Button>
                         )}
                         {run.pane_status === "missing" &&
+                          runWorkset &&
                           !runWorkset.archived && (
                             <Button
                               type="button"

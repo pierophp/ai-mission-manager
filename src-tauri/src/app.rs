@@ -23,9 +23,9 @@ use crate::{
         ExternalSnapshot, HomeView, Item, ItemDeletionPlan, ItemDeletionSummary, ItemRelation,
         ItemRelationKind, ItemStatus, ItemView, Machine, MachineDeletionPlan, MachineObservation,
         MachineTransport, ParentDeletionPlan, Project, ProjectDefaults, Repository,
-        RepositoryDeletionPlan, ResetLocalDataPlan, ResetLocalDataSummary, Run, RunPaneStatus,
-        RunPromptSelection, RunState, RunSuggestion, Workset, WorksetRepositoryInput, Workspace,
-        WorkspaceRepositoryInput, Worktree,
+        RepositoryDeletionPlan, ResetLocalDataPlan, ResetLocalDataSummary, Run, RunCheckout,
+        RunPaneStatus, RunPromptSelection, RunState, RunSuggestion, Workset,
+        WorksetRepositoryInput, Workspace, WorkspaceRepositoryInput, Worktree,
     },
     git::GitCli,
     persistence::SqliteStore,
@@ -98,6 +98,39 @@ pub struct HealthStatus {
     pub provider: DependencyStatus,
     pub agents: Vec<DependencyStatus>,
     pub checked_at: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectRunCheckoutPreview {
+    pub repository_id: i64,
+    pub repository_name: String,
+    pub path: String,
+    pub branch: String,
+    pub is_dirty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectRunSharedRun {
+    pub run_id: i64,
+    pub item_id: i64,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectRunPreview {
+    pub workspace_id: i64,
+    pub machine_id: i64,
+    pub machine_name: String,
+    pub working_directory: String,
+    pub checkouts: Vec<RunCheckout>,
+    pub checkout_details: Vec<DirectRunCheckoutPreview>,
+    pub current_branches: Vec<String>,
+    pub dirty_repository_ids: Vec<i64>,
+    pub shared_runs: Vec<DirectRunSharedRun>,
+    pub shared_paths: Vec<String>,
 }
 
 impl Runtime {
@@ -927,6 +960,314 @@ impl Runtime {
         Ok(run)
     }
 
+    fn inspect_direct_checkouts(
+        &mut self,
+        item_id: i64,
+        workspace_id: i64,
+        machine_id: Option<i64>,
+    ) -> Result<(Machine, Vec<DirectRunCheckoutPreview>), String> {
+        let workspace = self
+            .state
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id && workspace.item_id == item_id)
+            .cloned()
+            .ok_or_else(|| format!("Workspace {workspace_id} does not belong to Item {item_id}"))?;
+        let machine = self.machine_for_item(item_id, machine_id)?;
+        let machine_home = machine_home_directory(&machine);
+        let git = GitCli::system();
+        let mut previews = Vec::with_capacity(workspace.repositories.len());
+
+        for selected in workspace.repositories {
+            let repository = self
+                .state
+                .repositories
+                .iter()
+                .find(|repository| repository.id == selected.repository_id)
+                .ok_or_else(|| format!("Repository {} does not exist", selected.repository_id))?;
+            let location = self
+                .state
+                .repository_locations
+                .iter()
+                .find(|location| {
+                    location.repository_id == selected.repository_id
+                        && location.machine_id == machine.id
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "Repository {} has no checkout registered on Machine {}",
+                        repository.name, machine.name
+                    )
+                })?;
+            let path = match machine.transport {
+                MachineTransport::Local => {
+                    resolve_machine_path(&location.checkout_path, &machine_home)
+                }
+                MachineTransport::Ssh { .. } => PathBuf::from(&location.checkout_path),
+            };
+            let inspection = git
+                .inspect_checkout_on_machine(&machine, &path)
+                .map_err(|error| {
+                    format!(
+                        "Could not inspect Repository {} on Machine {}: {error}",
+                        repository.name, machine.name
+                    )
+                })?;
+            if let Some(remote_url) = inspection.remote_url.as_deref() {
+                if remote_url != repository.remote_url {
+                    return Err(format!(
+                        "Repository {} checkout remote does not match its registered Repository",
+                        repository.name
+                    ));
+                }
+            }
+            previews.push(DirectRunCheckoutPreview {
+                repository_id: repository.id,
+                repository_name: repository.name.clone(),
+                path: path.to_string_lossy().into_owned(),
+                branch: inspection.current_branch,
+                is_dirty: inspection.is_dirty,
+            });
+        }
+
+        Ok((machine, previews))
+    }
+
+    fn prepare_direct_run(
+        &mut self,
+        item_id: i64,
+        workspace_id: i64,
+        machine_id: Option<i64>,
+    ) -> Result<DirectRunPreview, String> {
+        let (machine, checkout_details) =
+            self.inspect_direct_checkouts(item_id, workspace_id, machine_id)?;
+        let checkouts = checkout_details
+            .iter()
+            .map(|checkout| RunCheckout {
+                repository_id: checkout.repository_id,
+                path: checkout.path.clone(),
+                branch: checkout.branch.clone(),
+                is_dirty: checkout.is_dirty,
+            })
+            .collect::<Vec<_>>();
+        let dirty_repository_ids = checkouts
+            .iter()
+            .filter(|checkout| checkout.is_dirty)
+            .map(|checkout| checkout.repository_id)
+            .collect::<Vec<_>>();
+        let mut shared_runs = Vec::new();
+        let mut shared_paths = Vec::new();
+        for run in self.state.runs.iter().filter(|run| {
+            run.machine_id == machine.id
+                && run.state != RunState::Finished
+                && run.pane_status != RunPaneStatus::Missing
+        }) {
+            for checkout in &checkouts {
+                if run
+                    .direct_checkouts
+                    .iter()
+                    .any(|active| active.path == checkout.path)
+                {
+                    shared_runs.push(DirectRunSharedRun {
+                        run_id: run.id,
+                        item_id: run.item_id,
+                        path: checkout.path.clone(),
+                    });
+                    shared_paths.push(checkout.path.clone());
+                }
+            }
+        }
+        shared_runs.sort_by_key(|run| (run.run_id, run.path.clone()));
+        shared_paths.sort();
+        shared_paths.dedup();
+        Ok(DirectRunPreview {
+            workspace_id,
+            machine_id: machine.id,
+            machine_name: machine.name,
+            working_directory: checkouts
+                .first()
+                .map(|checkout| checkout.path.clone())
+                .ok_or_else(|| "Workspace has no selected Repositories".to_owned())?,
+            current_branches: checkouts
+                .iter()
+                .map(|checkout| checkout.branch.clone())
+                .collect(),
+            checkouts,
+            checkout_details,
+            dirty_repository_ids,
+            shared_runs,
+            shared_paths,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_direct_run(
+        &mut self,
+        item_id: i64,
+        workspace_id: i64,
+        machine_id: Option<i64>,
+        agent: AgentKind,
+        execution_profile: ExecutionProfile,
+        prompt: String,
+        prompt_selection: RunPromptSelection,
+        expected_checkouts: Vec<RunCheckout>,
+        allow_dirty: bool,
+        allow_shared_checkouts: bool,
+    ) -> Result<Run, String> {
+        let (machine, checkout_details) =
+            self.inspect_direct_checkouts(item_id, workspace_id, machine_id)?;
+        let current_checkouts = checkout_details
+            .iter()
+            .map(|checkout| RunCheckout {
+                repository_id: checkout.repository_id,
+                path: checkout.path.clone(),
+                branch: checkout.branch.clone(),
+                is_dirty: checkout.is_dirty,
+            })
+            .collect::<Vec<_>>();
+        if current_checkouts != expected_checkouts {
+            return Err(
+                "A Direct checkout changed after the preview (branch or dirty state); review the Direct Run preview again before starting"
+                    .into(),
+            );
+        }
+        let working_directory = current_checkouts
+            .first()
+            .map(|checkout| checkout.path.clone())
+            .ok_or_else(|| "Workspace has no selected Repositories".to_owned())?;
+        let run_id = self.state.next_run_id;
+        let session_name = format!("mission-item-{item_id}-run-{run_id}");
+        let preflight = decide(
+            self.state.clone(),
+            Event::StartDirectRun {
+                item_id,
+                workspace_id,
+                machine_id: machine.id,
+                agent,
+                execution_profile,
+                prompt: prompt.clone(),
+                working_directory: working_directory.clone(),
+                session_name: format!("{session_name}-preflight"),
+                pane_id: "%preflight".into(),
+                started_at: current_unix_seconds(),
+                prompt_selection: prompt_selection.clone(),
+                checkouts: current_checkouts.clone(),
+                allow_dirty,
+                allow_shared_checkouts,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        if let Err(error) = probe_machine(&machine) {
+            return Err(format!(
+                "Could not reach Machine {}. The Run was not started locally: {error}",
+                machine.name
+            ));
+        }
+        self.observe_machine(machine.id, MachineObservation::Available)?;
+        if matches!(machine.transport, MachineTransport::Local) {
+            self.provision_agent_hooks()?;
+        }
+        let state_file = if matches!(machine.transport, MachineTransport::Local) {
+            state_file_path(&self.agent_state_directory, run_id)
+        } else {
+            PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
+        };
+        let executable = self
+            .agent_executable(&machine, agent)
+            .map_err(|error| format!("{}: {error}", agent_display_name(agent)))?;
+        let (_, before_launch) =
+            self.inspect_direct_checkouts(item_id, workspace_id, Some(machine.id))?;
+        let before_launch = before_launch
+            .iter()
+            .map(|checkout| RunCheckout {
+                repository_id: checkout.repository_id,
+                path: checkout.path.clone(),
+                branch: checkout.branch.clone(),
+                is_dirty: checkout.is_dirty,
+            })
+            .collect::<Vec<_>>();
+        if before_launch != current_checkouts {
+            return Err(
+                "A Direct checkout changed while preparing the Run; review the Direct Run preview again"
+                    .into(),
+            );
+        }
+        let terminal = TmuxRuntime;
+        let pane_id = terminal.launch_agent(
+            &machine,
+            &session_name,
+            Path::new(&working_directory),
+            &executable,
+            &prompt,
+            AgentLaunchContext {
+                run_id,
+                state_file: &state_file,
+            },
+        )?;
+        let (_, after_launch) =
+            match self.inspect_direct_checkouts(item_id, workspace_id, Some(machine.id)) {
+                Ok(value) => value,
+                Err(error) => {
+                    let cleanup = terminal.kill_session(&machine, &session_name);
+                    return Err(format_commit_error(error, cleanup.err()));
+                }
+            };
+        let after_launch = after_launch
+            .iter()
+            .map(|checkout| RunCheckout {
+                repository_id: checkout.repository_id,
+                path: checkout.path.clone(),
+                branch: checkout.branch.clone(),
+                is_dirty: checkout.is_dirty,
+            })
+            .collect::<Vec<_>>();
+        if after_launch != current_checkouts {
+            let cleanup = terminal.kill_session(&machine, &session_name);
+            return Err(format_commit_error(
+                "A Direct checkout changed before the Run was recorded; review the Direct Run preview again".into(),
+                cleanup.err(),
+            ));
+        }
+        let decision = match decide(
+            self.state.clone(),
+            Event::StartDirectRun {
+                item_id,
+                workspace_id,
+                machine_id: machine.id,
+                agent,
+                execution_profile,
+                prompt,
+                working_directory,
+                session_name: session_name.clone(),
+                pane_id,
+                started_at: current_unix_seconds(),
+                prompt_selection,
+                checkouts: after_launch,
+                allow_dirty,
+                allow_shared_checkouts,
+            },
+        ) {
+            Ok(decision) => decision,
+            Err(error) => {
+                let cleanup = terminal.kill_session(&machine, &session_name);
+                return Err(format_commit_error(error.to_string(), cleanup.err()));
+            }
+        };
+        let run = decision
+            .state
+            .runs
+            .last()
+            .cloned()
+            .ok_or_else(|| "Direct Run creation produced no Run".to_owned())?;
+        if let Err(error) = self.commit(decision) {
+            let cleanup = terminal.kill_session(&machine, &run.session_name);
+            return Err(format_commit_error(error, cleanup.err()));
+        }
+        let _ = preflight;
+        Ok(run)
+    }
+
     fn list_workset_panes(&mut self, workset_id: i64) -> Result<Vec<PaneTab>, String> {
         self.recover_run_states()?;
         if !self
@@ -944,7 +1285,7 @@ impl Runtime {
             .state
             .runs
             .iter()
-            .filter(|run| run.workset_id == workset_id)
+            .filter(|run| run.workset_id == Some(workset_id))
         {
             let machine = self
                 .state
@@ -1084,7 +1425,7 @@ impl Runtime {
     fn open_terminal(
         &mut self,
         app: &AppHandle,
-        workset_id: i64,
+        run_id: i64,
         terminal_id: String,
         session_name: String,
         pane_id: String,
@@ -1096,9 +1437,9 @@ impl Runtime {
             .state
             .runs
             .iter()
-            .find(|run| run.workset_id == workset_id && run.session_name == session_name)
+            .find(|run| run.id == run_id && run.session_name == session_name)
             .cloned()
-            .ok_or_else(|| "The Pane does not belong to a Run in this Workset".to_owned())?;
+            .ok_or_else(|| "The Pane does not belong to that Run".to_owned())?;
         let machine = self
             .state
             .machines
@@ -1183,7 +1524,7 @@ impl Runtime {
                 return Err(error);
             }
         };
-        let panes = match self.list_workset_panes(workset_id) {
+        let panes = match self.list_run_panes(run_id) {
             Ok(panes) => panes,
             Err(error) => {
                 let _ = connection.close();
@@ -1199,6 +1540,28 @@ impl Runtime {
             snapshot,
             panes,
         })
+    }
+
+    fn list_run_panes(&mut self, run_id: i64) -> Result<Vec<PaneTab>, String> {
+        self.recover_run_states()?;
+        let run = self
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == run.machine_id)
+            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
+        let panes = list_panes(&machine, &run.session_name)?;
+        Ok(panes
+            .into_iter()
+            .map(|pane| PaneTab::from_summary(&run, &run.session_name, pane, true))
+            .collect())
     }
 
     fn terminal_input(&self, terminal_id: &str, input: Vec<u8>) -> Result<(), String> {
@@ -1572,7 +1935,7 @@ impl Runtime {
             .state
             .runs
             .iter()
-            .any(|run| run.workset_id == workset_id)
+            .any(|run| run.workset_id == Some(workset_id))
         {
             report
                 .blockers
@@ -2076,7 +2439,7 @@ impl Runtime {
                     .state
                     .runs
                     .iter()
-                    .any(|run| run.workset_id == workset.id)
+                    .any(|run| run.workset_id == Some(workset.id))
                 {
                     preview.blockers.push(
                         "This Workset has Run history and cannot be removed with the Repository."
@@ -3862,6 +4225,51 @@ pub fn start_run(
         )
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn prepare_direct_run(
+    item_id: i64,
+    workspace_id: i64,
+    machine_id: Option<i64>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<DirectRunPreview, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .prepare_direct_run(item_id, workspace_id, machine_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
+pub fn start_direct_run(
+    item_id: i64,
+    workspace_id: i64,
+    machine_id: Option<i64>,
+    agent: AgentKind,
+    execution_profile: ExecutionProfile,
+    prompt: String,
+    prompt_selection: RunPromptSelection,
+    expected_checkouts: Vec<RunCheckout>,
+    allow_dirty: bool,
+    allow_shared_checkouts: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Run, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .start_direct_run(
+            item_id,
+            workspace_id,
+            machine_id,
+            agent,
+            execution_profile,
+            prompt,
+            prompt_selection,
+            expected_checkouts,
+            allow_dirty,
+            allow_shared_checkouts,
+        )
+}
+
 #[tauri::command]
 pub fn list_run_suggestions(
     state: State<'_, Mutex<Runtime>>,
@@ -3918,7 +4326,7 @@ pub fn list_workset_panes(
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn open_terminal(
-    workset_id: i64,
+    run_id: i64,
     terminal_id: String,
     session_name: String,
     pane_id: String,
@@ -3928,7 +4336,7 @@ pub fn open_terminal(
     state
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .open_terminal(&app, workset_id, terminal_id, session_name, pane_id)
+        .open_terminal(&app, run_id, terminal_id, session_name, pane_id)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5020,7 +5428,7 @@ mod tests {
         runtime.state.runs.push(Run {
             id: 1,
             item_id: 1,
-            workset_id: 1,
+            workset_id: Some(1),
             machine_id: 1,
             agent: AgentKind::Claude,
             execution_profile: ExecutionProfile::Implement,
@@ -5031,6 +5439,8 @@ mod tests {
             started_at: 1,
             state: RunState::Working,
             pane_status: RunPaneStatus::Available,
+            workspace_id: None,
+            direct_checkouts: Vec::new(),
         });
 
         let item = runtime
@@ -5106,7 +5516,7 @@ mod tests {
         runtime.state.runs.push(Run {
             id: 1,
             item_id: 1,
-            workset_id: 1,
+            workset_id: Some(1),
             machine_id: 1,
             agent: AgentKind::Claude,
             execution_profile: ExecutionProfile::Implement,
@@ -5117,6 +5527,8 @@ mod tests {
             started_at: 1,
             state: RunState::Working,
             pane_status: RunPaneStatus::Available,
+            workspace_id: None,
+            direct_checkouts: Vec::new(),
         });
 
         let stopped = runtime
@@ -5149,7 +5561,7 @@ mod tests {
         runtime.state.runs.push(Run {
             id: 1,
             item_id: 1,
-            workset_id: 1,
+            workset_id: Some(1),
             machine_id: 1,
             agent: AgentKind::Claude,
             execution_profile: ExecutionProfile::Implement,
@@ -5160,6 +5572,8 @@ mod tests {
             started_at: 1,
             state: RunState::Unknown,
             pane_status: RunPaneStatus::Unknown,
+            workspace_id: None,
+            direct_checkouts: Vec::new(),
         });
 
         let error = runtime
@@ -5216,7 +5630,7 @@ mod tests {
             Run {
                 id: 1,
                 item_id: 1,
-                workset_id: 1,
+                workset_id: Some(1),
                 machine_id: 1,
                 agent: AgentKind::Claude,
                 execution_profile: ExecutionProfile::Implement,
@@ -5227,11 +5641,13 @@ mod tests {
                 started_at: 1,
                 state: RunState::Working,
                 pane_status: RunPaneStatus::Unknown,
+                workspace_id: None,
+                direct_checkouts: Vec::new(),
             },
             Run {
                 id: 2,
                 item_id: 1,
-                workset_id: 1,
+                workset_id: Some(1),
                 machine_id: 1,
                 agent: AgentKind::Codex,
                 execution_profile: ExecutionProfile::Review,
@@ -5242,11 +5658,13 @@ mod tests {
                 started_at: 2,
                 state: RunState::Blocked,
                 pane_status: RunPaneStatus::Unknown,
+                workspace_id: None,
+                direct_checkouts: Vec::new(),
             },
             Run {
                 id: 3,
                 item_id: 1,
-                workset_id: 1,
+                workset_id: Some(1),
                 machine_id: 1,
                 agent: AgentKind::Claude,
                 execution_profile: ExecutionProfile::Investigate,
@@ -5257,6 +5675,8 @@ mod tests {
                 started_at: 3,
                 state: RunState::Finished,
                 pane_status: RunPaneStatus::Unknown,
+                workspace_id: None,
+                direct_checkouts: Vec::new(),
             },
         ]);
 
@@ -5388,7 +5808,7 @@ mod tests {
 
         let reopened = Runtime::open(&database).expect("runtime should reopen");
         assert_eq!(reopened.state.runs.len(), 1);
-        assert_eq!(reopened.state.runs[0].workset_id, 1);
+        assert_eq!(reopened.state.runs[0].workset_id, Some(1));
         run_tmux(&[
             "-f",
             "/dev/null",

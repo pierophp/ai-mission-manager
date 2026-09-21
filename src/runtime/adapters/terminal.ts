@@ -3,13 +3,13 @@ import { command, listen } from "./tauri";
 
 export const terminalRuntimeAdapter = {
   open: (
-    worksetId: number,
+    runId: number,
     terminalId: string,
     sessionName: string,
     paneId: string,
   ) =>
     command<TerminalAttachment>("open_terminal", {
-      worksetId,
+      runId,
       terminalId,
       sessionName,
       paneId,

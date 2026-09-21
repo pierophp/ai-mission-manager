@@ -72,6 +72,8 @@ pub fn run() {
             app::create_item,
             app::compose_run_prompt,
             app::start_run,
+            app::prepare_direct_run,
+            app::start_direct_run,
             app::list_run_suggestions,
             app::attach_run,
             app::list_workset_panes,

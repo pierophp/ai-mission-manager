@@ -658,7 +658,7 @@ pub fn find_agent_executable(machine: &Machine, name: &str) -> Result<PathBuf, S
     }
 }
 
-fn run_machine_shell(machine: &Machine, command: &str) -> Result<String, String> {
+pub(crate) fn run_machine_shell(machine: &Machine, command: &str) -> Result<String, String> {
     let output = match &machine.transport {
         MachineTransport::Local => Command::new("sh")
             .args(["-lc", command])

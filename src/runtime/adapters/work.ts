@@ -5,6 +5,7 @@ import type {
   ExternalObjectDeletionPreview,
   ExternalObjectDeletionResult,
   ExternalSnapshot,
+  DirectRunPreview,
   HomeView,
   Item,
   ItemDeletionPreview,
@@ -14,6 +15,7 @@ import type {
   ItemView,
   PollResult,
   Run,
+  RunCheckout,
   RunPromptSelection,
   RunSuggestion,
   Workset,
@@ -67,6 +69,16 @@ export const workAdapter = {
     }),
   createWorkspace: (itemId: number, repositories: WorkspaceRepositoryInput[]) =>
     command<Workspace>("create_workspace", { itemId, repositories }),
+  prepareDirectRun: (
+    itemId: number,
+    workspaceId: number,
+    machineId: number | null,
+  ) =>
+    command<DirectRunPreview>("prepare_direct_run", {
+      itemId,
+      workspaceId,
+      machineId,
+    }),
   createWorktree: (
     workspaceId: number,
     repositoryId: number,
@@ -165,6 +177,41 @@ export const workAdapter = {
       executionProfile,
       prompt,
       promptSelection,
+    }),
+  startDirectRun: ({
+    itemId,
+    workspaceId,
+    machineId,
+    agent,
+    executionProfile,
+    prompt,
+    promptSelection,
+    expectedCheckouts,
+    allowDirty,
+    allowSharedCheckouts,
+  }: {
+    itemId: number;
+    workspaceId: number;
+    machineId: number | null;
+    agent: Run["agent"];
+    executionProfile: Run["execution_profile"];
+    prompt: string;
+    promptSelection: RunPromptSelection;
+    expectedCheckouts: RunCheckout[];
+    allowDirty: boolean;
+    allowSharedCheckouts: boolean;
+  }) =>
+    command<Run>("start_direct_run", {
+      itemId,
+      workspaceId,
+      machineId,
+      agent,
+      executionProfile,
+      prompt,
+      promptSelection,
+      expectedCheckouts,
+      allowDirty,
+      allowSharedCheckouts,
     }),
   refreshExternalObject: (externalObjectId: number) =>
     command<ExternalSnapshot>("refresh_external_object", { externalObjectId }),

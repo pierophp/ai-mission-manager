@@ -127,6 +127,15 @@ pub struct Worktree {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunCheckout {
+    pub repository_id: i64,
+    pub path: String,
+    pub branch: String,
+    pub is_dirty: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum MachineTransport {
     #[serde(rename = "local")]
@@ -217,7 +226,8 @@ pub struct RunPromptSelection {
 pub struct Run {
     pub id: i64,
     pub item_id: i64,
-    pub workset_id: i64,
+    pub workset_id: Option<i64>,
+    pub workspace_id: Option<i64>,
     pub machine_id: i64,
     pub agent: AgentKind,
     pub execution_profile: ExecutionProfile,
@@ -228,6 +238,7 @@ pub struct Run {
     pub started_at: i64,
     pub state: RunState,
     pub pane_status: RunPaneStatus,
+    pub direct_checkouts: Vec<RunCheckout>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1224,6 +1235,22 @@ pub enum Event {
         started_at: i64,
         prompt_selection: RunPromptSelection,
     },
+    StartDirectRun {
+        item_id: i64,
+        workspace_id: i64,
+        machine_id: i64,
+        agent: AgentKind,
+        execution_profile: ExecutionProfile,
+        prompt: String,
+        working_directory: String,
+        session_name: String,
+        pane_id: String,
+        started_at: i64,
+        prompt_selection: RunPromptSelection,
+        checkouts: Vec<RunCheckout>,
+        allow_dirty: bool,
+        allow_shared_checkouts: bool,
+    },
     AttachRun {
         item_id: i64,
         workset_id: i64,
@@ -1630,7 +1657,7 @@ pub fn plan_machine_deletion(
                 item_id: run.item_id,
                 item_identifier: item.human_identifier.clone(),
                 item_title: item.title.clone(),
-                workset_id: run.workset_id,
+                workset_id: run.workset_id.unwrap_or_default(),
                 state: run.state,
                 pane_status: run.pane_status,
             })
@@ -1779,7 +1806,7 @@ fn plan_parent_deletion(
                 item_id: run.item_id,
                 item_identifier: item.human_identifier.clone(),
                 item_title: item.title.clone(),
-                workset_id: run.workset_id,
+                workset_id: run.workset_id.unwrap_or_default(),
                 machine_id: run.machine_id,
                 state: run.state,
                 pane_status: run.pane_status,
@@ -2013,6 +2040,17 @@ pub enum DomainError {
     EmptyRunWorkingDirectory,
     #[error("Run working directory does not match Workset {workset_id}")]
     RunWorkingDirectoryMismatch { workset_id: i64 },
+    #[error("Direct Run must include at least one Repository")]
+    EmptyDirectRunCheckouts,
+    #[error("Direct Run checkout for Repository {repository_id} is invalid")]
+    InvalidDirectRunCheckout { repository_id: i64 },
+    #[error("Direct Run has dirty checkouts for Repositories {repository_ids:?}; confirm the warning before starting")]
+    DirectRunDirtyCheckouts { repository_ids: Vec<i64> },
+    #[error("Direct Run shares checkout paths with active Runs {run_ids:?}: {paths:?}; confirm the shared checkout warning before starting")]
+    DirectRunSharedCheckouts {
+        run_ids: Vec<i64>,
+        paths: Vec<String>,
+    },
     #[error("a Run session name cannot be blank")]
     EmptyRunSessionName,
     #[error("a Run Pane identity cannot be blank")]
@@ -2442,7 +2480,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 state
                     .runs
                     .iter()
-                    .any(|run| run.workset_id == workset.id)
+                    .any(|run| run.workset_id == Some(workset.id))
                     .then_some(workset.id)
             }) {
                 return Err(DomainError::WorksetHasRuns { workset_id });
@@ -3172,7 +3210,11 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .iter()
                 .position(|workset| workset.id == workset_id)
                 .ok_or(DomainError::WorksetNotFound { workset_id })?;
-            if state.runs.iter().any(|run| run.workset_id == workset_id) {
+            if state
+                .runs
+                .iter()
+                .any(|run| run.workset_id == Some(workset_id))
+            {
                 return Err(DomainError::WorksetHasRuns { workset_id });
             }
             state.worksets.remove(position);
@@ -3351,7 +3393,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let run = Run {
                 id,
                 item_id,
-                workset_id,
+                workset_id: Some(workset_id),
+                workspace_id: None,
                 machine_id,
                 agent,
                 execution_profile,
@@ -3362,6 +3405,173 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 started_at,
                 state: RunState::Unknown,
                 pane_status: RunPaneStatus::Available,
+                direct_checkouts: Vec::new(),
+            };
+            state.next_run_id = next_run_id;
+            state.runs.push(run.clone());
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRun { run, next_run_id }],
+            })
+        }
+        Event::StartDirectRun {
+            item_id,
+            workspace_id,
+            machine_id,
+            agent,
+            execution_profile,
+            prompt,
+            working_directory,
+            session_name,
+            pane_id,
+            started_at,
+            prompt_selection,
+            checkouts,
+            allow_dirty,
+            allow_shared_checkouts,
+        } => {
+            let context_id = item_context_id(&state, item_id)?;
+            let workspace = state
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+                .ok_or(DomainError::WorkspaceNotFound { workspace_id })?;
+            if workspace.item_id != item_id {
+                return Err(DomainError::WorkspaceItemMismatch {
+                    workspace_id,
+                    item_id,
+                });
+            }
+            let machine = state
+                .machines
+                .iter()
+                .find(|machine| machine.id == machine_id)
+                .ok_or(DomainError::MachineNotFound { machine_id })?;
+            if machine.context_id != context_id {
+                return Err(DomainError::MachineContextMismatch {
+                    machine_id,
+                    context_id,
+                });
+            }
+            if checkouts.is_empty() {
+                return Err(DomainError::EmptyDirectRunCheckouts);
+            }
+            let selected_repository_ids = workspace
+                .repositories
+                .iter()
+                .map(|repository| repository.repository_id)
+                .collect::<Vec<_>>();
+            let mut checkout_repository_ids = Vec::new();
+            for checkout in &checkouts {
+                if checkout.path.trim().is_empty()
+                    || checkout.branch.trim().is_empty()
+                    || !selected_repository_ids.contains(&checkout.repository_id)
+                    || checkout_repository_ids.contains(&checkout.repository_id)
+                {
+                    return Err(DomainError::InvalidDirectRunCheckout {
+                        repository_id: checkout.repository_id,
+                    });
+                }
+                checkout_repository_ids.push(checkout.repository_id);
+            }
+            if checkout_repository_ids.len() != selected_repository_ids.len() {
+                return Err(DomainError::InvalidDirectRunCheckout {
+                    repository_id: selected_repository_ids
+                        .into_iter()
+                        .find(|repository_id| !checkout_repository_ids.contains(repository_id))
+                        .unwrap_or_default(),
+                });
+            }
+            for external_object_id in prompt_selection.external_object_ids {
+                if !state.links.iter().any(|link| {
+                    link.item_id == item_id && link.external_object_id == external_object_id
+                }) {
+                    return Err(DomainError::RunPromptSourceNotLinked {
+                        external_object_id,
+                        item_id,
+                    });
+                }
+            }
+            let dirty_repository_ids = checkouts
+                .iter()
+                .filter(|checkout| checkout.is_dirty)
+                .map(|checkout| checkout.repository_id)
+                .collect::<Vec<_>>();
+            if !allow_dirty && !dirty_repository_ids.is_empty() {
+                return Err(DomainError::DirectRunDirtyCheckouts {
+                    repository_ids: dirty_repository_ids,
+                });
+            }
+            let mut shared_run_ids = Vec::new();
+            let mut shared_paths = Vec::new();
+            for active_run in state.runs.iter().filter(|run| {
+                run.machine_id == machine_id
+                    && run.state != RunState::Finished
+                    && run.pane_status != RunPaneStatus::Missing
+            }) {
+                for checkout in &checkouts {
+                    if active_run
+                        .direct_checkouts
+                        .iter()
+                        .any(|active_checkout| active_checkout.path == checkout.path)
+                    {
+                        shared_run_ids.push(active_run.id);
+                        shared_paths.push(checkout.path.clone());
+                    }
+                }
+            }
+            shared_run_ids.sort_unstable();
+            shared_run_ids.dedup();
+            shared_paths.sort();
+            shared_paths.dedup();
+            if !allow_shared_checkouts && !shared_run_ids.is_empty() {
+                return Err(DomainError::DirectRunSharedCheckouts {
+                    run_ids: shared_run_ids,
+                    paths: shared_paths,
+                });
+            }
+            let prompt = clean_name(prompt, DomainError::EmptyRunPrompt)?;
+            let working_directory =
+                clean_name(working_directory, DomainError::EmptyRunWorkingDirectory)?;
+            if !checkouts
+                .iter()
+                .any(|checkout| checkout.path == working_directory)
+            {
+                return Err(DomainError::InvalidDirectRunCheckout {
+                    repository_id: checkouts[0].repository_id,
+                });
+            }
+            let session_name = clean_name(session_name, DomainError::EmptyRunSessionName)?;
+            let pane_id = clean_name(pane_id, DomainError::EmptyRunPaneId)?;
+            if state.runs.iter().any(|run| {
+                run.machine_id == machine_id
+                    && run.session_name == session_name
+                    && run.pane_id == pane_id
+            }) {
+                return Err(DomainError::RunAlreadyAttached {
+                    machine_id,
+                    session_name,
+                    pane_id,
+                });
+            }
+            let id = state.next_run_id;
+            let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let run = Run {
+                id,
+                item_id,
+                workset_id: None,
+                workspace_id: Some(workspace_id),
+                machine_id,
+                agent,
+                execution_profile,
+                prompt,
+                working_directory,
+                session_name,
+                pane_id,
+                started_at,
+                state: RunState::Unknown,
+                pane_status: RunPaneStatus::Available,
+                direct_checkouts: checkouts,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -3426,7 +3636,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let run = Run {
                 id,
                 item_id,
-                workset_id,
+                workset_id: Some(workset_id),
+                workspace_id: None,
                 machine_id,
                 agent,
                 execution_profile: ExecutionProfile::CustomPrompt,
@@ -3437,6 +3648,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 started_at: attached_at,
                 state: RunState::Unknown,
                 pane_status: RunPaneStatus::Available,
+                direct_checkouts: Vec::new(),
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -4777,7 +4989,7 @@ mod tests {
         state.runs.push(Run {
             id: 1,
             item_id: 1,
-            workset_id: 1,
+            workset_id: Some(1),
             machine_id: 1,
             agent: AgentKind::Codex,
             execution_profile: ExecutionProfile::Implement,
@@ -4788,6 +5000,8 @@ mod tests {
             started_at: 1,
             state: RunState::Working,
             pane_status: RunPaneStatus::Available,
+            workspace_id: None,
+            direct_checkouts: Vec::new(),
         });
 
         assert_eq!(
@@ -5263,7 +5477,7 @@ mod tests {
         state.runs.push(Run {
             id: 1,
             item_id: 1,
-            workset_id: 1,
+            workset_id: Some(1),
             machine_id: 1,
             agent: AgentKind::Codex,
             execution_profile: ExecutionProfile::Implement,
@@ -5274,6 +5488,8 @@ mod tests {
             started_at: 1,
             state: RunState::Finished,
             pane_status: RunPaneStatus::Missing,
+            workspace_id: None,
+            direct_checkouts: Vec::new(),
         });
         state.relationships.push(ItemRelation {
             from_item_id: 1,
@@ -5487,7 +5703,7 @@ mod tests {
         state.runs = vec![Run {
             id: 1,
             item_id: 1,
-            workset_id: 1,
+            workset_id: Some(1),
             machine_id: 1,
             agent: AgentKind::Codex,
             execution_profile: ExecutionProfile::Implement,
@@ -5498,6 +5714,8 @@ mod tests {
             started_at: 1,
             state: RunState::Finished,
             pane_status: RunPaneStatus::Missing,
+            workspace_id: None,
+            direct_checkouts: Vec::new(),
         }];
         state.next_run_id = 2;
         state.relationships.push(ItemRelation {
@@ -5706,7 +5924,7 @@ mod tests {
         state.runs.push(Run {
             id: 1,
             item_id: 1,
-            workset_id: 1,
+            workset_id: Some(1),
             machine_id: 1,
             agent: AgentKind::Claude,
             execution_profile: ExecutionProfile::Implement,
@@ -5717,6 +5935,8 @@ mod tests {
             started_at: 1,
             state: RunState::Working,
             pane_status: RunPaneStatus::Available,
+            workspace_id: None,
+            direct_checkouts: Vec::new(),
         });
 
         let plan = plan_context_deletion(&state, 7).expect("Context should have a deletion plan");
@@ -5838,7 +6058,7 @@ mod tests {
         state.runs.push(Run {
             id: 1,
             item_id: 1,
-            workset_id: 1,
+            workset_id: Some(1),
             machine_id: 1,
             agent: AgentKind::Claude,
             execution_profile: ExecutionProfile::Investigate,
@@ -5849,6 +6069,8 @@ mod tests {
             started_at: 1,
             state: RunState::Working,
             pane_status: RunPaneStatus::Available,
+            workspace_id: None,
+            direct_checkouts: Vec::new(),
         });
 
         assert_eq!(
@@ -5885,7 +6107,7 @@ mod tests {
             Run {
                 id: 1,
                 item_id: 1,
-                workset_id: 1,
+                workset_id: Some(1),
                 machine_id: 1,
                 agent: AgentKind::Codex,
                 execution_profile: ExecutionProfile::Implement,
@@ -5896,11 +6118,13 @@ mod tests {
                 started_at: 1,
                 state: RunState::Finished,
                 pane_status: RunPaneStatus::Missing,
+                workspace_id: None,
+                direct_checkouts: Vec::new(),
             },
             Run {
                 id: 2,
                 item_id: 1,
-                workset_id: 1,
+                workset_id: Some(1),
                 machine_id: 1,
                 agent: AgentKind::Claude,
                 execution_profile: ExecutionProfile::Review,
@@ -5911,6 +6135,8 @@ mod tests {
                 started_at: 2,
                 state: RunState::Working,
                 pane_status: RunPaneStatus::Available,
+                workspace_id: None,
+                direct_checkouts: Vec::new(),
             },
         ];
 
@@ -5954,7 +6180,7 @@ mod tests {
             Run {
                 id: 1,
                 item_id: 1,
-                workset_id: 1,
+                workset_id: Some(1),
                 machine_id: 1,
                 agent: AgentKind::Codex,
                 execution_profile: ExecutionProfile::Implement,
@@ -5965,11 +6191,13 @@ mod tests {
                 started_at: 1,
                 state: RunState::Finished,
                 pane_status: RunPaneStatus::Missing,
+                workspace_id: None,
+                direct_checkouts: Vec::new(),
             },
             Run {
                 id: 2,
                 item_id: 1,
-                workset_id: 1,
+                workset_id: Some(1),
                 machine_id: 1,
                 agent: AgentKind::Claude,
                 execution_profile: ExecutionProfile::Review,
@@ -5980,6 +6208,8 @@ mod tests {
                 started_at: 2,
                 state: RunState::Blocked,
                 pane_status: RunPaneStatus::Available,
+                workspace_id: None,
+                direct_checkouts: Vec::new(),
             },
         ];
 
@@ -7595,13 +7825,108 @@ mod tests {
         .expect("a second Run may use the same Workset");
 
         assert_eq!(second.state.runs.len(), 2);
-        assert_eq!(second.state.runs[0].workset_id, 1);
-        assert_eq!(second.state.runs[1].workset_id, 1);
+        assert_eq!(second.state.runs[0].workset_id, Some(1));
+        assert_eq!(second.state.runs[1].workset_id, Some(1));
         assert_eq!(second.state.runs[1].agent, AgentKind::Codex);
         assert!(matches!(
             second.effects.as_slice(),
             [Effect::PersistRun { run, next_run_id }] if run.id == 2 && *next_run_id == 3
         ));
+    }
+
+    #[test]
+    fn direct_runs_require_dirty_and_shared_checkout_confirmation() {
+        let mut state = state_with_item(1, "Work");
+        state.repositories.push(Repository {
+            id: 1,
+            project_id: 1,
+            name: "service".into(),
+            remote_url: "https://example.com/service.git".into(),
+            base_branch: "main".into(),
+        });
+        state.workspaces.push(Workspace {
+            id: 1,
+            item_id: 1,
+            repositories: vec![WorkspaceRepository {
+                repository_id: 1,
+                branch: "feature/direct".into(),
+                base_branch: "main".into(),
+            }],
+        });
+        state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: "mission-manager".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+        let checkout = RunCheckout {
+            repository_id: 1,
+            path: "/tmp/service".into(),
+            branch: "feature/direct".into(),
+            is_dirty: true,
+        };
+        let event = |allow_dirty, allow_shared_checkouts| Event::StartDirectRun {
+            item_id: 1,
+            workspace_id: 1,
+            machine_id: 1,
+            agent: AgentKind::Codex,
+            execution_profile: ExecutionProfile::Implement,
+            prompt: "Implement the direct run".into(),
+            working_directory: checkout.path.clone(),
+            session_name: "direct-run".into(),
+            pane_id: "%1".into(),
+            started_at: 1,
+            prompt_selection: RunPromptSelection {
+                include_objective: true,
+                include_notes: false,
+                external_object_ids: Vec::new(),
+            },
+            checkouts: vec![checkout.clone()],
+            allow_dirty,
+            allow_shared_checkouts,
+        };
+
+        assert_eq!(
+            decide(state.clone(), event(false, false)),
+            Err(DomainError::DirectRunDirtyCheckouts {
+                repository_ids: vec![1],
+            })
+        );
+
+        state.runs.push(Run {
+            id: 1,
+            item_id: 1,
+            workset_id: None,
+            workspace_id: Some(1),
+            machine_id: 1,
+            agent: AgentKind::Claude,
+            execution_profile: ExecutionProfile::Implement,
+            prompt: "existing direct run".into(),
+            working_directory: checkout.path.clone(),
+            session_name: "existing-run".into(),
+            pane_id: "%2".into(),
+            started_at: 1,
+            state: RunState::Working,
+            pane_status: RunPaneStatus::Available,
+            direct_checkouts: vec![checkout.clone()],
+        });
+        state.next_run_id = 2;
+        assert_eq!(
+            decide(state.clone(), event(true, false)),
+            Err(DomainError::DirectRunSharedCheckouts {
+                run_ids: vec![1],
+                paths: vec![checkout.path.clone()],
+            })
+        );
+
+        let started = decide(state, event(true, true)).expect("confirmed Direct Run should start");
+        assert_eq!(started.state.runs.len(), 2);
+        assert_eq!(started.state.runs[1].workspace_id, Some(1));
+        assert_eq!(started.state.runs[1].workset_id, None);
+        assert_eq!(started.state.runs[1].direct_checkouts, vec![checkout]);
     }
 
     #[test]
@@ -7637,7 +7962,7 @@ mod tests {
         state.runs.push(Run {
             id: 1,
             item_id: 1,
-            workset_id: 1,
+            workset_id: Some(1),
             machine_id: 1,
             agent: AgentKind::Codex,
             execution_profile: ExecutionProfile::Implement,
@@ -7648,6 +7973,8 @@ mod tests {
             started_at: 1,
             state: RunState::Unknown,
             pane_status: RunPaneStatus::Available,
+            workspace_id: None,
+            direct_checkouts: Vec::new(),
         });
 
         let suggestions = suggest_untracked_runs(

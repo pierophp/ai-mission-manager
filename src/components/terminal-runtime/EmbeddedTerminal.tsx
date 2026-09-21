@@ -14,13 +14,13 @@ import type {
 } from "../../runtime/terminal-types";
 
 type EmbeddedTerminalProps = {
-  worksetId: number;
+  runId: number;
   initialPane: PaneTab;
   onClose: () => void;
 };
 
 export function EmbeddedTerminal({
-  worksetId,
+  runId,
   initialPane,
   onClose,
 }: EmbeddedTerminalProps) {
@@ -31,7 +31,7 @@ export function EmbeddedTerminal({
   const activePaneRef = useRef(initialPane);
   const attachRequestRef = useRef(0);
   const attachedRef = useRef(false);
-  const terminalId = `workset-${worksetId}`;
+  const terminalId = `run-${runId}`;
   const [activePane, setActivePane] = useState(initialPane);
   const [panes, setPanes] = useState<PaneTab[]>([initialPane]);
   const [status, setStatus] = useState("Attaching…");
@@ -90,7 +90,7 @@ export function EmbeddedTerminal({
 
       try {
         const attachment = await terminalRuntimeAdapter.open(
-          worksetId,
+          runId,
           terminalId,
           pane.sessionName,
           pane.paneId,
@@ -167,7 +167,7 @@ export function EmbeddedTerminal({
       unlisteners.forEach((unlisten) => unlisten());
       void terminalRuntimeAdapter.close(terminalId).catch(() => undefined);
     };
-  }, [initialPane, terminalId, worksetId]);
+  }, [initialPane, terminalId, runId]);
 
   return (
     <section

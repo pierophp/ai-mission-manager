@@ -29,7 +29,9 @@ export const workActions = {
   createWorkspace: (
     itemId: number,
     repositories: Parameters<typeof workAdapter.createWorkspace>[1],
-  ) => () => workAdapter.createWorkspace(itemId, repositories),
+    ) => () => workAdapter.createWorkspace(itemId, repositories),
+  prepareDirectRun: (itemId: number, workspaceId: number, machineId: number | null) =>
+    () => workAdapter.prepareDirectRun(itemId, workspaceId, machineId),
   attachWorkset: (itemId: number, rootDirectory: string) =>
     () => workAdapter.attachWorkset(itemId, rootDirectory),
   addRepositoryToWorkset: (
@@ -70,6 +72,8 @@ export const workActions = {
   ) => () => workAdapter.composeRunPrompt(itemId, executionProfile, selection, customPrompt),
   startRun: (input: Parameters<typeof workAdapter.startRun>[0]) =>
     () => workAdapter.startRun(input),
+  startDirectRun: (input: Parameters<typeof workAdapter.startDirectRun>[0]) =>
+    () => workAdapter.startDirectRun(input),
   refreshExternalObject: (externalObjectId: number) =>
     () => workAdapter.refreshExternalObject(externalObjectId),
   createGithubIssue: (itemId: number, repository: string, title: string, body: string) =>

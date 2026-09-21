@@ -32,7 +32,7 @@ import { Input } from "./ui/input";
 import { appShellLayoutClassName } from "./app-shell-layout";
 
 type AppShellContextValue = {
-  openTerminal: (worksetId: number, pane: PaneTab) => void;
+  openTerminal: (runId: number, pane: PaneTab) => void;
   closeTerminal: () => void;
 };
 
@@ -92,7 +92,7 @@ export function AppShell() {
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const themePreferenceRef = useRef<Theme | undefined>(loadStoredTheme());
   const [terminalRequest, setTerminalRequest] = useState<{
-    worksetId: number;
+    runId: number;
     pane: PaneTab;
   }>();
   const setupState = setupQuery.data;
@@ -233,8 +233,8 @@ export function AppShell() {
 
       {terminalRequest && (
         <EmbeddedTerminal
-          key={`${terminalRequest.worksetId}-${terminalRequest.pane.paneId}`}
-          worksetId={terminalRequest.worksetId}
+          key={`${terminalRequest.runId}-${terminalRequest.pane.paneId}`}
+          runId={terminalRequest.runId}
           initialPane={terminalRequest.pane}
           onClose={() => setTerminalRequest(undefined)}
         />
@@ -242,7 +242,7 @@ export function AppShell() {
 
       <AppShellContext.Provider
         value={{
-          openTerminal: (worksetId, pane) => setTerminalRequest({ worksetId, pane }),
+          openTerminal: (runId, pane) => setTerminalRequest({ runId, pane }),
           closeTerminal: () => setTerminalRequest(undefined),
         }}
       >

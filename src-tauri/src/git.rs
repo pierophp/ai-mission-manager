@@ -6,7 +6,8 @@ use std::{
 
 use thiserror::Error;
 
-use crate::domain::Repository;
+use crate::domain::{Machine, MachineTransport, Repository};
+use crate::terminal::run_machine_shell;
 
 #[derive(Debug, Error)]
 pub enum GitError {
@@ -147,6 +148,43 @@ impl GitCli {
         )?;
         Ok(CheckoutInspection {
             remote_url,
+            current_branch,
+            is_dirty: !status.trim().is_empty(),
+        })
+    }
+
+    pub fn inspect_checkout_on_machine(
+        &self,
+        machine: &Machine,
+        checkout_path: &Path,
+    ) -> Result<CheckoutInspection, GitError> {
+        if matches!(machine.transport, MachineTransport::Local) {
+            return self.inspect_checkout(checkout_path);
+        }
+
+        let checkout = shell_quote(&checkout_path.to_string_lossy());
+        let run = |operation: &'static str, command: String| {
+            run_machine_shell(machine, &command)
+                .map_err(|details| GitError::Failed { operation, details })
+        };
+        run(
+            "validate the remote checkout Git repository",
+            format!("git -C {checkout} rev-parse --show-toplevel"),
+        )?;
+        let current_branch = run(
+            "read the remote checkout branch",
+            format!(
+                "git -C {checkout} symbolic-ref --short HEAD 2>/dev/null || printf '%s' 'HEAD (detached)'"
+            ),
+        )?
+        .trim()
+        .to_owned();
+        let status = run(
+            "read the remote checkout status",
+            format!("git -C {checkout} status --porcelain --untracked-files=all"),
+        )?;
+        Ok(CheckoutInspection {
+            remote_url: None,
             current_branch,
             is_dirty: !status.trim().is_empty(),
         })
@@ -662,4 +700,8 @@ mod tests {
     fn path_arg(path: &Path) -> String {
         PathBuf::from(path).to_string_lossy().into_owned()
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
