@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type FormEvent, type KeyboardEvent, useEffect, useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -25,6 +25,20 @@ import {
   NativeSelectOption,
 } from "../../components/ui/native-select";
 import { Textarea } from "../../components/ui/textarea";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "../../components/ui/dropdown-menu";
+import { EllipsisVerticalIcon } from "lucide-react";
 import { currentMinute } from "../../runtime/time";
 import { errorMessage } from "../../runtime/errors";
 import type {
@@ -62,6 +76,11 @@ import { type WorkAction, useWorkCommand, workActions } from "./work-mutations";
 
 const itemStatuses: ItemStatus[] = ["Inbox", "Active", "Waiting", "Done"];
 const relationKinds: ItemRelationKind[] = ["Blocks", "BlockedBy", "RelatedTo"];
+
+function displayItemIdentifier(identifier: string): string {
+  const match = /^MC-(\d+)$/.exec(identifier);
+  return match ? `#${match[1]}` : identifier;
+}
 
 type WorkConfirmation = {
   title: string;
@@ -147,6 +166,9 @@ export function ItemCard({
   const [targetItemId, setTargetItemId] = useState<number>();
   const [externalUrl, setExternalUrl] = useState("");
   const [isIssuePreviewOpen, setIsIssuePreviewOpen] = useState(false);
+  const [isReminderDialogOpen, setIsReminderDialogOpen] = useState(false);
+  const [isRenameDialogOpen, setIsRenameDialogOpen] = useState(false);
+  const [titleDraft, setTitleDraft] = useState(view.item.title);
   const [issueRepository, setIssueRepository] = useState("");
   const [issueTitle, setIssueTitle] = useState(view.item.title);
   const [issueBody, setIssueBody] = useState(view.item.notes);
@@ -186,7 +208,10 @@ export function ItemCard({
   const [runPrompt, setRunPrompt] = useState("");
   const [runPromptNeedsCompose, setRunPromptNeedsCompose] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
+  const [isExpanded, setIsExpanded] = useState(false);
   const workCommand = useWorkCommand();
+
+  const displayIdentifier = displayItemIdentifier(view.item.human_identifier);
 
   const itemRepositories = repositories.filter(
     (repository) => repository.project_id === view.item.project_id,
@@ -195,6 +220,10 @@ export function ItemCard({
   useEffect(() => {
     setNotes(view.item.notes);
   }, [view.item.notes]);
+
+  useEffect(() => {
+    setTitleDraft(view.item.title);
+  }, [view.item.title]);
 
   async function saveItem<TData>(
     update: WorkAction<TData>,
@@ -385,6 +414,27 @@ export function ItemCard({
     }
   }
 
+  async function handleAddReminder() {
+    if (!reminderAt) return;
+    const result = await saveItem(
+      workActions.addReminder(view.item.id, reminderAt),
+    );
+    if (!result) return;
+    setReminderAt("");
+    setIsReminderDialogOpen(false);
+  }
+
+  async function handleRenameTitle() {
+    const nextTitle = titleDraft.trim();
+    if (!nextTitle || nextTitle === view.item.title) return;
+    const result = await saveItem(
+      workActions.setItemTitle(view.item.id, nextTitle),
+    );
+    if (!result) return;
+    setTitleDraft(result.title);
+    setIsRenameDialogOpen(false);
+  }
+
   async function handleDeleteItem() {
     if (!deletionPreview || deletionPreview.blockers.length > 0) return;
     setIsSaving(true);
@@ -400,7 +450,7 @@ export function ItemCard({
         ? `\n\n${result.physicalCleanupWarning}`
         : "";
       window.alert(
-        `Deleted ${deletionPreview.plan.humanIdentifier}.\n\nRemoved ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.worksetCount} Workset(s), ${summary.runCount} Run(s), ${summary.linkCount} Link(s), and ${summary.externalObjectCount} orphaned External Object(s).${physicalWarning}`,
+        `Deleted ${displayItemIdentifier(deletionPreview.plan.humanIdentifier)}.\n\nRemoved ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.worksetCount} Workset(s), ${summary.runCount} Run(s), ${summary.linkCount} Link(s), and ${summary.externalObjectCount} orphaned External Object(s).${physicalWarning}`,
       );
     } catch (deleteError) {
       setDeletionPreview(undefined);
@@ -1046,39 +1096,96 @@ export function ItemCard({
   return (
     <>
       <Card size="sm" className="h-full">
-      <CardHeader className="border-b border-border/70">
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge variant="outline">{view.item.human_identifier}</Badge>
-          <NativeSelect
-            aria-label={`Status for ${view.item.human_identifier}`}
-            value={view.item.status}
-            onChange={(event) =>
-              handleItemStatusChange(event.target.value as ItemStatus)
-            }
-            disabled={isSaving}
+        <CardHeader className="border-b border-border/70">
+          <div className="flex items-start justify-between gap-2">
+            <button
+              type="button"
+              className="grid min-w-0 flex-1 gap-1 rounded-md text-left outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+              aria-expanded={isExpanded}
+              aria-controls={`item-card-content-${view.item.id}`}
+              onClick={() => setIsExpanded((current) => !current)}
+              onKeyDown={(event: KeyboardEvent<HTMLButtonElement>) => {
+                if (event.key === "Escape" && isExpanded) {
+                  setIsExpanded(false);
+                }
+              }}
+            >
+              <span className="flex flex-wrap items-center gap-2">
+                <Badge variant="outline">{displayIdentifier}</Badge>
+                <Badge variant="secondary">{view.item.status}</Badge>
+              </span>
+              <span className="font-heading text-base leading-snug font-medium group-data-[size=sm]/card:text-sm">
+                {view.item.title}
+              </span>
+              <span className="text-sm text-muted-foreground">
+                {view.context_name} <span>·</span> {view.project_name}
+              </span>
+            </button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  size="icon-sm"
+                  variant="ghost"
+                  aria-label={`More actions for ${displayIdentifier}`}
+                  title="More actions"
+                  disabled={isSaving}
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <EllipsisVerticalIcon aria-hidden="true" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-48">
+                <DropdownMenuLabel>Item actions</DropdownMenuLabel>
+                <DropdownMenuItem
+                  disabled={isSaving}
+                  onSelect={() => {
+                    setTitleDraft(view.item.title);
+                    setIsRenameDialogOpen(true);
+                  }}
+                >
+                  Rename title
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={isSaving}
+                  onSelect={() => setIsReminderDialogOpen(true)}
+                >
+                  Add reminder
+                </DropdownMenuItem>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>Change status</DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent>
+                    <DropdownMenuRadioGroup
+                      value={view.item.status}
+                      onValueChange={(nextStatus) =>
+                        handleItemStatusChange(nextStatus as ItemStatus)
+                      }
+                    >
+                      {itemStatuses.map((status) => (
+                        <DropdownMenuRadioItem value={status} key={status}>
+                          {status}
+                        </DropdownMenuRadioItem>
+                      ))}
+                    </DropdownMenuRadioGroup>
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  variant="destructive"
+                  disabled={isSaving}
+                  onSelect={() => void handlePrepareItemDeletion()}
+                >
+                  Delete Item
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        </CardHeader>
+        {isExpanded && (
+          <CardContent
+            id={`item-card-content-${view.item.id}`}
+            className="space-y-5 pt-4"
           >
-            {itemStatuses.map((status) => (
-              <NativeSelectOption value={status} key={status}>
-                {status}
-              </NativeSelectOption>
-            ))}
-          </NativeSelect>
-          <Button
-            type="button"
-            size="sm"
-            variant="destructive"
-            disabled={isSaving}
-            onClick={() => void handlePrepareItemDeletion()}
-          >
-            Delete Item
-          </Button>
-        </div>
-        <CardTitle className="mt-2 text-base">{view.item.title}</CardTitle>
-        <CardDescription>
-          {view.context_name} <span>·</span> {view.project_name}
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-5 pt-4">
         <label className="grid gap-1.5 text-sm font-medium">
           <span>Notes</span>
           <Textarea
@@ -1089,39 +1196,17 @@ export function ItemCard({
             disabled={isSaving}
           />
         </label>
-        <div className="flex flex-wrap items-end gap-3">
-          <Button
-            size="sm"
-            type="button"
-            variant="outline"
-            disabled={isSaving || notes === view.item.notes}
-            onClick={() =>
-              void saveItem(workActions.setItemNotes(view.item.id, notes))
-            }
-          >
-            Save notes
-          </Button>
-          <label className="grid min-w-52 gap-1.5 text-sm font-medium">
-            <span>New reminder</span>
-            <Input
-              type="datetime-local"
-              value={reminderAt}
-              onChange={(event) => setReminderAt(event.target.value)}
-              disabled={isSaving}
-            />
-          </label>
-          <Button
-            size="sm"
-            type="button"
-            variant="outline"
-            disabled={isSaving || !reminderAt}
-            onClick={() =>
-              void saveItem(workActions.addReminder(view.item.id, reminderAt))
-            }
-          >
-            Add reminder
-          </Button>
-        </div>
+        <Button
+          size="sm"
+          type="button"
+          variant="outline"
+          disabled={isSaving || notes === view.item.notes}
+          onClick={() =>
+            void saveItem(workActions.setItemNotes(view.item.id, notes))
+          }
+        >
+          Save notes
+        </Button>
         {view.item.reminders.length > 0 && (
           <div className="grid gap-2">
             <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -1502,7 +1587,7 @@ export function ItemCard({
                   <strong>Items affected</strong>
                   {externalObjectDeletionPreview.links.map((link) => (
                     <span key={link.linkId}>
-                      {link.itemIdentifier} · {link.itemTitle}
+                      {displayItemIdentifier(link.itemIdentifier)} · {link.itemTitle}
                     </span>
                   ))}
                 </div>
@@ -1534,7 +1619,7 @@ export function ItemCard({
           <form className="flex flex-wrap gap-2" onSubmit={handleExternalLink}>
             <Input
               className="min-w-0 flex-1"
-              aria-label={`External URL for ${view.item.human_identifier}`}
+              aria-label={`External URL for ${displayIdentifier}`}
               value={externalUrl}
               onChange={(event) => setExternalUrl(event.target.value)}
               placeholder="Paste a GitHub issue, pull request, or URL"
@@ -1639,7 +1724,9 @@ export function ItemCard({
                   key={`${relation.from_item_id}-${relation.to_item_id}-${relation.kind}`}
                 >
                   {relationshipLabel(relation, view.item.id)}{" "}
-                  {other?.item.human_identifier ?? `MC-${otherId}`}
+                  {displayItemIdentifier(
+                    other?.item.human_identifier ?? `MC-${otherId}`,
+                  )}
                 </Badge>
               );
             })
@@ -1676,7 +1763,8 @@ export function ItemCard({
                   value={candidate.item.id}
                   key={candidate.item.id}
                 >
-                  {candidate.item.human_identifier} · {candidate.item.title}
+                  {displayItemIdentifier(candidate.item.human_identifier)} ·{" "}
+                  {candidate.item.title}
                 </NativeSelectOption>
               ))}
             </NativeSelect>
@@ -1689,8 +1777,123 @@ export function ItemCard({
             </Button>
           </form>
         )}
-      </CardContent>
+          </CardContent>
+        )}
       </Card>
+      {isRenameDialogOpen && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open && !isSaving) {
+              setIsRenameDialogOpen(false);
+              setTitleDraft(view.item.title);
+            }
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Rename title</DialogTitle>
+              <DialogDescription>
+                Choose a clear title for {displayIdentifier}.
+              </DialogDescription>
+            </DialogHeader>
+            <form
+              className="grid gap-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleRenameTitle();
+              }}
+            >
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Title</span>
+                <Input
+                  autoFocus
+                  value={titleDraft}
+                  onChange={(event) => setTitleDraft(event.target.value)}
+                  disabled={isSaving}
+                />
+              </label>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={isSaving}
+                  onClick={() => {
+                    setIsRenameDialogOpen(false);
+                    setTitleDraft(view.item.title);
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={
+                    isSaving ||
+                    !titleDraft.trim() ||
+                    titleDraft.trim() === view.item.title
+                  }
+                >
+                  {isSaving ? "Saving…" : "Save title"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+      )}
+      {isReminderDialogOpen && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open && !isSaving) {
+              setIsReminderDialogOpen(false);
+              setReminderAt("");
+            }
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Add reminder</DialogTitle>
+              <DialogDescription>
+                Choose when {displayIdentifier} should appear in Needs Attention.
+              </DialogDescription>
+            </DialogHeader>
+            <form
+              className="grid gap-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void handleAddReminder();
+              }}
+            >
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Reminder date and time</span>
+                <Input
+                  autoFocus
+                  type="datetime-local"
+                  value={reminderAt}
+                  onChange={(event) => setReminderAt(event.target.value)}
+                  disabled={isSaving}
+                />
+              </label>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={isSaving}
+                  onClick={() => {
+                    setIsReminderDialogOpen(false);
+                    setReminderAt("");
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={isSaving || !reminderAt}>
+                  {isSaving ? "Saving…" : "Add reminder"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+      )}
       {confirmation && (
         <ConfirmationDialog
           open
@@ -1717,7 +1920,7 @@ export function ItemCard({
           <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-2xl">
             <DialogHeader>
               <DialogTitle>
-                Delete {deletionPreview.plan.humanIdentifier}?
+                Delete {displayItemIdentifier(deletionPreview.plan.humanIdentifier)}?
               </DialogTitle>
               <DialogDescription>
                 This removes the Item and its local descendants. External Issues
@@ -2169,7 +2372,7 @@ export function AttentionEntryCard({
         <div className="min-w-0">
           <strong className="block text-sm">{entry.source_title}</strong>
           <span className="text-xs text-muted-foreground">
-            {item?.item.human_identifier ?? "Item"} ·{" "}
+            {displayItemIdentifier(item?.item.human_identifier ?? "Item")} ·{" "}
             {attentionEntryLabel(entry)}
           </span>
         </div>
@@ -2260,7 +2463,8 @@ export function RunSuggestionCard({
             {suggestion.machineName}
           </strong>
           <span className="text-xs text-muted-foreground">
-            {suggestion.itemIdentifier} · {suggestion.itemTitle} ·{" "}
+            {displayItemIdentifier(suggestion.itemIdentifier)} ·{" "}
+            {suggestion.itemTitle} ·{" "}
             {suggestion.contextName}
           </span>
         </div>
@@ -2306,7 +2510,9 @@ export function SearchResult({ view }: { view: ItemView }) {
   return (
     <Card size="sm">
       <CardContent className="flex items-center gap-3 pt-4">
-        <Badge variant="outline">{view.item.human_identifier}</Badge>
+        <Badge variant="outline">
+          {displayItemIdentifier(view.item.human_identifier)}
+        </Badge>
         <div>
           <h3 className="font-heading text-sm font-medium normal-case tracking-normal text-foreground">
             {view.item.title}

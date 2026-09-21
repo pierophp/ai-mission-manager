@@ -733,6 +733,9 @@ pub enum AuditAction {
         from: ItemStatus,
         to: ItemStatus,
     },
+    ItemTitleChanged {
+        item_id: i64,
+    },
     ItemNotesChanged {
         item_id: i64,
     },
@@ -1155,6 +1158,10 @@ pub enum Event {
     SetItemStatus {
         item_id: i64,
         status: ItemStatus,
+    },
+    SetItemTitle {
+        item_id: i64,
+        title: String,
     },
     SetItemNotes {
         item_id: i64,
@@ -3053,6 +3060,24 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::PersistItemUpdate { item }],
             })
         }
+        Event::SetItemTitle { item_id, title } => {
+            let title = title.trim();
+            if title.is_empty() {
+                return Err(DomainError::EmptyTitle);
+            }
+            let item = state
+                .items
+                .iter_mut()
+                .find(|item| item.id == item_id)
+                .ok_or(DomainError::ItemNotFound { item_id })?;
+            item.title = title.to_owned();
+            let item = item.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistItemUpdate { item }],
+            })
+        }
         Event::SetItemNotes { item_id, notes } => {
             let item = state
                 .items
@@ -4592,8 +4617,34 @@ mod tests {
         state.next_item_id = 3;
         state.next_item_number = 3;
 
-        let noted = decide(
+        let renamed = decide(
             state,
+            Event::SetItemTitle {
+                item_id: 1,
+                title: "  Ship the release  ".into(),
+            },
+        )
+        .expect("the Item title should be saved");
+        assert_eq!(renamed.state.items[0].title, "Ship the release");
+        assert_eq!(
+            renamed.effects,
+            vec![Effect::PersistItemUpdate {
+                item: renamed.state.items[0].clone(),
+            }]
+        );
+        assert_eq!(
+            decide(
+                renamed.state.clone(),
+                Event::SetItemTitle {
+                    item_id: 1,
+                    title: "  ".into(),
+                },
+            ),
+            Err(DomainError::EmptyTitle)
+        );
+
+        let noted = decide(
+            renamed.state,
             Event::SetItemNotes {
                 item_id: 1,
                 notes: "Release after the migration is verified.".into(),

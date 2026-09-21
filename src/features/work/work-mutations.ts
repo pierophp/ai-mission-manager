@@ -8,6 +8,8 @@ export type WorkAction<TData> = () => Promise<TData>;
 export const workActions = {
   setItemStatus: (itemId: number, status: Parameters<typeof workAdapter.setItemStatus>[1]) =>
     () => workAdapter.setItemStatus(itemId, status),
+  setItemTitle: (itemId: number, title: string) =>
+    () => workAdapter.setItemTitle(itemId, title),
   setItemNotes: (itemId: number, notes: string) =>
     () => workAdapter.setItemNotes(itemId, notes),
   addReminder: (itemId: number, remindAt: string) =>

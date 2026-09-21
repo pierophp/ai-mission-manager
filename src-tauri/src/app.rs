@@ -2960,6 +2960,9 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
                     .iter()
                     .find(|candidate| candidate.id == item.id);
                 match previous {
+                    Some(previous) if previous.title != item.title => {
+                        Some(AuditAction::ItemTitleChanged { item_id: item.id })
+                    }
                     Some(previous) if previous.status != item.status => {
                         Some(AuditAction::ItemStatusChanged {
                             item_id: item.id,
@@ -4224,6 +4227,18 @@ pub fn set_item_status(
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .update_item(Event::SetItemStatus { item_id, status }, item_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_item_title(
+    item_id: i64,
+    title: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Item, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .update_item(Event::SetItemTitle { item_id, title }, item_id)
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -38,6 +38,8 @@ export const workAdapter = {
   pollExternalObjects: () => command<PollResult>("poll_external_objects"),
   setItemStatus: (itemId: number, status: Item["status"]) =>
     command<Item>("set_item_status", { itemId, status }),
+  setItemTitle: (itemId: number, title: string) =>
+    command<Item>("set_item_title", { itemId, title }),
   setItemNotes: (itemId: number, notes: string) =>
     command<Item>("set_item_notes", { itemId, notes }),
   addReminder: (itemId: number, remindAt: string) =>
