@@ -1,3 +1,4 @@
+import path from "node:path";
 import { defineConfig, lazyPlugins } from "vite-plus";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
@@ -36,6 +37,11 @@ export default defineConfig({
     passWithNoTests: true,
   },
   plugins: lazyPlugins(() => [react(), tailwindcss()]),
+  resolve: {
+    alias: {
+      "@": path.resolve(process.cwd(), "./src"),
+    },
+  },
   clearScreen: false,
   server: {
     port: 1420,
