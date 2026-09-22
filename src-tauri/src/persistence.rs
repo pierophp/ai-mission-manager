@@ -7,10 +7,10 @@ use crate::domain::{
     Activity, AgentKind, AuditAction, AuditEntry, Context, ContextAttentionDefault, DomainState,
     Effect, ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalMetadata,
     ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, GrillAnswer,
-    GrillConfiguration, GrillPhase, GrillQuestionGroup, Item, ItemRelation, ItemRelationKind,
-    ItemStatus, Link, Machine, MachineObservation, Project, ProjectDefaults, Reminder, Repository,
-    RepositoryLocation, Run, RunPaneStatus, RunState, Workspace, WorkspacePreparationState,
-    WorkspaceRepository, Worktree,
+    GrillConfiguration, GrillContinuationAction, GrillPhase, GrillQuestionGroup, Item,
+    ItemRelation, ItemRelationKind, ItemStatus, Link, LinkProvenance, Machine, MachineObservation,
+    Project, ProjectDefaults, Reminder, Repository, RepositoryLocation, Run, RunPaneStatus,
+    RunState, Workspace, WorkspacePreparationState, WorkspaceRepository, Worktree,
 };
 
 #[derive(Debug, Error)]
@@ -45,6 +45,8 @@ pub enum StoreError {
     InvalidRunPaneStatus(String),
     #[error("invalid Grill phase in database: {0}")]
     InvalidGrillPhase(String),
+    #[error("invalid downstream action in database: {0}")]
+    InvalidDownstreamAction(String),
     #[error("invalid Workspace preparation state in database: {0}")]
     InvalidWorkspacePreparationState(String),
     #[error("invalid Machine transport in database: {0}")]
@@ -86,6 +88,16 @@ impl SqliteStore {
                     .any(|column| column == "review_at"))
         {
             return Err(StoreError::IncompatibleSchema);
+        }
+        if !link_attention_columns.is_empty()
+            && !link_attention_columns
+                .iter()
+                .any(|column| column == "provenance_json")
+        {
+            connection.execute(
+                "ALTER TABLE link_attention_state ADD COLUMN provenance_json TEXT",
+                [],
+            )?;
         }
         let machine_columns = table_columns(&connection, "machines")?;
         if !machine_columns.is_empty()
@@ -392,7 +404,7 @@ impl SqliteStore {
                         prompt, working_directory, session_name, pane_id, started_at, state,
                         pane_status, direct_checkouts_json, transcript,
                         grill_question_group_json, grill_answers_json, grill_decisions_json,
-                        grill_response, grill_phase
+                        grill_response, grill_phase, grill_action
                  FROM runs
                  ORDER BY id",
             )?;
@@ -404,6 +416,7 @@ impl SqliteStore {
                 let grill_answers_json: String = row.get(21)?;
                 let grill_decisions_json: String = row.get(22)?;
                 let grill_phase: Option<String> = row.get(24)?;
+                let grill_action: Option<String> = row.get(25)?;
                 let grill_question_group = grill_question_group_json
                     .map(|json| {
                         serde_json::from_str::<GrillQuestionGroup>(&json).map_err(|error| {
@@ -439,6 +452,16 @@ impl SqliteStore {
                     .map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
                             24,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                let grill_action = grill_action
+                    .map(|action| parse_grill_continuation_action(&action))
+                    .transpose()
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            25,
                             rusqlite::types::Type::Text,
                             Box::new(error),
                         )
@@ -505,6 +528,7 @@ impl SqliteStore {
                     grill_decisions,
                     grill_response: row.get(23)?,
                     grill_phase,
+                    grill_action,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -570,7 +594,8 @@ impl SqliteStore {
                         link_attention_state.state_attention,
                         link_attention_state.metadata_attention,
                         link_attention_state.watch_until,
-                        link_attention_state.review_at
+                        link_attention_state.review_at,
+                        link_attention_state.provenance_json
                  FROM external_links
                  LEFT JOIN link_attention_state
                    ON link_attention_state.link_id = external_links.id
@@ -580,6 +605,7 @@ impl SqliteStore {
                 let title_attention: Option<i64> = row.get(4)?;
                 let state_attention: Option<i64> = row.get(5)?;
                 let metadata_attention: Option<i64> = row.get(6)?;
+                let provenance_json: Option<String> = row.get(9)?;
                 let attention_policy = match (title_attention, state_attention, metadata_attention)
                 {
                     (Some(title), Some(state), Some(metadata)) => Some(ExternalChangePolicy {
@@ -589,6 +615,16 @@ impl SqliteStore {
                     }),
                     _ => None,
                 };
+                let provenance = provenance_json
+                    .map(|json| serde_json::from_str::<LinkProvenance>(&json))
+                    .transpose()
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            9,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
                 Ok(Link {
                     id: row.get(0)?,
                     item_id: row.get(1)?,
@@ -597,6 +633,7 @@ impl SqliteStore {
                     attention_policy,
                     watch_until: row.get(7)?,
                     review_at: row.get(8)?,
+                    provenance,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -1077,8 +1114,8 @@ impl SqliteStore {
                             prompt, working_directory, session_name, pane_id,
                             started_at, state, pane_status, direct_checkouts_json,
                             transcript, grill_question_group_json, grill_answers_json,
-                            grill_decisions_json, grill_response, grill_phase)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                            grill_decisions_json, grill_response, grill_phase, grill_action)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
                         params![
                             run.id,
                             run.item_id,
@@ -1117,6 +1154,7 @@ impl SqliteStore {
                             })?,
                             run.grill_response,
                             run.grill_phase.map(grill_phase_as_str),
+                            run.grill_action.map(grill_continuation_action_as_str),
                         ],
                     )?;
                     transaction.execute(
@@ -1126,10 +1164,11 @@ impl SqliteStore {
                 }
                 Effect::PersistRunState { run } => {
                     transaction.execute(
-                        "UPDATE runs SET state = ?1, grill_phase = ?2 WHERE id = ?3",
+                        "UPDATE runs SET state = ?1, grill_phase = ?2, grill_action = ?3 WHERE id = ?4",
                         params![
                             run_state_as_str(run.state),
                             run.grill_phase.map(grill_phase_as_str),
+                            run.grill_action.map(grill_continuation_action_as_str),
                             run.id
                         ],
                     )?;
@@ -1871,7 +1910,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              grill_answers_json TEXT NOT NULL DEFAULT '[]',
              grill_decisions_json TEXT NOT NULL DEFAULT '[]',
              grill_response TEXT,
-             grill_phase TEXT
+             grill_phase TEXT,
+             grill_action TEXT
          );
          CREATE INDEX IF NOT EXISTS runs_by_item
              ON runs (item_id, id);
@@ -1920,7 +1960,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              state_attention INTEGER,
              metadata_attention INTEGER,
              watch_until TEXT,
-             review_at TEXT
+             review_at TEXT,
+             provenance_json TEXT
          );
          CREATE TABLE IF NOT EXISTS activities (
              id INTEGER PRIMARY KEY NOT NULL,
@@ -2037,6 +2078,9 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     }
     if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "grill_phase") {
         connection.execute("ALTER TABLE runs ADD COLUMN grill_phase TEXT", [])?;
+    }
+    if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "grill_action") {
+        connection.execute("ALTER TABLE runs ADD COLUMN grill_action TEXT", [])?;
     }
     if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "repository_id") {
         connection.execute("ALTER TABLE runs ADD COLUMN repository_id INTEGER", [])?;
@@ -2320,18 +2364,25 @@ fn persist_link_state(
             )
         })
         .unwrap_or((None, None, None));
+    let provenance_json = link
+        .provenance
+        .as_ref()
+        .map(serde_json::to_string)
+        .transpose()
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
     transaction.execute(
         "INSERT INTO link_attention_state
             (link_id, reviewed_activity_id, title_attention, state_attention, metadata_attention,
-             watch_until, review_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             watch_until, review_at, provenance_json)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
          ON CONFLICT(link_id) DO UPDATE SET
             reviewed_activity_id = excluded.reviewed_activity_id,
             title_attention = excluded.title_attention,
             state_attention = excluded.state_attention,
             metadata_attention = excluded.metadata_attention,
             watch_until = excluded.watch_until,
-            review_at = excluded.review_at",
+            review_at = excluded.review_at,
+            provenance_json = excluded.provenance_json",
         params![
             link.id,
             link.reviewed_activity_id,
@@ -2340,6 +2391,7 @@ fn persist_link_state(
             metadata_attention,
             link.watch_until,
             link.review_at,
+            provenance_json,
         ],
     )?;
     Ok(())
@@ -2514,6 +2566,19 @@ fn parse_grill_phase(phase: &str) -> Result<GrillPhase, StoreError> {
     }
 }
 
+fn grill_continuation_action_as_str(action: GrillContinuationAction) -> &'static str {
+    action.as_str()
+}
+
+fn parse_grill_continuation_action(action: &str) -> Result<GrillContinuationAction, StoreError> {
+    match action {
+        "to-spec" => Ok(GrillContinuationAction::ToSpec),
+        "to-tickets" => Ok(GrillContinuationAction::ToTickets),
+        "implement" => Ok(GrillContinuationAction::Implement),
+        other => Err(StoreError::InvalidDownstreamAction(other.into())),
+    }
+}
+
 fn machine_observation_as_str(observation: MachineObservation) -> &'static str {
     match observation {
         MachineObservation::Unknown => "unknown",
@@ -2616,7 +2681,8 @@ mod tests {
 
     use crate::domain::{
         compose_grill_prompt, decide, format_grill_response, parse_grill_question_group, AgentKind,
-        Event, GrillAnswer, GrillConfiguration, GrillPhase, MachineTransport, RunCheckout,
+        ConfirmedDownstreamIssue, DownstreamIssueDiscovery, Event, GrillAnswer, GrillConfiguration,
+        GrillContinuationAction, GrillPhase, LinkProvenance, MachineTransport, RunCheckout,
         WorkspaceRepositoryInput, GRILL_SKILL_SNAPSHOT,
     };
 
@@ -3006,7 +3072,6 @@ mod tests {
                 status: crate::domain::RunPaneStatus::Missing,
             },
         );
-
         let reloaded = store.load_state().expect("persisted state should load");
         assert_eq!(reloaded, state);
         assert_eq!(reloaded.contexts[0].grill_defaults.model, "codex-luna");
@@ -3036,6 +3101,64 @@ mod tests {
         assert_eq!(
             reloaded.runs[0].grill_response.as_deref(),
             Some("1. A. Keep it\n2. Document the migration path")
+        );
+        state = apply_event(
+            &mut store,
+            state,
+            Event::SetRunPaneStatus {
+                run_id: 1,
+                status: crate::domain::RunPaneStatus::Available,
+            },
+        );
+        state = apply_event(
+            &mut store,
+            state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: crate::domain::RunState::Finished,
+            },
+        );
+        state = apply_event(
+            &mut store,
+            state,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+            },
+        );
+        let object = crate::provider::classify_url("https://github.com/acme/app/issues/7")
+            .expect("the Issue URL should classify");
+        let _state = apply_event(
+            &mut store,
+            state,
+            Event::CaptureDownstreamIssues {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                issues: vec![ConfirmedDownstreamIssue {
+                    object,
+                    snapshot: crate::domain::ExternalSnapshotData {
+                        title: "Captured Issue".into(),
+                        state: "OPEN".into(),
+                        metadata: Vec::new(),
+                        fetched_at: 456,
+                    },
+                    discovery: DownstreamIssueDiscovery::StructuredEvent,
+                }],
+            },
+        );
+        let reloaded_with_capture = store.load_state().expect("captured state should load");
+        assert_eq!(
+            reloaded_with_capture.runs[0].grill_action,
+            Some(GrillContinuationAction::ToTickets)
+        );
+        assert_eq!(reloaded_with_capture.external_objects.len(), 1);
+        assert_eq!(
+            reloaded_with_capture.links[0].provenance,
+            Some(LinkProvenance {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                discovery: DownstreamIssueDiscovery::StructuredEvent,
+            })
         );
     }
 }

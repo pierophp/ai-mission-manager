@@ -3099,6 +3099,15 @@ export function ExternalLinkCard({
         >
           {object.canonical_url}
         </a>
+        {externalLink.link.provenance && (
+          <p className="m-0 text-xs text-muted-foreground">
+            Discovered by Run #{externalLink.link.provenance.run_id} via{" "}
+            {externalLink.link.provenance.action} ·{" "}
+            {externalLink.link.provenance.discovery === "structured-event"
+              ? "structured Issue-created event"
+              : "Run output URL"}
+          </p>
+        )}
         {snapshot ? (
           <>
             <div className="flex flex-wrap gap-2">

@@ -72,6 +72,7 @@ export type Run = {
   grill_decisions: GrillAnswer[];
   grill_response: string | null;
   grill_phase: GrillPhase | null;
+  grill_action: GrillContinuationAction | null;
 };
 
 export type RunSuggestion = {

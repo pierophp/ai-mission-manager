@@ -35,6 +35,137 @@ impl GrillContinuationAction {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DownstreamIssueDiscovery {
+    StructuredEvent,
+    OutputUrl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DownstreamIssueCandidate {
+    pub url: String,
+    pub discovery: DownstreamIssueDiscovery,
+    #[serde(default)]
+    pub run_id: Option<i64>,
+    #[serde(default)]
+    pub action: Option<GrillContinuationAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GithubIssueCreatedEvent {
+    #[serde(alias = "type", alias = "kind")]
+    pub event: String,
+    pub url: String,
+    #[serde(default)]
+    pub run_id: Option<i64>,
+    #[serde(default)]
+    pub action: Option<GrillContinuationAction>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfirmedDownstreamIssue {
+    pub object: ExternalObjectInput,
+    pub snapshot: ExternalSnapshotData,
+    pub discovery: DownstreamIssueDiscovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LinkProvenance {
+    pub run_id: i64,
+    pub action: GrillContinuationAction,
+    pub discovery: DownstreamIssueDiscovery,
+}
+
+const DOWNSTREAM_EVENT_PREFIX: &str = "AI_MISSION_MANAGER_EVENT ";
+
+pub fn discover_downstream_issue_candidates(output: &str) -> Vec<DownstreamIssueCandidate> {
+    let structured = output
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            let json = trimmed
+                .strip_prefix(DOWNSTREAM_EVENT_PREFIX)
+                .or_else(|| trimmed.starts_with('{').then_some(trimmed))?;
+            let event = serde_json::from_str::<GithubIssueCreatedEvent>(json).ok()?;
+            (event.event == "github.issue.created").then_some(DownstreamIssueCandidate {
+                url: event.url,
+                discovery: DownstreamIssueDiscovery::StructuredEvent,
+                run_id: event.run_id,
+                action: event.action,
+            })
+        })
+        .collect::<Vec<_>>();
+    if !structured.is_empty() {
+        return unique_issue_candidates(structured);
+    }
+
+    unique_issue_candidates(
+        output
+            .split_whitespace()
+            .filter_map(|token| {
+                let url = token
+                    .trim_matches(|character: char| {
+                        matches!(
+                            character,
+                            '(' | ')'
+                                | '['
+                                | ']'
+                                | '{'
+                                | '}'
+                                | '<'
+                                | '>'
+                                | '"'
+                                | '\''
+                                | '`'
+                                | '.'
+                                | ','
+                                | ';'
+                                | ':'
+                                | '!'
+                                | '?'
+                        )
+                    })
+                    .trim_end_matches('/');
+                is_github_issue_url(url).then_some(DownstreamIssueCandidate {
+                    url: url.to_owned(),
+                    discovery: DownstreamIssueDiscovery::OutputUrl,
+                    run_id: None,
+                    action: None,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn unique_issue_candidates(
+    candidates: Vec<DownstreamIssueCandidate>,
+) -> Vec<DownstreamIssueCandidate> {
+    candidates
+        .into_iter()
+        .fold(Vec::new(), |mut unique, candidate| {
+            if !unique.iter().any(|existing: &DownstreamIssueCandidate| {
+                existing.url.eq_ignore_ascii_case(&candidate.url)
+            }) {
+                unique.push(candidate);
+            }
+            unique
+        })
+}
+
+fn is_github_issue_url(url: &str) -> bool {
+    let parts = url.split('/').collect::<Vec<_>>();
+    parts.len() == 7
+        && parts[0] == "https:"
+        && (parts[2].eq_ignore_ascii_case("github.com")
+            || parts[2].eq_ignore_ascii_case("www.github.com"))
+        && !parts[3].is_empty()
+        && !parts[4].is_empty()
+        && parts[5] == "issues"
+        && parts[6].parse::<u64>().is_ok()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrillConfiguration {
@@ -668,6 +799,8 @@ pub struct Run {
     pub grill_response: Option<String>,
     #[serde(default)]
     pub grill_phase: Option<GrillPhase>,
+    #[serde(default)]
+    pub grill_action: Option<GrillContinuationAction>,
 }
 
 pub fn run_is_active(run: &Run) -> bool {
@@ -855,6 +988,8 @@ pub struct Link {
     pub attention_policy: Option<ExternalChangePolicy>,
     pub watch_until: Option<String>,
     pub review_at: Option<String>,
+    #[serde(default)]
+    pub provenance: Option<LinkProvenance>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1718,6 +1853,11 @@ pub enum Event {
     ContinueGrill {
         run_id: i64,
         action: GrillContinuationAction,
+    },
+    CaptureDownstreamIssues {
+        run_id: i64,
+        action: GrillContinuationAction,
+        issues: Vec<ConfirmedDownstreamIssue>,
     },
     RecordRunTranscript {
         run_id: i64,
@@ -2592,6 +2732,11 @@ pub enum DomainError {
     GrillContinuationNotAvailable {
         run_id: i64,
         phase: Option<GrillPhase>,
+    },
+    #[error("Run {run_id} cannot capture downstream Issues for action {action:?}")]
+    DownstreamCaptureNotAvailable {
+        run_id: i64,
+        action: GrillContinuationAction,
     },
     #[error("Run {run_id} is {state:?}; stop it and wait for Finished state before deleting")]
     RunNotFinished { run_id: i64, state: RunState },
@@ -3954,6 +4099,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: None,
+                grill_action: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -4085,6 +4231,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: None,
+                grill_action: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -4249,6 +4396,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: Some(GrillPhase::Starting),
+                grill_action: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -4371,6 +4519,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: None,
+                grill_action: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -4421,7 +4570,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::PersistRunState { run }],
             })
         }
-        Event::ContinueGrill { run_id, action: _ } => {
+        Event::ContinueGrill { run_id, action } => {
             let run = state
                 .runs
                 .iter_mut()
@@ -4441,12 +4590,59 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             run.grill_question_group = None;
             run.grill_answers.clear();
             run.grill_response = None;
+            run.grill_action = Some(action);
             let run = run.clone();
 
             Ok(Decision {
                 state,
                 effects: vec![Effect::PersistRunState { run }],
             })
+        }
+        Event::CaptureDownstreamIssues {
+            run_id,
+            action,
+            issues,
+        } => {
+            let run = state
+                .runs
+                .iter()
+                .find(|run| run.id == run_id)
+                .cloned()
+                .ok_or(DomainError::RunNotFound { run_id })?;
+            if run.execution_profile != ExecutionProfile::Grill
+                || run.grill_action != Some(action)
+                || !matches!(
+                    action,
+                    GrillContinuationAction::ToSpec | GrillContinuationAction::ToTickets
+                )
+            {
+                return Err(DomainError::DownstreamCaptureNotAvailable { run_id, action });
+            }
+
+            let mut effects = Vec::new();
+            for issue in issues {
+                if issue.object.provider != ExternalProvider::GitHub
+                    || issue.object.kind != ExternalObjectKind::Issue
+                    || issue.object.external_key.trim().is_empty()
+                    || issue.object.canonical_url.trim().is_empty()
+                {
+                    continue;
+                }
+                effects.extend(link_external_object(
+                    &mut state,
+                    run.item_id,
+                    issue.object,
+                    Some(issue.snapshot),
+                    Some(LinkProvenance {
+                        run_id,
+                        action,
+                        discovery: issue.discovery,
+                    }),
+                    true,
+                )?);
+            }
+
+            Ok(Decision { state, effects })
         }
         Event::RecordRunTranscript {
             run_id,
@@ -4749,90 +4945,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             object,
             snapshot,
         } => {
-            ensure_item(&state, item_id)?;
-            if object.canonical_url.trim().is_empty() {
-                return Err(DomainError::EmptyExternalUrl);
-            }
-            if object.external_key.trim().is_empty() {
-                return Err(DomainError::EmptyExternalObjectKey);
-            }
-
-            let existing_object = state
-                .external_objects
-                .iter()
-                .find(|candidate| {
-                    candidate.provider == object.provider
-                        && candidate.external_key == object.external_key
-                })
-                .cloned();
-            let (external_object, is_new_object) = match existing_object {
-                Some(object) => (object, false),
-                None => {
-                    let id = state.next_external_object_id;
-                    let next_external_object_id =
-                        id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
-                    let object = ExternalObject {
-                        id,
-                        provider: object.provider,
-                        kind: object.kind,
-                        external_key: object.external_key,
-                        canonical_url: object.canonical_url.trim().to_owned(),
-                    };
-                    state.next_external_object_id = next_external_object_id;
-                    state.external_objects.push(object.clone());
-                    (object, true)
-                }
-            };
-
-            if state.links.iter().any(|link| {
-                link.item_id == item_id && link.external_object_id == external_object.id
-            }) {
-                return Err(DomainError::LinkAlreadyExists);
-            }
-
-            let link_id = state.next_link_id;
-            let next_link_id = link_id
-                .checked_add(1)
-                .ok_or(DomainError::SequenceExhausted)?;
-            let reviewed_activity_id = state
-                .activities
-                .iter()
-                .filter(|activity| activity.external_object_id == external_object.id)
-                .map(|activity| activity.id)
-                .max()
-                .unwrap_or_default();
-            let link = Link {
-                id: link_id,
-                item_id,
-                external_object_id: external_object.id,
-                reviewed_activity_id,
-                attention_policy: None,
-                watch_until: None,
-                review_at: None,
-            };
-            state.next_link_id = next_link_id;
-            state.links.push(link.clone());
-
-            let mut effects = Vec::new();
-            if is_new_object {
-                effects.push(Effect::PersistExternalObject {
-                    object: external_object.clone(),
-                    next_external_object_id: state.next_external_object_id,
-                });
-            }
-            effects.push(Effect::PersistLink { link, next_link_id });
-            if let Some(snapshot_data) = snapshot {
-                let snapshot = ExternalSnapshot {
-                    external_object_id: external_object.id,
-                    title: snapshot_data.title,
-                    state: snapshot_data.state,
-                    metadata: snapshot_data.metadata,
-                    fetched_at: snapshot_data.fetched_at,
-                };
-                upsert_snapshot(&mut state, snapshot.clone());
-                effects.push(Effect::PersistExternalSnapshot { snapshot });
-            }
-
+            let effects = link_external_object(&mut state, item_id, object, snapshot, None, false)?;
             Ok(Decision { state, effects })
         }
         Event::RefreshExternalObject {
@@ -5542,7 +5655,7 @@ pub fn compose_grill_continuation_prompt(
     };
 
     Ok(format!(
-        "Continue the existing Grill Run in the same Run and Pane.\n\nSelected downstream action: {}\n\nDownstream skill snapshot (inject this content explicitly; do not rely on the agent having the skill installed):\n{}\n\nRelevant Item context:\n{}\n\nGrill transcript:\n{}\n\nRecorded Grill decisions:\n{}\n\nContinuation instruction:\nApply the selected {} skill to the Item using the transcript and decisions above. Keep working in the same Workspace and working directory. Ask any confirmation questions using the same ❓ and ➡️ markers as one grouped frontier. Wait for an explicit user decision to finish or stop; never mark the Item Done automatically.",
+        "Continue the existing Grill Run in the same Run and Pane.\n\nSelected downstream action: {}\n\nDownstream skill snapshot (inject this content explicitly; do not rely on the agent having the skill installed):\n{}\n\nRelevant Item context:\n{}\n\nGrill transcript:\n{}\n\nRecorded Grill decisions:\n{}\n\nContinuation instruction:\nApply the selected {} skill to the Item using the transcript and decisions above. Keep working in the same Workspace and working directory. Ask any confirmation questions using the same ❓ and ➡️ markers as one grouped frontier. Wait for an explicit user decision to finish or stop; never mark the Item Done automatically.\n\nWhen to-spec or to-tickets creates a GitHub Issue, emit one machine-readable line with the confirmed Issue URL: AI_MISSION_MANAGER_EVENT {{\"event\":\"github.issue.created\",\"url\":\"<canonical URL>\",\"run_id\":{},\"action\":\"{}\"}}",
         action.as_str(),
         action.skill_snapshot(),
         context.join("\n\n"),
@@ -5552,6 +5665,8 @@ pub fn compose_grill_continuation_prompt(
             run.transcript.as_str()
         },
         decisions,
+        action.as_str(),
+        run.id,
         action.as_str(),
     ))
 }
@@ -5735,6 +5850,117 @@ fn upsert_snapshot(state: &mut DomainState, snapshot: ExternalSnapshot) {
     } else {
         state.snapshots.push(snapshot);
     }
+}
+
+fn link_external_object(
+    state: &mut DomainState,
+    item_id: i64,
+    object: ExternalObjectInput,
+    snapshot: Option<ExternalSnapshotData>,
+    provenance: Option<LinkProvenance>,
+    allow_existing_link: bool,
+) -> Result<Vec<Effect>, DomainError> {
+    ensure_item(state, item_id)?;
+    if object.canonical_url.trim().is_empty() {
+        return Err(DomainError::EmptyExternalUrl);
+    }
+    if object.external_key.trim().is_empty() {
+        return Err(DomainError::EmptyExternalObjectKey);
+    }
+
+    let existing_object = state
+        .external_objects
+        .iter()
+        .find(|candidate| {
+            candidate.provider == object.provider && candidate.external_key == object.external_key
+        })
+        .cloned();
+    let (external_object, is_new_object) = match existing_object {
+        Some(object) => (object, false),
+        None => {
+            let id = state.next_external_object_id;
+            let next_external_object_id =
+                id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let object = ExternalObject {
+                id,
+                provider: object.provider,
+                kind: object.kind,
+                external_key: object.external_key,
+                canonical_url: object.canonical_url.trim().to_owned(),
+            };
+            state.next_external_object_id = next_external_object_id;
+            state.external_objects.push(object.clone());
+            (object, true)
+        }
+    };
+
+    let mut effects = Vec::new();
+    if is_new_object {
+        effects.push(Effect::PersistExternalObject {
+            object: external_object.clone(),
+            next_external_object_id: state.next_external_object_id,
+        });
+    }
+
+    if let Some(link) = state
+        .links
+        .iter_mut()
+        .find(|link| link.item_id == item_id && link.external_object_id == external_object.id)
+    {
+        if !allow_existing_link {
+            return Err(DomainError::LinkAlreadyExists);
+        }
+        if link.provenance != provenance {
+            link.provenance = provenance;
+            effects.push(Effect::PersistLinkState { link: link.clone() });
+        }
+    } else {
+        let link_id = state.next_link_id;
+        let next_link_id = link_id
+            .checked_add(1)
+            .ok_or(DomainError::SequenceExhausted)?;
+        let reviewed_activity_id = state
+            .activities
+            .iter()
+            .filter(|activity| activity.external_object_id == external_object.id)
+            .map(|activity| activity.id)
+            .max()
+            .unwrap_or_default();
+        let link = Link {
+            id: link_id,
+            item_id,
+            external_object_id: external_object.id,
+            reviewed_activity_id,
+            attention_policy: None,
+            watch_until: None,
+            review_at: None,
+            provenance,
+        };
+        state.next_link_id = next_link_id;
+        state.links.push(link.clone());
+        effects.push(Effect::PersistLink { link, next_link_id });
+    }
+
+    if let Some(snapshot_data) = snapshot {
+        let snapshot = ExternalSnapshot {
+            external_object_id: external_object.id,
+            title: snapshot_data.title,
+            state: snapshot_data.state,
+            metadata: snapshot_data.metadata,
+            fetched_at: snapshot_data.fetched_at,
+        };
+        let snapshot_changed = state
+            .snapshots
+            .iter()
+            .find(|existing| existing.external_object_id == snapshot.external_object_id)
+            != Some(&snapshot);
+        if snapshot_changed {
+            upsert_snapshot(state, snapshot.clone());
+            effects.push(Effect::PersistExternalSnapshot { snapshot });
+        }
+    }
+
+    Ok(effects)
 }
 
 fn effective_attention_policy(
@@ -6585,6 +6811,9 @@ mod grill_contract_tests {
             assert!(prompt.contains("Q1: Keep the reversible design"));
             assert!(prompt.contains(action.as_str()));
             assert!(prompt.contains("same Run and Pane"));
+            assert!(prompt.contains("AI_MISSION_MANAGER_EVENT"));
+            assert!(prompt.contains("github.issue.created"));
+            assert!(prompt.contains("\"run_id\":1"));
         }
     }
 
@@ -6695,5 +6924,168 @@ mod grill_contract_tests {
             error,
             DomainError::GrillContinuationNotAvailable { run_id: 1, .. }
         ));
+    }
+
+    #[test]
+    fn downstream_issue_discovery_prefers_structured_events_and_falls_back_to_issue_urls() {
+        let structured = discover_downstream_issue_candidates(
+            r#"AI_MISSION_MANAGER_EVENT {"event":"github.issue.created","url":"https://github.com/acme/app/issues/7","run_id":1,"action":"to-tickets"}
+https://github.com/acme/app/issues/8
+https://example.com/unrelated"#,
+        );
+        assert_eq!(structured.len(), 1);
+        assert_eq!(structured[0].url, "https://github.com/acme/app/issues/7");
+        assert_eq!(
+            structured[0].discovery,
+            DownstreamIssueDiscovery::StructuredEvent
+        );
+        assert_eq!(structured[0].run_id, Some(1));
+        assert_eq!(
+            structured[0].action,
+            Some(GrillContinuationAction::ToTickets)
+        );
+
+        let fallback = discover_downstream_issue_candidates(
+            "Created issues: https://github.com/acme/app/issues/8/ and https://github.com/acme/app/issues/8/).",
+        );
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(fallback[0].url, "https://github.com/acme/app/issues/8");
+        assert_eq!(fallback[0].discovery, DownstreamIssueDiscovery::OutputUrl);
+    }
+
+    #[test]
+    fn captured_downstream_issue_is_idempotent_and_keeps_run_action_provenance() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let awaiting = decide(
+            started.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the Grill should finish");
+        let continued = decide(
+            awaiting.state,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+            },
+        )
+        .expect("to-tickets should continue the Run");
+        let issue = confirmed_downstream_issue("https://github.com/acme/app/issues/7");
+        let second_item = decide(
+            continued.state,
+            Event::CreateItem {
+                title: "Another Item".into(),
+                context_id: 1,
+                project_id: 1,
+            },
+        )
+        .expect("a second Item should be created");
+        let linked_elsewhere = decide(
+            second_item.state,
+            Event::LinkExternalObject {
+                item_id: 2,
+                object: issue.object.clone(),
+                snapshot: Some(issue.snapshot.clone()),
+            },
+        )
+        .expect("the same External Object should be linkable to another Item");
+
+        let first = decide(
+            linked_elsewhere.state,
+            Event::CaptureDownstreamIssues {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                issues: vec![issue.clone()],
+            },
+        )
+        .expect("the confirmed Issue should be captured");
+        assert_eq!(first.state.external_objects.len(), 1);
+        assert_eq!(first.state.links.len(), 2);
+        assert_eq!(
+            first
+                .state
+                .links
+                .iter()
+                .find(|link| link.item_id == 1)
+                .expect("the captured Item Link should exist")
+                .provenance,
+            Some(LinkProvenance {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                discovery: DownstreamIssueDiscovery::StructuredEvent,
+            })
+        );
+
+        let second = decide(
+            first.state,
+            Event::CaptureDownstreamIssues {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                issues: vec![issue],
+            },
+        )
+        .expect("capturing the same Issue again should be safe");
+        assert_eq!(second.state.external_objects.len(), 1);
+        assert_eq!(second.state.links.len(), 2);
+        assert!(second.effects.is_empty());
+    }
+
+    #[test]
+    fn deleting_a_captured_link_only_removes_local_external_state() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let awaiting = decide(
+            started.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the Grill should finish");
+        let continued = decide(
+            awaiting.state,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+            },
+        )
+        .expect("to-tickets should continue the Run");
+        let captured = decide(
+            continued.state,
+            Event::CaptureDownstreamIssues {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                issues: vec![confirmed_downstream_issue(
+                    "https://github.com/acme/app/issues/7",
+                )],
+            },
+        )
+        .expect("the Issue should be captured");
+
+        let deleted = decide(captured.state, Event::DeleteLink { link_id: 1 })
+            .expect("deleting the local Link should succeed");
+        assert!(deleted.state.links.is_empty());
+        assert!(deleted.state.external_objects.is_empty());
+        assert!(deleted.effects.iter().all(|effect| matches!(
+            effect,
+            Effect::RemoveLink { .. } | Effect::RemoveExternalObject { .. }
+        )));
+    }
+
+    fn confirmed_downstream_issue(url: &str) -> ConfirmedDownstreamIssue {
+        let object = crate::provider::classify_url(url).expect("fixture URL should classify");
+        ConfirmedDownstreamIssue {
+            object,
+            snapshot: ExternalSnapshotData {
+                title: "Captured Issue".into(),
+                state: "OPEN".into(),
+                metadata: vec![],
+                fetched_at: 123,
+            },
+            discovery: DownstreamIssueDiscovery::StructuredEvent,
+        }
     }
 }

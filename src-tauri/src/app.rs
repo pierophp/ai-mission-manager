@@ -14,11 +14,12 @@ use crate::{
     domain::{
         activity_tab_view, compose_grill_continuation_prompt as build_grill_continuation_prompt,
         compose_grill_prompt as build_grill_prompt, compose_run_prompt as build_run_prompt, decide,
-        external_link_view, format_grill_response, home_view, normalize_machine_path,
-        parse_grill_question_group, plan_context_deletion, plan_external_object_deletion,
-        plan_item_deletion, plan_machine_deletion, plan_project_deletion, plan_repository_deletion,
-        plan_reset_local_data, run_is_active, search_items, suggest_untracked_runs, worktree_path,
-        ActivityTabView, AgentKind, AgentPaneObservation, AuditAction, AuditEntry, Context,
+        discover_downstream_issue_candidates, external_link_view, format_grill_response, home_view,
+        normalize_machine_path, parse_grill_question_group, plan_context_deletion,
+        plan_external_object_deletion, plan_item_deletion, plan_machine_deletion,
+        plan_project_deletion, plan_repository_deletion, plan_reset_local_data, run_is_active,
+        search_items, suggest_untracked_runs, worktree_path, ActivityTabView, AgentKind,
+        AgentPaneObservation, AuditAction, AuditEntry, ConfirmedDownstreamIssue, Context,
         ContextAttentionDefault, DomainState, Effect, Event, ExecutionMode, ExecutionProfile,
         ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
         ExternalObjectDeletionSummary, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
@@ -2149,7 +2150,7 @@ impl Runtime {
                             eprintln!("Could not persist state for Run {run_id}: {error}");
                         }
                     }
-                    if record.state == RunState::Blocked {
+                    if matches!(record.state, RunState::Blocked | RunState::Finished) {
                         match runtime.capture_grill_transcript(run_id) {
                             Ok(true) => {
                                 let _ = state_app.emit("run-questions-changed", run_id);
@@ -2282,12 +2283,21 @@ impl Runtime {
             .find(|machine| machine.id == run.machine_id)
             .cloned()
             .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-        let transcript =
-            String::from_utf8_lossy(&capture_pane_transcript(&machine, &run.pane_id)?).into_owned();
+        let transcript = match capture_pane_transcript(&machine, &run.pane_id) {
+            Ok(transcript) => String::from_utf8_lossy(&transcript).into_owned(),
+            Err(error) => {
+                if run.grill_action.is_some() && !run.transcript.trim().is_empty() {
+                    self.capture_downstream_issues(run_id, &run.transcript)?;
+                }
+                return Err(error);
+            }
+        };
         let question_group = parse_grill_question_group(&transcript);
         if run.transcript == transcript && run.grill_question_group == question_group {
+            self.capture_downstream_issues(run_id, &transcript)?;
             return Ok(false);
         }
+        let captured_transcript = transcript.clone();
         let decision = decide(
             self.state.clone(),
             Event::RecordRunTranscript {
@@ -2298,7 +2308,97 @@ impl Runtime {
         )
         .map_err(|error| error.to_string())?;
         self.commit(decision)?;
+        self.capture_downstream_issues(run_id, &captured_transcript)?;
         Ok(true)
+    }
+
+    fn capture_downstream_issues(&mut self, run_id: i64, transcript: &str) -> Result<(), String> {
+        let run = self
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        let Some(action) = run.grill_action else {
+            return Ok(());
+        };
+        if !matches!(
+            action,
+            GrillContinuationAction::ToSpec | GrillContinuationAction::ToTickets
+        ) {
+            return Ok(());
+        }
+
+        let candidates = discover_downstream_issue_candidates(transcript)
+            .into_iter()
+            .filter(|candidate| {
+                candidate
+                    .run_id
+                    .is_none_or(|candidate_run_id| candidate_run_id == run_id)
+                    && candidate
+                        .action
+                        .is_none_or(|candidate_action| candidate_action == action)
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Ok(());
+        }
+
+        let executable = match self.gh_executable_path() {
+            Ok(executable) => executable,
+            Err(error) => {
+                eprintln!("Could not confirm downstream GitHub Issues for Run {run_id}: {error}");
+                return Ok(());
+            }
+        };
+        let github = GithubCli::new(executable);
+        let mut confirmed = Vec::new();
+        for candidate in candidates {
+            let object = match classify_url(&candidate.url) {
+                Ok(object)
+                    if object.provider == ExternalProvider::GitHub
+                        && object.kind == ExternalObjectKind::Issue =>
+                {
+                    object
+                }
+                Ok(_) | Err(_) => continue,
+            };
+            let snapshot = match github.fetch(&object, current_unix_seconds()) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    eprintln!(
+                        "Could not confirm downstream GitHub Issue {} for Run {run_id}: {error}",
+                        candidate.url
+                    );
+                    continue;
+                }
+            };
+            if confirmed.iter().any(|issue: &ConfirmedDownstreamIssue| {
+                issue.object.external_key == object.external_key
+            }) {
+                continue;
+            }
+            confirmed.push(ConfirmedDownstreamIssue {
+                object,
+                snapshot,
+                discovery: candidate.discovery,
+            });
+        }
+        if confirmed.is_empty() {
+            return Ok(());
+        }
+
+        let decision = decide(
+            self.state.clone(),
+            Event::CaptureDownstreamIssues {
+                run_id,
+                action,
+                issues: confirmed,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        self.commit(decision)
     }
 
     fn submit_grill_answers(
@@ -2526,7 +2626,7 @@ impl Runtime {
                 continue;
             }
             self.apply_agent_state_record(record_run_id, record.clone())?;
-            if record.state == RunState::Blocked {
+            if matches!(record.state, RunState::Blocked | RunState::Finished) {
                 if let Err(error) = self.capture_grill_transcript(record_run_id) {
                     eprintln!(
                         "Could not retain transcript for waiting Grill Run {record_run_id}: {error}"
@@ -5521,6 +5621,7 @@ mod tests {
             grill_decisions: Vec::new(),
             grill_response: None,
             grill_phase: None,
+            grill_action: None,
         });
 
         let item = runtime
@@ -5619,6 +5720,7 @@ mod tests {
             grill_decisions: Vec::new(),
             grill_response: None,
             grill_phase: None,
+            grill_action: None,
         });
 
         let stopped = runtime
@@ -5674,6 +5776,7 @@ mod tests {
             grill_decisions: Vec::new(),
             grill_response: None,
             grill_phase: None,
+            grill_action: None,
         });
 
         let error = runtime
@@ -5753,6 +5856,7 @@ mod tests {
                 grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: None,
+                grill_action: None,
             },
             Run {
                 id: 2,
@@ -5780,6 +5884,7 @@ mod tests {
                 grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: None,
+                grill_action: None,
             },
             Run {
                 id: 3,
@@ -5807,6 +5912,7 @@ mod tests {
                 grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: None,
+                grill_action: None,
             },
         ]);
 
@@ -5923,6 +6029,7 @@ mod tests {
             }],
             grill_response: Some("1. Keep it".into()),
             grill_phase: Some(GrillPhase::Working),
+            grill_action: None,
         });
 
         runtime
@@ -6019,6 +6126,89 @@ fi
         assert_eq!(
             runtime.state.snapshots[0].title,
             "Created from Mission Manager"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn downstream_grill_output_is_confirmed_before_it_becomes_an_item_link() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let executable = directory.path().join("gh");
+        let script = r#"#!/bin/sh
+if [ "$1" = issue ] && [ "$2" = view ] && [ "$3" = "https://github.com/acme/app/issues/7" ]; then
+  printf '%s' '{"number":7,"title":"Captured downstream Issue","state":"OPEN","author":null,"labels":[],"milestone":null,"updatedAt":null}'
+  exit 0
+fi
+exit 1
+"#;
+        fs::write(&executable, script).expect("fake gh should be written");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("fake gh should be executable");
+        let mut store = SqliteStore::open(&database).expect("database should open");
+        store
+            .set_gh_executable_path(&executable)
+            .expect("fake gh path should persist");
+        drop(store);
+
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .create_item("Capture downstream work".into(), 1, 1)
+            .expect("Item should be created");
+        runtime.state.runs.push(Run {
+            id: 1,
+            item_id: 1,
+            workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
+            machine_id: 1,
+            agent: AgentKind::Claude,
+            execution_profile: ExecutionProfile::Grill,
+            model: None,
+            effort: None,
+            skill_snapshot: None,
+            prompt: "Continue to-tickets".into(),
+            working_directory: "/tmp".into(),
+            session_name: "downstream".into(),
+            pane_id: "%1".into(),
+            started_at: 1,
+            state: RunState::Finished,
+            pane_status: RunPaneStatus::Available,
+            direct_checkouts: Vec::new(),
+            transcript: String::new(),
+            grill_question_group: None,
+            grill_answers: Vec::new(),
+            grill_decisions: Vec::new(),
+            grill_response: None,
+            grill_phase: Some(GrillPhase::Working),
+            grill_action: Some(GrillContinuationAction::ToTickets),
+        });
+
+        let output = r#"AI_MISSION_MANAGER_EVENT {"event":"github.issue.created","url":"https://github.com/acme/app/issues/7","run_id":1,"action":"to-tickets"}
+https://github.com/acme/app/issues/8
+https://example.com/unrelated"#;
+        runtime
+            .capture_downstream_issues(1, output)
+            .expect("capture should tolerate unconfirmable and unrelated URLs");
+        runtime
+            .capture_downstream_issues(1, output)
+            .expect("replaying output should be idempotent");
+
+        assert_eq!(runtime.state.external_objects.len(), 1);
+        assert_eq!(runtime.state.links.len(), 1);
+        assert_eq!(
+            runtime.state.snapshots[0].title,
+            "Captured downstream Issue"
+        );
+        assert_eq!(
+            runtime.state.links[0].provenance,
+            Some(crate::domain::LinkProvenance {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                discovery: crate::domain::DownstreamIssueDiscovery::StructuredEvent,
+            })
         );
     }
 

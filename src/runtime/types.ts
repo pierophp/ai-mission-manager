@@ -1,4 +1,10 @@
-import type { AgentKind, Run, RunPaneStatus, RunState } from "./execution-types";
+import type {
+  AgentKind,
+  GrillContinuationAction,
+  Run,
+  RunPaneStatus,
+  RunState,
+} from "./execution-types";
 import type { RunCheckout } from "./execution-types";
 
 export type Context = {
@@ -284,6 +290,11 @@ export type ExternalLink = {
   attention_policy: ExternalChangePolicy | null;
   watch_until: string | null;
   review_at: string | null;
+  provenance: {
+    run_id: number;
+    action: GrillContinuationAction;
+    discovery: "structured-event" | "output-url";
+  } | null;
 };
 
 export type ExternalLinkView = {
