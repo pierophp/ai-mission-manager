@@ -13,7 +13,6 @@ export type RunCheckout = {
 export type Run = {
   id: number;
   item_id: number;
-  workset_id: number | null;
   workspace_id: number | null;
   repository_id: number | null;
   worktree_id: number | null;
@@ -37,9 +36,6 @@ export type RunSuggestion = {
   sessionName: string;
   paneId: string;
   currentPath: string;
-  worksetId: number;
-  worksetRootDirectory: string;
-  worksetBranch: string;
   itemId: number;
   itemIdentifier: string;
   itemTitle: string;

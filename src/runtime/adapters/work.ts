@@ -18,10 +18,6 @@ import type {
   RunCheckout,
   RunPromptSelection,
   RunSuggestion,
-  Workset,
-  WorksetRemovalReport,
-  WorksetRemovalResult,
-  WorksetRepositoryInput,
   Workspace,
   WorkspaceRemovalReport,
   WorkspaceRemovalResult,
@@ -57,18 +53,6 @@ export const workAdapter = {
     command<ItemRelation>("set_item_relation", { fromItemId, toItemId, kind }),
   linkExternalObject: (itemId: number, url: string) =>
     command<ExternalLinkAction>("link_external_object", { itemId, url }),
-  createWorkset: (
-    itemId: number,
-    rootDirectory: string,
-    branch: string,
-    repositories: WorksetRepositoryInput[],
-  ) =>
-    command<Workset>("create_workset", {
-      itemId,
-      rootDirectory,
-      branch,
-      repositories,
-    }),
   createWorkspace: (itemId: number, repositories: WorkspaceRepositoryInput[]) =>
     command<Workspace>("create_workspace", { itemId, repositories }),
   prepareDirectRun: (
@@ -140,37 +124,13 @@ export const workAdapter = {
       destructiveWorktreeIds,
       confirmed: true,
     }),
-  attachWorkset: (itemId: number, rootDirectory: string) =>
-    command<Workset>("attach_workset", { itemId, rootDirectory }),
-  addRepositoryToWorkset: (
-    worksetId: number,
-    repositoryId: number,
-    branchOverride: string | null,
-    baseBranchOverride: string | null,
-  ) =>
-    command<Workset>("add_repository_to_workset", {
-      worksetId,
-      repositoryId,
-      branchOverride,
-      baseBranchOverride,
-    }),
-  setWorksetArchived: (worksetId: number, archived: boolean) =>
-    command<Workset>("set_workset_archived", { worksetId, archived }),
   stopRun: (runId: number) => command<Run>("stop_run", { runId }),
   deleteRun: (runId: number) =>
     command<{ runId: number }>("delete_run", { runId, confirmed: true }),
-  prepareWorksetRemoval: (worksetId: number) =>
-    command<WorksetRemovalReport>("prepare_workset_removal", { worksetId }),
-  removeWorkset: (worksetId: number) =>
-    command<WorksetRemovalResult>("remove_workset", { worksetId, confirmed: true }),
   prepareItemDeletion: (itemId: number) =>
     command<ItemDeletionPreview>("prepare_item_deletion", { itemId }),
-  deleteItem: (itemId: number, deleteWorksetDirectories: boolean) =>
-    command<ItemDeletionResult>("delete_item", {
-      itemId,
-      confirmed: true,
-      deleteWorksetDirectories,
-    }),
+  deleteItem: (itemId: number) =>
+    command<ItemDeletionResult>("delete_item", { itemId, confirmed: true }),
   unlinkExternalLink: (linkId: number) =>
     command<ExternalLinkDeletionResult>("unlink_external_link", {
       linkId,
@@ -196,32 +156,6 @@ export const workAdapter = {
       executionProfile,
       promptSelection: selection,
       customPrompt,
-    }),
-  startRun: ({
-    itemId,
-    worksetId,
-    machineId,
-    agent,
-    executionProfile,
-    prompt,
-    promptSelection,
-  }: {
-    itemId: number;
-    worksetId: number;
-    machineId: number | null;
-    agent: Run["agent"];
-    executionProfile: Run["execution_profile"];
-    prompt: string;
-    promptSelection: RunPromptSelection;
-  }) =>
-    command<Run>("start_run", {
-      itemId,
-      worksetId,
-      machineId,
-      agent,
-      executionProfile,
-      prompt,
-      promptSelection,
     }),
   startDirectRun: ({
     itemId,

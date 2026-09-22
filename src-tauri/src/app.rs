@@ -4826,7 +4826,7 @@ mod tests {
             agent: AgentKind::Claude,
             execution_profile: ExecutionProfile::Implement,
             prompt: "private prompt that must not enter the audit history".into(),
-            working_directory: "/private/workset".into(),
+            working_directory: "/private/working-directory".into(),
             session_name: "private-session".into(),
             pane_id: "%1".into(),
             started_at: 1,
@@ -4867,7 +4867,7 @@ mod tests {
         let serialized = serde_json::to_string(&history).expect("audit history should serialize");
         assert!(!serialized.contains("private prompt"));
         assert!(!serialized.contains("private-session"));
-        assert!(!serialized.contains("/private/workset"));
+        assert!(!serialized.contains("/private/working-directory"));
     }
 
     #[test]

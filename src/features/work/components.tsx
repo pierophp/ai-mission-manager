@@ -62,14 +62,10 @@ import type {
   Workspace,
   WorkspaceRemovalReport,
   WorkspaceRepositoryInput,
-  Workset,
-  WorksetRemovalReport,
-  WorksetRepositoryInput,
 } from "../../runtime/types";
 import type { PaneTab } from "../../runtime/terminal-types";
 import {
   externalObjectKindLabel,
-  findWorkset,
   formatSnapshotAge,
   paneTabForRun,
   relationKindLabel,
@@ -176,18 +172,6 @@ export function ItemCard({
   const [issueRepository, setIssueRepository] = useState("");
   const [issueTitle, setIssueTitle] = useState(view.item.title);
   const [issueBody, setIssueBody] = useState(view.item.notes);
-  const [worksetRoot, setWorksetRoot] = useState("");
-  const [worksetBranch, setWorksetBranch] = useState("");
-  const [attachWorksetRoot, setAttachWorksetRoot] = useState("");
-  const [selectedRepositoryIds, setSelectedRepositoryIds] = useState<number[]>(
-    [],
-  );
-  const [worksetBranchOverrides, setWorksetBranchOverrides] = useState<
-    Record<number, string>
-  >({});
-  const [worksetBaseBranchOverrides, setWorksetBaseBranchOverrides] = useState<
-    Record<number, string>
-  >({});
   const [workspaceRepositoryIds, setWorkspaceRepositoryIds] = useState<
     number[]
   >([]);
@@ -197,20 +181,10 @@ export function ItemCard({
   const [workspaceBaseBranches, setWorkspaceBaseBranches] = useState<
     Record<number, string>
   >({});
-  const [additionalRepositoryId, setAdditionalRepositoryId] =
-    useState<number>();
-  const [additionalBranchOverride, setAdditionalBranchOverride] = useState("");
-  const [additionalBaseBranchOverride, setAdditionalBaseBranchOverride] =
-    useState("");
-  const [removalReport, setRemovalReport] = useState<WorksetRemovalReport>();
   const [deletionPreview, setDeletionPreview] = useState<ItemDeletionPreview>();
-  const [deleteWorksetDirectories, setDeleteWorksetDirectories] =
-    useState(false);
   const [confirmation, setConfirmation] = useState<WorkConfirmation>();
   const [externalObjectDeletionPreview, setExternalObjectDeletionPreview] =
     useState<ExternalObjectDeletionPreview>();
-  const [runPreviewWorksetId, setRunPreviewWorksetId] = useState<number>();
-  const [runMachineId, setRunMachineId] = useState<number>();
   const [runAgent, setRunAgent] = useState<AgentKind>("claude");
   const [runProfile, setRunProfile] = useState<ExecutionProfile>("implement");
   const [includeRunObjective, setIncludeRunObjective] = useState(true);
@@ -301,38 +275,6 @@ export function ItemCard({
     }
   }
 
-  async function handleCreateWorkset(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (
-      !worksetRoot.trim() ||
-      !worksetBranch.trim() ||
-      selectedRepositoryIds.length === 0
-    ) {
-      return;
-    }
-    const selected: WorksetRepositoryInput[] = selectedRepositoryIds.map(
-      (repositoryId) => ({
-        repositoryId,
-        branchOverride: worksetBranchOverrides[repositoryId]?.trim() || null,
-        baseBranchOverride:
-          worksetBaseBranchOverrides[repositoryId]?.trim() || null,
-      }),
-    );
-    await saveItem(
-      workActions.createWorkset(
-        view.item.id,
-        worksetRoot,
-        worksetBranch,
-        selected,
-      ),
-    );
-    setWorksetRoot("");
-    setWorksetBranch("");
-    setSelectedRepositoryIds([]);
-    setWorksetBranchOverrides({});
-    setWorksetBaseBranchOverrides({});
-  }
-
   async function handleCreateWorkspace(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (workspaceRepositoryIds.length === 0) return;
@@ -356,38 +298,6 @@ export function ItemCard({
     setWorkspaceRepositoryIds([]);
     setWorkspaceBranches({});
     setWorkspaceBaseBranches({});
-  }
-
-  async function handleAttachWorkset(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!attachWorksetRoot.trim()) return;
-    await saveItem(workActions.attachWorkset(view.item.id, attachWorksetRoot));
-    setAttachWorksetRoot("");
-  }
-
-  async function handleAddRepositoryToWorkset(worksetId: number) {
-    if (!additionalRepositoryId) return;
-    await saveItem(
-      workActions.addRepositoryToWorkset(
-        worksetId,
-        additionalRepositoryId,
-        additionalBranchOverride.trim() || null,
-        additionalBaseBranchOverride.trim() || null,
-      ),
-    );
-    setAdditionalRepositoryId(undefined);
-    setAdditionalBranchOverride("");
-    setAdditionalBaseBranchOverride("");
-  }
-
-  async function handleSetWorksetArchived(
-    worksetId: number,
-    archived: boolean,
-  ) {
-    await saveItem(workActions.setWorksetArchived(worksetId, archived));
-    if (removalReport?.workset_id === worksetId) {
-      setRemovalReport(undefined);
-    }
   }
 
   function handleStopRun(run: Run) {
@@ -416,43 +326,6 @@ export function ItemCard({
     });
   }
 
-  async function handlePrepareRemoval(worksetId: number) {
-    setIsSaving(true);
-    try {
-      const report = await workCommand.execute(
-        workActions.prepareWorksetRemoval(worksetId),
-        false,
-      );
-      setRemovalReport(report);
-    } catch (reportError) {
-      window.alert(errorMessage(reportError));
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function executeRemoveWorkset(worksetId: number) {
-    const result = await saveItem(workActions.removeWorkset(worksetId));
-    if (!result) return;
-    setRemovalReport(undefined);
-    if (result.physicalCleanupWarning) {
-      window.alert(result.physicalCleanupWarning);
-    }
-  }
-
-  function handleRemoveWorkset(worksetId: number) {
-    if (removalReport?.workset_id !== worksetId) return;
-    setConfirmation({
-      title: "Remove this Workset?",
-      description: "The Workset record and its directory will be removed from disk.",
-      confirmLabel: "Remove Workset",
-      onConfirm: () => {
-        setConfirmation(undefined);
-        void executeRemoveWorkset(worksetId);
-      },
-    });
-  }
-
   async function handlePrepareItemDeletion() {
     setIsSaving(true);
     try {
@@ -460,7 +333,6 @@ export function ItemCard({
         workActions.prepareItemDeletion(view.item.id),
         false,
       );
-      setDeleteWorksetDirectories(false);
       setDeletionPreview(preview);
     } catch (previewError) {
       window.alert(errorMessage(previewError));
@@ -495,21 +367,16 @@ export function ItemCard({
     setIsSaving(true);
     try {
       const result = await workCommand.execute(
-        workActions.deleteItem(view.item.id, deleteWorksetDirectories),
+        workActions.deleteItem(view.item.id),
       );
       setDeletionPreview(undefined);
-      setDeleteWorksetDirectories(false);
       await onChanged();
       const summary = result.summary;
-      const physicalWarning = result.physicalCleanupWarning
-        ? `\n\n${result.physicalCleanupWarning}`
-        : "";
       window.alert(
-        `Deleted ${displayItemIdentifier(deletionPreview.plan.humanIdentifier)}.\n\nRemoved ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.worksetCount} Workset(s), ${summary.runCount} Run(s), ${summary.linkCount} Link(s), and ${summary.externalObjectCount} orphaned External Object(s).${physicalWarning}`,
+        `Deleted ${displayItemIdentifier(deletionPreview.plan.humanIdentifier)}.\n\nRemoved ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.workspaceCount} Workspace(s), ${summary.runCount} Run(s), ${summary.linkCount} Link(s), and ${summary.externalObjectCount} orphaned External Object(s).`,
       );
     } catch (deleteError) {
       setDeletionPreview(undefined);
-      setDeleteWorksetDirectories(false);
       window.alert(errorMessage(deleteError));
     } finally {
       setIsSaving(false);
@@ -619,7 +486,7 @@ export function ItemCard({
   }
 
   async function composeRunPromptPreview() {
-    if (!runPreviewWorksetId && !directRunWorkspaceId) return;
+    if (!directRunWorkspaceId) return;
     setIsSaving(true);
     try {
       const composed = await workCommand.execute(
@@ -634,40 +501,6 @@ export function ItemCard({
       setRunPrompt(composed);
       setRunPromptNeedsCompose(false);
     } catch (composeError) {
-      window.alert(errorMessage(composeError));
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function openRunPreview(workset: Workset) {
-    setRunPreviewWorksetId(workset.id);
-    setRunMachineId(undefined);
-    setRunAgent("claude");
-    setRunProfile("implement");
-    setIncludeRunObjective(true);
-    setIncludeRunNotes(Boolean(view.item.notes.trim()));
-    setSelectedRunExternalObjectIds([]);
-    setRunCustomPrompt("");
-    setIsSaving(true);
-    try {
-      const composed = await workCommand.execute(
-        workActions.composeRunPrompt(
-          view.item.id,
-          "implement",
-          {
-            includeObjective: true,
-            includeNotes: Boolean(view.item.notes.trim()),
-            externalObjectIds: [],
-          },
-          null,
-        ),
-        false,
-      );
-      setRunPrompt(composed);
-      setRunPromptNeedsCompose(false);
-    } catch (composeError) {
-      setRunPreviewWorksetId(undefined);
       window.alert(errorMessage(composeError));
     } finally {
       setIsSaving(false);
@@ -837,25 +670,6 @@ export function ItemCard({
     setWorkspaceRemovalReport(undefined);
   }
 
-  async function handleStartRun(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!runPreviewWorksetId || !runPrompt.trim() || runPromptNeedsCompose)
-      return;
-    await saveItem(
-      workActions.startRun({
-        itemId: view.item.id,
-        worksetId: runPreviewWorksetId,
-        machineId: runMachineId ?? null,
-        agent: runAgent,
-        executionProfile: runProfile,
-        prompt: runPrompt,
-        promptSelection: runPromptSelection(),
-      }),
-    );
-    setRunPreviewWorksetId(undefined);
-    setRunPrompt("");
-  }
-
   async function refreshExternalObject(externalObjectId: number) {
     setIsSaving(true);
     try {
@@ -910,18 +724,6 @@ export function ItemCard({
   const itemMachines = machines.filter(
     (machine) => machine.context_id === view.context_id,
   );
-
-  function renderRemovalFinding(
-    label: string,
-    values: string[],
-    emptyMessage: string,
-  ) {
-    return (
-      <p>
-        {values.length === 0 ? emptyMessage : `${label}: ${values.join("; ")}`}
-      </p>
-    );
-  }
 
   function renderWorkspaceCard(workspace: Workspace) {
     return (
@@ -1362,394 +1164,6 @@ export function ItemCard({
     );
   }
 
-  function renderWorksetCard(workset: Workset, archived: boolean) {
-    const selectedIds = new Set(
-      workset.repositories.map((selected) => selected.repository_id),
-    );
-    const availableRepositories = itemRepositories.filter(
-      (repository) => !selectedIds.has(repository.id),
-    );
-    const report =
-      removalReport?.workset_id === workset.id ? removalReport : undefined;
-
-    return (
-      <Card
-        size="sm"
-        className={archived ? "border-dashed opacity-80" : ""}
-        key={workset.id}
-      >
-        <CardHeader className="border-b border-border/70">
-          <div>
-            <CardTitle className="flex items-center gap-2">
-              {workset.branch}
-              {archived && <Badge variant="outline">Archived</Badge>}
-            </CardTitle>
-            <CardDescription className="mt-1 break-all font-mono text-xs">
-              {workset.root_directory}
-            </CardDescription>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-3 pt-4">
-          <div className="flex flex-wrap gap-2">
-            {workset.repositories.map((selected) => (
-              <Badge
-                variant="secondary"
-                className="h-auto items-start gap-1 py-1"
-                key={selected.repository_id}
-              >
-                <span className="font-medium">
-                  {repositoryName(repositories, selected.repository_id)}
-                </span>
-                <span className="text-muted-foreground">
-                  {selected.current_branch} ·{" "}
-                  {selected.is_dirty ? "uncommitted changes" : "clean"}
-                </span>
-              </Badge>
-            ))}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {!archived && (
-              <Button
-                type="button"
-                size="sm"
-                disabled={isSaving}
-                onClick={() => void openRunPreview(workset)}
-              >
-                Start Run
-              </Button>
-            )}
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={isSaving}
-              onClick={() =>
-                void handleSetWorksetArchived(workset.id, !archived)
-              }
-            >
-              {archived ? "Restore" : "Archive"}
-            </Button>
-            <Button
-              type="button"
-              size="sm"
-              variant="outline"
-              disabled={isSaving}
-              onClick={() => void handlePrepareRemoval(workset.id)}
-            >
-              Review removal
-            </Button>
-          </div>
-          {report && (
-            <Alert
-              variant={report.blockers.length > 0 ? "destructive" : "default"}
-            >
-              <AlertTitle>Removal safety report</AlertTitle>
-              <AlertDescription className="space-y-3">
-                <p>{report.root_directory} will be removed from disk.</p>
-                {report.repositories.map((repository) => (
-                  <div className="grid gap-1" key={repository.repository_id}>
-                    <strong>{repository.name}</strong>
-                    <span>
-                      {repository.current_branch} · {repository.path}
-                    </span>
-                    {repository.unpushed_commits_unknown ? (
-                      <p>
-                        Unpushed commits could not be verified: no upstream
-                        branch is configured.
-                      </p>
-                    ) : (
-                      renderRemovalFinding(
-                        "Unpushed commits",
-                        repository.unpushed_commits,
-                        "No unpushed commits.",
-                      )
-                    )}
-                    {renderRemovalFinding(
-                      "Uncommitted changes",
-                      repository.uncommitted_changes,
-                      "No uncommitted changes.",
-                    )}
-                  </div>
-                ))}
-                {report.blockers.length > 0 && (
-                  <div className="grid gap-1">
-                    <strong>Removal blocked</strong>
-                    {report.blockers.map((blocker) => (
-                      <span key={blocker}>{blocker}</span>
-                    ))}
-                    <p>Resolve each finding, then create a fresh report.</p>
-                  </div>
-                )}
-              </AlertDescription>
-              <div className="mt-3 flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  disabled={isSaving || !report.safe}
-                  onClick={() => void handleRemoveWorkset(workset.id)}
-                >
-                  Confirm and remove
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  disabled={isSaving}
-                  onClick={() => setRemovalReport(undefined)}
-                >
-                  Keep Workset
-                </Button>
-              </div>
-            </Alert>
-          )}
-          {runPreviewWorksetId === workset.id && (
-            <form
-              className="grid gap-4 rounded-lg border border-primary/30 bg-primary/5 p-4"
-              onSubmit={handleStartRun}
-            >
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h4 className="m-0 text-base font-medium">Confirm Run</h4>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    Context: {view.context_name} · Project: {view.project_name}{" "}
-                    · Workset: {workset.branch}
-                  </p>
-                </div>
-                <Badge variant="outline">
-                  Machine:{" "}
-                  {itemMachines.find((machine) => machine.id === runMachineId)
-                    ?.name ?? "Local Mac"}
-                </Badge>
-              </div>
-              <p className="m-0 text-sm text-muted-foreground">
-                Working directory:{" "}
-                <code className="break-all font-mono text-xs">
-                  {workset.root_directory}
-                </code>
-              </p>
-              <div className="grid gap-3 md:grid-cols-3">
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Machine</span>
-                  <NativeSelect
-                    value={runMachineId ?? ""}
-                    onChange={(event) =>
-                      setRunMachineId(Number(event.target.value) || undefined)
-                    }
-                    disabled={isSaving}
-                  >
-                    <NativeSelectOption value="">
-                      Local Mac (default)
-                    </NativeSelectOption>
-                    {itemMachines.map((machine) => (
-                      <NativeSelectOption value={machine.id} key={machine.id}>
-                        {machine.name} · {machine.last_observed}
-                      </NativeSelectOption>
-                    ))}
-                  </NativeSelect>
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Agent</span>
-                  <NativeSelect
-                    value={runAgent}
-                    onChange={(event) =>
-                      setRunAgent(event.target.value as AgentKind)
-                    }
-                    disabled={isSaving}
-                  >
-                    <NativeSelectOption value="claude">
-                      Claude Code
-                    </NativeSelectOption>
-                    <NativeSelectOption value="codex">Codex</NativeSelectOption>
-                  </NativeSelect>
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Execution Profile</span>
-                  <NativeSelect
-                    value={runProfile}
-                    onChange={(event) => {
-                      setRunProfile(event.target.value as ExecutionProfile);
-                      setRunPromptNeedsCompose(true);
-                    }}
-                    disabled={isSaving}
-                  >
-                    <NativeSelectOption value="investigate">
-                      Investigate
-                    </NativeSelectOption>
-                    <NativeSelectOption value="implement">
-                      Implement
-                    </NativeSelectOption>
-                    <NativeSelectOption value="review">
-                      Review
-                    </NativeSelectOption>
-                    <NativeSelectOption value="custom">
-                      Custom prompt
-                    </NativeSelectOption>
-                  </NativeSelect>
-                </label>
-              </div>
-              {runProfile === "custom" && (
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Custom prompt source</span>
-                  <Textarea
-                    value={runCustomPrompt}
-                    onChange={(event) => {
-                      setRunCustomPrompt(event.target.value);
-                      setRunPromptNeedsCompose(true);
-                    }}
-                    rows={3}
-                    placeholder="Tell the agent exactly what to do"
-                    disabled={isSaving}
-                  />
-                </label>
-              )}
-              <fieldset className="grid gap-2 rounded-md border p-3">
-                <legend className="px-1 text-sm font-medium">
-                  Include explicitly selected content
-                </legend>
-                <label className="flex items-center gap-2 text-sm font-normal">
-                  <Checkbox
-                    checked={includeRunObjective}
-                    onCheckedChange={(checked) => {
-                      setIncludeRunObjective(checked === true);
-                      setRunPromptNeedsCompose(true);
-                    }}
-                    disabled={isSaving}
-                  />
-                  Item objective
-                </label>
-                {view.item.notes.trim() && (
-                  <label className="flex items-center gap-2 text-sm font-normal">
-                    <Checkbox
-                      checked={includeRunNotes}
-                      onCheckedChange={(checked) => {
-                        setIncludeRunNotes(checked === true);
-                        setRunPromptNeedsCompose(true);
-                      }}
-                      disabled={isSaving}
-                    />
-                    Item notes
-                  </label>
-                )}
-                {view.links.map((link) => (
-                  <label
-                    className="flex items-center gap-2 text-sm font-normal"
-                    key={link.object.id}
-                  >
-                    <Checkbox
-                      checked={selectedRunExternalObjectIds.includes(
-                        link.object.id,
-                      )}
-                      onCheckedChange={(checked) => {
-                        setSelectedRunExternalObjectIds((current) =>
-                          checked === true
-                            ? [...current, link.object.id]
-                            : current.filter((id) => id !== link.object.id),
-                        );
-                        setRunPromptNeedsCompose(true);
-                      }}
-                      disabled={isSaving}
-                    />
-                    {link.snapshot?.title ?? link.object.canonical_url}
-                  </label>
-                ))}
-              </fieldset>
-              <label className="grid gap-1.5 text-sm font-medium">
-                <span>Editable composed prompt</span>
-                <Textarea
-                  value={runPrompt}
-                  onChange={(event) => setRunPrompt(event.target.value)}
-                  rows={7}
-                  disabled={isSaving}
-                />
-              </label>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={isSaving}
-                  onClick={() => void composeRunPromptPreview()}
-                >
-                  Compose from selection
-                </Button>
-                <Button
-                  type="submit"
-                  disabled={
-                    isSaving || !runPrompt.trim() || runPromptNeedsCompose
-                  }
-                >
-                  {isSaving
-                    ? "Starting…"
-                    : runPromptNeedsCompose
-                      ? "Compose before starting"
-                      : "Confirm and start Run"}
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  disabled={isSaving}
-                  onClick={() => setRunPreviewWorksetId(undefined)}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </form>
-          )}
-          {!archived && availableRepositories.length > 0 && (
-            <div className="grid gap-2 rounded-md border p-3 md:grid-cols-[1.2fr_1fr_1fr_auto] md:items-end">
-              <NativeSelect
-                aria-label={`Repository to add to Workset ${workset.id}`}
-                value={additionalRepositoryId ?? ""}
-                onChange={(event) =>
-                  setAdditionalRepositoryId(
-                    Number(event.target.value) || undefined,
-                  )
-                }
-                disabled={isSaving}
-              >
-                <NativeSelectOption value="">
-                  Add a Repository
-                </NativeSelectOption>
-                {availableRepositories.map((repository) => (
-                  <NativeSelectOption value={repository.id} key={repository.id}>
-                    {repository.name}
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
-              <Input
-                aria-label="Added Repository branch override"
-                value={additionalBranchOverride}
-                onChange={(event) =>
-                  setAdditionalBranchOverride(event.target.value)
-                }
-                placeholder="Branch override (optional)"
-                disabled={isSaving}
-              />
-              <Input
-                aria-label="Added Repository base branch override"
-                value={additionalBaseBranchOverride}
-                onChange={(event) =>
-                  setAdditionalBaseBranchOverride(event.target.value)
-                }
-                placeholder="Base branch override (optional)"
-                disabled={isSaving}
-              />
-              <Button
-                type="button"
-                variant="outline"
-                disabled={isSaving || !additionalRepositoryId}
-                onClick={() => void handleAddRepositoryToWorkset(workset.id)}
-              >
-                Add
-              </Button>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-    );
-  }
-
   return (
     <>
       <Card size="sm" className="h-full">
@@ -1901,10 +1315,6 @@ export function ItemCard({
               Run history
             </span>
             {view.runs.map((run) => {
-              const runWorkset =
-                run.workset_id === null
-                  ? undefined
-                  : findWorkset(view, run.workset_id);
               const runWorkspace =
                 run.workspace_id === null
                   ? undefined
@@ -1948,9 +1358,7 @@ export function ItemCard({
                     <span className="text-xs text-muted-foreground">
                       {runWorkspace
                         ? `Workspace #${runWorkspace.id}`
-                        : runWorkset
-                          ? `Workset ${runWorkset.branch}`
-                          : "Unscoped"}
+                        : "Unscoped"}
                       {runRepository !== undefined
                         ? ` · Repository ${repositoryName(repositories, runRepository)}`
                         : ""}
@@ -1969,7 +1377,7 @@ export function ItemCard({
                         Pane status not confirmed.
                       </span>
                     )}
-                    {(runWorkset || run.workspace_id !== null) && (
+                    {run.workspace_id !== null && (
                       <div className="flex flex-wrap gap-2">
                         <Button
                           type="button"
@@ -2019,19 +1427,6 @@ export function ItemCard({
                             Delete finished Run
                           </Button>
                         )}
-                        {run.pane_status === "missing" &&
-                          runWorkset &&
-                          !runWorkset.archived && (
-                            <Button
-                              type="button"
-                              size="sm"
-                              variant="outline"
-                              disabled={isSaving}
-                              onClick={() => void openRunPreview(runWorkset)}
-                            >
-                              Start a new Run
-                            </Button>
-                          )}
                       </div>
                     )}
                   </CardContent>
@@ -2161,168 +1556,6 @@ export function ItemCard({
                   }
                 >
                   {isSaving ? "Saving…" : "Create Workspace"}
-                </Button>
-              </form>
-            </CardContent>
-          </Card>
-        </div>
-        <div className="grid gap-3">
-          <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Worksets
-          </span>
-          {view.worksets.map((workset) => renderWorksetCard(workset, false))}
-          {view.archived_worksets.length > 0 && (
-            <div className="grid gap-2">
-              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Archived Worksets
-              </span>
-              {view.archived_worksets.map((workset) =>
-                renderWorksetCard(workset, true),
-              )}
-            </div>
-          )}
-          <Card size="sm">
-            <CardHeader>
-              <CardTitle className="text-sm">Create a Workset</CardTitle>
-              <CardDescription>
-                Choose repositories and prepare a shared working environment.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form className="grid gap-3" onSubmit={handleCreateWorkset}>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Root directory</span>
-                  <Input
-                    value={worksetRoot}
-                    onChange={(event) => setWorksetRoot(event.target.value)}
-                    placeholder="/Users/me/worksets/PLAT-847"
-                    disabled={isSaving}
-                  />
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Logical branch</span>
-                  <Input
-                    value={worksetBranch}
-                    onChange={(event) => setWorksetBranch(event.target.value)}
-                    placeholder="feature/PLAT-847"
-                    disabled={isSaving}
-                  />
-                </label>
-                <span className="text-sm font-medium">Select repositories</span>
-                {itemRepositories.length === 0 ? (
-                  <span className="text-sm text-muted-foreground">
-                    Register a Repository under this Project first.
-                  </span>
-                ) : (
-                  <div className="grid gap-2">
-                    {itemRepositories.map((repository) => {
-                      const selected = selectedRepositoryIds.includes(
-                        repository.id,
-                      );
-                      return (
-                        <div
-                          className="grid gap-2 rounded-md border p-3"
-                          key={repository.id}
-                        >
-                          <label className="flex items-center gap-2 text-sm font-normal">
-                            <Checkbox
-                              checked={selected}
-                              onCheckedChange={(checked) =>
-                                setSelectedRepositoryIds((current) =>
-                                  checked === true
-                                    ? [...current, repository.id]
-                                    : current.filter(
-                                        (id) => id !== repository.id,
-                                      ),
-                                )
-                              }
-                              disabled={isSaving}
-                            />
-                            {repository.name}
-                          </label>
-                          {selected && (
-                            <div className="grid gap-2 sm:grid-cols-2">
-                              <Input
-                                aria-label={`${repository.name} branch override`}
-                                value={
-                                  worksetBranchOverrides[repository.id] ?? ""
-                                }
-                                onChange={(event) =>
-                                  setWorksetBranchOverrides((current) => ({
-                                    ...current,
-                                    [repository.id]: event.target.value,
-                                  }))
-                                }
-                                placeholder="Branch override (optional)"
-                                disabled={isSaving}
-                              />
-                              <Input
-                                aria-label={`${repository.name} base branch override`}
-                                value={
-                                  worksetBaseBranchOverrides[repository.id] ??
-                                  ""
-                                }
-                                onChange={(event) =>
-                                  setWorksetBaseBranchOverrides((current) => ({
-                                    ...current,
-                                    [repository.id]: event.target.value,
-                                  }))
-                                }
-                                placeholder="Base branch override (optional)"
-                                disabled={isSaving}
-                              />
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-                <Button
-                  type="submit"
-                  disabled={
-                    isSaving ||
-                    !worksetRoot.trim() ||
-                    !worksetBranch.trim() ||
-                    selectedRepositoryIds.length === 0
-                  }
-                >
-                  {isSaving ? "Checking out…" : "Create Workset"}
-                </Button>
-              </form>
-            </CardContent>
-          </Card>
-          <Card size="sm">
-            <CardHeader>
-              <CardTitle className="text-sm">
-                Attach an Existing Workset
-              </CardTitle>
-              <CardDescription>
-                Inspect direct child repositories without modifying Git.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form className="grid gap-3" onSubmit={handleAttachWorkset}>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Existing root directory</span>
-                  <Input
-                    value={attachWorksetRoot}
-                    onChange={(event) =>
-                      setAttachWorksetRoot(event.target.value)
-                    }
-                    placeholder="/Users/me/worksets/PLAT-847"
-                    disabled={isSaving}
-                  />
-                </label>
-                <p className="m-0 text-sm text-muted-foreground">
-                  Inspects direct child repositories, branches, and uncommitted
-                  changes without modifying Git.
-                </p>
-                <Button
-                  type="submit"
-                  disabled={isSaving || !attachWorksetRoot.trim()}
-                >
-                  {isSaving ? "Inspecting…" : "Attach Workset"}
                 </Button>
               </form>
             </CardContent>
@@ -2731,7 +1964,6 @@ export function ItemCard({
           onOpenChange={(open) => {
             if (!open && !isSaving) {
               setDeletionPreview(undefined);
-              setDeleteWorksetDirectories(false);
             }
           }}
         >
@@ -2751,7 +1983,7 @@ export function ItemCard({
                 <li>
                   {deletionPreview.plan.relationshipCount} Item relationship(s)
                 </li>
-                <li>{deletionPreview.plan.worksets.length} Workset(s)</li>
+                <li>{deletionPreview.plan.workspaces.length} Workspace(s)</li>
                 <li>{deletionPreview.plan.runIds.length} Run(s)</li>
                 <li>{deletionPreview.plan.linkIds.length} Link(s)</li>
                 <li>
@@ -2761,50 +1993,6 @@ export function ItemCard({
                   {deletionPreview.plan.orphanedActivityCount} Activity record(s)
                 </li>
               </ul>
-              {deletionPreview.worksets.length > 0 && (
-                <div className="grid gap-2">
-                  <span className="font-medium">Workset directories</span>
-                  {deletionPreview.worksets.map((workset) => (
-                    <div
-                      className="grid gap-1 rounded-md border p-2"
-                      key={workset.worksetId}
-                    >
-                      <strong>
-                        {workset.branch} {workset.archived ? "· Archived" : ""}
-                      </strong>
-                      <code className="break-all font-mono text-xs">
-                        {workset.rootDirectory}
-                      </code>
-                      {!workset.safe &&
-                        workset.blockers.map((blocker) => (
-                          <span className="text-destructive" key={blocker}>
-                            {blocker}
-                          </span>
-                        ))}
-                    </div>
-                  ))}
-                </div>
-              )}
-              {deletionPreview.worksets.length > 0 &&
-                deletionPreview.blockers.length === 0 && (
-                  <label className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-                    <Checkbox
-                      checked={deleteWorksetDirectories}
-                      onCheckedChange={(checked) =>
-                        setDeleteWorksetDirectories(checked === true)
-                      }
-                      disabled={isSaving}
-                    />
-                    <span className="grid gap-1">
-                      <span className="font-medium">
-                        Also delete Workset directories from disk
-                      </span>
-                      <span className="text-muted-foreground">
-                        Leave this unchecked to remove only the local records.
-                      </span>
-                    </span>
-                  </label>
-                )}
               {deletionPreview.blockers.length > 0 && (
                 <div className="grid gap-1 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-destructive">
                   <strong>Deletion blocked</strong>
@@ -2822,7 +2010,6 @@ export function ItemCard({
                 disabled={isSaving}
                 onClick={() => {
                   setDeletionPreview(undefined);
-                  setDeleteWorksetDirectories(false);
                 }}
               >
                 Cancel
@@ -3292,10 +2479,10 @@ export function RunSuggestionCard({
               ? `Workspace #${suggestion.workspaceId} · ${
                   suggestion.worktreeId ? "Worktree" : "Direct checkout"
                 }`
-              : `Likely Workset: ${suggestion.worksetBranch}`}
+              : "Unregistered working location"}
           </strong>
           <span className="break-all text-muted-foreground">
-            {suggestion.locationPath ?? suggestion.worksetRootDirectory}
+            {suggestion.locationPath ?? suggestion.currentPath}
           </span>
           {suggestion.repositoryId !== null && (
             <span className="text-muted-foreground">

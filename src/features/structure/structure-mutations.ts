@@ -21,16 +21,14 @@ export const structureActions = {
     projectId: number,
     itemIds: number[],
     repositoryIds: number[],
-    worksetIds: number[],
-    deleteWorksetDirectories: boolean,
+    workspaceIds: number[],
   ) =>
     () =>
       structureAdapter.deleteProject(
         projectId,
         itemIds,
         repositoryIds,
-        worksetIds,
-        deleteWorksetDirectories,
+        workspaceIds,
       ),
   deleteContext: (input: Parameters<typeof structureAdapter.deleteContext>[0]) =>
     () => structureAdapter.deleteContext(input),
@@ -42,14 +40,12 @@ export const structureActions = {
     () => structureAdapter.prepareRepositoryDeletion(repositoryId),
   deleteRepository: (
     repositoryId: number,
-    worksetIds: number[],
-    deleteWorksetDirectories: boolean,
+    workspaceIds: number[],
   ) =>
     () =>
       structureAdapter.deleteRepository(
         repositoryId,
-        worksetIds,
-        deleteWorksetDirectories,
+        workspaceIds,
       ),
   registerMachine: (
     contextId: number,
@@ -71,8 +67,7 @@ export const structureActions = {
   createItem: (title: string, contextId: number, projectId: number) =>
     () => structureAdapter.createItem(title, contextId, projectId),
   prepareReset: () => () => structureAdapter.prepareReset(),
-  reset: (confirmation: string, deleteWorksetDirectories: boolean) =>
-    () => structureAdapter.reset(confirmation, deleteWorksetDirectories),
+  reset: (confirmation: string) => () => structureAdapter.reset(confirmation),
 };
 
 export function useStructureCommand() {

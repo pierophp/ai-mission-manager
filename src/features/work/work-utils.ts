@@ -7,7 +7,6 @@ import type {
   ItemView,
   Repository,
   Run,
-  Workset,
 } from "../../runtime/types";
 import type { PaneTab } from "../../runtime/terminal-types";
 
@@ -75,12 +74,6 @@ export function flattenHome(view: HomeView): ItemView[] {
     ...view.due,
     ...view.completed,
   ];
-}
-
-export function findWorkset(view: ItemView, worksetId: number): Workset | undefined {
-  return [...view.worksets, ...view.archived_worksets].find(
-    (workset) => workset.id === worksetId,
-  );
 }
 
 export function paneTabForRun(run: Run): PaneTab {

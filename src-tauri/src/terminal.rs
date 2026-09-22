@@ -579,32 +579,6 @@ pub fn probe_machine(machine: &Machine) -> Result<(), String> {
     }
 }
 
-pub fn workset_root_exists(machine: &Machine, root: &Path) -> Result<(), String> {
-    match machine.transport {
-        MachineTransport::Local => {
-            if root.is_dir() {
-                Ok(())
-            } else {
-                Err(format!(
-                    "Workset root is not a directory: {}",
-                    root.display()
-                ))
-            }
-        }
-        MachineTransport::Ssh { .. } => {
-            let command = format!("test -d {}", shell_quote(&root.to_string_lossy()));
-            run_machine_shell(machine, &command)
-                .map(|_| ())
-                .map_err(|error| {
-                    format!(
-                        "Workset root is not a directory on Machine {}: {}",
-                        machine.name, error
-                    )
-                })
-        }
-    }
-}
-
 pub fn probe_local_runtime(executable: &Path) -> Result<(), String> {
     let output = Command::new(executable)
         .arg("-V")
@@ -1287,7 +1261,7 @@ mod tests {
     #[test]
     fn agent_pane_discovery_recognizes_supported_cli_commands_only() {
         let claude = parse_agent_pane_summary(
-            "manual-session\t%7\t/usr/local/bin/claude\tterminal\t/tmp/workset/service",
+            "manual-session\t%7\t/usr/local/bin/claude\tterminal\t/tmp/working-directory/service",
         )
         .expect("the Pane description should parse")
         .expect("Claude should be recognized");
@@ -1295,13 +1269,13 @@ mod tests {
         assert_eq!(claude.session_name, "manual-session");
         assert_eq!(claude.pane_id, "%7");
 
-        let codex = parse_agent_pane_summary("manual-session\t%8\tcodex\tterminal\t/tmp/workset")
+        let codex = parse_agent_pane_summary("manual-session\t%8\tcodex\tterminal\t/tmp/working-directory")
             .expect("the Pane description should parse")
             .expect("Codex should be recognized");
         assert_eq!(codex.agent, AgentKind::Codex);
 
         assert!(
-            parse_agent_pane_summary("shell\t%9\tbash\tterminal\t/tmp/workset")
+            parse_agent_pane_summary("shell\t%9\tbash\tterminal\t/tmp/working-directory")
                 .expect("the Pane description should parse")
                 .is_none()
         );

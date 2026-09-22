@@ -63,29 +63,6 @@ export type RepositoryLocation = {
   worktree_root: string;
 };
 
-export type WorksetRepository = {
-  repository_id: number;
-  branch_override: string | null;
-  base_branch_override: string | null;
-  current_branch: string;
-  is_dirty: boolean;
-};
-
-export type Workset = {
-  id: number;
-  item_id: number;
-  root_directory: string;
-  branch: string;
-  archived: boolean;
-  repositories: WorksetRepository[];
-};
-
-export type WorksetRepositoryInput = {
-  repositoryId: number;
-  branchOverride: string | null;
-  baseBranchOverride: string | null;
-};
-
 export type WorkspaceRepository = {
   repository_id: number;
   branch: string;
@@ -102,6 +79,7 @@ export type Workspace = {
   id: number;
   item_id: number;
   repositories: WorkspaceRepository[];
+  preparation_state: "pending" | "resumable" | "ready";
 };
 
 export type DirectRunCheckoutPreview = {
@@ -304,30 +282,10 @@ export type ItemView = {
   context_name: string;
   project_name: string;
   relationships: ItemRelation[];
-  worksets: Workset[];
-  archived_worksets: Workset[];
   workspaces: Workspace[];
   worktrees: Worktree[];
   runs: Run[];
   links: ExternalLinkView[];
-};
-
-export type RepositoryRemovalReport = {
-  repository_id: number;
-  name: string;
-  path: string;
-  current_branch: string;
-  unpushed_commits: string[];
-  unpushed_commits_unknown: boolean;
-  uncommitted_changes: string[];
-};
-
-export type WorksetRemovalReport = {
-  workset_id: number;
-  root_directory: string;
-  repositories: RepositoryRemovalReport[];
-  safe: boolean;
-  blockers: string[];
 };
 
 export type ItemDeletionPlan = {
@@ -336,11 +294,9 @@ export type ItemDeletionPlan = {
   title: string;
   reminderCount: number;
   relationshipCount: number;
-  worksets: {
+  workspaces: {
     id: number;
-    rootDirectory: string;
-    branch: string;
-    archived: boolean;
+    itemId: number;
   }[];
   runIds: number[];
   activeRunIds: number[];
@@ -350,19 +306,8 @@ export type ItemDeletionPlan = {
   orphanedActivityCount: number;
 };
 
-export type WorksetDeletionPreview = {
-  worksetId: number;
-  rootDirectory: string;
-  branch: string;
-  archived: boolean;
-  safe: boolean;
-  blockers: string[];
-  safetyReport: WorksetRemovalReport | null;
-};
-
 export type ItemDeletionPreview = {
   plan: ItemDeletionPlan;
-  worksets: WorksetDeletionPreview[];
   blockers: string[];
 };
 
@@ -371,15 +316,13 @@ export type ItemDeletionResult = {
     itemId: number;
     reminderCount: number;
     relationshipCount: number;
-    worksetCount: number;
+    workspaceCount: number;
     runCount: number;
     linkCount: number;
     externalObjectCount: number;
     snapshotCount: number;
     activityCount: number;
   };
-  worksetDirectoriesDeleted: boolean;
-  physicalCleanupWarning: string | null;
 };
 
 export type ExternalObjectDeletionPlan = {
@@ -423,17 +366,14 @@ export type RepositoryDeletionPlan = {
   repositoryId: number;
   name: string;
   remoteUrl: string;
-  worksets: {
+  workspaces: {
     id: number;
-    rootDirectory: string;
-    branch: string;
-    archived: boolean;
+    itemId: number;
   }[];
 };
 
 export type RepositoryDeletionPreview = {
   plan: RepositoryDeletionPlan;
-  worksets: WorksetDeletionPreview[];
   blockers: string[];
 };
 
@@ -442,7 +382,8 @@ export type MachineDeletionRun = {
   itemId: number;
   itemIdentifier: string;
   itemTitle: string;
-  worksetId: number;
+  workspaceId: number | null;
+  worktreeId: number | null;
   state: RunState;
   paneStatus: RunPaneStatus;
 };
@@ -480,19 +421,17 @@ export type ParentDeletionPlan = {
     projectId: number;
   }[];
   machines: { id: number; name: string }[];
-  worksets: {
+  workspaces: {
     id: number;
     itemId: number;
-    rootDirectory: string;
-    branch: string;
-    archived: boolean;
   }[];
   runs: {
     id: number;
     itemId: number;
     itemIdentifier: string;
     itemTitle: string;
-    worksetId: number;
+    workspaceId: number | null;
+    worktreeId: number | null;
     machineId: number;
     state: RunState;
     paneStatus: RunPaneStatus;
@@ -509,7 +448,6 @@ export type ParentDeletionPlan = {
 
 export type ParentDeletionPreview = {
   plan: ParentDeletionPlan;
-  worksets: WorksetDeletionPreview[];
   blockers: string[];
 };
 
@@ -521,7 +459,7 @@ export type ParentDeletionResult = {
     itemCount: number;
     repositoryCount: number;
     machineCount: number;
-    worksetCount: number;
+    workspaceCount: number;
     runCount: number;
     reminderCount: number;
     relationshipCount: number;
@@ -531,8 +469,6 @@ export type ParentDeletionResult = {
     snapshotCount: number;
     activityCount: number;
   };
-  worksetDirectoriesDeleted: boolean;
-  physicalCleanupWarning: string | null;
 };
 
 export type ResetLocalDataSummary = {
@@ -540,7 +476,7 @@ export type ResetLocalDataSummary = {
   projectCount: number;
   repositoryCount: number;
   itemCount: number;
-  worksetCount: number;
+  workspaceCount: number;
   machineCount: number;
   runCount: number;
   reminderCount: number;
@@ -562,10 +498,9 @@ export type ResetLocalDataPreview = {
   plan: {
     summary: ResetLocalDataSummary;
     affectedRecords: ResetLocalDataRecord[];
-    worksets: ItemDeletionPlan["worksets"];
+  workspaces: ItemDeletionPlan["workspaces"];
   };
   auditEntryCount: number;
-  worksets: WorksetDeletionPreview[];
   blockers: string[];
   confirmationPhrase: string;
 };
@@ -573,8 +508,6 @@ export type ResetLocalDataPreview = {
 export type ResetLocalDataResult = {
   summary: ResetLocalDataSummary;
   auditEntryCount: number;
-  worksetDirectoriesDeleted: boolean;
-  physicalCleanupWarning: string | null;
 };
 
 export type RunDeletionResult = {
@@ -583,15 +516,7 @@ export type RunDeletionResult = {
 
 export type RepositoryDeletionResult = {
   repositoryId: number;
-  worksetCount: number;
-  worksetDirectoriesDeleted: boolean;
-  physicalCleanupWarning: string | null;
-};
-
-export type WorksetRemovalResult = {
-  worksetId: number;
-  worksetDirectoriesDeleted: boolean;
-  physicalCleanupWarning: string | null;
+  workspaceCount: number;
 };
 
 export type HomeView = {
@@ -616,9 +541,10 @@ export type AuditAction = {
   item_id?: number;
   from?: string;
   to?: string;
-  workset_id?: number;
+  workspace_id?: number;
+  worktree_id?: number;
   repository_count?: number | null;
-  workset_count?: number | null;
+  workspace_count?: number | null;
   archived?: boolean;
   machine_id?: number;
   run_count?: number | null;

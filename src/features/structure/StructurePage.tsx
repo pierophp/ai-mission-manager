@@ -72,12 +72,8 @@ type StructureConfirmation = {
   title: string;
   description: string;
   confirmLabel: string;
-  includeWorksetDirectoryOption?: boolean;
   confirmationPhrase?: string;
-  onConfirm: (
-    deleteWorksetDirectories: boolean,
-    confirmationPhrase: string,
-  ) => void;
+  onConfirm: (confirmationPhrase: string) => void;
 };
 
 export function StructurePage() {
@@ -134,8 +130,6 @@ export function StructurePage() {
   const [resetLocalDataPreview, setResetLocalDataPreview] =
     useState<ResetLocalDataPreview>();
   const [confirmation, setConfirmation] = useState<StructureConfirmation>();
-  const [deleteWorksetDirectories, setDeleteWorksetDirectories] =
-    useState(false);
   const [confirmationPhrase, setConfirmationPhrase] = useState("");
   const [isSaving, setIsSaving] = useState(false);
 
@@ -281,7 +275,6 @@ export function StructurePage() {
   async function executeDeleteProject(
     projectId: number,
     plan: ParentDeletionPreview["plan"],
-    deleteWorksetDirectories: boolean,
   ) {
     setIsSaving(true);
     try {
@@ -290,8 +283,7 @@ export function StructurePage() {
           projectId,
           plan.items.map((item) => item.id),
           plan.repositories.map((repository) => repository.id),
-          plan.worksets.map((workset) => workset.id),
-          deleteWorksetDirectories,
+          plan.workspaces.map((workspace) => workspace.id),
         ),
       );
       setParentDeletionPreview(undefined);
@@ -315,27 +307,18 @@ export function StructurePage() {
     }
 
     const { plan } = parentDeletionPreview;
-    setDeleteWorksetDirectories(false);
     setConfirmation({
       title: "Delete Project " + plan.name + "?",
       description:
         "This removes the Project and its complete local dependency graph. Provider-owned Issues and pull requests are never deleted.",
       confirmLabel: "Delete Project",
-      includeWorksetDirectoryOption: plan.worksets.length > 0,
-      onConfirm: (deleteWorksetDirectories) => {
-        void executeDeleteProject(
-          projectId,
-          plan,
-          deleteWorksetDirectories,
-        );
-      },
+      onConfirm: () => void executeDeleteProject(projectId, plan),
     });
   }
 
   async function executeDeleteContext(
     contextId: number,
     plan: ParentDeletionPreview["plan"],
-    deleteWorksetDirectories: boolean,
   ) {
     setIsSaving(true);
     try {
@@ -345,9 +328,8 @@ export function StructurePage() {
           projectIds: plan.projects.map((project) => project.id),
           itemIds: plan.items.map((item) => item.id),
           repositoryIds: plan.repositories.map((repository) => repository.id),
-          worksetIds: plan.worksets.map((workset) => workset.id),
+          workspaceIds: plan.workspaces.map((workspace) => workspace.id),
           machineIds: plan.machines.map((machine) => machine.id),
-          deleteWorksetDirectories,
         }),
       );
       setParentDeletionPreview(undefined);
@@ -371,20 +353,12 @@ export function StructurePage() {
     }
 
     const { plan } = parentDeletionPreview;
-    setDeleteWorksetDirectories(false);
     setConfirmation({
       title: "Delete Context " + plan.name + "?",
       description:
         "This removes the Context and its complete local dependency graph. Provider-owned Issues and pull requests are never deleted.",
       confirmLabel: "Delete Context",
-      includeWorksetDirectoryOption: plan.worksets.length > 0,
-      onConfirm: (deleteWorksetDirectories) => {
-        void executeDeleteContext(
-          contextId,
-          plan,
-          deleteWorksetDirectories,
-        );
-      },
+      onConfirm: () => void executeDeleteContext(contextId, plan),
     });
   }
 
@@ -460,20 +434,17 @@ export function StructurePage() {
   async function executeDeleteRepository(
     repositoryId: number,
     plan: RepositoryDeletionPreview["plan"],
-    deleteWorksetDirectories: boolean,
   ) {
     setIsSaving(true);
     try {
-      const result = await structureCommand.execute(
+      await structureCommand.execute(
         structureActions.deleteRepository(
           repositoryId,
-          plan.worksets.map((workset) => workset.id),
-          deleteWorksetDirectories,
+          plan.workspaces.map((workspace) => workspace.id),
         ),
       );
       setRepositoryDeletionPreview(undefined);
       await refreshAfterEdit();
-      if (result.physicalCleanupWarning) window.alert(result.physicalCleanupWarning);
     } catch (deleteError) {
       setRepositoryDeletionPreview(undefined);
       window.alert(errorMessage(deleteError));
@@ -492,20 +463,12 @@ export function StructurePage() {
     }
 
     const { plan } = repositoryDeletionPreview;
-    setDeleteWorksetDirectories(false);
     setConfirmation({
       title: "Delete Repository " + plan.name + "?",
       description:
-        "This removes the Repository record and its local Workset records. Provider-owned data is never deleted.",
+        "This removes the Repository record and its local Workspace records. Provider-owned data is never deleted.",
       confirmLabel: "Delete Repository",
-      includeWorksetDirectoryOption: plan.worksets.length > 0,
-      onConfirm: (deleteWorksetDirectories) => {
-        void executeDeleteRepository(
-          repositoryId,
-          plan,
-          deleteWorksetDirectories,
-        );
-      },
+      onConfirm: () => void executeDeleteRepository(repositoryId, plan),
     });
   }
 
@@ -693,21 +656,16 @@ export function StructurePage() {
   async function handleReset(
     confirmed = false,
     typedConfirmation = "",
-    deleteWorksetDirectories = false,
   ) {
     if (!resetLocalDataPreview || resetLocalDataPreview.blockers.length > 0) return;
     if (!confirmed) {
       setConfirmationPhrase("");
-      setDeleteWorksetDirectories(false);
       setConfirmation({
         title: "Reset all local data?",
         description: `This permanently resets all local records. Type ${resetLocalDataPreview.confirmationPhrase} to continue. Provider-owned Issues and pull requests are never deleted.`,
         confirmLabel: "Reset all local data",
-        includeWorksetDirectoryOption: resetLocalDataPreview.worksets.length > 0,
         confirmationPhrase: resetLocalDataPreview.confirmationPhrase,
-        onConfirm: (deleteDirectories, phrase) => {
-          void handleReset(true, phrase, deleteDirectories);
-        },
+        onConfirm: (phrase) => void handleReset(true, phrase),
       });
       return;
     }
@@ -716,7 +674,7 @@ export function StructurePage() {
     setIsSaving(true);
     try {
       const result = await structureCommand.execute(
-        structureActions.reset(typedConfirmation, deleteWorksetDirectories),
+        structureActions.reset(typedConfirmation),
       );
       setResetLocalDataPreview(undefined);
       closeTerminal();
@@ -735,9 +693,8 @@ export function StructurePage() {
       ]);
       const summary = result.summary;
       window.alert(
-        `Reset local data. Removed ${summary.contextCount} Context(s), ${summary.projectCount} Project(s), ${summary.repositoryCount} Repository record(s), ${summary.itemCount} Item(s), ${summary.worksetCount} Workset(s), ${summary.machineCount} Machine(s), ${summary.runCount} Run(s), ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.linkCount} Link(s), ${summary.externalObjectCount} External Object(s), ${summary.snapshotCount} snapshot(s), ${summary.activityCount} Activity record(s), ${summary.attentionDefaultCount} attention default(s), and ${result.auditEntryCount} prior audit entr${result.auditEntryCount === 1 ? "y" : "ies"}. A new Personal Context and Default Project are ready.`,
+        `Reset local data. Removed ${summary.contextCount} Context(s), ${summary.projectCount} Project(s), ${summary.repositoryCount} Repository record(s), ${summary.itemCount} Item(s), ${summary.workspaceCount} Workspace(s), ${summary.machineCount} Machine(s), ${summary.runCount} Run(s), ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.linkCount} Link(s), ${summary.externalObjectCount} External Object(s), ${summary.snapshotCount} snapshot(s), ${summary.activityCount} Activity record(s), ${summary.attentionDefaultCount} attention default(s), and ${result.auditEntryCount} prior audit entr${result.auditEntryCount === 1 ? "y" : "ies"}. A new Personal Context and Default Project are ready.`,
       );
-      if (result.physicalCleanupWarning) window.alert(result.physicalCleanupWarning);
     } catch (resetError) {
       window.alert(errorMessage(resetError));
     } finally {
@@ -1008,38 +965,15 @@ export function StructurePage() {
           onOpenChange={(open) => {
             if (!open && !isSaving) {
               setConfirmation(undefined);
-              setDeleteWorksetDirectories(false);
               setConfirmationPhrase("");
             }
           }}
           onConfirm={() => {
             const currentConfirmation = confirmation;
             setConfirmation(undefined);
-            currentConfirmation.onConfirm(
-              deleteWorksetDirectories,
-              confirmationPhrase,
-            );
+            currentConfirmation.onConfirm(confirmationPhrase);
           }}
         >
-          {confirmation.includeWorksetDirectoryOption && (
-            <label className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 p-3">
-              <Checkbox
-                checked={deleteWorksetDirectories}
-                onCheckedChange={(checked) =>
-                  setDeleteWorksetDirectories(checked === true)
-                }
-                disabled={isSaving}
-              />
-              <span className="grid gap-1">
-                <span className="font-medium">
-                  Also delete Workset directories from disk
-                </span>
-                <span className="text-muted-foreground">
-                  Leave this unchecked to remove only the local records.
-                </span>
-              </span>
-            </label>
-          )}
           {confirmation.confirmationPhrase && (
             <label className="grid gap-1.5 text-sm font-medium">
               <span>
@@ -1109,21 +1043,18 @@ function ParentDeletionPreviewCard({ preview, kind, disabled, onConfirm, onCance
     [plan.items.length, "Items"],
     [plan.repositories.length, "Repositories"],
     [plan.machines.length, "Machines"],
-    [plan.worksets.length, "Worksets"],
+    [plan.workspaces.length, "Workspaces"],
     [plan.runs.length, "Runs"],
     [plan.linkIds.length, "Links"],
     [plan.attentionDefaults.length, "attention defaults"],
     [plan.orphanedExternalObjectIds.length, "orphaned External Objects"],
   ];
-  const physicalCleanupBlockers = preview.worksets.flatMap((workset) => workset.blockers.map((blocker) => `Workset #${workset.worksetId}: ${blocker}`));
-
   return (
     <div className="w-full grid gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm" role="alert">
       <strong>{kind} deletion preview</strong>
       <p>Deleting <b>{plan.name}</b> removes the complete local dependency graph below. Provider-owned Issues and pull requests are never deleted.</p>
       <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-5">{counts.map(([count, label]) => <span key={label as string}><b>{count}</b> {label}</span>)}</div>
-      {plan.worksets.length > 0 && <PreviewList label="Workset roots" items={plan.worksets.map((workset) => `#${workset.id} · ${workset.branch}${workset.archived ? " · Archived" : ""} · ${workset.rootDirectory}`)} />}
-      {physicalCleanupBlockers.length > 0 && <PreviewWarnings title="Physical cleanup unavailable" items={physicalCleanupBlockers} />}
+      {plan.workspaces.length > 0 && <PreviewList label="Workspaces" items={plan.workspaces.map((workspace) => `Workspace #${workspace.id} · Item #${workspace.itemId}`)} />}
       {preview.blockers.length > 0 && <PreviewWarnings title="Deletion blocked" items={preview.blockers} />}
       <div className="flex flex-wrap gap-2">
         <Button type="button" variant="destructive" disabled={disabled || preview.blockers.length > 0} onClick={onConfirm}>Confirm and delete {kind}</Button>
@@ -1137,8 +1068,8 @@ function RepositoryDeletionPreviewCard({ preview, disabled, onConfirm, onCancel 
   return (
     <div className="w-full grid gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm" role="alert">
       <strong>Repository deletion preview</strong>
-      <p>Deleting <b>{preview.plan.name}</b> removes its local record. Referencing Worksets are shown before confirmation.</p>
-      {preview.worksets.length > 0 ? <PreviewList label="Affected Workset directories" items={preview.worksets.map((workset) => `${workset.branch}${workset.archived ? " · Archived" : ""} · ${workset.rootDirectory}${workset.blockers.length > 0 ? ` · ${workset.blockers.join("; ")}` : ""}`)} /> : <p>No Worksets reference this Repository.</p>}
+      <p>Deleting <b>{preview.plan.name}</b> removes its local record. Referencing Workspaces are shown before confirmation.</p>
+      {preview.plan.workspaces.length > 0 ? <PreviewList label="Affected Workspaces" items={preview.plan.workspaces.map((workspace) => `Workspace #${workspace.id} · Item #${workspace.itemId}`)} /> : <p>No Workspaces reference this Repository.</p>}
       {preview.blockers.length > 0 && <PreviewWarnings title="Deletion blocked" items={preview.blockers} />}
       <div className="flex flex-wrap gap-2">
         <Button type="button" variant="destructive" disabled={disabled || preview.blockers.length > 0} onClick={onConfirm}>Confirm logical deletion</Button>
@@ -1167,14 +1098,14 @@ function MachineDeletionPreviewCard({ preview, disabled, onConfirm, onDeleteRun,
 function ResetLocalDataPreviewCard({ preview, disabled, onConfirm, onCancel }: { preview: ResetLocalDataPreview; disabled: boolean; onConfirm: () => void; onCancel: () => void }) {
   const { summary } = preview.plan;
   const counts: [number, string][] = [
-    [summary.contextCount, "Contexts"], [summary.projectCount, "Projects"], [summary.repositoryCount, "Repositories"], [summary.itemCount, "Items"], [summary.worksetCount, "Worksets"], [summary.machineCount, "Machines"], [summary.runCount, "Runs"], [summary.reminderCount, "reminders"], [summary.relationshipCount, "relationships"], [summary.linkCount, "Links"], [summary.externalObjectCount, "External Objects"], [summary.snapshotCount, "snapshots"], [summary.activityCount, "Activity records"], [summary.attentionDefaultCount, "attention defaults"], [preview.auditEntryCount, "prior audit entries"],
+    [summary.contextCount, "Contexts"], [summary.projectCount, "Projects"], [summary.repositoryCount, "Repositories"], [summary.itemCount, "Items"], [summary.workspaceCount, "Workspaces"], [summary.machineCount, "Machines"], [summary.runCount, "Runs"], [summary.reminderCount, "reminders"], [summary.relationshipCount, "relationships"], [summary.linkCount, "Links"], [summary.externalObjectCount, "External Objects"], [summary.snapshotCount, "snapshots"], [summary.activityCount, "Activity records"], [summary.attentionDefaultCount, "attention defaults"], [preview.auditEntryCount, "prior audit entries"],
   ];
   return (
     <div className="grid gap-3 rounded-lg border border-destructive/30 bg-background p-4 text-sm" role="alert">
       <strong>Reset impact preview</strong>
-      <p>This removes only Mission Manager&apos;s local working model. Workset directories are checked separately, and provider-owned data is never deleted.</p>
+      <p>This removes only Mission Manager&apos;s local working model. Git Worktrees are managed separately, and provider-owned data is never deleted.</p>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{counts.map(([count, label]) => <span key={label}><b>{count}</b> {label}</span>)}</div>
-      {preview.worksets.length > 0 ? <PreviewList label="Workset roots to stage and remove" items={preview.worksets.map((workset) => `Workset #${workset.worksetId} · ${workset.branch}${workset.archived ? " · Archived" : ""} · ${workset.rootDirectory}`)} /> : <p>No Workset roots are registered. Local records will still be reset.</p>}
+      {preview.plan.workspaces.length > 0 ? <PreviewList label="Workspaces to remove" items={preview.plan.workspaces.map((workspace) => `Workspace #${workspace.id} · Item #${workspace.itemId}`)} /> : <p>No Workspaces are registered. Local records will still be reset.</p>}
       {preview.blockers.length > 0 && <PreviewWarnings title="Reset blocked" items={preview.blockers} />}
       <p>Confirmation requires typing <code>{preview.confirmationPhrase}</code> exactly.</p>
       <div className="flex flex-wrap gap-2">
@@ -1195,6 +1126,5 @@ function PreviewWarnings({ title, items }: { title: string; items: string[] }) {
 
 function showParentDeletionResult(kind: "Project" | "Context", result: ParentDeletionResult) {
   const { summary } = result;
-  window.alert(`Deleted ${kind}: ${summary.projectCount} Project(s), ${summary.itemCount} Item(s), ${summary.repositoryCount} Repository record(s), ${summary.machineCount} Machine(s), ${summary.worksetCount} Workset(s), ${summary.runCount} Run(s), ${summary.linkCount} Link(s), and ${summary.externalObjectCount} orphaned External Object(s).`);
-  if (result.physicalCleanupWarning) window.alert(result.physicalCleanupWarning);
+  window.alert(`Deleted ${kind}: ${summary.projectCount} Project(s), ${summary.itemCount} Item(s), ${summary.repositoryCount} Repository record(s), ${summary.machineCount} Machine(s), ${summary.workspaceCount} Workspace(s), ${summary.runCount} Run(s), ${summary.linkCount} Link(s), and ${summary.externalObjectCount} orphaned External Object(s).`);
 }

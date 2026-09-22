@@ -48,52 +48,44 @@ export const structureAdapter = {
   prepareContextDeletion: (contextId: number) =>
     command<ParentDeletionPreview>("prepare_context_deletion", { contextId }),
   prepareReset: () => command<ResetLocalDataPreview>("prepare_reset_local_data"),
-  reset: (confirmation: string, deleteWorksetDirectories: boolean) =>
-    command<ResetLocalDataResult>("reset_all_local_data", {
-      confirmation,
-      deleteWorksetDirectories,
-    }),
+  reset: (confirmation: string) =>
+    command<ResetLocalDataResult>("reset_all_local_data", { confirmation }),
   deleteProject: (
     projectId: number,
     itemIds: number[],
     repositoryIds: number[],
-    worksetIds: number[],
-    deleteWorksetDirectories: boolean,
+    workspaceIds: number[],
   ) =>
     command<ParentDeletionResult>("delete_project", {
       projectId,
       itemIds,
       repositoryIds,
-      worksetIds,
+      workspaceIds,
       confirmed: true,
-      deleteWorksetDirectories,
     }),
   deleteContext: ({
     contextId,
     projectIds,
     itemIds,
     repositoryIds,
-    worksetIds,
+    workspaceIds,
     machineIds,
-    deleteWorksetDirectories,
   }: {
     contextId: number;
     projectIds: number[];
     itemIds: number[];
     repositoryIds: number[];
-    worksetIds: number[];
+    workspaceIds: number[];
     machineIds: number[];
-    deleteWorksetDirectories: boolean;
   }) =>
     command<ParentDeletionResult>("delete_context", {
       contextId,
       projectIds,
       itemIds,
       repositoryIds,
-      worksetIds,
+      workspaceIds,
       machineIds,
       confirmed: true,
-      deleteWorksetDirectories,
     }),
   registerRepository: (projectId: number, name: string, remoteUrl: string) =>
     command<Repository>("register_repository", { projectId, name, remoteUrl }),
@@ -113,14 +105,12 @@ export const structureAdapter = {
     }),
   deleteRepository: (
     repositoryId: number,
-    worksetIds: number[],
-    deleteWorksetDirectories: boolean,
+    workspaceIds: number[],
   ) =>
     command<RepositoryDeletionResult>("delete_repository", {
       repositoryId,
-      worksetIds,
+      workspaceIds,
       confirmed: true,
-      deleteWorksetDirectories,
     }),
   prepareMachineDeletion: (machineId: number) =>
     command<MachineDeletionPreview>("prepare_machine_deletion", { machineId }),

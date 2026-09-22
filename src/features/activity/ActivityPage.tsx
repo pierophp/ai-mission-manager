@@ -212,17 +212,15 @@ function auditActionLabel(action: AuditAction): string {
       }`;
     case "itemRelationChanged":
       return `Updated the relationship between Items #${action.from_item_id} and #${action.to_item_id}`;
-    case "worksetCreated":
-      return `Created Workset #${action.workset_id}`;
-    case "worksetArchived":
-      return `${action.archived ? "Archived" : "Restored"} Workset #${action.workset_id}`;
-    case "worksetRemoved":
-      return `Removed Workset #${action.workset_id} · ${countLabel(
+    case "workspaceCreated":
+      return `Created Workspace #${action.workspace_id}`;
+    case "workspaceRemoved":
+      return `Removed Workspace #${action.workspace_id} · ${countLabel(
         action.repository_count,
         "Repository",
       )}`;
-    case "worksetUpdated":
-      return `Updated Workset #${action.workset_id}`;
+    case "workspaceUpdated":
+      return `Updated Workspace #${action.workspace_id}`;
     case "runCreated":
       return `Created Run #${action.run_id}`;
     case "runStopped":
@@ -259,8 +257,8 @@ function auditActionLabel(action: AuditAction): string {
       return `Registered Repository #${action.repository_id}`;
     case "repositoryDeleted":
       return `Deleted Repository #${action.repository_id} · ${countLabel(
-        action.workset_count,
-        "Workset",
+        action.workspace_count,
+        "Workspace",
       )}`;
     case "machineRegistered":
       return `Registered Machine #${action.machine_id}`;
@@ -281,7 +279,7 @@ function itemDeletionSummary(summary: ItemDeletionResult["summary"]): string {
   return cascadeCounts([
     [summary.reminderCount, "reminder"],
     [summary.relationshipCount, "relationship"],
-    [summary.worksetCount, "Workset"],
+    [summary.workspaceCount, "Workspace"],
     [summary.runCount, "Run"],
     [summary.linkCount, "Link"],
     [summary.externalObjectCount, "orphaned External Object"],
@@ -314,7 +312,7 @@ function parentDeletionSummary(summary: ParentDeletionResult["summary"]): string
     [summary.itemCount, "Item"],
     [summary.repositoryCount, "Repository"],
     [summary.machineCount, "Machine"],
-    [summary.worksetCount, "Workset"],
+    [summary.workspaceCount, "Workspace"],
     [summary.runCount, "Run"],
     [summary.reminderCount, "reminder"],
     [summary.relationshipCount, "relationship"],

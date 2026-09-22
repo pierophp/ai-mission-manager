@@ -20,12 +20,6 @@ export const workActions = {
     () => workAdapter.setRelation(fromItemId, toItemId, kind),
   linkExternalObject: (itemId: number, url: string) =>
     () => workAdapter.linkExternalObject(itemId, url),
-  createWorkset: (
-    itemId: number,
-    rootDirectory: string,
-    branch: string,
-    repositories: Parameters<typeof workAdapter.createWorkset>[3],
-  ) => () => workAdapter.createWorkset(itemId, rootDirectory, branch, repositories),
   createWorkspace: (
     itemId: number,
     repositories: Parameters<typeof workAdapter.createWorkspace>[1],
@@ -75,32 +69,11 @@ export const workActions = {
       ),
   prepareDirectRun: (itemId: number, workspaceId: number, machineId: number | null) =>
     () => workAdapter.prepareDirectRun(itemId, workspaceId, machineId),
-  attachWorkset: (itemId: number, rootDirectory: string) =>
-    () => workAdapter.attachWorkset(itemId, rootDirectory),
-  addRepositoryToWorkset: (
-    worksetId: number,
-    repositoryId: number,
-    branchOverride: string | null,
-    baseBranchOverride: string | null,
-  ) =>
-    () =>
-      workAdapter.addRepositoryToWorkset(
-        worksetId,
-        repositoryId,
-        branchOverride,
-        baseBranchOverride,
-      ),
-  setWorksetArchived: (worksetId: number, archived: boolean) =>
-    () => workAdapter.setWorksetArchived(worksetId, archived),
   stopRun: (runId: number) => () => workAdapter.stopRun(runId),
   deleteRun: (runId: number) => () => workAdapter.deleteRun(runId),
-  prepareWorksetRemoval: (worksetId: number) =>
-    () => workAdapter.prepareWorksetRemoval(worksetId),
-  removeWorkset: (worksetId: number) => () => workAdapter.removeWorkset(worksetId),
   prepareItemDeletion: (itemId: number) =>
     () => workAdapter.prepareItemDeletion(itemId),
-  deleteItem: (itemId: number, deleteWorksetDirectories: boolean) =>
-    () => workAdapter.deleteItem(itemId, deleteWorksetDirectories),
+  deleteItem: (itemId: number) => () => workAdapter.deleteItem(itemId),
   unlinkExternalLink: (linkId: number) =>
     () => workAdapter.unlinkExternalLink(linkId),
   prepareExternalObjectDeletion: (externalObjectId: number) =>
@@ -113,8 +86,6 @@ export const workActions = {
     selection: Parameters<typeof workAdapter.composeRunPrompt>[2],
     customPrompt: string | null,
   ) => () => workAdapter.composeRunPrompt(itemId, executionProfile, selection, customPrompt),
-  startRun: (input: Parameters<typeof workAdapter.startRun>[0]) =>
-    () => workAdapter.startRun(input),
   startDirectRun: (input: Parameters<typeof workAdapter.startDirectRun>[0]) =>
     () => workAdapter.startDirectRun(input),
   refreshExternalObject: (externalObjectId: number) =>
