@@ -15,6 +15,8 @@ export type GrillPhase =
   | "recoverablePaneLoss"
   | "finished";
 
+export type GrillContinuationAction = "to-spec" | "to-tickets" | "implement";
+
 export type RunCheckout = {
   repositoryId: number;
   path: string;
@@ -67,6 +69,7 @@ export type Run = {
   transcript: string;
   grill_question_group: GrillQuestionGroup | null;
   grill_answers: GrillAnswer[];
+  grill_decisions: GrillAnswer[];
   grill_response: string | null;
   grill_phase: GrillPhase | null;
 };

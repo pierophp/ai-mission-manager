@@ -391,7 +391,8 @@ impl SqliteStore {
                         machine_id, agent, execution_profile, model, effort, skill_snapshot,
                         prompt, working_directory, session_name, pane_id, started_at, state,
                         pane_status, direct_checkouts_json, transcript,
-                        grill_question_group_json, grill_answers_json, grill_response, grill_phase
+                        grill_question_group_json, grill_answers_json, grill_decisions_json,
+                        grill_response, grill_phase
                  FROM runs
                  ORDER BY id",
             )?;
@@ -401,7 +402,8 @@ impl SqliteStore {
                 let direct_checkouts_json: String = row.get(18)?;
                 let grill_question_group_json: Option<String> = row.get(20)?;
                 let grill_answers_json: String = row.get(21)?;
-                let grill_phase: Option<String> = row.get(23)?;
+                let grill_decisions_json: String = row.get(22)?;
+                let grill_phase: Option<String> = row.get(24)?;
                 let grill_question_group = grill_question_group_json
                     .map(|json| {
                         serde_json::from_str::<GrillQuestionGroup>(&json).map_err(|error| {
@@ -421,12 +423,22 @@ impl SqliteStore {
                         Box::new(error),
                     )
                 })?;
+                let grill_decisions = serde_json::from_str::<Vec<GrillAnswer>>(
+                    &grill_decisions_json,
+                )
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        22,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
                 let grill_phase = grill_phase
                     .map(|phase| parse_grill_phase(&phase))
                     .transpose()
                     .map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            23,
+                            24,
                             rusqlite::types::Type::Text,
                             Box::new(error),
                         )
@@ -490,7 +502,8 @@ impl SqliteStore {
                     transcript: row.get(19)?,
                     grill_question_group,
                     grill_answers,
-                    grill_response: row.get(22)?,
+                    grill_decisions,
+                    grill_response: row.get(23)?,
                     grill_phase,
                 })
             })?;
@@ -1063,9 +1076,9 @@ impl SqliteStore {
                             execution_profile, model, effort, skill_snapshot,
                             prompt, working_directory, session_name, pane_id,
                             started_at, state, pane_status, direct_checkouts_json,
-                            transcript, grill_question_group_json, grill_answers_json, grill_response,
-                            grill_phase)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
+                            transcript, grill_question_group_json, grill_answers_json,
+                            grill_decisions_json, grill_response, grill_phase)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
                         params![
                             run.id,
                             run.item_id,
@@ -1099,6 +1112,9 @@ impl SqliteStore {
                             serde_json::to_string(&run.grill_answers).map_err(|error| {
                                 rusqlite::Error::ToSqlConversionFailure(Box::new(error))
                             })?,
+                            serde_json::to_string(&run.grill_decisions).map_err(|error| {
+                                rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                            })?,
                             run.grill_response,
                             run.grill_phase.map(grill_phase_as_str),
                         ],
@@ -1122,8 +1138,9 @@ impl SqliteStore {
                     transaction.execute(
                         "UPDATE runs
                          SET transcript = ?1, grill_question_group_json = ?2,
-                             grill_answers_json = ?3, grill_response = ?4
-                         WHERE id = ?5",
+                             grill_answers_json = ?3, grill_decisions_json = ?4,
+                             grill_response = ?5
+                         WHERE id = ?6",
                         params![
                             run.transcript,
                             run.grill_question_group
@@ -1136,6 +1153,9 @@ impl SqliteStore {
                             serde_json::to_string(&run.grill_answers).map_err(|error| {
                                 rusqlite::Error::ToSqlConversionFailure(Box::new(error))
                             })?,
+                            serde_json::to_string(&run.grill_decisions).map_err(|error| {
+                                rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                            })?,
                             run.grill_response,
                             run.id,
                         ],
@@ -1143,9 +1163,14 @@ impl SqliteStore {
                 }
                 Effect::PersistGrillAnswers { run } => {
                     transaction.execute(
-                        "UPDATE runs SET grill_answers_json = ?1 WHERE id = ?2",
+                        "UPDATE runs
+                         SET grill_answers_json = ?1, grill_decisions_json = ?2
+                         WHERE id = ?3",
                         params![
                             serde_json::to_string(&run.grill_answers).map_err(|error| {
+                                rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                            })?,
+                            serde_json::to_string(&run.grill_decisions).map_err(|error| {
                                 rusqlite::Error::ToSqlConversionFailure(Box::new(error))
                             })?,
                             run.id,
@@ -1844,6 +1869,7 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              transcript TEXT NOT NULL DEFAULT '',
              grill_question_group_json TEXT,
              grill_answers_json TEXT NOT NULL DEFAULT '[]',
+             grill_decisions_json TEXT NOT NULL DEFAULT '[]',
              grill_response TEXT,
              grill_phase TEXT
          );
@@ -1993,6 +2019,16 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     {
         connection.execute(
             "ALTER TABLE runs ADD COLUMN grill_answers_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+    if !run_columns.is_empty()
+        && !run_columns
+            .iter()
+            .any(|column| column == "grill_decisions_json")
+    {
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN grill_decisions_json TEXT NOT NULL DEFAULT '[]'",
             [],
         )?;
     }
@@ -2987,6 +3023,7 @@ mod tests {
         );
         assert_eq!(reloaded.runs[0].transcript, "raw Grill transcript");
         assert_eq!(reloaded.runs[0].grill_answers.len(), 2);
+        assert_eq!(reloaded.runs[0].grill_decisions.len(), 2);
         assert_eq!(reloaded.runs[0].state, crate::domain::RunState::Blocked);
         assert_eq!(
             reloaded.runs[0].pane_status,

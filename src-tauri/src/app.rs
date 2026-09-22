@@ -12,18 +12,19 @@ use crate::{
     agent_state::{provision_hooks, read_state_file, state_file_path, AgentStateRecord},
     dependencies::{check_command, resolve_executable, DependencyState, DependencyStatus},
     domain::{
-        activity_tab_view, compose_grill_prompt as build_grill_prompt,
-        compose_run_prompt as build_run_prompt, decide, external_link_view, format_grill_response,
-        home_view, normalize_machine_path, parse_grill_question_group, plan_context_deletion,
-        plan_external_object_deletion, plan_item_deletion, plan_machine_deletion,
-        plan_project_deletion, plan_repository_deletion, plan_reset_local_data, search_items,
-        suggest_untracked_runs, worktree_path, ActivityTabView, AgentKind, AgentPaneObservation,
-        AuditAction, AuditEntry, Context, ContextAttentionDefault, DomainState, Effect, Event,
-        ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
-        ExternalObjectDeletionPlan, ExternalObjectDeletionSummary, ExternalObjectInput,
-        ExternalObjectKind, ExternalProvider, ExternalSnapshot, GrillAnswer, GrillConfiguration,
-        HomeView, Item, ItemDeletionPlan, ItemDeletionSummary, ItemRelation, ItemRelationKind,
-        ItemStatus, ItemView, Machine, MachineDeletionPlan, MachineObservation, MachineTransport,
+        activity_tab_view, compose_grill_continuation_prompt as build_grill_continuation_prompt,
+        compose_grill_prompt as build_grill_prompt, compose_run_prompt as build_run_prompt, decide,
+        external_link_view, format_grill_response, home_view, normalize_machine_path,
+        parse_grill_question_group, plan_context_deletion, plan_external_object_deletion,
+        plan_item_deletion, plan_machine_deletion, plan_project_deletion, plan_repository_deletion,
+        plan_reset_local_data, run_is_active, search_items, suggest_untracked_runs, worktree_path,
+        ActivityTabView, AgentKind, AgentPaneObservation, AuditAction, AuditEntry, Context,
+        ContextAttentionDefault, DomainState, Effect, Event, ExecutionMode, ExecutionProfile,
+        ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
+        ExternalObjectDeletionSummary, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
+        ExternalSnapshot, GrillAnswer, GrillConfiguration, GrillContinuationAction, HomeView, Item,
+        ItemDeletionPlan, ItemDeletionSummary, ItemRelation, ItemRelationKind, ItemStatus,
+        ItemView, Machine, MachineDeletionPlan, MachineObservation, MachineTransport,
         ParentDeletionPlan, Project, ProjectDefaults, Repository, RepositoryDeletionPlan,
         ResetLocalDataPlan, ResetLocalDataSummary, Run, RunCheckout, RunPaneStatus,
         RunPromptSelection, RunState, RunSuggestion, Workspace, WorkspaceRepositoryInput, Worktree,
@@ -1422,7 +1423,7 @@ impl Runtime {
         let mut shared_paths = Vec::new();
         for run in self.state.runs.iter().filter(|run| {
             run.machine_id == machine.id
-                && run.state != RunState::Finished
+                && run_is_active(run)
                 && run.pane_status != RunPaneStatus::Missing
         }) {
             for checkout in &checkouts {
@@ -1697,7 +1698,7 @@ impl Runtime {
                 .iter()
                 .filter(|run| {
                     run.machine_id == machine.id
-                        && run.state != RunState::Finished
+                        && run_is_active(run)
                         && run.pane_status != RunPaneStatus::Missing
                 })
                 .flat_map(|run| {
@@ -2364,6 +2365,44 @@ impl Runtime {
         Ok(submitted_run)
     }
 
+    fn continue_grill(
+        &mut self,
+        run_id: i64,
+        action: GrillContinuationAction,
+    ) -> Result<Run, String> {
+        let run = self
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        let prompt = build_grill_continuation_prompt(&self.state, run_id, action)
+            .map_err(|error| error.to_string())?;
+        let decision = decide(self.state.clone(), Event::ContinueGrill { run_id, action })
+            .map_err(|error| error.to_string())?;
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == run.machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
+        let mut input = prompt.into_bytes();
+        input.push(b'\n');
+        send_input_to_pane(&machine, &run.pane_id, &input)?;
+
+        let continued = decision
+            .state
+            .runs
+            .iter()
+            .find(|candidate| candidate.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        self.commit(decision)?;
+        Ok(continued)
+    }
+
     fn stop_run(&mut self, run_id: i64) -> Result<Run, String> {
         let run = self
             .state
@@ -2662,7 +2701,7 @@ impl Runtime {
             .state
             .runs
             .iter()
-            .filter(|run| run.state != RunState::Finished)
+            .filter(|run| run_is_active(run))
             .map(|run| {
                 format!(
                     "Run #{} is active; stop it before resetting local data.",
@@ -4429,6 +4468,18 @@ pub fn submit_grill_answers(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn continue_grill(
+    run_id: i64,
+    action: GrillContinuationAction,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Run, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .continue_grill(run_id, action)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn terminal_resize(
     terminal_id: String,
     columns: u16,
@@ -5467,6 +5518,7 @@ mod tests {
             transcript: String::new(),
             grill_question_group: None,
             grill_answers: Vec::new(),
+            grill_decisions: Vec::new(),
             grill_response: None,
             grill_phase: None,
         });
@@ -5564,6 +5616,7 @@ mod tests {
             transcript: String::new(),
             grill_question_group: None,
             grill_answers: Vec::new(),
+            grill_decisions: Vec::new(),
             grill_response: None,
             grill_phase: None,
         });
@@ -5618,6 +5671,7 @@ mod tests {
             transcript: String::new(),
             grill_question_group: None,
             grill_answers: Vec::new(),
+            grill_decisions: Vec::new(),
             grill_response: None,
             grill_phase: None,
         });
@@ -5696,6 +5750,7 @@ mod tests {
                 transcript: String::new(),
                 grill_question_group: None,
                 grill_answers: Vec::new(),
+                grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: None,
             },
@@ -5722,6 +5777,7 @@ mod tests {
                 transcript: String::new(),
                 grill_question_group: None,
                 grill_answers: Vec::new(),
+                grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: None,
             },
@@ -5748,6 +5804,7 @@ mod tests {
                 transcript: String::new(),
                 grill_question_group: None,
                 grill_answers: Vec::new(),
+                grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: None,
             },
@@ -5857,6 +5914,10 @@ mod tests {
             transcript: "saved transcript".into(),
             grill_question_group: Some(question_group),
             grill_answers: vec![GrillAnswer {
+                question_number: 1,
+                answer: "Keep it".into(),
+            }],
+            grill_decisions: vec![GrillAnswer {
                 question_number: 1,
                 answer: "Keep it".into(),
             }],

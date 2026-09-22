@@ -4,6 +4,36 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const GRILL_SKILL_SNAPSHOT: &str = include_str!("../../.agents/skills/grilling/SKILL.md");
+pub const TO_SPEC_SKILL_SNAPSHOT: &str = include_str!("../../.agents/skills/to-spec/SKILL.md");
+pub const TO_TICKETS_SKILL_SNAPSHOT: &str =
+    include_str!("../../.agents/skills/to-tickets/SKILL.md");
+pub const IMPLEMENT_SKILL_SNAPSHOT: &str = include_str!("../../.agents/skills/implement/SKILL.md");
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GrillContinuationAction {
+    ToSpec,
+    ToTickets,
+    Implement,
+}
+
+impl GrillContinuationAction {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ToSpec => "to-spec",
+            Self::ToTickets => "to-tickets",
+            Self::Implement => "implement",
+        }
+    }
+
+    pub fn skill_snapshot(self) -> &'static str {
+        match self {
+            Self::ToSpec => TO_SPEC_SKILL_SNAPSHOT,
+            Self::ToTickets => TO_TICKETS_SKILL_SNAPSHOT,
+            Self::Implement => IMPLEMENT_SKILL_SNAPSHOT,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -633,9 +663,21 @@ pub struct Run {
     #[serde(default)]
     pub grill_answers: Vec<GrillAnswer>,
     #[serde(default)]
+    pub grill_decisions: Vec<GrillAnswer>,
+    #[serde(default)]
     pub grill_response: Option<String>,
     #[serde(default)]
     pub grill_phase: Option<GrillPhase>,
+}
+
+pub fn run_is_active(run: &Run) -> bool {
+    run.state != RunState::Finished
+        || (run.execution_profile == ExecutionProfile::Grill
+            && run.grill_phase != Some(GrillPhase::Finished))
+}
+
+pub fn run_is_finished(run: &Run) -> bool {
+    !run_is_active(run)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1673,6 +1715,10 @@ pub enum Event {
     FinishRun {
         run_id: i64,
     },
+    ContinueGrill {
+        run_id: i64,
+        action: GrillContinuationAction,
+    },
     RecordRunTranscript {
         run_id: i64,
         transcript: String,
@@ -1931,7 +1977,7 @@ pub fn plan_item_deletion(
     let active_run_ids = state
         .runs
         .iter()
-        .filter(|run| run.item_id == item_id && run.state != RunState::Finished)
+        .filter(|run| run.item_id == item_id && run_is_active(run))
         .map(|run| run.id)
         .collect::<Vec<_>>();
     let link_ids = state
@@ -2091,9 +2137,10 @@ pub fn plan_machine_deletion(
             })
         })
         .collect::<Result<Vec<_>, DomainError>>()?;
-    let active_run_ids = runs
+    let active_run_ids = state
+        .runs
         .iter()
-        .filter(|run| run.state != RunState::Finished)
+        .filter(|run| run.machine_id == machine_id && run_is_active(run))
         .map(|run| run.id)
         .collect();
 
@@ -2239,9 +2286,13 @@ fn plan_parent_deletion(
             })
         })
         .collect::<Result<Vec<_>, DomainError>>()?;
-    let active_run_ids = runs
+    let active_run_ids = state
+        .runs
         .iter()
-        .filter(|run| run.state != RunState::Finished)
+        .filter(|run| {
+            (item_ids.contains(&run.item_id) || machine_ids.contains(&run.machine_id))
+                && run_is_active(run)
+        })
         .map(|run| run.id)
         .collect::<Vec<_>>();
     let link_ids = state
@@ -2537,6 +2588,11 @@ pub enum DomainError {
     EmptyGrillResponse,
     #[error("Run {run_id} does not exist")]
     RunNotFound { run_id: i64 },
+    #[error("Run {run_id} cannot continue Grill from phase {phase:?}")]
+    GrillContinuationNotAvailable {
+        run_id: i64,
+        phase: Option<GrillPhase>,
+    },
     #[error("Run {run_id} is {state:?}; stop it and wait for Finished state before deleting")]
     RunNotFinished { run_id: i64, state: RunState },
     #[error(
@@ -2899,7 +2955,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let active_run_ids = state
                 .runs
                 .iter()
-                .filter(|run| run.state != RunState::Finished)
+                .filter(|run| run_is_active(run))
                 .map(|run| run.id)
                 .collect::<Vec<_>>();
             if !active_run_ids.is_empty() {
@@ -3698,7 +3754,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .position(|run| run.id == run_id)
                 .ok_or(DomainError::RunNotFound { run_id })?;
             let run_state = state.runs[position].state;
-            if run_state != RunState::Finished {
+            if !run_is_finished(&state.runs[position]) {
                 return Err(DomainError::RunNotFinished {
                     run_id,
                     state: run_state,
@@ -3814,7 +3870,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let mut shared_paths = Vec::new();
             for active_run in state.runs.iter().filter(|run| {
                 run.machine_id == machine_id
-                    && run.state != RunState::Finished
+                    && run_is_active(run)
                     && run.pane_status != RunPaneStatus::Missing
             }) {
                 for checkout in &checkouts {
@@ -3895,6 +3951,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 transcript: String::new(),
                 grill_question_group: None,
                 grill_answers: Vec::new(),
+                grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: None,
             };
@@ -4025,6 +4082,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 transcript: String::new(),
                 grill_question_group: None,
                 grill_answers: Vec::new(),
+                grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: None,
             };
@@ -4104,7 +4162,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             if let Some(run) = state.runs.iter().find(|run| {
                 run.item_id == item_id
                     && run.execution_profile == ExecutionProfile::Grill
-                    && run.state != RunState::Finished
+                    && run_is_active(run)
             }) {
                 return Err(DomainError::ActiveGrillRun {
                     item_id,
@@ -4188,6 +4246,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 transcript: String::new(),
                 grill_question_group: None,
                 grill_answers: Vec::new(),
+                grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: Some(GrillPhase::Starting),
             };
@@ -4309,6 +4368,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 transcript: String::new(),
                 grill_question_group: None,
                 grill_answers: Vec::new(),
+                grill_decisions: Vec::new(),
                 grill_response: None,
                 grill_phase: None,
             };
@@ -4354,6 +4414,33 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             if run.execution_profile == ExecutionProfile::Grill {
                 run.grill_phase = Some(GrillPhase::Finished);
             }
+            let run = run.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRunState { run }],
+            })
+        }
+        Event::ContinueGrill { run_id, action: _ } => {
+            let run = state
+                .runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
+                .ok_or(DomainError::RunNotFound { run_id })?;
+            if run.execution_profile != ExecutionProfile::Grill
+                || run.grill_phase != Some(GrillPhase::AwaitingNextAction)
+                || run.pane_status != RunPaneStatus::Available
+            {
+                return Err(DomainError::GrillContinuationNotAvailable {
+                    run_id,
+                    phase: run.grill_phase,
+                });
+            }
+            run.state = RunState::Working;
+            run.grill_phase = Some(GrillPhase::Working);
+            run.grill_question_group = None;
+            run.grill_answers.clear();
+            run.grill_response = None;
             let run = run.clone();
 
             Ok(Decision {
@@ -4422,6 +4509,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 }
             }
             format_grill_response(&normalized_answers)?;
+            run.grill_decisions
+                .extend(normalized_answers.iter().cloned());
             run.grill_answers = normalized_answers;
             let run = run.clone();
 
@@ -4459,7 +4548,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .ok_or(DomainError::RunNotFound { run_id })?;
             run.pane_status = status;
             if run.execution_profile == ExecutionProfile::Grill {
-                if status != RunPaneStatus::Available && run.state != RunState::Finished {
+                if status != RunPaneStatus::Available && run_is_active(run) {
                     run.grill_phase = Some(GrillPhase::RecoverablePaneLoss);
                 } else if status == RunPaneStatus::Available
                     && (run.grill_phase.is_none()
@@ -5402,6 +5491,82 @@ pub fn compose_grill_prompt(
     ))
 }
 
+pub fn compose_grill_continuation_prompt(
+    state: &DomainState,
+    run_id: i64,
+    action: GrillContinuationAction,
+) -> Result<String, DomainError> {
+    let run = state
+        .runs
+        .iter()
+        .find(|run| run.id == run_id)
+        .ok_or(DomainError::RunNotFound { run_id })?;
+    if run.execution_profile != ExecutionProfile::Grill {
+        return Err(DomainError::NotGrillRun { run_id });
+    }
+    let item = state
+        .items
+        .iter()
+        .find(|item| item.id == run.item_id)
+        .ok_or(DomainError::ItemNotFound {
+            item_id: run.item_id,
+        })?;
+    let mut context = vec![format!("Item objective:\n{}", item.title)];
+    if !item.notes.trim().is_empty() {
+        context.push(format!("Item notes:\n{}", item.notes.trim()));
+    }
+    for link in state.links.iter().filter(|link| link.item_id == item.id) {
+        if let Some(object) = state
+            .external_objects
+            .iter()
+            .find(|object| object.id == link.external_object_id)
+        {
+            let title = state
+                .snapshots
+                .iter()
+                .find(|snapshot| snapshot.external_object_id == object.id)
+                .map(|snapshot| snapshot.title.as_str())
+                .unwrap_or("Linked external object");
+            context.push(format!("Linked source:\n{title}\n{}", object.canonical_url));
+        }
+    }
+    let decisions = if run.grill_decisions.is_empty() {
+        run.grill_response
+            .as_deref()
+            .filter(|response| !response.trim().is_empty())
+            .map(str::to_owned)
+            .or_else(|| format_grill_response(&run.grill_answers).ok())
+            .unwrap_or_else(|| "No structured Grill decisions were recorded.".into())
+    } else {
+        format_recorded_grill_decisions(&run.grill_decisions)
+    };
+
+    Ok(format!(
+        "Continue the existing Grill Run in the same Run and Pane.\n\nSelected downstream action: {}\n\nDownstream skill snapshot (inject this content explicitly; do not rely on the agent having the skill installed):\n{}\n\nRelevant Item context:\n{}\n\nGrill transcript:\n{}\n\nRecorded Grill decisions:\n{}\n\nContinuation instruction:\nApply the selected {} skill to the Item using the transcript and decisions above. Keep working in the same Workspace and working directory. Ask any confirmation questions using the same ❓ and ➡️ markers as one grouped frontier. Wait for an explicit user decision to finish or stop; never mark the Item Done automatically.",
+        action.as_str(),
+        action.skill_snapshot(),
+        context.join("\n\n"),
+        if run.transcript.trim().is_empty() {
+            "No transcript was captured yet."
+        } else {
+            run.transcript.as_str()
+        },
+        decisions,
+        action.as_str(),
+    ))
+}
+
+fn format_recorded_grill_decisions(decisions: &[GrillAnswer]) -> String {
+    decisions
+        .iter()
+        .map(|decision| {
+            let answer = decision.answer.trim().replace('\n', "\n   ");
+            format!("Q{}: {answer}", decision.question_number)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn clean_name<E>(name: String, empty_error: E) -> Result<String, E> {
     let name = name.trim();
     if name.is_empty() {
@@ -6337,5 +6502,198 @@ mod grill_contract_tests {
             Some(GrillPhase::Finished)
         );
         assert_eq!(finished.state.items[0].status, ItemStatus::Active);
+    }
+
+    #[test]
+    fn a_completed_grill_stays_active_until_the_user_finishes_it() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let awaiting = decide(
+            started.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the hook completion should enter the downstream phase");
+
+        assert_eq!(awaiting.state.runs[0].state, RunState::Finished);
+        assert_eq!(
+            awaiting.state.runs[0].grill_phase,
+            Some(GrillPhase::AwaitingNextAction)
+        );
+        let error = decide(awaiting.state, start_event(GrillConfiguration::default()))
+            .expect_err("an awaiting Grill still occupies the Item");
+        assert!(matches!(
+            error,
+            DomainError::ActiveGrillRun { item_id: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn downstream_prompt_contains_the_selected_skill_item_context_transcript_and_decisions() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let transcript = decide(
+            started.state,
+            Event::RecordRunTranscript {
+                run_id: 1,
+                transcript: "❓ Q1: Which decision should we keep?".into(),
+                question_group: parse_grill_question_group("❓ Q1: Which decision should we keep?"),
+            },
+        )
+        .expect("the Grill transcript should be recorded");
+        let answered = decide(
+            transcript.state,
+            Event::RecordGrillAnswers {
+                run_id: 1,
+                answers: vec![GrillAnswer {
+                    question_number: 1,
+                    answer: "Keep the reversible design".into(),
+                }],
+            },
+        )
+        .expect("the decision should be recorded");
+        let responded = decide(
+            answered.state,
+            Event::RecordGrillResponse {
+                run_id: 1,
+                response: "1. Keep the reversible design".into(),
+            },
+        )
+        .expect("the grouped response should be recorded");
+        let awaiting = decide(
+            responded.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the Grill should await a downstream action");
+
+        for action in [
+            GrillContinuationAction::ToSpec,
+            GrillContinuationAction::ToTickets,
+            GrillContinuationAction::Implement,
+        ] {
+            let prompt = compose_grill_continuation_prompt(&awaiting.state, 1, action)
+                .expect("the downstream prompt should compose");
+            assert!(prompt.contains(action.skill_snapshot()));
+            assert!(prompt.contains("Decide the next architecture"));
+            assert!(prompt.contains("The decision must stay reversible."));
+            assert!(prompt.contains("❓ Q1: Which decision should we keep?"));
+            assert!(prompt.contains("Q1: Keep the reversible design"));
+            assert!(prompt.contains(action.as_str()));
+            assert!(prompt.contains("same Run and Pane"));
+        }
+    }
+
+    #[test]
+    fn selecting_a_downstream_skill_reuses_the_run_and_allows_grouped_questions_again() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let awaiting = decide(
+            started.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the Grill should await a downstream action");
+        let continued = decide(
+            awaiting.state,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToSpec,
+            },
+        )
+        .expect("to-spec should continue the existing Run");
+        assert_eq!(continued.state.runs[0].id, 1);
+        assert_eq!(continued.state.runs[0].state, RunState::Working);
+        assert_eq!(
+            continued.state.runs[0].grill_phase,
+            Some(GrillPhase::Working)
+        );
+        assert_eq!(continued.state.runs[0].pane_id, "%1");
+        assert_eq!(
+            continued.state.runs[0].working_directory,
+            "/tmp/mission-manager"
+        );
+        assert!(continued.state.runs[0].grill_question_group.is_none());
+        assert!(continued.state.runs[0].grill_response.is_none());
+
+        let group = parse_grill_question_group("❓ Q1: Confirm the specification?")
+            .expect("the downstream skill should use the same parser");
+        let waiting = decide(
+            continued.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Blocked,
+            },
+        )
+        .expect("the downstream hook should report a question");
+        let recorded = decide(
+            waiting.state,
+            Event::RecordRunTranscript {
+                run_id: 1,
+                transcript: "downstream confirmation".into(),
+                question_group: Some(group),
+            },
+        )
+        .expect("the downstream question group should be recorded");
+        assert_eq!(
+            recorded.state.runs[0].grill_phase,
+            Some(GrillPhase::WaitingForAnswers)
+        );
+        assert_eq!(recorded.state.runs[0].session_name, "mission-item-1-run-1");
+    }
+
+    #[test]
+    fn downstream_action_requires_the_completed_grill_and_an_available_pane() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let error = decide(
+            started.state,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::Implement,
+            },
+        )
+        .expect_err("a Grill still asking questions cannot jump downstream");
+        assert!(matches!(
+            error,
+            DomainError::GrillContinuationNotAvailable { run_id: 1, .. }
+        ));
+
+        let awaiting = decide(
+            decide(state(), start_event(GrillConfiguration::default()))
+                .expect("the Grill should start")
+                .state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the Grill should await a downstream action");
+        let missing = decide(
+            awaiting.state,
+            Event::SetRunPaneStatus {
+                run_id: 1,
+                status: RunPaneStatus::Missing,
+            },
+        )
+        .expect("Pane loss should be recoverable");
+        let error = decide(
+            missing.state,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::Implement,
+            },
+        )
+        .expect_err("a missing Pane cannot receive a continuation");
+        assert!(matches!(
+            error,
+            DomainError::GrillContinuationNotAvailable { run_id: 1, .. }
+        ));
     }
 }

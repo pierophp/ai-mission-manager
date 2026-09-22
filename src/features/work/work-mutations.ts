@@ -75,6 +75,10 @@ export const workActions = {
   finishRun: (runId: number) => () => workAdapter.finishRun(runId),
   submitGrillAnswers: (runId: number, answers: Parameters<typeof workAdapter.submitGrillAnswers>[1]) =>
     () => workAdapter.submitGrillAnswers(runId, answers),
+  continueGrill: (
+    runId: number,
+    action: Parameters<typeof workAdapter.continueGrill>[1],
+  ) => () => workAdapter.continueGrill(runId, action),
   deleteRun: (runId: number) => () => workAdapter.deleteRun(runId),
   prepareItemDeletion: (itemId: number) =>
     () => workAdapter.prepareItemDeletion(itemId),

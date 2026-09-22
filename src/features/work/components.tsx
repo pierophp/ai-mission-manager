@@ -68,6 +68,7 @@ import type {
   WorkspaceRepositoryInput,
 } from "../../runtime/types";
 import type { PaneTab } from "../../runtime/terminal-types";
+import type { GrillContinuationAction } from "../../runtime/execution-types";
 import {
   externalObjectKindLabel,
   formatSnapshotAge,
@@ -85,6 +86,13 @@ const relationKinds: ItemRelationKind[] = ["Blocks", "BlockedBy", "RelatedTo"];
 function displayItemIdentifier(identifier: string): string {
   const match = /^MC-(\d+)$/.exec(identifier);
   return match ? `#${match[1]}` : identifier;
+}
+
+function isRunFinished(run: Run): boolean {
+  return (
+    run.state === "finished" &&
+    (run.execution_profile !== "grill" || run.grill_phase === "finished")
+  );
 }
 
 type WorkConfirmation = {
@@ -256,7 +264,7 @@ export function ItemCard({
     (repository) => repository.project_id === view.item.project_id,
   );
   const activeGrillRun = view.runs.find(
-    (run) => run.execution_profile === "grill" && run.state !== "finished",
+    (run) => run.execution_profile === "grill" && !isRunFinished(run),
   );
   const selectedGrillCatalog = grillModelCatalog.find(
     (catalog) => catalog.agent === grillAgent,
@@ -378,6 +386,13 @@ export function ItemCard({
     setGrillPromptPreview("");
   }
 
+  async function handleContinueGrill(
+    run: Run,
+    action: GrillContinuationAction,
+  ) {
+    await saveItem(workActions.continueGrill(run.id, action));
+  }
+
   async function saveItem<TData>(
     update: WorkAction<TData>,
     invalidate = true,
@@ -476,7 +491,7 @@ export function ItemCard({
   }
 
   function handleDeleteRun(run: Run) {
-    if (run.state !== "finished") return;
+    if (!isRunFinished(run)) return;
     setConfirmation({
       title: `Delete finished Run #${run.id}?`,
       description: "This removes the Run from history and cannot be undone.",
@@ -619,7 +634,7 @@ export function ItemCard({
   function handleItemStatusChange(nextStatus: ItemStatus) {
     if (nextStatus === "Done" && view.item.status !== "Done") {
       const activeRuns = view.runs.filter(
-        (run) => run.state !== "finished" && run.pane_status !== "missing",
+        (run) => !isRunFinished(run) && run.pane_status !== "missing",
       );
       if (activeRuns.length > 0) {
         setConfirmation({
@@ -2096,7 +2111,7 @@ export function ItemCard({
                       </span>
                     )}
                     {run.execution_profile === "grill" &&
-                      run.state === "blocked" &&
+                      run.grill_phase === "waitingForAnswers" &&
                       !run.grill_response && (
                         <GrillQuestionFlow
                           run={run}
@@ -2105,6 +2120,43 @@ export function ItemCard({
                             saveItem(workActions.submitGrillAnswers(run.id, answers))
                           }
                         />
+                      )}
+                    {run.execution_profile === "grill" &&
+                      run.grill_phase === "awaitingNextAction" && (
+                        <div className="grid gap-2 rounded-md border border-primary/30 bg-primary/5 p-3">
+                          <div>
+                            <strong className="block text-sm">
+                              Grill completed · choose the next action
+                            </strong>
+                            <span className="text-xs text-muted-foreground">
+                              Each action continues this Run in the same Pane and working directory.
+                              Finish or stop remains explicit.
+                            </span>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            {([
+                              ["to-spec", "to-spec"],
+                              ["to-tickets", "to-tickets"],
+                              ["implement", "implement"],
+                            ] as const).map(([action, label]) => (
+                              <Button
+                                key={action}
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                disabled={isSaving || run.pane_status !== "available"}
+                                onClick={() => void handleContinueGrill(run, action)}
+                              >
+                                {label}
+                              </Button>
+                            ))}
+                          </div>
+                          {run.pane_status !== "available" && (
+                            <span className="text-xs text-destructive">
+                              Reconnect the exact Pane before continuing this Run.
+                            </span>
+                          )}
+                        </div>
                       )}
                     {run.workspace_id !== null && (
                       <div className="flex flex-wrap gap-2">
@@ -2136,7 +2188,7 @@ export function ItemCard({
                         >
                           Open in Terminal
                         </Button>
-                        {run.state !== "finished" &&
+                        {!isRunFinished(run) &&
                           run.pane_status !== "missing" && (
                             <Button
                               type="button"
@@ -2148,7 +2200,7 @@ export function ItemCard({
                               Stop Run
                             </Button>
                           )}
-                        {run.state !== "finished" && (
+                        {!isRunFinished(run) && (
                           <Button
                             type="button"
                             size="sm"
@@ -2159,7 +2211,7 @@ export function ItemCard({
                             Finish Run
                           </Button>
                         )}
-                        {run.state === "finished" && (
+                        {isRunFinished(run) && (
                           <Button
                             type="button"
                             size="sm"

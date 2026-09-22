@@ -26,6 +26,7 @@ import type {
   WorkspaceRepositoryInput,
   Worktree,
 } from "../types";
+import type { GrillContinuationAction } from "../execution-types";
 import { command } from "./tauri";
 
 export const workAdapter = {
@@ -140,6 +141,8 @@ export const workAdapter = {
   finishRun: (runId: number) => command<Run>("finish_run", { runId }),
   submitGrillAnswers: (runId: number, answers: GrillAnswer[]) =>
     command<Run>("submit_grill_answers", { runId, answers }),
+  continueGrill: (runId: number, action: GrillContinuationAction) =>
+    command<Run>("continue_grill", { runId, action }),
   deleteRun: (runId: number) =>
     command<{ runId: number }>("delete_run", { runId, confirmed: true }),
   prepareItemDeletion: (itemId: number) =>
