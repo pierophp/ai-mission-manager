@@ -7,6 +7,13 @@ export type ExecutionProfile =
   | "grill";
 export type RunState = "unknown" | "working" | "blocked" | "finished";
 export type RunPaneStatus = "unknown" | "available" | "missing";
+export type GrillPhase =
+  | "starting"
+  | "working"
+  | "waitingForAnswers"
+  | "awaitingNextAction"
+  | "recoverablePaneLoss"
+  | "finished";
 
 export type RunCheckout = {
   repositoryId: number;
@@ -61,6 +68,7 @@ export type Run = {
   grill_question_group: GrillQuestionGroup | null;
   grill_answers: GrillAnswer[];
   grill_response: string | null;
+  grill_phase: GrillPhase | null;
 };
 
 export type RunSuggestion = {

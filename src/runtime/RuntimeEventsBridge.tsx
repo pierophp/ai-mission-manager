@@ -23,6 +23,7 @@ export function RuntimeEventsBridge() {
   const pollExternalObjects = pollMutation.mutateAsync;
 
   useEffect(() => {
+    void reconcileRuns().catch(() => undefined);
     const interval = window.setInterval(() => {
       void reconcileRuns().catch(() => undefined);
     }, 3_000);

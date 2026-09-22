@@ -71,6 +71,7 @@ import type { PaneTab } from "../../runtime/terminal-types";
 import {
   externalObjectKindLabel,
   formatSnapshotAge,
+  grillPhaseLabel,
   paneTabForRun,
   relationKindLabel,
   relationshipLabel,
@@ -457,6 +458,19 @@ export function ItemCard({
       onConfirm: () => {
         setConfirmation(undefined);
         void saveItem(workActions.stopRun(run.id));
+      },
+    });
+  }
+
+  function handleFinishRun(run: Run) {
+    setConfirmation({
+      title: `Finish Run #${run.id}?`,
+      description:
+        "This records an explicit Run completion, keeps its transcript and answers in history, and leaves the Item status unchanged.",
+      confirmLabel: "Finish Run",
+      onConfirm: () => {
+        setConfirmation(undefined);
+        void saveItem(workActions.finishRun(run.id));
       },
     });
   }
@@ -2037,6 +2051,9 @@ export function ItemCard({
                           (machine) => machine.id === run.machine_id,
                         )?.name ?? "Machine #" + run.machine_id}{" "}
                         · {runStateLabel(run.state, run.execution_profile === "grill")}
+                        {run.execution_profile === "grill" && run.grill_phase
+                          ? ` · ${grillPhaseLabel(run.grill_phase)}`
+                          : ""}
                         {run.pane_status === "available" && " · Pane available"}
                       </span>
                     </div>
@@ -2055,9 +2072,22 @@ export function ItemCard({
                     <span className="text-xs text-muted-foreground">
                       Session {run.session_name} · Pane {run.pane_id}
                     </span>
-                    {run.pane_status === "missing" && (
+                    {run.execution_profile === "grill" && run.transcript && (
+                      <details className="rounded-md border bg-background/60 p-2 text-xs">
+                        <summary className="cursor-pointer font-medium">
+                          Retained Grill transcript
+                        </summary>
+                        <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap font-mono text-muted-foreground">
+                          {run.transcript}
+                        </pre>
+                      </details>
+                    )}
+                    {(run.pane_status === "missing" ||
+                      run.grill_phase === "recoverablePaneLoss") && (
                       <span className="text-xs text-destructive">
-                        Pane missing. Decide whether to start another Run.
+                        Pane unavailable. This Run is preserved and recoverable;
+                        reconnect the exact Pane or use the terminal escape hatch
+                        when the runtime returns.
                       </span>
                     )}
                     {run.pane_status === "unknown" && (
@@ -2082,18 +2112,21 @@ export function ItemCard({
                           type="button"
                           size="sm"
                           variant="outline"
-                          disabled={isSaving || run.pane_status === "missing"}
+                          disabled={isSaving}
                           onClick={() =>
                             onOpenTerminal(run.id, paneTabForRun(run))
                           }
                         >
-                          Open embedded terminal
+                          {run.pane_status === "missing" ||
+                          run.grill_phase === "recoverablePaneLoss"
+                            ? "Reconnect embedded terminal"
+                            : "Open embedded terminal"}
                         </Button>
                         <Button
                           type="button"
                           size="sm"
                           variant="outline"
-                          disabled={isSaving || run.pane_status === "missing"}
+                          disabled={isSaving}
                           onClick={() =>
                             void saveItem(
                               workActions.openExternalTerminal(run.id),
@@ -2115,6 +2148,17 @@ export function ItemCard({
                               Stop Run
                             </Button>
                           )}
+                        {run.state !== "finished" && (
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            disabled={isSaving}
+                            onClick={() => void handleFinishRun(run)}
+                          >
+                            Finish Run
+                          </Button>
+                        )}
                         {run.state === "finished" && (
                           <Button
                             type="button"

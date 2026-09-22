@@ -2188,6 +2188,27 @@ impl Runtime {
                 return Err(error);
             }
         };
+        if run.pane_status != RunPaneStatus::Available {
+            let decision = decide(
+                self.state.clone(),
+                Event::SetRunPaneStatus {
+                    run_id,
+                    status: RunPaneStatus::Available,
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            if let Err(error) = self.commit(decision) {
+                let _ = connection.close();
+                return Err(error);
+            }
+        }
+        if run.execution_profile == ExecutionProfile::Grill {
+            if let Err(error) = self.capture_grill_transcript(run_id) {
+                eprintln!(
+                    "Could not capture transcript while reopening Grill Run {run_id}: {error}"
+                );
+            }
+        }
         self.terminal_connections
             .insert(terminal_id.clone(), connection);
         Ok(TerminalAttachment {
@@ -2381,6 +2402,20 @@ impl Runtime {
         Ok(stopped)
     }
 
+    fn finish_run(&mut self, run_id: i64) -> Result<Run, String> {
+        let decision = decide(self.state.clone(), Event::FinishRun { run_id })
+            .map_err(|error| error.to_string())?;
+        let finished = decision
+            .state
+            .runs
+            .iter()
+            .find(|candidate| candidate.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        self.commit_with_audit(decision, &[AuditAction::RunFinished { run_id }])?;
+        Ok(finished)
+    }
+
     fn open_external_terminal(&self, run_id: i64) -> Result<(), String> {
         let run = self
             .state
@@ -2484,7 +2519,19 @@ impl Runtime {
                     Ok(_) | Err(_) => RunPaneStatus::Missing,
                 }
             };
-            if pane_status == run.pane_status {
+            let phase_needs_recovery =
+                run.execution_profile == ExecutionProfile::Grill && run.grill_phase.is_none();
+            if pane_status == run.pane_status && !phase_needs_recovery {
+                if pane_status == RunPaneStatus::Available
+                    && run.execution_profile == ExecutionProfile::Grill
+                {
+                    if let Err(error) = self.capture_grill_transcript(run.id) {
+                        eprintln!(
+                            "Could not reconcile transcript for Grill Run {}: {error}",
+                            run.id
+                        );
+                    }
+                }
                 continue;
             }
             let decision = decide(
@@ -2496,6 +2543,16 @@ impl Runtime {
             )
             .map_err(|error| error.to_string())?;
             self.commit(decision)?;
+            if pane_status == RunPaneStatus::Available
+                && run.execution_profile == ExecutionProfile::Grill
+            {
+                if let Err(error) = self.capture_grill_transcript(run.id) {
+                    eprintln!(
+                        "Could not reconcile transcript for Grill Run {}: {error}",
+                        run.id
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -4408,6 +4465,14 @@ pub fn stop_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, St
         .stop_run(run_id)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn finish_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .finish_run(run_id)
+}
+
 #[tauri::command]
 pub fn list_audit_history(state: State<'_, Mutex<Runtime>>) -> Result<Vec<AuditEntry>, String> {
     state
@@ -5136,6 +5201,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    use crate::domain::{GrillPhase, GRILL_SKILL_SNAPSHOT};
     use crate::persistence::SqliteStore;
 
     #[test]
@@ -5402,6 +5468,7 @@ mod tests {
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_response: None,
+            grill_phase: None,
         });
 
         let item = runtime
@@ -5498,6 +5565,7 @@ mod tests {
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_response: None,
+            grill_phase: None,
         });
 
         let stopped = runtime
@@ -5551,6 +5619,7 @@ mod tests {
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_response: None,
+            grill_phase: None,
         });
 
         let error = runtime
@@ -5628,6 +5697,7 @@ mod tests {
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_response: None,
+                grill_phase: None,
             },
             Run {
                 id: 2,
@@ -5653,6 +5723,7 @@ mod tests {
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_response: None,
+                grill_phase: None,
             },
             Run {
                 id: 3,
@@ -5678,6 +5749,7 @@ mod tests {
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_response: None,
+                grill_phase: None,
             },
         ]);
 
@@ -5699,6 +5771,126 @@ mod tests {
             "-t",
             &session,
         ]);
+    }
+
+    #[test]
+    fn grill_reconciliation_restores_transcript_and_keeps_answers_across_pane_loss() {
+        let directory = tempdir().expect("temporary directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let socket = format!("mission-manager-grill-reconcile-{}", std::process::id());
+        let session = format!("grill-reconcile-{}", std::process::id());
+        run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "new-session",
+            "-d",
+            "-s",
+            &session,
+            "-c",
+            directory
+                .path()
+                .to_str()
+                .expect("temporary path should be valid"),
+        ]);
+        let pane_id = run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "display-message",
+            "-p",
+            "-t",
+            &session,
+            "#{pane_id}",
+        ]);
+        run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "send-keys",
+            "-t",
+            &pane_id,
+            "printf '\\342\\235\\223 Q1: Keep this decision?\\n'",
+            "Enter",
+        ]);
+
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime.state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Mac".into(),
+            socket_name: socket.clone(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+        let question_group = parse_grill_question_group("❓ Q1: Keep this decision?")
+            .expect("the saved Grill question should parse");
+        runtime.state.runs.push(Run {
+            id: 1,
+            item_id: 1,
+            machine_id: 1,
+            agent: AgentKind::Claude,
+            execution_profile: ExecutionProfile::Grill,
+            model: Some("claude-sonnet-4-5".into()),
+            effort: Some("high".into()),
+            skill_snapshot: Some(GRILL_SKILL_SNAPSHOT.into()),
+            prompt: "Recover this Grill".into(),
+            working_directory: directory.path().to_string_lossy().into_owned(),
+            session_name: session.clone(),
+            pane_id: pane_id.clone(),
+            started_at: 1,
+            state: RunState::Working,
+            pane_status: RunPaneStatus::Unknown,
+            workspace_id: Some(1),
+            repository_id: Some(1),
+            worktree_id: None,
+            direct_checkouts: vec![RunCheckout {
+                repository_id: 1,
+                path: directory.path().to_string_lossy().into_owned(),
+                branch: "main".into(),
+                is_dirty: false,
+            }],
+            transcript: "saved transcript".into(),
+            grill_question_group: Some(question_group),
+            grill_answers: vec![GrillAnswer {
+                question_number: 1,
+                answer: "Keep it".into(),
+            }],
+            grill_response: Some("1. Keep it".into()),
+            grill_phase: Some(GrillPhase::Working),
+        });
+
+        runtime
+            .reconcile_runs()
+            .expect("the active Grill should reconcile");
+        let recovered = &runtime.state.runs[0];
+        assert_eq!(recovered.pane_status, RunPaneStatus::Available);
+        assert_eq!(recovered.grill_phase, Some(GrillPhase::Working));
+        assert!(recovered.transcript.contains("Keep this decision?"));
+        assert_eq!(recovered.grill_answers.len(), 1);
+        assert_eq!(recovered.grill_response.as_deref(), Some("1. Keep it"));
+
+        run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "kill-session",
+            "-t",
+            &session,
+        ]);
+        runtime
+            .reconcile_runs()
+            .expect("Pane loss should remain recoverable");
+        let missing = &runtime.state.runs[0];
+        assert_eq!(missing.pane_status, RunPaneStatus::Missing);
+        assert_eq!(missing.grill_phase, Some(GrillPhase::RecoverablePaneLoss));
+        assert_eq!(missing.grill_answers.len(), 1);
+        assert!(missing.transcript.contains("Keep this decision?"));
     }
 
     #[cfg(unix)]

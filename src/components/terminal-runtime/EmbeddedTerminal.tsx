@@ -220,6 +220,14 @@ export function EmbeddedTerminal({
       {terminalError && (
         <Alert variant="destructive">
           <AlertDescription>{terminalError}</AlertDescription>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            onClick={() => void attachPaneRef.current?.(activePaneRef.current)}
+          >
+            Retry Pane connection
+          </Button>
         </Alert>
       )}
     </section>

@@ -7,8 +7,8 @@ use crate::domain::{
     Activity, AgentKind, AuditAction, AuditEntry, Context, ContextAttentionDefault, DomainState,
     Effect, ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalMetadata,
     ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, GrillAnswer,
-    GrillConfiguration, GrillQuestionGroup, Item, ItemRelation, ItemRelationKind, ItemStatus, Link,
-    Machine, MachineObservation, Project, ProjectDefaults, Reminder, Repository,
+    GrillConfiguration, GrillPhase, GrillQuestionGroup, Item, ItemRelation, ItemRelationKind,
+    ItemStatus, Link, Machine, MachineObservation, Project, ProjectDefaults, Reminder, Repository,
     RepositoryLocation, Run, RunPaneStatus, RunState, Workspace, WorkspacePreparationState,
     WorkspaceRepository, Worktree,
 };
@@ -43,6 +43,8 @@ pub enum StoreError {
     InvalidRunState(String),
     #[error("invalid Run Pane status in database: {0}")]
     InvalidRunPaneStatus(String),
+    #[error("invalid Grill phase in database: {0}")]
+    InvalidGrillPhase(String),
     #[error("invalid Workspace preparation state in database: {0}")]
     InvalidWorkspacePreparationState(String),
     #[error("invalid Machine transport in database: {0}")]
@@ -389,7 +391,7 @@ impl SqliteStore {
                         machine_id, agent, execution_profile, model, effort, skill_snapshot,
                         prompt, working_directory, session_name, pane_id, started_at, state,
                         pane_status, direct_checkouts_json, transcript,
-                        grill_question_group_json, grill_answers_json, grill_response
+                        grill_question_group_json, grill_answers_json, grill_response, grill_phase
                  FROM runs
                  ORDER BY id",
             )?;
@@ -399,6 +401,7 @@ impl SqliteStore {
                 let direct_checkouts_json: String = row.get(18)?;
                 let grill_question_group_json: Option<String> = row.get(20)?;
                 let grill_answers_json: String = row.get(21)?;
+                let grill_phase: Option<String> = row.get(23)?;
                 let grill_question_group = grill_question_group_json
                     .map(|json| {
                         serde_json::from_str::<GrillQuestionGroup>(&json).map_err(|error| {
@@ -418,6 +421,16 @@ impl SqliteStore {
                         Box::new(error),
                     )
                 })?;
+                let grill_phase = grill_phase
+                    .map(|phase| parse_grill_phase(&phase))
+                    .transpose()
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            23,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
                 Ok(Run {
                     id: row.get(0)?,
                     item_id: row.get(1)?,
@@ -478,6 +491,7 @@ impl SqliteStore {
                     grill_question_group,
                     grill_answers,
                     grill_response: row.get(22)?,
+                    grill_phase,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -1049,8 +1063,9 @@ impl SqliteStore {
                             execution_profile, model, effort, skill_snapshot,
                             prompt, working_directory, session_name, pane_id,
                             started_at, state, pane_status, direct_checkouts_json,
-                            transcript, grill_question_group_json, grill_answers_json, grill_response)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                            transcript, grill_question_group_json, grill_answers_json, grill_response,
+                            grill_phase)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
                         params![
                             run.id,
                             run.item_id,
@@ -1085,6 +1100,7 @@ impl SqliteStore {
                                 rusqlite::Error::ToSqlConversionFailure(Box::new(error))
                             })?,
                             run.grill_response,
+                            run.grill_phase.map(grill_phase_as_str),
                         ],
                     )?;
                     transaction.execute(
@@ -1094,8 +1110,12 @@ impl SqliteStore {
                 }
                 Effect::PersistRunState { run } => {
                     transaction.execute(
-                        "UPDATE runs SET state = ?1 WHERE id = ?2",
-                        params![run_state_as_str(run.state), run.id],
+                        "UPDATE runs SET state = ?1, grill_phase = ?2 WHERE id = ?3",
+                        params![
+                            run_state_as_str(run.state),
+                            run.grill_phase.map(grill_phase_as_str),
+                            run.id
+                        ],
                     )?;
                 }
                 Effect::PersistRunTranscript { run } => {
@@ -1140,8 +1160,12 @@ impl SqliteStore {
                 }
                 Effect::PersistRunPaneStatus { run } => {
                     transaction.execute(
-                        "UPDATE runs SET pane_status = ?1 WHERE id = ?2",
-                        params![run_pane_status_as_str(run.pane_status), run.id],
+                        "UPDATE runs SET pane_status = ?1, grill_phase = ?2 WHERE id = ?3",
+                        params![
+                            run_pane_status_as_str(run.pane_status),
+                            run.grill_phase.map(grill_phase_as_str),
+                            run.id
+                        ],
                     )?;
                 }
                 Effect::RemoveRepository { repository_id } => {
@@ -1820,7 +1844,8 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              transcript TEXT NOT NULL DEFAULT '',
              grill_question_group_json TEXT,
              grill_answers_json TEXT NOT NULL DEFAULT '[]',
-             grill_response TEXT
+             grill_response TEXT,
+             grill_phase TEXT
          );
          CREATE INDEX IF NOT EXISTS runs_by_item
              ON runs (item_id, id);
@@ -1973,6 +1998,9 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     }
     if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "grill_response") {
         connection.execute("ALTER TABLE runs ADD COLUMN grill_response TEXT", [])?;
+    }
+    if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "grill_phase") {
+        connection.execute("ALTER TABLE runs ADD COLUMN grill_phase TEXT", [])?;
     }
     if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "repository_id") {
         connection.execute("ALTER TABLE runs ADD COLUMN repository_id INTEGER", [])?;
@@ -2427,6 +2455,29 @@ fn parse_run_pane_status(status: &str) -> Result<RunPaneStatus, StoreError> {
     }
 }
 
+fn grill_phase_as_str(phase: GrillPhase) -> &'static str {
+    match phase {
+        GrillPhase::Starting => "starting",
+        GrillPhase::Working => "working",
+        GrillPhase::WaitingForAnswers => "waiting_for_answers",
+        GrillPhase::AwaitingNextAction => "awaiting_next_action",
+        GrillPhase::RecoverablePaneLoss => "recoverable_pane_loss",
+        GrillPhase::Finished => "finished",
+    }
+}
+
+fn parse_grill_phase(phase: &str) -> Result<GrillPhase, StoreError> {
+    match phase {
+        "starting" => Ok(GrillPhase::Starting),
+        "working" => Ok(GrillPhase::Working),
+        "waiting_for_answers" => Ok(GrillPhase::WaitingForAnswers),
+        "awaiting_next_action" => Ok(GrillPhase::AwaitingNextAction),
+        "recoverable_pane_loss" => Ok(GrillPhase::RecoverablePaneLoss),
+        "finished" => Ok(GrillPhase::Finished),
+        other => Err(StoreError::InvalidGrillPhase(other.into())),
+    }
+}
+
 fn machine_observation_as_str(observation: MachineObservation) -> &'static str {
     match observation {
         MachineObservation::Unknown => "unknown",
@@ -2529,7 +2580,7 @@ mod tests {
 
     use crate::domain::{
         compose_grill_prompt, decide, format_grill_response, parse_grill_question_group, AgentKind,
-        Event, GrillAnswer, GrillConfiguration, MachineTransport, RunCheckout,
+        Event, GrillAnswer, GrillConfiguration, GrillPhase, MachineTransport, RunCheckout,
         WorkspaceRepositoryInput, GRILL_SKILL_SNAPSHOT,
     };
 
@@ -2903,6 +2954,22 @@ mod tests {
                 response,
             },
         );
+        state = apply_event(
+            &mut store,
+            state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: crate::domain::RunState::Blocked,
+            },
+        );
+        state = apply_event(
+            &mut store,
+            state,
+            Event::SetRunPaneStatus {
+                run_id: 1,
+                status: crate::domain::RunPaneStatus::Missing,
+            },
+        );
 
         let reloaded = store.load_state().expect("persisted state should load");
         assert_eq!(reloaded, state);
@@ -2920,6 +2987,15 @@ mod tests {
         );
         assert_eq!(reloaded.runs[0].transcript, "raw Grill transcript");
         assert_eq!(reloaded.runs[0].grill_answers.len(), 2);
+        assert_eq!(reloaded.runs[0].state, crate::domain::RunState::Blocked);
+        assert_eq!(
+            reloaded.runs[0].pane_status,
+            crate::domain::RunPaneStatus::Missing
+        );
+        assert_eq!(
+            reloaded.runs[0].grill_phase,
+            Some(GrillPhase::RecoverablePaneLoss)
+        );
         assert_eq!(
             reloaded.runs[0].grill_response.as_deref(),
             Some("1. A. Keep it\n2. Document the migration path")

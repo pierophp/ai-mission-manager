@@ -137,6 +137,7 @@ export const workAdapter = {
       confirmed: true,
     }),
   stopRun: (runId: number) => command<Run>("stop_run", { runId }),
+  finishRun: (runId: number) => command<Run>("finish_run", { runId }),
   submitGrillAnswers: (runId: number, answers: GrillAnswer[]) =>
     command<Run>("submit_grill_answers", { runId, answers }),
   deleteRun: (runId: number) =>
