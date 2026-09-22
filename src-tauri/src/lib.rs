@@ -83,6 +83,7 @@ pub fn run() {
             app::attach_run,
             app::open_terminal,
             app::terminal_input,
+            app::submit_grill_answers,
             app::terminal_resize,
             app::close_terminal,
             app::open_external_terminal,

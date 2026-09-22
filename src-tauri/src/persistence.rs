@@ -6,10 +6,11 @@ use thiserror::Error;
 use crate::domain::{
     Activity, AgentKind, AuditAction, AuditEntry, Context, ContextAttentionDefault, DomainState,
     Effect, ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalMetadata,
-    ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, GrillConfiguration,
-    Item, ItemRelation, ItemRelationKind, ItemStatus, Link, Machine, MachineObservation, Project,
-    ProjectDefaults, Reminder, Repository, RepositoryLocation, Run, RunPaneStatus, RunState,
-    Workspace, WorkspacePreparationState, WorkspaceRepository, Worktree,
+    ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, GrillAnswer,
+    GrillConfiguration, GrillQuestionGroup, Item, ItemRelation, ItemRelationKind, ItemStatus, Link,
+    Machine, MachineObservation, Project, ProjectDefaults, Reminder, Repository,
+    RepositoryLocation, Run, RunPaneStatus, RunState, Workspace, WorkspacePreparationState,
+    WorkspaceRepository, Worktree,
 };
 
 #[derive(Debug, Error)]
@@ -387,7 +388,8 @@ impl SqliteStore {
                 "SELECT id, item_id, workspace_id, repository_id, worktree_id,
                         machine_id, agent, execution_profile, model, effort, skill_snapshot,
                         prompt, working_directory, session_name, pane_id, started_at, state,
-                        pane_status, direct_checkouts_json
+                        pane_status, direct_checkouts_json, transcript,
+                        grill_question_group_json, grill_answers_json, grill_response
                  FROM runs
                  ORDER BY id",
             )?;
@@ -395,6 +397,27 @@ impl SqliteStore {
                 let agent: String = row.get(6)?;
                 let execution_profile: String = row.get(7)?;
                 let direct_checkouts_json: String = row.get(18)?;
+                let grill_question_group_json: Option<String> = row.get(20)?;
+                let grill_answers_json: String = row.get(21)?;
+                let grill_question_group = grill_question_group_json
+                    .map(|json| {
+                        serde_json::from_str::<GrillQuestionGroup>(&json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                20,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })
+                    })
+                    .transpose()?;
+                let grill_answers = serde_json::from_str::<Vec<GrillAnswer>>(&grill_answers_json)
+                    .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        21,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?;
                 Ok(Run {
                     id: row.get(0)?,
                     item_id: row.get(1)?,
@@ -451,6 +474,10 @@ impl SqliteStore {
                             )
                         },
                     )?,
+                    transcript: row.get(19)?,
+                    grill_question_group,
+                    grill_answers,
+                    grill_response: row.get(22)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -1021,8 +1048,9 @@ impl SqliteStore {
                             machine_id, agent,
                             execution_profile, model, effort, skill_snapshot,
                             prompt, working_directory, session_name, pane_id,
-                            started_at, state, pane_status, direct_checkouts_json)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                            started_at, state, pane_status, direct_checkouts_json,
+                            transcript, grill_question_group_json, grill_answers_json, grill_response)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
                         params![
                             run.id,
                             run.item_id,
@@ -1045,6 +1073,18 @@ impl SqliteStore {
                             serde_json::to_string(&run.direct_checkouts).map_err(|error| {
                                 rusqlite::Error::ToSqlConversionFailure(Box::new(error))
                             })?,
+                            run.transcript,
+                            run.grill_question_group
+                                .as_ref()
+                                .map(serde_json::to_string)
+                                .transpose()
+                                .map_err(|error| {
+                                    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                                })?,
+                            serde_json::to_string(&run.grill_answers).map_err(|error| {
+                                rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                            })?,
+                            run.grill_response,
                         ],
                     )?;
                     transaction.execute(
@@ -1056,6 +1096,46 @@ impl SqliteStore {
                     transaction.execute(
                         "UPDATE runs SET state = ?1 WHERE id = ?2",
                         params![run_state_as_str(run.state), run.id],
+                    )?;
+                }
+                Effect::PersistRunTranscript { run } => {
+                    transaction.execute(
+                        "UPDATE runs
+                         SET transcript = ?1, grill_question_group_json = ?2,
+                             grill_answers_json = ?3, grill_response = ?4
+                         WHERE id = ?5",
+                        params![
+                            run.transcript,
+                            run.grill_question_group
+                                .as_ref()
+                                .map(serde_json::to_string)
+                                .transpose()
+                                .map_err(|error| {
+                                    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                                })?,
+                            serde_json::to_string(&run.grill_answers).map_err(|error| {
+                                rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                            })?,
+                            run.grill_response,
+                            run.id,
+                        ],
+                    )?;
+                }
+                Effect::PersistGrillAnswers { run } => {
+                    transaction.execute(
+                        "UPDATE runs SET grill_answers_json = ?1 WHERE id = ?2",
+                        params![
+                            serde_json::to_string(&run.grill_answers).map_err(|error| {
+                                rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                            })?,
+                            run.id,
+                        ],
+                    )?;
+                }
+                Effect::PersistGrillResponse { run } => {
+                    transaction.execute(
+                        "UPDATE runs SET grill_response = ?1 WHERE id = ?2",
+                        params![run.grill_response, run.id],
                     )?;
                 }
                 Effect::PersistRunPaneStatus { run } => {
@@ -1736,7 +1816,11 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              started_at INTEGER NOT NULL,
              state TEXT NOT NULL DEFAULT 'unknown',
              pane_status TEXT NOT NULL DEFAULT 'unknown',
-             direct_checkouts_json TEXT NOT NULL DEFAULT '[]'
+             direct_checkouts_json TEXT NOT NULL DEFAULT '[]',
+             transcript TEXT NOT NULL DEFAULT '',
+             grill_question_group_json TEXT,
+             grill_answers_json TEXT NOT NULL DEFAULT '[]',
+             grill_response TEXT
          );
          CREATE INDEX IF NOT EXISTS runs_by_item
              ON runs (item_id, id);
@@ -1860,6 +1944,35 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
             "ALTER TABLE runs ADD COLUMN direct_checkouts_json TEXT NOT NULL DEFAULT '[]'",
             [],
         )?;
+    }
+    if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "transcript") {
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN transcript TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !run_columns.is_empty()
+        && !run_columns
+            .iter()
+            .any(|column| column == "grill_question_group_json")
+    {
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN grill_question_group_json TEXT",
+            [],
+        )?;
+    }
+    if !run_columns.is_empty()
+        && !run_columns
+            .iter()
+            .any(|column| column == "grill_answers_json")
+    {
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN grill_answers_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+    if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "grill_response") {
+        connection.execute("ALTER TABLE runs ADD COLUMN grill_response TEXT", [])?;
     }
     if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "repository_id") {
         connection.execute("ALTER TABLE runs ADD COLUMN repository_id INTEGER", [])?;
@@ -2415,8 +2528,9 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::domain::{
-        compose_grill_prompt, decide, AgentKind, Event, GrillConfiguration, MachineTransport,
-        RunCheckout, WorkspaceRepositoryInput, GRILL_SKILL_SNAPSHOT,
+        compose_grill_prompt, decide, format_grill_response, parse_grill_question_group, AgentKind,
+        Event, GrillAnswer, GrillConfiguration, MachineTransport, RunCheckout,
+        WorkspaceRepositoryInput, GRILL_SKILL_SNAPSHOT,
     };
 
     use super::{migrate_legacy_workset_data, table_columns, SqliteStore};
@@ -2749,6 +2863,46 @@ mod tests {
                 }],
             },
         );
+        let question_group = parse_grill_question_group(
+            "❓ Q1: Which direction?\n➡️ Keep the current design\nA) Keep it\nB) Replace it\n❓ Q2: What should we document?",
+        )
+        .expect("the Grill question group should parse");
+        state = apply_event(
+            &mut store,
+            state,
+            Event::RecordRunTranscript {
+                run_id: 1,
+                transcript: "raw Grill transcript".into(),
+                question_group: Some(question_group),
+            },
+        );
+        state = apply_event(
+            &mut store,
+            state,
+            Event::RecordGrillAnswers {
+                run_id: 1,
+                answers: vec![
+                    GrillAnswer {
+                        question_number: 1,
+                        answer: "A. Keep it".into(),
+                    },
+                    GrillAnswer {
+                        question_number: 2,
+                        answer: "Document the migration path".into(),
+                    },
+                ],
+            },
+        );
+        let response = format_grill_response(&state.runs[0].grill_answers)
+            .expect("the response should format");
+        state = apply_event(
+            &mut store,
+            state,
+            Event::RecordGrillResponse {
+                run_id: 1,
+                response,
+            },
+        );
 
         let reloaded = store.load_state().expect("persisted state should load");
         assert_eq!(reloaded, state);
@@ -2763,6 +2917,12 @@ mod tests {
         assert_eq!(
             reloaded.runs[0].skill_snapshot.as_deref(),
             Some(GRILL_SKILL_SNAPSHOT)
+        );
+        assert_eq!(reloaded.runs[0].transcript, "raw Grill transcript");
+        assert_eq!(reloaded.runs[0].grill_answers.len(), 2);
+        assert_eq!(
+            reloaded.runs[0].grill_response.as_deref(),
+            Some("1. A. Keep it\n2. Document the migration path")
         );
     }
 }

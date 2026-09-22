@@ -55,6 +55,7 @@ import type {
   ItemRelationKind,
   ItemView,
   Machine,
+  GrillAnswer,
   GrillAgentCatalog,
   GrillConfiguration,
   Repository,
@@ -2035,7 +2036,7 @@ export function ItemCard({
                         {machines.find(
                           (machine) => machine.id === run.machine_id,
                         )?.name ?? "Machine #" + run.machine_id}{" "}
-                        · {runStateLabel(run.state)}
+                        · {runStateLabel(run.state, run.execution_profile === "grill")}
                         {run.pane_status === "available" && " · Pane available"}
                       </span>
                     </div>
@@ -2064,6 +2065,17 @@ export function ItemCard({
                         Pane status not confirmed.
                       </span>
                     )}
+                    {run.execution_profile === "grill" &&
+                      run.state === "blocked" &&
+                      !run.grill_response && (
+                        <GrillQuestionFlow
+                          run={run}
+                          disabled={isSaving}
+                          onSubmit={(answers) =>
+                            saveItem(workActions.submitGrillAnswers(run.id, answers))
+                          }
+                        />
+                      )}
                     {run.workspace_id !== null && (
                       <div className="flex flex-wrap gap-2">
                         <Button
@@ -2717,6 +2729,163 @@ export function ItemCard({
   );
 }
 
+function GrillQuestionFlow({
+  run,
+  disabled,
+  onSubmit,
+}: {
+  run: Run;
+  disabled: boolean;
+  onSubmit: (answers: GrillAnswer[]) => Promise<unknown>;
+}) {
+  const group = run.grill_question_group;
+  const [answers, setAnswers] = useState<Record<number, string>>(() =>
+    Object.fromEntries(
+      run.grill_answers.map((answer) => [answer.questionNumber, answer.answer]),
+    ),
+  );
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  useEffect(() => {
+    setAnswers(
+      Object.fromEntries(
+        run.grill_answers.map((answer) => [answer.questionNumber, answer.answer]),
+      ),
+    );
+  }, [run.id, run.grill_answers]);
+
+  if (!group || group.questions.length === 0) {
+    return (
+      <Alert className="border-amber-500/30 bg-amber-500/5">
+        <AlertTitle>Grill is waiting for your input</AlertTitle>
+        <AlertDescription>
+          The question markers were incomplete or could not be parsed. The raw
+          transcript is retained; continue safely through the embedded terminal.
+        </AlertDescription>
+      </Alert>
+    );
+  }
+  const questionGroup = group;
+
+  const unanswered = questionGroup.questions.some(
+    (question) => !answers[question.number]?.trim(),
+  );
+
+  async function submitAnswers() {
+    if (unanswered || disabled || isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      await onSubmit(
+        questionGroup.questions.map((question) => ({
+          questionNumber: question.number,
+          answer: answers[question.number].trim(),
+        })),
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <section className="grid gap-3 rounded-lg border border-primary/30 bg-primary/5 p-4">
+      <div>
+        <h4 className="m-0 text-base font-medium">Grill questions</h4>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Answer this complete group once. Mission Manager will send one numbered response.
+        </p>
+      </div>
+      {questionGroup.questions.map((question) => {
+        const recommendationAnswer = question.recommendation
+          ? `Recommendation: ${question.recommendation}`
+          : undefined;
+        return (
+          <div className="grid gap-2 rounded-md border bg-background/60 p-3" key={question.number}>
+            <div className="text-sm">
+              <strong>
+                {question.number}. {question.title ?? "Question"}
+              </strong>
+              <p className="mt-1 whitespace-pre-wrap text-muted-foreground">
+                {question.prompt}
+              </p>
+            </div>
+            {recommendationAnswer && (
+              <Button
+                type="button"
+                size="sm"
+                variant={answers[question.number] === recommendationAnswer ? "default" : "outline"}
+                className="justify-start whitespace-normal text-left"
+                disabled={disabled || isSubmitting}
+                onClick={() =>
+                  setAnswers((current) => ({
+                    ...current,
+                    [question.number]: recommendationAnswer,
+                  }))
+                }
+              >
+                Accept recommendation: {question.recommendation}
+              </Button>
+            )}
+            {question.options.length > 0 ? (
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Choose an option</span>
+                <NativeSelect
+                  value={
+                    question.options.some(
+                      (option) => answers[question.number] === `${option.key}. ${option.label}`,
+                    )
+                      ? answers[question.number]
+                      : ""
+                  }
+                  onChange={(event) =>
+                    setAnswers((current) => ({
+                      ...current,
+                      [question.number]: event.target.value,
+                    }))
+                  }
+                  disabled={disabled || isSubmitting}
+                >
+                  <NativeSelectOption value="">Choose an option</NativeSelectOption>
+                  {question.options.map((option) => (
+                    <NativeSelectOption
+                      value={`${option.key}. ${option.label}`}
+                      key={option.key}
+                    >
+                      {option.key}. {option.label}
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+              </label>
+            ) : (
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Your answer</span>
+                <Textarea
+                  value={answers[question.number] ?? ""}
+                  onChange={(event) =>
+                    setAnswers((current) => ({
+                      ...current,
+                      [question.number]: event.target.value,
+                    }))
+                  }
+                  rows={3}
+                  placeholder="Write a free-form answer"
+                  disabled={disabled || isSubmitting}
+                />
+              </label>
+            )}
+          </div>
+        );
+      })}
+      <Button
+        type="button"
+        disabled={disabled || isSubmitting || unanswered}
+        onClick={() => void submitAnswers()}
+      >
+        {isSubmitting ? "Sending grouped response…" : "Submit all answers"}
+      </Button>
+    </section>
+  );
+}
+
 export function ExternalLinkCard({
   externalLink,
   isSaving,
@@ -3202,9 +3371,9 @@ function attentionEntryLabel(entry: AttentionEntry): string {
   return `${entry.activities.length} change${entry.activities.length === 1 ? "" : "s"}`;
 }
 
-function runStateLabel(state: RunState): string {
+function runStateLabel(state: RunState, isGrill = false): string {
   if (state === "working") return "Working";
-  if (state === "blocked") return "Blocked";
+  if (state === "blocked") return isGrill ? "Waiting for answers" : "Blocked";
   if (state === "finished") return "Finished";
   return "Unknown";
 }

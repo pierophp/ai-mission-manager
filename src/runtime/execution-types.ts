@@ -15,6 +15,28 @@ export type RunCheckout = {
   isDirty: boolean;
 };
 
+export type GrillOption = {
+  key: string;
+  label: string;
+};
+
+export type GrillQuestion = {
+  number: number;
+  title: string | null;
+  prompt: string;
+  recommendation: string | null;
+  options: GrillOption[];
+};
+
+export type GrillQuestionGroup = {
+  questions: GrillQuestion[];
+};
+
+export type GrillAnswer = {
+  questionNumber: number;
+  answer: string;
+};
+
 export type Run = {
   id: number;
   item_id: number;
@@ -35,6 +57,10 @@ export type Run = {
   state: RunState;
   pane_status: RunPaneStatus;
   direct_checkouts: RunCheckout[];
+  transcript: string;
+  grill_question_group: GrillQuestionGroup | null;
+  grill_answers: GrillAnswer[];
+  grill_response: string | null;
 };
 
 export type RunSuggestion = {

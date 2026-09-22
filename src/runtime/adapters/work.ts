@@ -6,6 +6,7 @@ import type {
   ExternalObjectDeletionResult,
   ExternalSnapshot,
   DirectRunPreview,
+  GrillAnswer,
   GrillConfiguration,
   HomeView,
   Item,
@@ -136,6 +137,8 @@ export const workAdapter = {
       confirmed: true,
     }),
   stopRun: (runId: number) => command<Run>("stop_run", { runId }),
+  submitGrillAnswers: (runId: number, answers: GrillAnswer[]) =>
+    command<Run>("submit_grill_answers", { runId, answers }),
   deleteRun: (runId: number) =>
     command<{ runId: number }>("delete_run", { runId, confirmed: true }),
   prepareItemDeletion: (itemId: number) =>

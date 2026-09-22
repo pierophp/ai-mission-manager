@@ -7,13 +7,27 @@ import { listen } from "./adapters/tauri";
 
 export function RuntimeEventsBridge() {
   const queryClient = useQueryClient();
+  const reconcileMutation = useMutation({
+    mutationFn: workAdapter.reconcileRuns,
+    onSuccess: async () => {
+      await invalidateRunQueries(queryClient);
+    },
+  });
   const pollMutation = useMutation({
     mutationFn: workAdapter.pollExternalObjects,
     onSuccess: async (result) => {
       if (result.refreshed > 0) await invalidateWorkQueries(queryClient);
     },
   });
+  const reconcileRuns = reconcileMutation.mutateAsync;
   const pollExternalObjects = pollMutation.mutateAsync;
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void reconcileRuns().catch(() => undefined);
+    }, 3_000);
+    return () => window.clearInterval(interval);
+  }, [reconcileRuns]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -27,6 +41,23 @@ export function RuntimeEventsBridge() {
     let unlisten: (() => void) | undefined;
 
     void listen("run-state-changed", () => {
+      if (!disposed) void invalidateRunQueries(queryClient);
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    });
+
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [queryClient]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+
+    void listen("run-questions-changed", () => {
       if (!disposed) void invalidateRunQueries(queryClient);
     }).then((cleanup) => {
       if (disposed) cleanup();

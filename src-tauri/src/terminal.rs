@@ -758,6 +758,32 @@ pub fn capture_pane(machine: &Machine, pane_id: &str) -> Result<Vec<u8>, String>
     Ok(output.stdout)
 }
 
+pub fn capture_pane_transcript(machine: &Machine, pane_id: &str) -> Result<Vec<u8>, String> {
+    validate_pane_id(pane_id)?;
+    let output = run_tmux_output(
+        machine,
+        &[
+            "capture-pane".into(),
+            "-p".into(),
+            "-S".into(),
+            "-".into(),
+            "-t".into(),
+            pane_id.into(),
+        ],
+    )?;
+    Ok(output.stdout)
+}
+
+pub fn send_input_to_pane(machine: &Machine, pane_id: &str, input: &[u8]) -> Result<(), String> {
+    validate_pane_id(pane_id)?;
+    if input.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["send-keys".into(), "-t".into(), pane_id.into(), "-H".into()];
+    args.extend(input.iter().map(|byte| format!("0x{byte:02x}")));
+    run_tmux(machine, &args).map(|_| ())
+}
+
 fn parse_pane_summary(line: &str) -> Result<PaneSummary, String> {
     let fields = line.split('\t').collect::<Vec<_>>();
     if fields.len() != 8 {

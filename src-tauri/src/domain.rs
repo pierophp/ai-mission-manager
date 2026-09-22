@@ -13,6 +13,227 @@ pub struct GrillConfiguration {
     pub effort: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrillQuestionGroup {
+    pub questions: Vec<GrillQuestion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrillQuestion {
+    pub number: u32,
+    pub title: Option<String>,
+    pub prompt: String,
+    pub recommendation: Option<String>,
+    pub options: Vec<GrillOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrillOption {
+    pub key: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrillAnswer {
+    pub question_number: u32,
+    pub answer: String,
+}
+
+/// Parse the stable markers emitted by the grilling skill without coupling the
+/// application to a terminal, agent, or filesystem.
+pub fn parse_grill_question_group(transcript: &str) -> Option<GrillQuestionGroup> {
+    let transcript = strip_terminal_escape_sequences(transcript);
+    let mut questions = Vec::new();
+    let mut current: Option<GrillQuestion> = None;
+
+    for line in transcript.lines() {
+        let line = line.trim_end();
+        if let Some(header) = line.trim_start().strip_prefix("❓") {
+            if let Some(question) = current.take() {
+                if !question.prompt.is_empty() {
+                    questions.push(question);
+                }
+            }
+            let (number, title, prompt) = parse_question_header(header, questions.len() as u32 + 1);
+            current = Some(GrillQuestion {
+                number,
+                title,
+                prompt,
+                recommendation: None,
+                options: Vec::new(),
+            });
+            continue;
+        }
+
+        let Some(question) = current.as_mut() else {
+            continue;
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed == "---" {
+            continue;
+        }
+        if let Some(recommendation) = trimmed
+            .strip_prefix("➡️")
+            .or_else(|| trimmed.strip_prefix("➡"))
+        {
+            let recommendation = clean_markup(recommendation);
+            if !recommendation.is_empty() {
+                question.recommendation = Some(recommendation);
+            }
+            continue;
+        }
+        if let Some((key, label)) = parse_grill_option(trimmed) {
+            question.options.push(GrillOption { key, label });
+            continue;
+        }
+
+        if !question.prompt.is_empty() {
+            question.prompt.push('\n');
+        }
+        question.prompt.push_str(trimmed);
+    }
+
+    if let Some(question) = current {
+        if !question.prompt.is_empty() {
+            questions.push(question);
+        }
+    }
+    (!questions.is_empty()).then_some(GrillQuestionGroup { questions })
+}
+
+pub fn format_grill_response(answers: &[GrillAnswer]) -> Result<String, DomainError> {
+    let mut answers = answers.to_vec();
+    answers.sort_by_key(|answer| answer.question_number);
+    if answers.is_empty() {
+        return Err(DomainError::EmptyGrillAnswer);
+    }
+    if answers.iter().any(|answer| answer.answer.trim().is_empty()) {
+        return Err(DomainError::EmptyGrillAnswer);
+    }
+    if answers
+        .windows(2)
+        .any(|pair| pair[0].question_number == pair[1].question_number)
+    {
+        return Err(DomainError::DuplicateGrillAnswer);
+    }
+    Ok(answers
+        .iter()
+        .map(|answer| {
+            let mut lines = answer.answer.trim().lines();
+            let first = format!(
+                "{}. {}",
+                answer.question_number,
+                lines.next().unwrap_or_default().trim()
+            );
+            let continuation = lines
+                .map(|line| format!("   {}", line.trim()))
+                .collect::<Vec<_>>();
+            std::iter::once(first)
+                .chain(continuation)
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
+}
+
+fn parse_question_header(header: &str, fallback_number: u32) -> (u32, Option<String>, String) {
+    let header = header.replace("**", "");
+    let header = header.trim().trim_start_matches(['-', ':']).trim();
+    let (number, rest) = parse_question_number(header).unwrap_or((fallback_number, header));
+    let rest = rest.trim();
+    let rest = rest
+        .strip_prefix('-')
+        .or_else(|| rest.strip_prefix(':'))
+        .or_else(|| rest.strip_prefix(')'))
+        .or_else(|| rest.strip_prefix('.'))
+        .unwrap_or(rest)
+        .trim();
+    let (title, prompt) = rest
+        .split_once(':')
+        .map(|(title, prompt)| (clean_markup(title), clean_markup(prompt)))
+        .filter(|(title, prompt)| !title.is_empty() && !prompt.is_empty())
+        .unwrap_or((String::new(), clean_markup(rest)));
+    (number, (!title.is_empty()).then_some(title), prompt)
+}
+
+fn parse_question_number(value: &str) -> Option<(u32, &str)> {
+    let value = value.trim();
+    let digit_start = if value
+        .chars()
+        .next()
+        .is_some_and(|character| character.eq_ignore_ascii_case(&'q'))
+    {
+        1
+    } else if value.starts_with("Question") || value.starts_with("question") {
+        "Question".len()
+    } else {
+        0
+    };
+    let mut end = digit_start;
+    for (index, character) in value[digit_start..].char_indices() {
+        if !character.is_ascii_digit() {
+            break;
+        }
+        end = digit_start + index + character.len_utf8();
+    }
+    if end == digit_start {
+        return None;
+    }
+    Some((value[digit_start..end].parse().ok()?, &value[end..]))
+}
+
+fn parse_grill_option(value: &str) -> Option<(String, String)> {
+    let value = value.trim();
+    let (key, rest) = if value.starts_with('(') {
+        let closing = value.find(')')?;
+        (&value[1..closing], &value[closing + 1..])
+    } else {
+        let key = value.chars().next()?;
+        if !key.is_ascii_uppercase() {
+            return None;
+        }
+        (&value[..key.len_utf8()], &value[key.len_utf8()..])
+    };
+    if key.len() != 1 || !key.chars().all(|character| character.is_ascii_uppercase()) {
+        return None;
+    }
+    let rest = rest.trim_start();
+    let separator = rest.chars().next()?;
+    if !matches!(separator, '.' | ')' | ':' | '-') {
+        return None;
+    }
+    let rest = rest[separator.len_utf8()..].trim();
+    (!rest.is_empty()).then_some((key.to_owned(), clean_markup(rest)))
+}
+
+fn clean_markup(value: &str) -> String {
+    value.replace("**", "").replace('*', "").trim().to_owned()
+}
+
+fn strip_terminal_escape_sequences(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut characters = value.chars();
+    while let Some(character) = characters.next() {
+        if character != '\u{1b}' {
+            output.push(character);
+            continue;
+        }
+        if characters.next() == Some('[') {
+            for character in characters.by_ref() {
+                if character.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        }
+    }
+    output
+}
+
 impl Default for GrillConfiguration {
     fn default() -> Self {
         Self {
@@ -394,6 +615,14 @@ pub struct Run {
     pub state: RunState,
     pub pane_status: RunPaneStatus,
     pub direct_checkouts: Vec<RunCheckout>,
+    #[serde(default)]
+    pub transcript: String,
+    #[serde(default)]
+    pub grill_question_group: Option<GrillQuestionGroup>,
+    #[serde(default)]
+    pub grill_answers: Vec<GrillAnswer>,
+    #[serde(default)]
+    pub grill_response: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1425,6 +1654,19 @@ pub enum Event {
         run_id: i64,
         state: RunState,
     },
+    RecordRunTranscript {
+        run_id: i64,
+        transcript: String,
+        question_group: Option<GrillQuestionGroup>,
+    },
+    RecordGrillAnswers {
+        run_id: i64,
+        answers: Vec<GrillAnswer>,
+    },
+    RecordGrillResponse {
+        run_id: i64,
+        response: String,
+    },
     SetRunPaneStatus {
         run_id: i64,
         status: RunPaneStatus,
@@ -1557,6 +1799,15 @@ pub enum Effect {
         next_run_id: i64,
     },
     PersistRunState {
+        run: Run,
+    },
+    PersistRunTranscript {
+        run: Run,
+    },
+    PersistGrillAnswers {
+        run: Run,
+    },
+    PersistGrillResponse {
         run: Run,
     },
     PersistRunPaneStatus {
@@ -2251,6 +2502,20 @@ pub enum DomainError {
     ActiveGrillRun { item_id: i64, run_id: i64 },
     #[error("a Grill skill snapshot cannot be blank")]
     EmptyGrillSkillSnapshot,
+    #[error("a Grill answer cannot be blank")]
+    EmptyGrillAnswer,
+    #[error("a Grill question cannot have more than one answer")]
+    DuplicateGrillAnswer,
+    #[error("Run {run_id} has no parsed Grill question group")]
+    GrillQuestionGroupNotFound { run_id: i64 },
+    #[error("Grill answer is for unknown question {question_number}")]
+    UnknownGrillQuestion { question_number: u32 },
+    #[error("Run {run_id} already has a submitted Grill response")]
+    GrillResponseAlreadySubmitted { run_id: i64 },
+    #[error("Run {run_id} is not a Grill Run")]
+    NotGrillRun { run_id: i64 },
+    #[error("a Grill response cannot be blank")]
+    EmptyGrillResponse,
     #[error("Run {run_id} does not exist")]
     RunNotFound { run_id: i64 },
     #[error("Run {run_id} is {state:?}; stop it and wait for Finished state before deleting")]
@@ -3608,6 +3873,10 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 state: RunState::Unknown,
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: checkouts,
+                transcript: String::new(),
+                grill_question_group: None,
+                grill_answers: Vec::new(),
+                grill_response: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -3733,6 +4002,10 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 state: RunState::Unknown,
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: Vec::new(),
+                transcript: String::new(),
+                grill_question_group: None,
+                grill_answers: Vec::new(),
+                grill_response: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -3891,6 +4164,10 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 state: RunState::Unknown,
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: checkouts,
+                transcript: String::new(),
+                grill_question_group: None,
+                grill_answers: Vec::new(),
+                grill_response: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -4007,6 +4284,10 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 state: RunState::Unknown,
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: Vec::new(),
+                transcript: String::new(),
+                grill_question_group: None,
+                grill_answers: Vec::new(),
+                grill_response: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -4030,6 +4311,92 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             Ok(Decision {
                 state,
                 effects: vec![Effect::PersistRunState { run }],
+            })
+        }
+        Event::RecordRunTranscript {
+            run_id,
+            transcript,
+            question_group,
+        } => {
+            let run = state
+                .runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
+                .ok_or(DomainError::RunNotFound { run_id })?;
+            if run.execution_profile != ExecutionProfile::Grill {
+                return Err(DomainError::NotGrillRun { run_id });
+            }
+            run.transcript = transcript;
+            run.grill_question_group = question_group;
+            run.grill_answers.clear();
+            run.grill_response = None;
+            let run = run.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRunTranscript { run }],
+            })
+        }
+        Event::RecordGrillAnswers { run_id, answers } => {
+            let run = state
+                .runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
+                .ok_or(DomainError::RunNotFound { run_id })?;
+            if run.execution_profile != ExecutionProfile::Grill {
+                return Err(DomainError::NotGrillRun { run_id });
+            }
+            if run.grill_response.is_some() {
+                return Err(DomainError::GrillResponseAlreadySubmitted { run_id });
+            }
+            let question_group = run
+                .grill_question_group
+                .as_ref()
+                .ok_or(DomainError::GrillQuestionGroupNotFound { run_id })?;
+            let mut normalized_answers = answers;
+            normalized_answers.sort_by_key(|answer| answer.question_number);
+            if normalized_answers.len() != question_group.questions.len() {
+                return Err(DomainError::GrillQuestionGroupNotFound { run_id });
+            }
+            for answer in &normalized_answers {
+                if !question_group
+                    .questions
+                    .iter()
+                    .any(|question| question.number == answer.question_number)
+                {
+                    return Err(DomainError::UnknownGrillQuestion {
+                        question_number: answer.question_number,
+                    });
+                }
+            }
+            format_grill_response(&normalized_answers)?;
+            run.grill_answers = normalized_answers;
+            let run = run.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistGrillAnswers { run }],
+            })
+        }
+        Event::RecordGrillResponse { run_id, response } => {
+            let run = state
+                .runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
+                .ok_or(DomainError::RunNotFound { run_id })?;
+            if run.execution_profile != ExecutionProfile::Grill {
+                return Err(DomainError::NotGrillRun { run_id });
+            }
+            if run.grill_answers.is_empty() {
+                return Err(DomainError::EmptyGrillAnswer);
+            }
+            let response = clean_name(response, DomainError::EmptyGrillResponse)?;
+            run.grill_response = Some(response);
+            let run = run.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistGrillResponse { run }],
             })
         }
         Event::SetRunPaneStatus { run_id, status } => {
@@ -5677,5 +6044,98 @@ mod grill_contract_tests {
             error,
             DomainError::ActiveGrillRun { item_id: 1, .. }
         ));
+    }
+
+    #[test]
+    fn parser_extracts_recommendations_options_and_free_form_questions() {
+        let group = parse_grill_question_group(
+            "before the group\n\n❓ **Q1** - **Repository layout**: Which layout should we keep?\n➡️ **Keep the current layout**\nA) Keep current\nB. Split repositories\n---\n❓ 2. What should we document next?\n",
+        )
+        .expect("the question group should parse");
+
+        assert_eq!(group.questions.len(), 2);
+        assert_eq!(group.questions[0].number, 1);
+        assert_eq!(
+            group.questions[0].title.as_deref(),
+            Some("Repository layout")
+        );
+        assert_eq!(
+            group.questions[0].recommendation.as_deref(),
+            Some("Keep the current layout")
+        );
+        assert_eq!(
+            group.questions[0].options,
+            vec![
+                GrillOption {
+                    key: "A".into(),
+                    label: "Keep current".into(),
+                },
+                GrillOption {
+                    key: "B".into(),
+                    label: "Split repositories".into(),
+                },
+            ]
+        );
+        assert_eq!(group.questions[1].number, 2);
+        assert!(group.questions[1].options.is_empty());
+        assert_eq!(group.questions[1].prompt, "What should we document next?");
+    }
+
+    #[test]
+    fn malformed_grill_text_does_not_become_a_question_group() {
+        assert!(parse_grill_question_group("❓\n➡️\n---").is_none());
+        assert!(parse_grill_question_group("The agent is still working").is_none());
+    }
+
+    #[test]
+    fn one_grill_answer_event_persists_a_stable_numbered_response() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let group = parse_grill_question_group(
+            "❓ Q1: Which option?\n➡️ Use A\nA) Use A\nB) Use B\n❓ Q2: Explain the tradeoff",
+        )
+        .expect("the group should parse");
+        let recorded = decide(
+            started.state,
+            Event::RecordRunTranscript {
+                run_id: 1,
+                transcript: "raw response".into(),
+                question_group: Some(group),
+            },
+        )
+        .expect("the transcript should be recorded");
+        let answered = decide(
+            recorded.state,
+            Event::RecordGrillAnswers {
+                run_id: 1,
+                answers: vec![
+                    GrillAnswer {
+                        question_number: 2,
+                        answer: "Document the tradeoff".into(),
+                    },
+                    GrillAnswer {
+                        question_number: 1,
+                        answer: "Recommendation: Use A".into(),
+                    },
+                ],
+            },
+        )
+        .expect("the answers should be recorded");
+        let response = format_grill_response(&answered.state.runs[0].grill_answers)
+            .expect("the grouped response should format");
+        let completed = decide(
+            answered.state,
+            Event::RecordGrillResponse {
+                run_id: 1,
+                response,
+            },
+        )
+        .expect("the grouped response should be recorded");
+
+        assert_eq!(completed.state.runs[0].transcript, "raw response");
+        assert_eq!(
+            completed.state.runs[0].grill_response.as_deref(),
+            Some("1. Recommendation: Use A\n2. Document the tradeoff")
+        );
     }
 }

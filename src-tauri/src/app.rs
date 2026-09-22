@@ -13,28 +13,29 @@ use crate::{
     dependencies::{check_command, resolve_executable, DependencyState, DependencyStatus},
     domain::{
         activity_tab_view, compose_grill_prompt as build_grill_prompt,
-        compose_run_prompt as build_run_prompt, decide, external_link_view, home_view,
-        normalize_machine_path, plan_context_deletion, plan_external_object_deletion,
-        plan_item_deletion, plan_machine_deletion, plan_project_deletion, plan_repository_deletion,
-        plan_reset_local_data, search_items, suggest_untracked_runs, worktree_path,
-        ActivityTabView, AgentKind, AgentPaneObservation, AuditAction, AuditEntry, Context,
-        ContextAttentionDefault, DomainState, Effect, Event, ExecutionMode, ExecutionProfile,
-        ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
-        ExternalObjectDeletionSummary, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
-        ExternalSnapshot, GrillConfiguration, HomeView, Item, ItemDeletionPlan,
-        ItemDeletionSummary, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine,
-        MachineDeletionPlan, MachineObservation, MachineTransport, ParentDeletionPlan, Project,
-        ProjectDefaults, Repository, RepositoryDeletionPlan, ResetLocalDataPlan,
-        ResetLocalDataSummary, Run, RunCheckout, RunPaneStatus, RunPromptSelection, RunState,
-        RunSuggestion, Workspace, WorkspaceRepositoryInput, Worktree,
+        compose_run_prompt as build_run_prompt, decide, external_link_view, format_grill_response,
+        home_view, normalize_machine_path, parse_grill_question_group, plan_context_deletion,
+        plan_external_object_deletion, plan_item_deletion, plan_machine_deletion,
+        plan_project_deletion, plan_repository_deletion, plan_reset_local_data, search_items,
+        suggest_untracked_runs, worktree_path, ActivityTabView, AgentKind, AgentPaneObservation,
+        AuditAction, AuditEntry, Context, ContextAttentionDefault, DomainState, Effect, Event,
+        ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
+        ExternalObjectDeletionPlan, ExternalObjectDeletionSummary, ExternalObjectInput,
+        ExternalObjectKind, ExternalProvider, ExternalSnapshot, GrillAnswer, GrillConfiguration,
+        HomeView, Item, ItemDeletionPlan, ItemDeletionSummary, ItemRelation, ItemRelationKind,
+        ItemStatus, ItemView, Machine, MachineDeletionPlan, MachineObservation, MachineTransport,
+        ParentDeletionPlan, Project, ProjectDefaults, Repository, RepositoryDeletionPlan,
+        ResetLocalDataPlan, ResetLocalDataSummary, Run, RunCheckout, RunPaneStatus,
+        RunPromptSelection, RunState, RunSuggestion, Workspace, WorkspaceRepositoryInput, Worktree,
     },
     git::GitCli,
     persistence::SqliteStore,
     provider::{classify_url, resolve_gh_executable, GithubCli},
     terminal::{
-        capture_pane, find_agent_executable, list_agent_panes, list_panes, open_pane_in_terminal,
-        probe_local_runtime, probe_machine, terminal_transport, AgentLaunchContext,
-        ExternalPaneIdentity, PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime,
+        capture_pane, capture_pane_transcript, find_agent_executable, list_agent_panes, list_panes,
+        open_pane_in_terminal, probe_local_runtime, probe_machine, send_input_to_pane,
+        terminal_transport, AgentLaunchContext, ExternalPaneIdentity, PaneSummary, TerminalRuntime,
+        TmuxControlPane, TmuxRuntime,
     },
 };
 
@@ -2147,6 +2148,19 @@ impl Runtime {
                             eprintln!("Could not persist state for Run {run_id}: {error}");
                         }
                     }
+                    if record.state == RunState::Blocked {
+                        match runtime.capture_grill_transcript(run_id) {
+                            Ok(true) => {
+                                let _ = state_app.emit("run-questions-changed", run_id);
+                            }
+                            Ok(false) => {}
+                            Err(error) => {
+                                eprintln!(
+                                    "Could not retain transcript for waiting Grill Run {run_id}: {error}"
+                                );
+                            }
+                        }
+                    }
                 }
             },
             move |code| {
@@ -2226,6 +2240,107 @@ impl Runtime {
             connection.close()?;
         }
         Ok(())
+    }
+
+    fn capture_grill_transcript(&mut self, run_id: i64) -> Result<bool, String> {
+        let run = self
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        if run.execution_profile != ExecutionProfile::Grill {
+            return Ok(false);
+        }
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == run.machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
+        let transcript =
+            String::from_utf8_lossy(&capture_pane_transcript(&machine, &run.pane_id)?).into_owned();
+        let question_group = parse_grill_question_group(&transcript);
+        if run.transcript == transcript && run.grill_question_group == question_group {
+            return Ok(false);
+        }
+        let decision = decide(
+            self.state.clone(),
+            Event::RecordRunTranscript {
+                run_id,
+                transcript,
+                question_group,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        self.commit(decision)?;
+        Ok(true)
+    }
+
+    fn submit_grill_answers(
+        &mut self,
+        run_id: i64,
+        answers: Vec<GrillAnswer>,
+    ) -> Result<Run, String> {
+        let run = self
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        if run.execution_profile != ExecutionProfile::Grill {
+            return Err(format!("Run {run_id} is not a Grill Run"));
+        }
+        if run.state != RunState::Blocked {
+            return Err(format!("Run {run_id} is not waiting for Grill answers"));
+        }
+        let answers_decision = decide(
+            self.state.clone(),
+            Event::RecordGrillAnswers { run_id, answers },
+        )
+        .map_err(|error| error.to_string())?;
+        let answered_run = answers_decision
+            .state
+            .runs
+            .iter()
+            .find(|candidate| candidate.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        let response = format_grill_response(&answered_run.grill_answers)
+            .map_err(|error| error.to_string())?;
+        self.commit(answers_decision)?;
+
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == answered_run.machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", answered_run.machine_id))?;
+        let mut input = response.into_bytes();
+        input.push(b'\n');
+        send_input_to_pane(&machine, &answered_run.pane_id, &input)?;
+
+        let response = String::from_utf8(input)
+            .map_err(|_| "The grouped Grill response was not valid UTF-8".to_owned())?;
+        let response = response.trim_end_matches('\n').to_owned();
+        let decision = decide(
+            self.state.clone(),
+            Event::RecordGrillResponse { run_id, response },
+        )
+        .map_err(|error| error.to_string())?;
+        let submitted_run = decision
+            .state
+            .runs
+            .iter()
+            .find(|candidate| candidate.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        self.commit(decision)?;
+        Ok(submitted_run)
     }
 
     fn stop_run(&mut self, run_id: i64) -> Result<Run, String> {
@@ -2336,7 +2451,14 @@ impl Runtime {
             if record_run_id != run.id || record.agent != run.agent {
                 continue;
             }
-            self.apply_agent_state_record(record_run_id, record)?;
+            self.apply_agent_state_record(record_run_id, record.clone())?;
+            if record.state == RunState::Blocked {
+                if let Err(error) = self.capture_grill_transcript(record_run_id) {
+                    eprintln!(
+                        "Could not retain transcript for waiting Grill Run {record_run_id}: {error}"
+                    );
+                }
+            }
         }
         Ok(())
     }
@@ -3594,6 +3716,9 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
                         to: run.state,
                     })
             }
+            Effect::PersistRunTranscript { .. }
+            | Effect::PersistGrillAnswers { .. }
+            | Effect::PersistGrillResponse { .. } => None,
             Effect::PersistRunPaneStatus { run } => {
                 let previous = before.runs.iter().find(|candidate| candidate.id == run.id);
                 previous
@@ -4232,6 +4357,18 @@ pub fn terminal_input(
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .terminal_input(&terminal_id, input)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn submit_grill_answers(
+    run_id: i64,
+    answers: Vec<GrillAnswer>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Run, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .submit_grill_answers(run_id, answers)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5261,6 +5398,10 @@ mod tests {
             repository_id: None,
             worktree_id: None,
             direct_checkouts: Vec::new(),
+            transcript: String::new(),
+            grill_question_group: None,
+            grill_answers: Vec::new(),
+            grill_response: None,
         });
 
         let item = runtime
@@ -5353,6 +5494,10 @@ mod tests {
             repository_id: None,
             worktree_id: None,
             direct_checkouts: Vec::new(),
+            transcript: String::new(),
+            grill_question_group: None,
+            grill_answers: Vec::new(),
+            grill_response: None,
         });
 
         let stopped = runtime
@@ -5402,6 +5547,10 @@ mod tests {
             repository_id: None,
             worktree_id: None,
             direct_checkouts: Vec::new(),
+            transcript: String::new(),
+            grill_question_group: None,
+            grill_answers: Vec::new(),
+            grill_response: None,
         });
 
         let error = runtime
@@ -5475,6 +5624,10 @@ mod tests {
                 repository_id: None,
                 worktree_id: None,
                 direct_checkouts: Vec::new(),
+                transcript: String::new(),
+                grill_question_group: None,
+                grill_answers: Vec::new(),
+                grill_response: None,
             },
             Run {
                 id: 2,
@@ -5496,6 +5649,10 @@ mod tests {
                 repository_id: None,
                 worktree_id: None,
                 direct_checkouts: Vec::new(),
+                transcript: String::new(),
+                grill_question_group: None,
+                grill_answers: Vec::new(),
+                grill_response: None,
             },
             Run {
                 id: 3,
@@ -5517,6 +5674,10 @@ mod tests {
                 repository_id: None,
                 worktree_id: None,
                 direct_checkouts: Vec::new(),
+                transcript: String::new(),
+                grill_question_group: None,
+                grill_answers: Vec::new(),
+                grill_response: None,
             },
         ]);
 
