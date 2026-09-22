@@ -69,6 +69,8 @@ export const workActions = {
       ),
   prepareDirectRun: (itemId: number, workspaceId: number, machineId: number | null) =>
     () => workAdapter.prepareDirectRun(itemId, workspaceId, machineId),
+  prepareGrillRun: (itemId: number, workspaceId: number, machineId: number | null) =>
+    () => workAdapter.prepareGrillRun(itemId, workspaceId, machineId),
   stopRun: (runId: number) => () => workAdapter.stopRun(runId),
   deleteRun: (runId: number) => () => workAdapter.deleteRun(runId),
   prepareItemDeletion: (itemId: number) =>
@@ -86,8 +88,15 @@ export const workActions = {
     selection: Parameters<typeof workAdapter.composeRunPrompt>[2],
     customPrompt: string | null,
   ) => () => workAdapter.composeRunPrompt(itemId, executionProfile, selection, customPrompt),
+  composeGrillPrompt: (
+    itemId: number,
+    configuration: Parameters<typeof workAdapter.composeGrillPrompt>[1],
+    initialPrompt: string,
+  ) => () => workAdapter.composeGrillPrompt(itemId, configuration, initialPrompt),
   startDirectRun: (input: Parameters<typeof workAdapter.startDirectRun>[0]) =>
     () => workAdapter.startDirectRun(input),
+  startGrillRun: (input: Parameters<typeof workAdapter.startGrillRun>[0]) =>
+    () => workAdapter.startGrillRun(input),
   startWorktreeRun: (input: Parameters<typeof workAdapter.startWorktreeRun>[0]) =>
     () => workAdapter.startWorktreeRun(input),
   refreshExternalObject: (externalObjectId: number) =>

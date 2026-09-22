@@ -12,20 +12,21 @@ use crate::{
     agent_state::{provision_hooks, read_state_file, state_file_path, AgentStateRecord},
     dependencies::{check_command, resolve_executable, DependencyState, DependencyStatus},
     domain::{
-        activity_tab_view, compose_run_prompt as build_run_prompt, decide, external_link_view,
-        home_view, normalize_machine_path, plan_context_deletion, plan_external_object_deletion,
+        activity_tab_view, compose_grill_prompt as build_grill_prompt,
+        compose_run_prompt as build_run_prompt, decide, external_link_view, home_view,
+        normalize_machine_path, plan_context_deletion, plan_external_object_deletion,
         plan_item_deletion, plan_machine_deletion, plan_project_deletion, plan_repository_deletion,
         plan_reset_local_data, search_items, suggest_untracked_runs, worktree_path,
         ActivityTabView, AgentKind, AgentPaneObservation, AuditAction, AuditEntry, Context,
         ContextAttentionDefault, DomainState, Effect, Event, ExecutionMode, ExecutionProfile,
         ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
         ExternalObjectDeletionSummary, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
-        ExternalSnapshot, HomeView, Item, ItemDeletionPlan, ItemDeletionSummary, ItemRelation,
-        ItemRelationKind, ItemStatus, ItemView, Machine, MachineDeletionPlan, MachineObservation,
-        MachineTransport, ParentDeletionPlan, Project, ProjectDefaults, Repository,
-        RepositoryDeletionPlan, ResetLocalDataPlan, ResetLocalDataSummary, Run, RunCheckout,
-        RunPaneStatus, RunPromptSelection, RunState, RunSuggestion, Workspace,
-        WorkspaceRepositoryInput, Worktree,
+        ExternalSnapshot, GrillConfiguration, HomeView, Item, ItemDeletionPlan,
+        ItemDeletionSummary, ItemRelation, ItemRelationKind, ItemStatus, ItemView, Machine,
+        MachineDeletionPlan, MachineObservation, MachineTransport, ParentDeletionPlan, Project,
+        ProjectDefaults, Repository, RepositoryDeletionPlan, ResetLocalDataPlan,
+        ResetLocalDataSummary, Run, RunCheckout, RunPaneStatus, RunPromptSelection, RunState,
+        RunSuggestion, Workspace, WorkspaceRepositoryInput, Worktree,
     },
     git::GitCli,
     persistence::SqliteStore,
@@ -212,6 +213,30 @@ impl Runtime {
             .last()
             .cloned()
             .ok_or_else(|| "Context creation produced no Context".to_owned())?;
+        self.commit(decision)?;
+        Ok(context)
+    }
+
+    fn set_context_grill_defaults(
+        &mut self,
+        context_id: i64,
+        defaults: GrillConfiguration,
+    ) -> Result<Context, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::SetContextGrillDefaults {
+                context_id,
+                defaults,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let context = decision
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .cloned()
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
         self.commit(decision)?;
         Ok(context)
     }
@@ -1287,6 +1312,16 @@ impl Runtime {
         .map_err(|error| error.to_string())
     }
 
+    fn compose_grill_prompt(
+        &self,
+        item_id: i64,
+        configuration: GrillConfiguration,
+        initial_prompt: String,
+    ) -> Result<String, String> {
+        build_grill_prompt(&self.state, item_id, &configuration, &initial_prompt)
+            .map_err(|error| error.to_string())
+    }
+
     fn inspect_direct_checkouts(
         &mut self,
         item_id: i64,
@@ -1533,6 +1568,9 @@ impl Runtime {
             AgentLaunchContext {
                 run_id,
                 state_file: &state_file,
+                agent: None,
+                model: None,
+                effort: None,
             },
         )?;
         let (_, after_launch) =
@@ -1596,6 +1634,201 @@ impl Runtime {
             return Err(format_commit_error(error, cleanup.err()));
         }
         let _ = preflight;
+        Ok(run)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_grill_run(
+        &mut self,
+        item_id: i64,
+        workspace_id: i64,
+        machine_id: Option<i64>,
+        primary_repository_id: i64,
+        configuration: GrillConfiguration,
+        initial_prompt: String,
+        expected_checkouts: Vec<RunCheckout>,
+        allow_dirty: bool,
+        allow_shared_checkouts: bool,
+    ) -> Result<Run, String> {
+        let (machine, checkout_details) =
+            self.inspect_direct_checkouts(item_id, workspace_id, machine_id)?;
+        let current_checkouts = checkout_details
+            .iter()
+            .map(|checkout| RunCheckout {
+                repository_id: checkout.repository_id,
+                path: checkout.path.clone(),
+                branch: checkout.branch.clone(),
+                is_dirty: checkout.is_dirty,
+            })
+            .collect::<Vec<_>>();
+        if current_checkouts != expected_checkouts {
+            return Err(
+                "A Grill checkout changed after the preview (branch or dirty state); review the Grill preview again before starting"
+                    .into(),
+            );
+        }
+        let working_directory = current_checkouts
+            .iter()
+            .find(|checkout| checkout.repository_id == primary_repository_id)
+            .map(|checkout| checkout.path.clone())
+            .ok_or_else(|| "Choose a selected Repository checkout for the Grill".to_owned())?;
+        if !allow_dirty {
+            let dirty_repository_ids = current_checkouts
+                .iter()
+                .filter(|checkout| checkout.is_dirty)
+                .map(|checkout| checkout.repository_id)
+                .collect::<Vec<_>>();
+            if !dirty_repository_ids.is_empty() {
+                return Err(format!(
+                    "Grill checkout(s) are dirty: {}; review the preview and confirm before starting",
+                    dirty_repository_ids
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        if !allow_shared_checkouts {
+            let shared_paths = self
+                .state
+                .runs
+                .iter()
+                .filter(|run| {
+                    run.machine_id == machine.id
+                        && run.state != RunState::Finished
+                        && run.pane_status != RunPaneStatus::Missing
+                })
+                .flat_map(|run| {
+                    current_checkouts.iter().filter_map(move |checkout| {
+                        run.direct_checkouts
+                            .iter()
+                            .any(|active| active.path == checkout.path)
+                            .then_some(checkout.path.clone())
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !shared_paths.is_empty() {
+                return Err(format!(
+                    "Grill checkout(s) are already used by an active Run: {}; review the preview and confirm before starting",
+                    shared_paths.join(", ")
+                ));
+            }
+        }
+        let prompt = self.compose_grill_prompt(item_id, configuration.clone(), initial_prompt)?;
+        let run_id = self.state.next_run_id;
+        let session_name = format!("mission-item-{item_id}-grill-{run_id}");
+        let preflight = decide(
+            self.state.clone(),
+            Event::StartGrillRun {
+                item_id,
+                workspace_id,
+                repository_id: primary_repository_id,
+                machine_id: machine.id,
+                configuration: configuration.clone(),
+                prompt: prompt.clone(),
+                skill_snapshot: crate::domain::GRILL_SKILL_SNAPSHOT.into(),
+                working_directory: working_directory.clone(),
+                session_name: format!("{session_name}-preflight"),
+                pane_id: "%preflight".into(),
+                started_at: current_unix_seconds(),
+                checkouts: current_checkouts.clone(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+
+        if let Err(error) = probe_machine(&machine) {
+            return Err(format!(
+                "Could not reach Machine {}. The Grill was not started locally: {error}",
+                machine.name
+            ));
+        }
+        self.observe_machine(machine.id, MachineObservation::Available)?;
+        if matches!(machine.transport, MachineTransport::Local) {
+            self.provision_agent_hooks()?;
+        }
+        let state_file = if matches!(machine.transport, MachineTransport::Local) {
+            state_file_path(&self.agent_state_directory, run_id)
+        } else {
+            PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
+        };
+        let executable = self
+            .agent_executable(&machine, configuration.agent)
+            .map_err(|error| format!("{}: {error}", agent_display_name(configuration.agent)))?;
+        let terminal = TmuxRuntime;
+        let pane_id = terminal.launch_agent(
+            &machine,
+            &session_name,
+            Path::new(&working_directory),
+            &executable,
+            &prompt,
+            AgentLaunchContext {
+                run_id,
+                state_file: &state_file,
+                agent: Some(configuration.agent),
+                model: Some(&configuration.model),
+                effort: Some(&configuration.effort),
+            },
+        )?;
+        let (_, after_launch) =
+            match self.inspect_direct_checkouts(item_id, workspace_id, Some(machine.id)) {
+                Ok(value) => value,
+                Err(error) => {
+                    let cleanup = terminal.kill_session(&machine, &session_name);
+                    return Err(format_commit_error(error, cleanup.err()));
+                }
+            };
+        let after_launch = after_launch
+            .iter()
+            .map(|checkout| RunCheckout {
+                repository_id: checkout.repository_id,
+                path: checkout.path.clone(),
+                branch: checkout.branch.clone(),
+                is_dirty: checkout.is_dirty,
+            })
+            .collect::<Vec<_>>();
+        if after_launch != current_checkouts {
+            let cleanup = terminal.kill_session(&machine, &session_name);
+            return Err(format_commit_error(
+                "A Grill checkout changed before the Run was recorded; review the Grill preview again"
+                    .into(),
+                cleanup.err(),
+            ));
+        }
+        let decision = match decide(
+            self.state.clone(),
+            Event::StartGrillRun {
+                item_id,
+                workspace_id,
+                repository_id: primary_repository_id,
+                machine_id: machine.id,
+                configuration,
+                prompt,
+                skill_snapshot: crate::domain::GRILL_SKILL_SNAPSHOT.into(),
+                working_directory,
+                session_name: session_name.clone(),
+                pane_id,
+                started_at: current_unix_seconds(),
+                checkouts: after_launch,
+            },
+        ) {
+            Ok(decision) => decision,
+            Err(error) => {
+                let cleanup = terminal.kill_session(&machine, &session_name);
+                return Err(format_commit_error(error.to_string(), cleanup.err()));
+            }
+        };
+        let run = decision
+            .state
+            .runs
+            .last()
+            .cloned()
+            .ok_or_else(|| "Grill Run creation produced no Run".to_owned())?;
+        if let Err(error) = self.commit(decision) {
+            let cleanup = terminal.kill_session(&machine, &run.session_name);
+            return Err(format_commit_error(error, cleanup.err()));
+        }
+        let _ = (preflight, allow_dirty, allow_shared_checkouts);
         Ok(run)
     }
 
@@ -1676,6 +1909,9 @@ impl Runtime {
             AgentLaunchContext {
                 run_id,
                 state_file: &state_file,
+                agent: None,
+                model: None,
+                effort: None,
             },
         )?;
         let decision = match decide(
@@ -3182,6 +3418,7 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
             Effect::PersistContext { context, .. } => Some(AuditAction::ContextCreated {
                 context_id: context.id,
             }),
+            Effect::PersistContextGrillDefaults { .. } => None,
             Effect::PersistProject { project, .. } => Some(AuditAction::ProjectCreated {
                 project_id: project.id,
             }),
@@ -3703,6 +3940,23 @@ pub fn list_contexts(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Context>, S
 }
 
 #[tauri::command]
+pub fn list_grill_model_catalog() -> Vec<crate::domain::GrillAgentCatalog> {
+    crate::domain::grill_model_catalog()
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_context_grill_defaults(
+    context_id: i64,
+    defaults: GrillConfiguration,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .set_context_grill_defaults(context_id, defaults)
+}
+
+#[tauri::command]
 pub fn list_projects(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Project>, String> {
     state
         .lock()
@@ -3782,7 +4036,33 @@ pub fn compose_run_prompt(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn compose_grill_prompt(
+    item_id: i64,
+    configuration: GrillConfiguration,
+    initial_prompt: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<String, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .compose_grill_prompt(item_id, configuration, initial_prompt)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn prepare_direct_run(
+    item_id: i64,
+    workspace_id: i64,
+    machine_id: Option<i64>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<DirectRunPreview, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .prepare_direct_run(item_id, workspace_id, machine_id)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn prepare_grill_run(
     item_id: i64,
     workspace_id: i64,
     machine_id: Option<i64>,
@@ -3822,6 +4102,36 @@ pub fn start_direct_run(
             execution_profile,
             prompt,
             prompt_selection,
+            expected_checkouts,
+            allow_dirty,
+            allow_shared_checkouts,
+        )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
+pub fn start_grill_run(
+    item_id: i64,
+    workspace_id: i64,
+    machine_id: Option<i64>,
+    primary_repository_id: i64,
+    configuration: GrillConfiguration,
+    initial_prompt: String,
+    expected_checkouts: Vec<RunCheckout>,
+    allow_dirty: bool,
+    allow_shared_checkouts: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Run, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .start_grill_run(
+            item_id,
+            workspace_id,
+            machine_id,
+            primary_repository_id,
+            configuration,
+            initial_prompt,
             expected_checkouts,
             allow_dirty,
             allow_shared_checkouts,
@@ -4937,6 +5247,9 @@ mod tests {
             machine_id: 1,
             agent: AgentKind::Claude,
             execution_profile: ExecutionProfile::Implement,
+            model: None,
+            effort: None,
+            skill_snapshot: None,
             prompt: "private prompt that must not enter the audit history".into(),
             working_directory: "/private/working-directory".into(),
             session_name: "private-session".into(),
@@ -5026,6 +5339,9 @@ mod tests {
             machine_id: 1,
             agent: AgentKind::Claude,
             execution_profile: ExecutionProfile::Implement,
+            model: None,
+            effort: None,
+            skill_snapshot: None,
             prompt: "private prompt".into(),
             working_directory: "/tmp".into(),
             session_name: session,
@@ -5072,6 +5388,9 @@ mod tests {
             machine_id: 1,
             agent: AgentKind::Claude,
             execution_profile: ExecutionProfile::Implement,
+            model: None,
+            effort: None,
+            skill_snapshot: None,
             prompt: "Open the missing Pane".into(),
             working_directory: directory.path().to_string_lossy().into_owned(),
             session_name: "missing-session".into(),
@@ -5142,6 +5461,9 @@ mod tests {
                 machine_id: 1,
                 agent: AgentKind::Claude,
                 execution_profile: ExecutionProfile::Implement,
+                model: None,
+                effort: None,
+                skill_snapshot: None,
                 prompt: "Keep the known Run".into(),
                 working_directory: directory.path().to_string_lossy().into_owned(),
                 session_name: session.clone(),
@@ -5160,6 +5482,9 @@ mod tests {
                 machine_id: 1,
                 agent: AgentKind::Codex,
                 execution_profile: ExecutionProfile::Review,
+                model: None,
+                effort: None,
+                skill_snapshot: None,
                 prompt: "Keep the missing Run".into(),
                 working_directory: directory.path().to_string_lossy().into_owned(),
                 session_name: session.clone(),
@@ -5178,6 +5503,9 @@ mod tests {
                 machine_id: 1,
                 agent: AgentKind::Claude,
                 execution_profile: ExecutionProfile::Investigate,
+                model: None,
+                effort: None,
+                skill_snapshot: None,
                 prompt: "Keep the missing session Run".into(),
                 working_directory: directory.path().to_string_lossy().into_owned(),
                 session_name: "gone-session".into(),

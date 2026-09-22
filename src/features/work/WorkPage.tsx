@@ -44,7 +44,7 @@ export function WorkPage() {
   const queryClient = useQueryClient();
   const [debouncedSearchQuery, setDebouncedSearchQuery] = useState("");
   const structure = useStructureData().data;
-  const { contexts, projects, repositories, machines } = structure;
+  const { contexts, projects, repositories, machines, grillModelCatalog } = structure;
   const search = useSearch({ from: "/work" });
   const navigate = useNavigate({ from: "/work" });
   const normalizedSearch = parseWorkSearch(search);
@@ -298,6 +298,8 @@ export function WorkPage() {
                 allItems={allItems}
                 repositories={repositories}
                 machines={machines}
+                contexts={contexts}
+                grillModelCatalog={grillModelCatalog}
                 onChanged={() => invalidateWorkQueries(queryClient)}
                 onOpenTerminal={onOpenTerminal}
               />
@@ -308,6 +310,8 @@ export function WorkPage() {
                 allItems={allItems}
                 repositories={repositories}
                 machines={machines}
+                contexts={contexts}
+                grillModelCatalog={grillModelCatalog}
                 onChanged={() => invalidateWorkQueries(queryClient)}
                 onOpenTerminal={onOpenTerminal}
               />
@@ -318,6 +322,8 @@ export function WorkPage() {
                 allItems={allItems}
                 repositories={repositories}
                 machines={machines}
+                contexts={contexts}
+                grillModelCatalog={grillModelCatalog}
                 onChanged={() => invalidateWorkQueries(queryClient)}
                 onOpenTerminal={onOpenTerminal}
               />
@@ -328,6 +334,8 @@ export function WorkPage() {
                 allItems={allItems}
                 repositories={repositories}
                 machines={machines}
+                contexts={contexts}
+                grillModelCatalog={grillModelCatalog}
                 onChanged={() => invalidateWorkQueries(queryClient)}
                 onOpenTerminal={onOpenTerminal}
               />
@@ -338,6 +346,8 @@ export function WorkPage() {
                 allItems={allItems}
                 repositories={repositories}
                 machines={machines}
+                contexts={contexts}
+                grillModelCatalog={grillModelCatalog}
                 onChanged={() => invalidateWorkQueries(queryClient)}
                 onOpenTerminal={onOpenTerminal}
               />

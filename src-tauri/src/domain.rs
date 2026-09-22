@@ -3,10 +3,148 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub const GRILL_SKILL_SNAPSHOT: &str = include_str!("../../.agents/skills/grilling/SKILL.md");
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrillConfiguration {
+    pub agent: AgentKind,
+    pub model: String,
+    pub effort: String,
+}
+
+impl Default for GrillConfiguration {
+    fn default() -> Self {
+        Self {
+            agent: AgentKind::Claude,
+            model: "claude-sonnet-4-5".into(),
+            effort: "high".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrillEffort {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrillModel {
+    pub id: String,
+    pub label: String,
+    pub efforts: Vec<GrillEffort>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrillAgentCatalog {
+    pub agent: AgentKind,
+    pub models: Vec<GrillModel>,
+}
+
+pub fn grill_model_catalog() -> Vec<GrillAgentCatalog> {
+    let efforts = |ids: &[(&str, &str)]| {
+        ids.iter()
+            .map(|(id, label)| GrillEffort {
+                id: (*id).into(),
+                label: (*label).into(),
+            })
+            .collect()
+    };
+    vec![
+        GrillAgentCatalog {
+            agent: AgentKind::Claude,
+            models: vec![
+                GrillModel {
+                    id: "claude-opus-4-1".into(),
+                    label: "Opus".into(),
+                    efforts: efforts(&[("low", "Low"), ("medium", "Medium"), ("high", "High")]),
+                },
+                GrillModel {
+                    id: "claude-sonnet-4-5".into(),
+                    label: "Sonnet".into(),
+                    efforts: efforts(&[("low", "Low"), ("medium", "Medium"), ("high", "High")]),
+                },
+                GrillModel {
+                    id: "claude-haiku-4-5".into(),
+                    label: "Haiku".into(),
+                    efforts: efforts(&[("low", "Low"), ("medium", "Medium"), ("high", "High")]),
+                },
+            ],
+        },
+        GrillAgentCatalog {
+            agent: AgentKind::Codex,
+            models: vec![
+                GrillModel {
+                    id: "codex-sol".into(),
+                    label: "Sol".into(),
+                    efforts: efforts(&[
+                        ("low", "Low"),
+                        ("medium", "Medium"),
+                        ("high", "High"),
+                        ("xhigh", "Extra high"),
+                    ]),
+                },
+                GrillModel {
+                    id: "codex-terra".into(),
+                    label: "Terra".into(),
+                    efforts: efforts(&[
+                        ("low", "Low"),
+                        ("medium", "Medium"),
+                        ("high", "High"),
+                        ("xhigh", "Extra high"),
+                    ]),
+                },
+                GrillModel {
+                    id: "codex-luna".into(),
+                    label: "Luna".into(),
+                    efforts: efforts(&[
+                        ("low", "Low"),
+                        ("medium", "Medium"),
+                        ("high", "High"),
+                        ("xhigh", "Extra high"),
+                    ]),
+                },
+            ],
+        },
+    ]
+}
+
+pub fn validate_grill_configuration(configuration: &GrillConfiguration) -> Result<(), DomainError> {
+    let valid = grill_model_catalog()
+        .into_iter()
+        .find(|catalog| catalog.agent == configuration.agent)
+        .and_then(|catalog| {
+            catalog
+                .models
+                .into_iter()
+                .find(|model| model.id == configuration.model)
+        })
+        .is_some_and(|model| {
+            model
+                .efforts
+                .into_iter()
+                .any(|effort| effort.id == configuration.effort)
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(DomainError::InvalidGrillConfiguration {
+            agent: configuration.agent,
+            model: configuration.model.clone(),
+            effort: configuration.effort.clone(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Context {
     pub id: i64,
     pub name: String,
+    pub grill_defaults: GrillConfiguration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +336,8 @@ pub enum ExecutionProfile {
     Review,
     #[serde(rename = "custom")]
     CustomPrompt,
+    #[serde(rename = "grill")]
+    Grill,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -240,6 +380,12 @@ pub struct Run {
     pub machine_id: i64,
     pub agent: AgentKind,
     pub execution_profile: ExecutionProfile,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub effort: Option<String>,
+    #[serde(default)]
+    pub skill_snapshot: Option<String>,
     pub prompt: String,
     pub working_directory: String,
     pub session_name: String,
@@ -1116,6 +1262,10 @@ pub enum Event {
     CreateContext {
         name: String,
     },
+    SetContextGrillDefaults {
+        context_id: i64,
+        defaults: GrillConfiguration,
+    },
     CreateProject {
         context_id: i64,
         name: String,
@@ -1245,6 +1395,20 @@ pub enum Event {
         started_at: i64,
         prompt_selection: RunPromptSelection,
     },
+    StartGrillRun {
+        item_id: i64,
+        workspace_id: i64,
+        repository_id: i64,
+        machine_id: i64,
+        configuration: GrillConfiguration,
+        prompt: String,
+        skill_snapshot: String,
+        working_directory: String,
+        session_name: String,
+        pane_id: String,
+        started_at: i64,
+        checkouts: Vec<RunCheckout>,
+    },
     AttachRun {
         item_id: i64,
         workspace_id: i64,
@@ -1329,6 +1493,9 @@ pub enum Effect {
     PersistContext {
         context: Context,
         next_context_id: i64,
+    },
+    PersistContextGrillDefaults {
+        context: Context,
     },
     PersistProject {
         project: Project,
@@ -2074,6 +2241,16 @@ pub enum DomainError {
     EmptyRunSessionName,
     #[error("a Run Pane identity cannot be blank")]
     EmptyRunPaneId,
+    #[error("Grill configuration is invalid for {agent:?}: model {model}, effort {effort}")]
+    InvalidGrillConfiguration {
+        agent: AgentKind,
+        model: String,
+        effort: String,
+    },
+    #[error("Item {item_id} already has an active Grill Run {run_id}")]
+    ActiveGrillRun { item_id: i64, run_id: i64 },
+    #[error("a Grill skill snapshot cannot be blank")]
+    EmptyGrillSkillSnapshot,
     #[error("Run {run_id} does not exist")]
     RunNotFound { run_id: i64 },
     #[error("Run {run_id} is {state:?}; stop it and wait for Finished state before deleting")]
@@ -2160,7 +2337,11 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let next_project_id = project_id
                 .checked_add(1)
                 .ok_or(DomainError::SequenceExhausted)?;
-            let context = Context { id, name };
+            let context = Context {
+                id,
+                name,
+                grill_defaults: GrillConfiguration::default(),
+            };
             let project = Project {
                 id: project_id,
                 context_id: id,
@@ -2185,6 +2366,23 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                         next_project_id,
                     },
                 ],
+            })
+        }
+        Event::SetContextGrillDefaults {
+            context_id,
+            defaults,
+        } => {
+            validate_grill_configuration(&defaults)?;
+            let context = state
+                .contexts
+                .iter_mut()
+                .find(|context| context.id == context_id)
+                .ok_or(DomainError::ContextNotFound { context_id })?;
+            context.grill_defaults = defaults;
+            let context = context.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistContextGrillDefaults { context }],
             })
         }
         Event::CreateProject {
@@ -2436,6 +2634,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let context = Context {
                 id: context_id,
                 name: "Personal".into(),
+                grill_defaults: GrillConfiguration::default(),
             };
             let project = Project {
                 id: project_id,
@@ -3398,6 +3597,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 machine_id,
                 agent,
                 execution_profile,
+                model: None,
+                effort: None,
+                skill_snapshot: None,
                 prompt,
                 working_directory,
                 session_name,
@@ -3520,6 +3722,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 machine_id,
                 agent,
                 execution_profile,
+                model: None,
+                effort: None,
+                skill_snapshot: None,
                 prompt,
                 working_directory,
                 session_name,
@@ -3528,6 +3733,164 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 state: RunState::Unknown,
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: Vec::new(),
+            };
+            state.next_run_id = next_run_id;
+            state.runs.push(run.clone());
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRun { run, next_run_id }],
+            })
+        }
+        Event::StartGrillRun {
+            item_id,
+            workspace_id,
+            repository_id,
+            machine_id,
+            configuration,
+            prompt,
+            skill_snapshot,
+            working_directory,
+            session_name,
+            pane_id,
+            started_at,
+            checkouts,
+        } => {
+            let context_id = item_context_id(&state, item_id)?;
+            validate_grill_configuration(&configuration)?;
+            let workspace = state
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+                .ok_or(DomainError::WorkspaceNotFound { workspace_id })?;
+            if workspace.item_id != item_id {
+                return Err(DomainError::WorkspaceItemMismatch {
+                    workspace_id,
+                    item_id,
+                });
+            }
+            if !workspace
+                .repositories
+                .iter()
+                .any(|repository| repository.repository_id == repository_id)
+            {
+                return Err(DomainError::RunRepositoryNotSelected {
+                    repository_id,
+                    workspace_id,
+                });
+            }
+            let repository = state
+                .repositories
+                .iter()
+                .find(|repository| repository.id == repository_id)
+                .ok_or(DomainError::RepositoryNotFound { repository_id })?;
+            let project = state
+                .projects
+                .iter()
+                .find(|project| project.id == repository.project_id)
+                .ok_or(DomainError::ProjectNotFound {
+                    project_id: repository.project_id,
+                })?;
+            if project.context_id != context_id {
+                return Err(DomainError::RepositoryProjectMismatch {
+                    repository_id,
+                    project_id: project.id,
+                });
+            }
+            let machine = state
+                .machines
+                .iter()
+                .find(|machine| machine.id == machine_id)
+                .ok_or(DomainError::MachineNotFound { machine_id })?;
+            if machine.context_id != context_id {
+                return Err(DomainError::MachineContextMismatch {
+                    machine_id,
+                    context_id,
+                });
+            }
+            if let Some(run) = state.runs.iter().find(|run| {
+                run.item_id == item_id
+                    && run.execution_profile == ExecutionProfile::Grill
+                    && run.state != RunState::Finished
+            }) {
+                return Err(DomainError::ActiveGrillRun {
+                    item_id,
+                    run_id: run.id,
+                });
+            }
+            let prompt = clean_name(prompt, DomainError::EmptyRunPrompt)?;
+            if skill_snapshot.trim().is_empty() {
+                return Err(DomainError::EmptyGrillSkillSnapshot);
+            }
+            let working_directory =
+                clean_name(working_directory, DomainError::EmptyRunWorkingDirectory)?;
+            let selected_repository_ids = workspace
+                .repositories
+                .iter()
+                .map(|repository| repository.repository_id)
+                .collect::<Vec<_>>();
+            let mut checkout_repository_ids = Vec::new();
+            for checkout in &checkouts {
+                if checkout.path.trim().is_empty()
+                    || checkout.branch.trim().is_empty()
+                    || !selected_repository_ids.contains(&checkout.repository_id)
+                    || checkout_repository_ids.contains(&checkout.repository_id)
+                {
+                    return Err(DomainError::InvalidDirectRunCheckout {
+                        repository_id: checkout.repository_id,
+                    });
+                }
+                checkout_repository_ids.push(checkout.repository_id);
+            }
+            if checkout_repository_ids.len() != selected_repository_ids.len()
+                || !checkouts
+                    .iter()
+                    .any(|checkout| checkout.path == working_directory)
+            {
+                return Err(DomainError::InvalidDirectRunCheckout { repository_id });
+            }
+            if checkouts
+                .iter()
+                .find(|checkout| checkout.repository_id == repository_id)
+                .map(|checkout| checkout.path.as_str())
+                != Some(working_directory.as_str())
+            {
+                return Err(DomainError::RunWorkingDirectoryRepositoryMismatch { repository_id });
+            }
+            let session_name = clean_name(session_name, DomainError::EmptyRunSessionName)?;
+            let pane_id = clean_name(pane_id, DomainError::EmptyRunPaneId)?;
+            if state.runs.iter().any(|run| {
+                run.machine_id == machine_id
+                    && run.session_name == session_name
+                    && run.pane_id == pane_id
+            }) {
+                return Err(DomainError::RunAlreadyAttached {
+                    machine_id,
+                    session_name,
+                    pane_id,
+                });
+            }
+            let id = state.next_run_id;
+            let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let run = Run {
+                id,
+                item_id,
+                workspace_id: Some(workspace_id),
+                repository_id: Some(repository_id),
+                worktree_id: None,
+                machine_id,
+                agent: configuration.agent,
+                execution_profile: ExecutionProfile::Grill,
+                model: Some(configuration.model),
+                effort: Some(configuration.effort),
+                skill_snapshot: Some(skill_snapshot),
+                prompt,
+                working_directory,
+                session_name,
+                pane_id,
+                started_at,
+                state: RunState::Unknown,
+                pane_status: RunPaneStatus::Available,
+                direct_checkouts: checkouts,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -3633,6 +3996,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 machine_id,
                 agent,
                 execution_profile: ExecutionProfile::CustomPrompt,
+                model: None,
+                effort: None,
+                skill_snapshot: None,
                 prompt: "Attached existing agent".into(),
                 working_directory,
                 session_name,
@@ -4549,10 +4915,57 @@ pub fn compose_run_prompt(
             custom_prompt.unwrap_or_default().to_owned(),
             DomainError::EmptyRunPrompt,
         )?,
+        ExecutionProfile::Grill => {
+            "Use the selected grilling skill to ask a structured frontier of questions before recommending the next decision."
+                .to_owned()
+        }
     };
     sections.insert(0, instruction);
     let prompt = sections.join("\n\n");
     clean_name(prompt, DomainError::EmptyRunPrompt)
+}
+
+pub fn compose_grill_prompt(
+    state: &DomainState,
+    item_id: i64,
+    configuration: &GrillConfiguration,
+    initial_prompt: &str,
+) -> Result<String, DomainError> {
+    validate_grill_configuration(configuration)?;
+    let item = state
+        .items
+        .iter()
+        .find(|item| item.id == item_id)
+        .ok_or(DomainError::ItemNotFound { item_id })?;
+    let initial_prompt = clean_name(initial_prompt.to_owned(), DomainError::EmptyRunPrompt)?;
+    let mut context = vec![format!("Item objective:\n{}", item.title)];
+    if !item.notes.trim().is_empty() {
+        context.push(format!("Item notes:\n{}", item.notes.trim()));
+    }
+    for link in state.links.iter().filter(|link| link.item_id == item_id) {
+        if let Some(object) = state
+            .external_objects
+            .iter()
+            .find(|object| object.id == link.external_object_id)
+        {
+            let title = state
+                .snapshots
+                .iter()
+                .find(|snapshot| snapshot.external_object_id == object.id)
+                .map(|snapshot| snapshot.title.as_str())
+                .unwrap_or("Linked external object");
+            context.push(format!("Linked source:\n{title}\n{}", object.canonical_url));
+        }
+    }
+    Ok(format!(
+        "You are starting a Grill Run.\n\nGrill configuration: agent={}, model={}, effort={}.\n\nGrilling skill snapshot:\n{}\n\nRelevant Item context:\n{}\n\nUser's initial prompt:\n{}",
+        serde_json::to_string(&configuration.agent).unwrap_or_else(|_| "unknown".into()),
+        configuration.model,
+        configuration.effort,
+        GRILL_SKILL_SNAPSHOT,
+        context.join("\n\n"),
+        initial_prompt,
+    ))
 }
 
 fn clean_name<E>(name: String, empty_error: E) -> Result<String, E> {
@@ -4903,6 +5316,7 @@ mod workspace_contract_tests {
             contexts: vec![Context {
                 id: 1,
                 name: "Personal".into(),
+                grill_defaults: GrillConfiguration::default(),
             }],
             projects: vec![Project {
                 id: 1,
@@ -5002,6 +5416,7 @@ mod workspace_contract_tests {
             contexts: vec![Context {
                 id: 1,
                 name: "Personal".into(),
+                grill_defaults: GrillConfiguration::default(),
             }],
             projects: vec![Project {
                 id: 1,
@@ -5091,6 +5506,176 @@ mod workspace_contract_tests {
         assert!(!path_is_within(
             "/tmp/src/repo",
             "/tmp/src/repository/service"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod grill_contract_tests {
+    use super::*;
+
+    fn state() -> DomainState {
+        DomainState {
+            next_context_id: 2,
+            next_project_id: 2,
+            next_item_id: 2,
+            next_item_number: 2,
+            next_repository_id: 2,
+            next_workspace_id: 2,
+            next_worktree_id: 1,
+            next_machine_id: 2,
+            next_run_id: 1,
+            next_external_object_id: 1,
+            next_link_id: 1,
+            next_activity_id: 1,
+            next_reminder_id: 1,
+            contexts: vec![Context {
+                id: 1,
+                name: "Personal".into(),
+                grill_defaults: GrillConfiguration::default(),
+            }],
+            projects: vec![Project {
+                id: 1,
+                context_id: 1,
+                name: "Default".into(),
+                defaults: ProjectDefaults::default(),
+            }],
+            repositories: vec![Repository {
+                id: 1,
+                project_id: 1,
+                name: "mission-manager".into(),
+                remote_url: "https://example.test/repo".into(),
+                base_branch: "main".into(),
+            }],
+            repository_locations: vec![RepositoryLocation {
+                repository_id: 1,
+                machine_id: 1,
+                checkout_path: "/tmp/mission-manager".into(),
+                worktree_root: "/tmp/worktrees".into(),
+            }],
+            items: vec![Item {
+                id: 1,
+                human_identifier: "MC-1".into(),
+                title: "Decide the next architecture".into(),
+                project_id: 1,
+                status: ItemStatus::Active,
+                notes: "The decision must stay reversible.".into(),
+                reminders: Vec::new(),
+            }],
+            workspaces: vec![Workspace {
+                id: 1,
+                item_id: 1,
+                repositories: vec![WorkspaceRepository {
+                    repository_id: 1,
+                    branch: "main".into(),
+                    base_branch: "main".into(),
+                }],
+                preparation_state: WorkspacePreparationState::Ready,
+            }],
+            worktrees: Vec::new(),
+            machines: vec![Machine {
+                id: 1,
+                context_id: 1,
+                name: "Local".into(),
+                socket_name: "mission".into(),
+                transport: MachineTransport::Local,
+                last_observed: MachineObservation::Available,
+                last_observed_at: None,
+            }],
+            runs: Vec::new(),
+            relationships: Vec::new(),
+            external_objects: Vec::new(),
+            links: Vec::new(),
+            snapshots: Vec::new(),
+            activities: Vec::new(),
+            attention_defaults: Vec::new(),
+        }
+    }
+
+    fn start_event(configuration: GrillConfiguration) -> Event {
+        let prompt = compose_grill_prompt(
+            &state(),
+            1,
+            &configuration,
+            "Stress-test this architecture decision.",
+        )
+        .expect("the Grill prompt should be composable");
+        Event::StartGrillRun {
+            item_id: 1,
+            workspace_id: 1,
+            repository_id: 1,
+            machine_id: 1,
+            configuration,
+            prompt,
+            skill_snapshot: GRILL_SKILL_SNAPSHOT.into(),
+            working_directory: "/tmp/mission-manager".into(),
+            session_name: "mission-item-1-run-1".into(),
+            pane_id: "%1".into(),
+            started_at: 123,
+            checkouts: vec![RunCheckout {
+                repository_id: 1,
+                path: "/tmp/mission-manager".into(),
+                branch: "main".into(),
+                is_dirty: false,
+            }],
+        }
+    }
+
+    #[test]
+    fn grill_catalog_rejects_an_effort_not_supported_by_the_selected_model() {
+        let configuration = GrillConfiguration {
+            agent: AgentKind::Codex,
+            model: "codex-luna".into(),
+            effort: "not-supported".into(),
+        };
+
+        assert!(validate_grill_configuration(&configuration).is_err());
+        assert!(grill_model_catalog()
+            .iter()
+            .any(|catalog| catalog.agent == AgentKind::Codex
+                && catalog.models.iter().any(|model| {
+                    model.id == "codex-luna"
+                        && model.efforts.iter().any(|effort| effort.id == "xhigh")
+                })));
+    }
+
+    #[test]
+    fn a_grill_run_persists_its_configuration_snapshot_and_primary_checkout() {
+        let configuration = GrillConfiguration {
+            agent: AgentKind::Codex,
+            model: "codex-luna".into(),
+            effort: "xhigh".into(),
+        };
+
+        let decision = decide(state(), start_event(configuration.clone()))
+            .expect("a valid Grill should start");
+        let run = decision.state.runs.last().expect("Run should be recorded");
+
+        assert_eq!(run.execution_profile, ExecutionProfile::Grill);
+        assert_eq!(run.repository_id, Some(1));
+        assert_eq!(run.working_directory, "/tmp/mission-manager");
+        assert_eq!(run.model.as_deref(), Some("codex-luna"));
+        assert_eq!(run.effort.as_deref(), Some("xhigh"));
+        assert_eq!(run.skill_snapshot.as_deref(), Some(GRILL_SKILL_SNAPSHOT));
+        assert!(run
+            .prompt
+            .contains("Stress-test this architecture decision."));
+        assert!(run.prompt.contains("Decide the next architecture"));
+        assert!(run.prompt.contains("The decision must stay reversible."));
+        assert!(run.prompt.contains(GRILL_SKILL_SNAPSHOT));
+    }
+
+    #[test]
+    fn an_item_cannot_start_a_second_active_grill_run() {
+        let configuration = GrillConfiguration::default();
+        let first = decide(state(), start_event(configuration.clone()))
+            .expect("the first Grill should start");
+        let error = decide(first.state, start_event(configuration))
+            .expect_err("a second active Grill must be rejected");
+
+        assert!(matches!(
+            error,
+            DomainError::ActiveGrillRun { item_id: 1, .. }
         ));
     }
 }

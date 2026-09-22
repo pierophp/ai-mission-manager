@@ -4,6 +4,7 @@ import { structureAdapter } from "../../runtime/adapters";
 import type {
   Context,
   ContextAttentionDefault,
+  GrillAgentCatalog,
   Machine,
   Project,
   Repository,
@@ -17,6 +18,7 @@ export type StructureData = {
   repositoryLocations: RepositoryLocation[];
   machines: Machine[];
   attentionDefaults: ContextAttentionDefault[];
+  grillModelCatalog: GrillAgentCatalog[];
 };
 
 export const structureKeys = {
@@ -27,6 +29,7 @@ export const structureKeys = {
   repositoryLocations: () => [...structureKeys.all, "repositoryLocations"] as const,
   machines: () => [...structureKeys.all, "machines"] as const,
   attentionDefaults: () => [...structureKeys.all, "attentionDefaults"] as const,
+  grillModelCatalog: () => [...structureKeys.all, "grillModelCatalog"] as const,
 };
 
 const structureStaleTime = 5 * 60 * 1000;
@@ -68,6 +71,12 @@ export const structureQueryOptions = {
       queryFn: structureAdapter.listAttentionDefaults,
       staleTime: structureStaleTime,
     }),
+  grillModelCatalog: () =>
+    queryOptions({
+      queryKey: structureKeys.grillModelCatalog(),
+      queryFn: structureAdapter.listGrillModelCatalog,
+      staleTime: structureStaleTime,
+    }),
 };
 
 export function useStructureData() {
@@ -77,6 +86,7 @@ export function useStructureData() {
   const repositoryLocations = useQuery(structureQueryOptions.repositoryLocations());
   const machines = useQuery(structureQueryOptions.machines());
   const attentionDefaults = useQuery(structureQueryOptions.attentionDefaults());
+  const grillModelCatalog = useQuery(structureQueryOptions.grillModelCatalog());
 
   return {
     data: {
@@ -86,8 +96,9 @@ export function useStructureData() {
       repositoryLocations: repositoryLocations.data ?? [],
       machines: machines.data ?? [],
       attentionDefaults: attentionDefaults.data ?? [],
+      grillModelCatalog: grillModelCatalog.data ?? [],
     } satisfies StructureData,
-    isPending: [contexts, projects, repositories, repositoryLocations, machines, attentionDefaults].some(
+    isPending: [contexts, projects, repositories, repositoryLocations, machines, attentionDefaults, grillModelCatalog].some(
       (query) => query.isPending,
     ),
     error:
@@ -96,6 +107,7 @@ export function useStructureData() {
       repositories.error ??
       repositoryLocations.error ??
       machines.error ??
-      attentionDefaults.error,
+      attentionDefaults.error ??
+      grillModelCatalog.error,
   };
 }

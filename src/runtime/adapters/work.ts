@@ -6,6 +6,7 @@ import type {
   ExternalObjectDeletionResult,
   ExternalSnapshot,
   DirectRunPreview,
+  GrillConfiguration,
   HomeView,
   Item,
   ItemDeletionPreview,
@@ -61,6 +62,16 @@ export const workAdapter = {
     machineId: number | null,
   ) =>
     command<DirectRunPreview>("prepare_direct_run", {
+      itemId,
+      workspaceId,
+      machineId,
+    }),
+  prepareGrillRun: (
+    itemId: number,
+    workspaceId: number,
+    machineId: number | null,
+  ) =>
+    command<DirectRunPreview>("prepare_grill_run", {
       itemId,
       workspaceId,
       machineId,
@@ -157,6 +168,16 @@ export const workAdapter = {
       promptSelection: selection,
       customPrompt,
     }),
+  composeGrillPrompt: (
+    itemId: number,
+    configuration: GrillConfiguration,
+    initialPrompt: string,
+  ) =>
+    command<string>("compose_grill_prompt", {
+      itemId,
+      configuration,
+      initialPrompt,
+    }),
   startDirectRun: ({
     itemId,
     workspaceId,
@@ -191,6 +212,38 @@ export const workAdapter = {
       executionProfile,
       prompt,
       promptSelection,
+      expectedCheckouts,
+      allowDirty,
+      allowSharedCheckouts,
+    }),
+  startGrillRun: ({
+    itemId,
+    workspaceId,
+    primaryRepositoryId,
+    machineId,
+    configuration,
+    initialPrompt,
+    expectedCheckouts,
+    allowDirty,
+    allowSharedCheckouts,
+  }: {
+    itemId: number;
+    workspaceId: number;
+    primaryRepositoryId: number;
+    machineId: number | null;
+    configuration: GrillConfiguration;
+    initialPrompt: string;
+    expectedCheckouts: RunCheckout[];
+    allowDirty: boolean;
+    allowSharedCheckouts: boolean;
+  }) =>
+    command<Run>("start_grill_run", {
+      itemId,
+      workspaceId,
+      primaryRepositoryId,
+      machineId,
+      configuration,
+      initialPrompt,
       expectedCheckouts,
       allowDirty,
       allowSharedCheckouts,

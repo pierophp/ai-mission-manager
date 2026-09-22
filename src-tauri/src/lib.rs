@@ -27,6 +27,8 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             app::list_contexts,
+            app::list_grill_model_catalog,
+            app::set_context_grill_defaults,
             app::list_projects,
             app::list_repositories,
             app::list_repository_locations,
@@ -71,8 +73,11 @@ pub fn run() {
             app::list_inbox_items,
             app::create_item,
             app::compose_run_prompt,
+            app::compose_grill_prompt,
             app::prepare_direct_run,
+            app::prepare_grill_run,
             app::start_direct_run,
+            app::start_grill_run,
             app::start_worktree_run,
             app::list_run_suggestions,
             app::attach_run,

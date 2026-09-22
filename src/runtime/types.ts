@@ -1,9 +1,32 @@
-import type { Run, RunPaneStatus, RunState } from "./execution-types";
+import type { AgentKind, Run, RunPaneStatus, RunState } from "./execution-types";
 import type { RunCheckout } from "./execution-types";
 
 export type Context = {
   id: number;
   name: string;
+  grill_defaults: GrillConfiguration;
+};
+
+export type GrillConfiguration = {
+  agent: AgentKind;
+  model: string;
+  effort: string;
+};
+
+export type GrillEffort = {
+  id: string;
+  label: string;
+};
+
+export type GrillModel = {
+  id: string;
+  label: string;
+  efforts: GrillEffort[];
+};
+
+export type GrillAgentCatalog = {
+  agent: AgentKind;
+  models: GrillModel[];
 };
 
 export type ProviderChoice = "github" | "none";

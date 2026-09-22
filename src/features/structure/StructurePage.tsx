@@ -47,6 +47,7 @@ import type {
   ExternalObjectKind,
   ItemStatus,
   ExecutionMode,
+  GrillConfiguration,
   MachineDeletionPreview,
   MachineTransport,
   ParentDeletionPreview,
@@ -83,7 +84,15 @@ export function StructurePage() {
   const structure = useStructureData().data;
   const home = useHomeQuery(undefined).data;
   const [error, setError] = useState<string>();
-  const { contexts, projects, repositories, repositoryLocations, machines, attentionDefaults } = structure;
+  const {
+    contexts,
+    projects,
+    repositories,
+    repositoryLocations,
+    machines,
+    attentionDefaults,
+    grillModelCatalog,
+  } = structure;
   const allItems = useMemo(
     () => uniqueItems(home ? flattenHome(home) : []),
     [home],
@@ -121,6 +130,9 @@ export function StructurePage() {
     useState<ExternalObjectKind>("pull_request");
   const [attentionDefaultPolicy, setAttentionDefaultPolicy] =
     useState<ExternalChangePolicy>(defaultAttentionPolicy);
+  const [grillAgent, setGrillAgent] = useState<GrillConfiguration["agent"]>("claude");
+  const [grillModel, setGrillModel] = useState("claude-sonnet-4-5");
+  const [grillEffort, setGrillEffort] = useState("high");
   const [repositoryDeletionPreview, setRepositoryDeletionPreview] =
     useState<RepositoryDeletionPreview>();
   const [parentDeletionPreview, setParentDeletionPreview] =
@@ -171,6 +183,14 @@ export function StructurePage() {
     );
     setAttentionDefaultPolicy(configured?.policy ?? defaultAttentionPolicy);
   }, [attentionDefaults, attentionObjectKind, selectedContextId]);
+
+  useEffect(() => {
+    const context = contexts.find((candidate) => candidate.id === selectedContextId);
+    if (!context) return;
+    setGrillAgent(context.grill_defaults.agent);
+    setGrillModel(context.grill_defaults.model);
+    setGrillEffort(context.grill_defaults.effort);
+  }, [contexts, selectedContextId]);
 
   async function refreshAfterEdit() {
     await invalidateStructureQueries(queryClient);
@@ -639,6 +659,35 @@ export function StructurePage() {
     }
   }
 
+  async function saveGrillDefaults(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedContextId) return;
+
+    setIsSaving(true);
+    try {
+      await structureCommand.execute(
+        structureActions.setContextGrillDefaults(selectedContextId, {
+          agent: grillAgent,
+          model: grillModel,
+          effort: grillEffort,
+        }),
+      );
+      await refreshAfterEdit();
+      setError(undefined);
+    } catch (saveError) {
+      setError(errorMessage(saveError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  const selectedGrillCatalog = grillModelCatalog.find(
+    (catalog) => catalog.agent === grillAgent,
+  );
+  const selectedGrillModel = selectedGrillCatalog?.models.find(
+    (model) => model.id === grillModel,
+  );
+
   async function handlePrepareReset() {
     setIsSaving(true);
     try {
@@ -935,6 +984,85 @@ export function StructurePage() {
               ))}
             </div>
             <Button type="submit" disabled={isSaving || !selectedContextId}>Save defaults</Button>
+          </form>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader className="border-b border-border/70">
+          <CardTitle>Grill defaults</CardTitle>
+          <CardDescription>
+            Context-scoped agent, model, and effort defaults for starting a Grill Run from an Item.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4 p-4">
+          <form
+            className="grid gap-4 lg:grid-cols-[1fr_1fr_1fr_1fr_auto] lg:items-end"
+            onSubmit={saveGrillDefaults}
+          >
+            <ContextSelect
+              contexts={contexts}
+              value={selectedContextId}
+              onChange={handleContextChange}
+              disabled={isSaving}
+            />
+            <Field label="Agent">
+              <NativeSelect
+                value={grillAgent}
+                onChange={(event) => {
+                  const nextAgent = event.target.value as GrillConfiguration["agent"];
+                  const nextCatalog = grillModelCatalog.find(
+                    (catalog) => catalog.agent === nextAgent,
+                  );
+                  const nextModel = nextCatalog?.models[0];
+                  setGrillAgent(nextAgent);
+                  setGrillModel(nextModel?.id ?? "");
+                  setGrillEffort(nextModel?.efforts[0]?.id ?? "");
+                }}
+                disabled={isSaving || grillModelCatalog.length === 0}
+              >
+                {grillModelCatalog.map((catalog) => (
+                  <NativeSelectOption value={catalog.agent} key={catalog.agent}>
+                    {catalog.agent === "claude" ? "Claude Code" : "Codex"}
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+            </Field>
+            <Field label="Model">
+              <NativeSelect
+                value={grillModel}
+                onChange={(event) => {
+                  const nextModel = selectedGrillCatalog?.models.find(
+                    (model) => model.id === event.target.value,
+                  );
+                  setGrillModel(event.target.value);
+                  setGrillEffort(nextModel?.efforts[0]?.id ?? "");
+                }}
+                disabled={isSaving || !selectedGrillCatalog}
+              >
+                {selectedGrillCatalog?.models.map((model) => (
+                  <NativeSelectOption value={model.id} key={model.id}>
+                    {model.label} ({model.id})
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+            </Field>
+            <Field label="Effort">
+              <NativeSelect
+                value={grillEffort}
+                onChange={(event) => setGrillEffort(event.target.value)}
+                disabled={isSaving || !selectedGrillModel}
+              >
+                {selectedGrillModel?.efforts.map((effort) => (
+                  <NativeSelectOption value={effort.id} key={effort.id}>
+                    {effort.label} ({effort.id})
+                  </NativeSelectOption>
+                ))}
+              </NativeSelect>
+            </Field>
+            <Button type="submit" disabled={isSaving || !selectedContextId || !selectedGrillModel}>
+              Save defaults
+            </Button>
           </form>
         </CardContent>
       </Card>

@@ -44,6 +44,7 @@ import { errorMessage } from "../../runtime/errors";
 import type {
   AgentKind,
   AttentionEntry,
+  Context,
   DirectRunPreview,
   ExecutionProfile,
   ExternalChangePolicy,
@@ -54,6 +55,8 @@ import type {
   ItemRelationKind,
   ItemView,
   Machine,
+  GrillAgentCatalog,
+  GrillConfiguration,
   Repository,
   Run,
   RunPromptSelection,
@@ -96,6 +99,8 @@ export function HomeColumn({
   allItems,
   repositories,
   machines,
+  contexts,
+  grillModelCatalog,
   onChanged,
   onOpenTerminal,
 }: {
@@ -105,6 +110,8 @@ export function HomeColumn({
   allItems: ItemView[];
   repositories: Repository[];
   machines: Machine[];
+  contexts: Context[];
+  grillModelCatalog: GrillAgentCatalog[];
   onChanged: () => Promise<void>;
   onOpenTerminal: (runId: number, pane: PaneTab) => void;
 }) {
@@ -135,6 +142,8 @@ export function HomeColumn({
               allItems={allItems}
               repositories={repositories}
               machines={machines}
+              contexts={contexts}
+              grillModelCatalog={grillModelCatalog}
               onChanged={onChanged}
               onOpenTerminal={onOpenTerminal}
             />
@@ -150,6 +159,8 @@ export function ItemCard({
   allItems,
   repositories,
   machines,
+  contexts,
+  grillModelCatalog,
   onChanged,
   onOpenTerminal,
 }: {
@@ -157,6 +168,8 @@ export function ItemCard({
   allItems: ItemView[];
   repositories: Repository[];
   machines: Machine[];
+  contexts: Context[];
+  grillModelCatalog: GrillAgentCatalog[];
   onChanged: () => Promise<void>;
   onOpenTerminal: (runId: number, pane: PaneTab) => void;
 }) {
@@ -203,6 +216,18 @@ export function ItemCard({
     useState(false);
   const [directRunSharedConfirmed, setDirectRunSharedConfirmed] =
     useState(false);
+  const [isGrillRunOpen, setIsGrillRunOpen] = useState(false);
+  const [grillRunWorkspaceId, setGrillRunWorkspaceId] = useState<number>();
+  const [grillRunMachineId, setGrillRunMachineId] = useState<number>();
+  const [grillRunRepositoryId, setGrillRunRepositoryId] = useState<number>();
+  const [grillRunPreview, setGrillRunPreview] = useState<DirectRunPreview>();
+  const [grillAgent, setGrillAgent] = useState<GrillConfiguration["agent"]>("claude");
+  const [grillModel, setGrillModel] = useState("claude-sonnet-4-5");
+  const [grillEffort, setGrillEffort] = useState("high");
+  const [grillInitialPrompt, setGrillInitialPrompt] = useState("");
+  const [grillPromptPreview, setGrillPromptPreview] = useState("");
+  const [grillDirtyConfirmed, setGrillDirtyConfirmed] = useState(false);
+  const [grillSharedConfirmed, setGrillSharedConfirmed] = useState(false);
   const [worktreeMachineId, setWorktreeMachineId] = useState<number>();
   const [worktreePathDrafts, setWorktreePathDrafts] = useState<
     Record<string, string>
@@ -228,6 +253,15 @@ export function ItemCard({
   const itemRepositories = repositories.filter(
     (repository) => repository.project_id === view.item.project_id,
   );
+  const activeGrillRun = view.runs.find(
+    (run) => run.execution_profile === "grill" && run.state !== "finished",
+  );
+  const selectedGrillCatalog = grillModelCatalog.find(
+    (catalog) => catalog.agent === grillAgent,
+  );
+  const selectedGrillModel = selectedGrillCatalog?.models.find(
+    (model) => model.id === grillModel,
+  );
 
   useEffect(() => {
     setNotes(view.item.notes);
@@ -236,6 +270,111 @@ export function ItemCard({
   useEffect(() => {
     setTitleDraft(view.item.title);
   }, [view.item.title]);
+
+  function openGrillStart() {
+    const context = contexts.find((candidate) => candidate.id === view.context_id);
+    const defaults = context?.grill_defaults;
+    setIsExpanded(true);
+    setIsGrillRunOpen(true);
+    setGrillRunWorkspaceId(undefined);
+    setGrillRunMachineId(undefined);
+    setGrillRunRepositoryId(undefined);
+    setGrillRunPreview(undefined);
+    setGrillAgent(defaults?.agent ?? "claude");
+    setGrillModel(defaults?.model ?? "claude-sonnet-4-5");
+    setGrillEffort(defaults?.effort ?? "high");
+    setGrillInitialPrompt("");
+    setGrillPromptPreview("");
+    setGrillDirtyConfirmed(false);
+    setGrillSharedConfirmed(false);
+  }
+
+  async function refreshGrillRunPreview(
+    workspaceId: number | undefined,
+    machineId: number | undefined,
+  ) {
+    setGrillRunWorkspaceId(workspaceId);
+    setGrillRunMachineId(machineId);
+    setGrillRunRepositoryId(undefined);
+    setGrillRunPreview(undefined);
+    setGrillDirtyConfirmed(false);
+    setGrillSharedConfirmed(false);
+    if (!workspaceId) return;
+
+    setIsSaving(true);
+    try {
+      const preview = await workCommand.execute(
+        workActions.prepareGrillRun(view.item.id, workspaceId, machineId ?? null),
+        false,
+      );
+      setGrillRunPreview(preview);
+    } catch (previewError) {
+      window.alert(errorMessage(previewError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function composeGrillPromptPreview() {
+    if (!grillInitialPrompt.trim() || !selectedGrillModel) return;
+    setIsSaving(true);
+    try {
+      const prompt = await workCommand.execute(
+        workActions.composeGrillPrompt(view.item.id, {
+          agent: grillAgent,
+          model: grillModel,
+          effort: grillEffort,
+        }, grillInitialPrompt),
+        false,
+      );
+      setGrillPromptPreview(prompt);
+    } catch (composeError) {
+      window.alert(errorMessage(composeError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
+  async function handleStartGrillRun(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (
+      !grillRunWorkspaceId ||
+      !grillRunPreview ||
+      !grillRunRepositoryId ||
+      !selectedGrillModel ||
+      !grillInitialPrompt.trim()
+    ) {
+      return;
+    }
+    const dirtyConfirmed =
+      grillRunPreview.dirtyRepositoryIds.length === 0 || grillDirtyConfirmed;
+    const sharedConfirmed =
+      grillRunPreview.sharedPaths.length === 0 || grillSharedConfirmed;
+    if (!dirtyConfirmed || !sharedConfirmed) return;
+
+    const started = await saveItem(
+      workActions.startGrillRun({
+        itemId: view.item.id,
+        workspaceId: grillRunWorkspaceId,
+        primaryRepositoryId: grillRunRepositoryId,
+        machineId: grillRunMachineId ?? null,
+        configuration: {
+          agent: grillAgent,
+          model: grillModel,
+          effort: grillEffort,
+        },
+        initialPrompt: grillInitialPrompt,
+        expectedCheckouts: grillRunPreview.checkouts,
+        allowDirty: grillRunPreview.dirtyRepositoryIds.length > 0,
+        allowSharedCheckouts: grillRunPreview.sharedPaths.length > 0,
+      }),
+    );
+    if (!started) return;
+    setIsGrillRunOpen(false);
+    setGrillRunWorkspaceId(undefined);
+    setGrillRunPreview(undefined);
+    setGrillPromptPreview("");
+  }
 
   async function saveItem<TData>(
     update: WorkAction<TData>,
@@ -1499,6 +1638,12 @@ export function ItemCard({
               <DropdownMenuContent align="end" className="w-48">
                 <DropdownMenuLabel>Item actions</DropdownMenuLabel>
                 <DropdownMenuItem
+                  disabled={isSaving || Boolean(activeGrillRun)}
+                  onSelect={openGrillStart}
+                >
+                  {activeGrillRun ? "Grill Run already active" : "Start Grill Run"}
+                </DropdownMenuItem>
+                <DropdownMenuItem
                   disabled={isSaving}
                   onSelect={() => {
                     setTitleDraft(view.item.title);
@@ -1547,6 +1692,255 @@ export function ItemCard({
             id={`item-card-content-${view.item.id}`}
             className="space-y-5 pt-4"
           >
+        {isGrillRunOpen && (
+          <form
+            className="grid gap-4 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4"
+            onSubmit={handleStartGrillRun}
+          >
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <h4 className="m-0 text-base font-medium">Start Grill Run</h4>
+                <p className="mt-1 text-sm text-muted-foreground">
+                  The Run uses this Item&apos;s Context defaults unless you override them here.
+                </p>
+              </div>
+              {grillRunPreview && (
+                <Badge variant="outline">Machine: {grillRunPreview.machineName}</Badge>
+              )}
+            </div>
+            {view.workspaces.length === 0 && (
+              <Alert variant="destructive">
+                <AlertTitle>Workspace required</AlertTitle>
+                <AlertDescription>
+                  Create a Workspace with at least one Repository before starting a Grill Run.
+                </AlertDescription>
+              </Alert>
+            )}
+            <div className="grid gap-3 md:grid-cols-2">
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Workspace</span>
+                <NativeSelect
+                  value={grillRunWorkspaceId ?? ""}
+                  onChange={(event) =>
+                    void refreshGrillRunPreview(
+                      Number(event.target.value) || undefined,
+                      undefined,
+                    )
+                  }
+                  disabled={isSaving || view.workspaces.length === 0}
+                >
+                  <NativeSelectOption value="">Choose a Workspace</NativeSelectOption>
+                  {view.workspaces.map((workspace) => (
+                    <NativeSelectOption value={workspace.id} key={workspace.id}>
+                      Workspace #{workspace.id} · {workspace.repositories.length} Repository(s)
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Machine</span>
+                <NativeSelect
+                  value={grillRunMachineId ?? ""}
+                  onChange={(event) =>
+                    void refreshGrillRunPreview(
+                      grillRunWorkspaceId,
+                      Number(event.target.value) || undefined,
+                    )
+                  }
+                  disabled={isSaving || !grillRunWorkspaceId}
+                >
+                  <NativeSelectOption value="">Local Mac (default)</NativeSelectOption>
+                  {itemMachines.map((machine) => (
+                    <NativeSelectOption value={machine.id} key={machine.id}>
+                      {machine.name} · {machine.last_observed}
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+              </label>
+            </div>
+            {grillRunPreview && (
+              <>
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Primary Repository / checkout root</span>
+                  <NativeSelect
+                    value={grillRunRepositoryId ?? ""}
+                    onChange={(event) =>
+                      setGrillRunRepositoryId(Number(event.target.value) || undefined)
+                    }
+                    disabled={isSaving}
+                  >
+                    <NativeSelectOption value="">Choose the primary checkout</NativeSelectOption>
+                    {grillRunPreview.checkoutDetails.map((checkout) => (
+                      <NativeSelectOption value={checkout.repositoryId} key={checkout.repositoryId}>
+                        {checkout.repositoryName} · {checkout.path}
+                      </NativeSelectOption>
+                    ))}
+                  </NativeSelect>
+                </label>
+                <div className="grid gap-2 rounded-md border p-3 text-sm">
+                  <p className="m-0 font-medium">Registered checkouts</p>
+                  {grillRunPreview.checkoutDetails.map((checkout) => (
+                    <div className="flex flex-wrap justify-between gap-2" key={checkout.repositoryId}>
+                      <span>{checkout.repositoryName} · {checkout.branch}</span>
+                      <code className="break-all text-xs text-muted-foreground">{checkout.path}</code>
+                    </div>
+                  ))}
+                </div>
+                {grillRunPreview.dirtyRepositoryIds.length > 0 && (
+                  <Alert>
+                    <AlertTitle>Checkout has local changes</AlertTitle>
+                    <AlertDescription>
+                      Review the checkout before allowing the Grill to use it.
+                      <label className="mt-2 flex items-center gap-2 font-normal">
+                        <Checkbox
+                          checked={grillDirtyConfirmed}
+                          onCheckedChange={(checked) => setGrillDirtyConfirmed(checked === true)}
+                          disabled={isSaving}
+                        />
+                        I understand and want to use the dirty checkout.
+                      </label>
+                    </AlertDescription>
+                  </Alert>
+                )}
+                {grillRunPreview.sharedPaths.length > 0 && (
+                  <Alert variant="destructive">
+                    <AlertTitle>Checkout is shared with an active Run</AlertTitle>
+                    <AlertDescription>
+                      {grillRunPreview.sharedRuns.map((shared) => (
+                        <div key={`${shared.runId}-${shared.path}`}>Run #{shared.runId} · {shared.path}</div>
+                      ))}
+                      <label className="mt-2 flex items-center gap-2 font-normal">
+                        <Checkbox
+                          checked={grillSharedConfirmed}
+                          onCheckedChange={(checked) => setGrillSharedConfirmed(checked === true)}
+                          disabled={isSaving}
+                        />
+                        I understand and want to share this checkout.
+                      </label>
+                    </AlertDescription>
+                  </Alert>
+                )}
+              </>
+            )}
+            <div className="grid gap-3 md:grid-cols-3">
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Agent</span>
+                <NativeSelect
+                  value={grillAgent}
+                  onChange={(event) => {
+                    const nextAgent = event.target.value as GrillConfiguration["agent"];
+                    const nextCatalog = grillModelCatalog.find((catalog) => catalog.agent === nextAgent);
+                    const nextModel = nextCatalog?.models[0];
+                    setGrillAgent(nextAgent);
+                    setGrillModel(nextModel?.id ?? "");
+                    setGrillEffort(nextModel?.efforts[0]?.id ?? "");
+                    setGrillPromptPreview("");
+                  }}
+                  disabled={isSaving || grillModelCatalog.length === 0}
+                >
+                  {grillModelCatalog.map((catalog) => (
+                    <NativeSelectOption value={catalog.agent} key={catalog.agent}>
+                      {catalog.agent === "claude" ? "Claude Code" : "Codex"}
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Model</span>
+                <NativeSelect
+                  value={grillModel}
+                  onChange={(event) => {
+                    const nextModel = selectedGrillCatalog?.models.find((model) => model.id === event.target.value);
+                    setGrillModel(event.target.value);
+                    setGrillEffort(nextModel?.efforts[0]?.id ?? "");
+                    setGrillPromptPreview("");
+                  }}
+                  disabled={isSaving || !selectedGrillCatalog}
+                >
+                  {selectedGrillCatalog?.models.map((model) => (
+                    <NativeSelectOption value={model.id} key={model.id}>
+                      {model.label} ({model.id})
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Effort</span>
+                <NativeSelect
+                  value={grillEffort}
+                  onChange={(event) => {
+                    setGrillEffort(event.target.value);
+                    setGrillPromptPreview("");
+                  }}
+                  disabled={isSaving || !selectedGrillModel}
+                >
+                  {selectedGrillModel?.efforts.map((effort) => (
+                    <NativeSelectOption value={effort.id} key={effort.id}>
+                      {effort.label} ({effort.id})
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+              </label>
+            </div>
+            <label className="grid gap-1.5 text-sm font-medium">
+              <span>Initial prompt</span>
+              <Textarea
+                value={grillInitialPrompt}
+                onChange={(event) => {
+                  setGrillInitialPrompt(event.target.value);
+                  setGrillPromptPreview("");
+                }}
+                rows={3}
+                placeholder="What decision, assumption, or plan should the Grill stress-test?"
+                disabled={isSaving}
+              />
+            </label>
+            {grillPromptPreview && (
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Composed prompt preview</span>
+                <Textarea value={grillPromptPreview} rows={8} readOnly />
+              </label>
+            )}
+            <div className="flex flex-wrap gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                disabled={isSaving || !grillInitialPrompt.trim() || !selectedGrillModel}
+                onClick={() => void composeGrillPromptPreview()}
+              >
+                Preview composed prompt
+              </Button>
+              <Button
+                type="submit"
+                disabled={
+                  isSaving ||
+                  !grillRunPreview ||
+                  !grillRunRepositoryId ||
+                  !grillInitialPrompt.trim() ||
+                  !selectedGrillModel ||
+                  (grillRunPreview?.dirtyRepositoryIds.length ?? 0) > 0 && !grillDirtyConfirmed ||
+                  (grillRunPreview?.sharedPaths.length ?? 0) > 0 && !grillSharedConfirmed
+                }
+              >
+                {isSaving ? "Starting…" : "Start Grill Run"}
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                disabled={isSaving}
+                onClick={() => {
+                  setIsGrillRunOpen(false);
+                  setGrillRunWorkspaceId(undefined);
+                  setGrillRunPreview(undefined);
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+          </form>
+        )}
         <label className="grid gap-1.5 text-sm font-medium">
           <span>Notes</span>
           <Textarea
@@ -1635,6 +2029,9 @@ export function ItemCard({
                       </strong>
                       <span className="text-xs text-muted-foreground">
                         {run.execution_profile} ·{" "}
+                        {run.execution_profile === "grill" && run.model && run.effort
+                          ? `${run.model} · ${run.effort} · `
+                          : ""}
                         {machines.find(
                           (machine) => machine.id === run.machine_id,
                         )?.name ?? "Machine #" + run.machine_id}{" "}

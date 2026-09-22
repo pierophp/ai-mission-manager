@@ -19,6 +19,8 @@ import type {
   Item,
   ItemStatus,
   ExecutionMode,
+  GrillAgentCatalog,
+  GrillConfiguration,
 } from "../types";
 import { command } from "./tauri";
 
@@ -30,6 +32,8 @@ export const structureAdapter = {
   listMachines: () => command<Machine[]>("list_machines"),
   listAttentionDefaults: () =>
     command<ContextAttentionDefault[]>("list_context_attention_defaults"),
+  listGrillModelCatalog: () =>
+    command<GrillAgentCatalog[]>("list_grill_model_catalog"),
   createContext: (name: string) => command<Context>("create_context", { name }),
   createProject: (
     name: string,
@@ -146,6 +150,8 @@ export const structureAdapter = {
       objectKind,
       policy,
     }),
+  setContextGrillDefaults: (contextId: number, defaults: GrillConfiguration) =>
+    command<Context>("set_context_grill_defaults", { contextId, defaults }),
   createItem: (title: string, contextId: number, projectId: number) =>
     command<Item>("create_item", { title, contextId, projectId }),
 };

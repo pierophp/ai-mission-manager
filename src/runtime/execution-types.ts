@@ -1,5 +1,10 @@
 export type AgentKind = "claude" | "codex";
-export type ExecutionProfile = "investigate" | "implement" | "review" | "custom";
+export type ExecutionProfile =
+  | "investigate"
+  | "implement"
+  | "review"
+  | "custom"
+  | "grill";
 export type RunState = "unknown" | "working" | "blocked" | "finished";
 export type RunPaneStatus = "unknown" | "available" | "missing";
 
@@ -19,6 +24,9 @@ export type Run = {
   machine_id: number;
   agent: AgentKind;
   execution_profile: ExecutionProfile;
+  model: string | null;
+  effort: string | null;
+  skill_snapshot: string | null;
   prompt: string;
   working_directory: string;
   session_name: string;

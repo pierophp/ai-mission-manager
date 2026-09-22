@@ -6,10 +6,10 @@ use thiserror::Error;
 use crate::domain::{
     Activity, AgentKind, AuditAction, AuditEntry, Context, ContextAttentionDefault, DomainState,
     Effect, ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalMetadata,
-    ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, Item, ItemRelation,
-    ItemRelationKind, ItemStatus, Link, Machine, MachineObservation, Project, ProjectDefaults,
-    Reminder, Repository, RepositoryLocation, Run, RunPaneStatus, RunState, Workspace,
-    WorkspacePreparationState, WorkspaceRepository, Worktree,
+    ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, GrillConfiguration,
+    Item, ItemRelation, ItemRelationKind, ItemStatus, Link, Machine, MachineObservation, Project,
+    ProjectDefaults, Reminder, Repository, RepositoryLocation, Run, RunPaneStatus, RunState,
+    Workspace, WorkspacePreparationState, WorkspaceRepository, Worktree,
 };
 
 #[derive(Debug, Error)]
@@ -32,6 +32,8 @@ pub enum StoreError {
     InvalidActivityChanges(String),
     #[error("invalid Agent kind in database: {0}")]
     InvalidAgentKind(String),
+    #[error("invalid Grill configuration in database: {0}")]
+    InvalidGrillConfiguration(String),
     #[error("invalid Execution Profile in database: {0}")]
     InvalidExecutionProfile(String),
     #[error("invalid Execution Mode in database: {0}")]
@@ -114,6 +116,7 @@ impl SqliteStore {
             )?;
         }
         migrate_legacy_workset_data(&mut connection)?;
+        migrate_runs_for_grill(&mut connection)?;
         initialize_schema(&mut connection)?;
 
         Ok(Self { connection })
@@ -134,13 +137,28 @@ impl SqliteStore {
         let next_activity_id = self.sequence("next_activity_id")?;
         let next_reminder_id = self.sequence("next_reminder_id")?;
         let contexts = {
-            let mut statement = self
-                .connection
-                .prepare("SELECT id, name FROM contexts ORDER BY id")?;
+            let mut statement = self.connection.prepare(
+                "SELECT id, name, grill_agent, grill_model, grill_effort
+                     FROM contexts ORDER BY id",
+            )?;
             let rows = statement.query_map([], |row| {
+                let agent: String = row.get(2)?;
+                let model: String = row.get(3)?;
+                let effort: String = row.get(4)?;
                 Ok(Context {
                     id: row.get(0)?,
                     name: row.get(1)?,
+                    grill_defaults: GrillConfiguration {
+                        agent: parse_agent_kind(&agent).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                2,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        model,
+                        effort,
+                    },
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -367,7 +385,7 @@ impl SqliteStore {
         let runs = {
             let mut statement = self.connection.prepare(
                 "SELECT id, item_id, workspace_id, repository_id, worktree_id,
-                        machine_id, agent, execution_profile,
+                        machine_id, agent, execution_profile, model, effort, skill_snapshot,
                         prompt, working_directory, session_name, pane_id, started_at, state,
                         pane_status, direct_checkouts_json
                  FROM runs
@@ -376,7 +394,7 @@ impl SqliteStore {
             let rows = statement.query_map([], |row| {
                 let agent: String = row.get(6)?;
                 let execution_profile: String = row.get(7)?;
-                let direct_checkouts_json: String = row.get(15)?;
+                let direct_checkouts_json: String = row.get(18)?;
                 Ok(Run {
                     id: row.get(0)?,
                     item_id: row.get(1)?,
@@ -400,22 +418,25 @@ impl SqliteStore {
                             )
                         },
                     )?,
-                    prompt: row.get(8)?,
-                    working_directory: row.get(9)?,
-                    session_name: row.get(10)?,
-                    pane_id: row.get(11)?,
-                    started_at: row.get(12)?,
-                    state: parse_run_state(&row.get::<_, String>(13)?).map_err(|error| {
+                    model: row.get(8)?,
+                    effort: row.get(9)?,
+                    skill_snapshot: row.get(10)?,
+                    prompt: row.get(11)?,
+                    working_directory: row.get(12)?,
+                    session_name: row.get(13)?,
+                    pane_id: row.get(14)?,
+                    started_at: row.get(15)?,
+                    state: parse_run_state(&row.get::<_, String>(16)?).map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            13,
+                            16,
                             rusqlite::types::Type::Text,
                             Box::new(error),
                         )
                     })?,
-                    pane_status: parse_run_pane_status(&row.get::<_, String>(14)?).map_err(
+                    pane_status: parse_run_pane_status(&row.get::<_, String>(17)?).map_err(
                         |error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                14,
+                                17,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
@@ -424,7 +445,7 @@ impl SqliteStore {
                     direct_checkouts: serde_json::from_str(&direct_checkouts_json).map_err(
                         |error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                15,
+                                18,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
@@ -685,12 +706,33 @@ impl SqliteStore {
                     next_context_id,
                 } => {
                     transaction.execute(
-                        "INSERT INTO contexts (id, name) VALUES (?1, ?2)",
-                        params![context.id, context.name],
+                        "INSERT INTO contexts
+                            (id, name, grill_agent, grill_model, grill_effort)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            context.id,
+                            context.name,
+                            agent_kind_as_str(context.grill_defaults.agent),
+                            context.grill_defaults.model,
+                            context.grill_defaults.effort,
+                        ],
                     )?;
                     transaction.execute(
                         "UPDATE metadata SET value = ?1 WHERE key = 'next_context_id'",
                         params![next_context_id],
+                    )?;
+                }
+                Effect::PersistContextGrillDefaults { context } => {
+                    transaction.execute(
+                        "UPDATE contexts
+                         SET grill_agent = ?1, grill_model = ?2, grill_effort = ?3
+                         WHERE id = ?4",
+                        params![
+                            agent_kind_as_str(context.grill_defaults.agent),
+                            context.grill_defaults.model,
+                            context.grill_defaults.effort,
+                            context.id,
+                        ],
                     )?;
                 }
                 Effect::PersistProject {
@@ -783,8 +825,16 @@ impl SqliteStore {
                          DELETE FROM contexts;",
                     )?;
                     transaction.execute(
-                        "INSERT INTO contexts (id, name) VALUES (?1, ?2)",
-                        params![context.id, context.name],
+                        "INSERT INTO contexts
+                            (id, name, grill_agent, grill_model, grill_effort)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            context.id,
+                            context.name,
+                            agent_kind_as_str(context.grill_defaults.agent),
+                            context.grill_defaults.model,
+                            context.grill_defaults.effort,
+                        ],
                     )?;
                     transaction.execute(
                         "INSERT INTO projects
@@ -969,9 +1019,10 @@ impl SqliteStore {
                         "INSERT INTO runs
                             (id, item_id, workspace_id, repository_id, worktree_id,
                             machine_id, agent,
-                            execution_profile, prompt, working_directory, session_name, pane_id,
+                            execution_profile, model, effort, skill_snapshot,
+                            prompt, working_directory, session_name, pane_id,
                             started_at, state, pane_status, direct_checkouts_json)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
                         params![
                             run.id,
                             run.item_id,
@@ -981,6 +1032,9 @@ impl SqliteStore {
                             run.machine_id,
                             agent_kind_as_str(run.agent),
                             execution_profile_as_str(run.execution_profile),
+                            run.model,
+                            run.effort,
+                            run.skill_snapshot,
                             run.prompt,
                             run.working_directory,
                             run.session_name,
@@ -1518,7 +1572,10 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          );
          CREATE TABLE IF NOT EXISTS contexts (
              id INTEGER PRIMARY KEY NOT NULL,
-             name TEXT NOT NULL UNIQUE
+             name TEXT NOT NULL UNIQUE,
+             grill_agent TEXT NOT NULL DEFAULT 'claude',
+             grill_model TEXT NOT NULL DEFAULT 'claude-sonnet-4-5',
+             grill_effort TEXT NOT NULL DEFAULT 'high'
          );
          CREATE TABLE IF NOT EXISTS projects (
              id INTEGER PRIMARY KEY NOT NULL,
@@ -1549,6 +1606,32 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
 
     if !projects_table_existed {
         ensure_default_projects(connection)?;
+    }
+
+    let context_columns = table_columns(connection, "contexts")?;
+    if !context_columns.is_empty() && !context_columns.iter().any(|column| column == "grill_agent")
+    {
+        connection.execute(
+            "ALTER TABLE contexts ADD COLUMN grill_agent TEXT NOT NULL DEFAULT 'claude'",
+            [],
+        )?;
+    }
+    if !context_columns.is_empty() && !context_columns.iter().any(|column| column == "grill_model")
+    {
+        connection.execute(
+            "ALTER TABLE contexts ADD COLUMN grill_model TEXT NOT NULL DEFAULT 'claude-sonnet-4-5'",
+            [],
+        )?;
+    }
+    if !context_columns.is_empty()
+        && !context_columns
+            .iter()
+            .any(|column| column == "grill_effort")
+    {
+        connection.execute(
+            "ALTER TABLE contexts ADD COLUMN grill_effort TEXT NOT NULL DEFAULT 'high'",
+            [],
+        )?;
     }
 
     if table_columns(connection, "items")?.is_empty() {
@@ -1642,7 +1725,10 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
              machine_id INTEGER NOT NULL REFERENCES machines(id),
              agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
              execution_profile TEXT NOT NULL
-                 CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom')),
+                 CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom', 'grill')),
+             model TEXT,
+             effort TEXT,
+             skill_snapshot TEXT,
              prompt TEXT NOT NULL,
              working_directory TEXT NOT NULL,
              session_name TEXT NOT NULL,
@@ -1915,6 +2001,54 @@ fn migrate_legacy_workset_data(connection: &mut Connection) -> Result<(), StoreE
     Ok(())
 }
 
+fn migrate_runs_for_grill(connection: &mut Connection) -> Result<(), StoreError> {
+    let columns = table_columns(connection, "runs")?;
+    if columns.is_empty() || columns.iter().any(|column| column == "model") {
+        return Ok(());
+    }
+
+    connection.execute_batch(
+        "DROP INDEX IF EXISTS runs_by_item;
+         DROP INDEX IF EXISTS runs_by_workspace;
+         ALTER TABLE runs RENAME TO runs_legacy;
+         CREATE TABLE runs (
+             id INTEGER PRIMARY KEY NOT NULL,
+             item_id INTEGER NOT NULL REFERENCES items(id),
+             workspace_id INTEGER REFERENCES workspaces(id),
+             repository_id INTEGER REFERENCES repositories(id),
+             worktree_id INTEGER REFERENCES worktrees(id),
+             machine_id INTEGER NOT NULL REFERENCES machines(id),
+             agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
+             execution_profile TEXT NOT NULL
+                 CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom', 'grill')),
+             model TEXT,
+             effort TEXT,
+             skill_snapshot TEXT,
+             prompt TEXT NOT NULL,
+             working_directory TEXT NOT NULL,
+             session_name TEXT NOT NULL,
+             pane_id TEXT NOT NULL,
+             started_at INTEGER NOT NULL,
+             state TEXT NOT NULL DEFAULT 'unknown',
+             pane_status TEXT NOT NULL DEFAULT 'unknown',
+             direct_checkouts_json TEXT NOT NULL DEFAULT '[]'
+         );
+         INSERT INTO runs (
+             id, item_id, workspace_id, repository_id, worktree_id, machine_id, agent,
+             execution_profile, prompt, working_directory, session_name, pane_id, started_at,
+             state, pane_status, direct_checkouts_json
+         )
+         SELECT id, item_id, workspace_id, repository_id, worktree_id, machine_id, agent,
+                execution_profile, prompt, working_directory, session_name, pane_id, started_at,
+                state, pane_status, direct_checkouts_json
+         FROM runs_legacy;
+         DROP TABLE runs_legacy;
+         CREATE INDEX runs_by_item ON runs (item_id, id);
+         CREATE INDEX runs_by_workspace ON runs (workspace_id, id);",
+    )?;
+    Ok(())
+}
+
 fn ensure_default_projects(connection: &mut Connection) -> Result<(), StoreError> {
     let context_ids = {
         let mut statement = connection.prepare("SELECT id FROM contexts ORDER BY id")?;
@@ -2097,6 +2231,7 @@ fn execution_profile_as_str(profile: ExecutionProfile) -> &'static str {
         ExecutionProfile::Implement => "implement",
         ExecutionProfile::Review => "review",
         ExecutionProfile::CustomPrompt => "custom",
+        ExecutionProfile::Grill => "grill",
     }
 }
 
@@ -2106,6 +2241,7 @@ fn parse_execution_profile(profile: &str) -> Result<ExecutionProfile, StoreError
         "implement" => Ok(ExecutionProfile::Implement),
         "review" => Ok(ExecutionProfile::Review),
         "custom" => Ok(ExecutionProfile::CustomPrompt),
+        "grill" => Ok(ExecutionProfile::Grill),
         other => Err(StoreError::InvalidExecutionProfile(other.into())),
     }
 }
@@ -2278,7 +2414,24 @@ mod tests {
     use rusqlite::Connection;
     use tempfile::tempdir;
 
-    use super::{migrate_legacy_workset_data, table_columns};
+    use crate::domain::{
+        compose_grill_prompt, decide, AgentKind, Event, GrillConfiguration, MachineTransport,
+        RunCheckout, WorkspaceRepositoryInput, GRILL_SKILL_SNAPSHOT,
+    };
+
+    use super::{migrate_legacy_workset_data, table_columns, SqliteStore};
+
+    fn apply_event(
+        store: &mut SqliteStore,
+        state: crate::domain::DomainState,
+        event: Event,
+    ) -> crate::domain::DomainState {
+        let decision = decide(state, event).expect("event should be accepted");
+        store
+            .apply(&decision.effects)
+            .expect("event effects should persist");
+        decision.state
+    }
 
     fn create_legacy_schema(connection: &Connection) {
         connection
@@ -2491,6 +2644,125 @@ mod tests {
                 )
                 .expect("migration marker should be readable"),
             0
+        );
+    }
+
+    #[test]
+    fn round_trips_context_grill_defaults_and_run_snapshot() {
+        let directory = tempdir().expect("temporary directory should exist");
+        let database_path = directory.path().join("mission-manager.sqlite");
+        let mut store = SqliteStore::open(&database_path).expect("database should open");
+        let mut state = store.load_state().expect("initial state should load");
+
+        state = apply_event(
+            &mut store,
+            state,
+            Event::CreateContext {
+                name: "Architecture".into(),
+            },
+        );
+        state = apply_event(
+            &mut store,
+            state,
+            Event::RegisterMachine {
+                context_id: 1,
+                name: "Local".into(),
+                socket_name: "mission".into(),
+                transport: MachineTransport::Local,
+            },
+        );
+        state = apply_event(
+            &mut store,
+            state,
+            Event::RegisterRepositoryAtLocation {
+                project_id: 1,
+                name: "mission-manager".into(),
+                remote_url: "https://example.test/mission-manager".into(),
+                base_branch: "main".into(),
+                machine_id: 1,
+                checkout_path: "/tmp/mission-manager".into(),
+                worktree_root: "/tmp/worktrees".into(),
+            },
+        );
+        state = apply_event(
+            &mut store,
+            state,
+            Event::CreateItem {
+                title: "Choose an architecture".into(),
+                context_id: 1,
+                project_id: 1,
+            },
+        );
+        state = apply_event(
+            &mut store,
+            state,
+            Event::CreateWorkspace {
+                item_id: 1,
+                repositories: vec![WorkspaceRepositoryInput {
+                    repository_id: 1,
+                    branch: "main".into(),
+                    base_branch: "main".into(),
+                }],
+            },
+        );
+
+        let configuration = GrillConfiguration {
+            agent: AgentKind::Codex,
+            model: "codex-luna".into(),
+            effort: "xhigh".into(),
+        };
+        state = apply_event(
+            &mut store,
+            state,
+            Event::SetContextGrillDefaults {
+                context_id: 1,
+                defaults: configuration.clone(),
+            },
+        );
+        let prompt = compose_grill_prompt(
+            &state,
+            1,
+            &configuration,
+            "Stress-test the proposed architecture.",
+        )
+        .expect("Grill prompt should compose");
+        state = apply_event(
+            &mut store,
+            state,
+            Event::StartGrillRun {
+                item_id: 1,
+                workspace_id: 1,
+                repository_id: 1,
+                machine_id: 1,
+                configuration,
+                prompt,
+                skill_snapshot: GRILL_SKILL_SNAPSHOT.into(),
+                working_directory: "/tmp/mission-manager".into(),
+                session_name: "mission-item-1-grill-1".into(),
+                pane_id: "%1".into(),
+                started_at: 123,
+                checkouts: vec![RunCheckout {
+                    repository_id: 1,
+                    path: "/tmp/mission-manager".into(),
+                    branch: "main".into(),
+                    is_dirty: false,
+                }],
+            },
+        );
+
+        let reloaded = store.load_state().expect("persisted state should load");
+        assert_eq!(reloaded, state);
+        assert_eq!(reloaded.contexts[0].grill_defaults.model, "codex-luna");
+        assert_eq!(reloaded.contexts[0].grill_defaults.effort, "xhigh");
+        assert_eq!(
+            reloaded.runs[0].execution_profile,
+            crate::domain::ExecutionProfile::Grill
+        );
+        assert_eq!(reloaded.runs[0].model.as_deref(), Some("codex-luna"));
+        assert_eq!(reloaded.runs[0].effort.as_deref(), Some("xhigh"));
+        assert_eq!(
+            reloaded.runs[0].skill_snapshot.as_deref(),
+            Some(GRILL_SKILL_SNAPSHOT)
         );
     }
 }

@@ -35,6 +35,9 @@ pub trait TerminalRuntime {
 pub struct AgentLaunchContext<'a> {
     pub run_id: i64,
     pub state_file: &'a Path,
+    pub agent: Option<AgentKind>,
+    pub model: Option<&'a str>,
+    pub effort: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -913,14 +916,21 @@ fn launch_tmux_agent(
     prompt: &str,
     launch: AgentLaunchContext<'_>,
 ) -> Result<String, String> {
-    let command = format!(
-        "export AI_MISSION_MANAGER_RUN_ID={}; export AI_MISSION_MANAGER_STATE_FILE={}; export AI_MISSION_MANAGER_TMUX_PATH=tmux; export AI_MISSION_MANAGER_TMUX_SOCKET={}; export AI_MISSION_MANAGER_PANE_ID=\"$TMUX_PANE\"; exec {} {}",
+    let mut command = format!(
+        "export AI_MISSION_MANAGER_RUN_ID={}; export AI_MISSION_MANAGER_STATE_FILE={}; export AI_MISSION_MANAGER_TMUX_PATH=tmux; export AI_MISSION_MANAGER_TMUX_SOCKET={}; export AI_MISSION_MANAGER_PANE_ID=\"$TMUX_PANE\"; exec {}",
         shell_quote(&launch.run_id.to_string()),
         shell_quote(&launch.state_file.to_string_lossy()),
         shell_quote(&machine.socket_name),
         shell_quote(&executable.to_string_lossy()),
-        shell_quote(prompt)
     );
+    if let Some(agent) = launch.agent {
+        for argument in agent_cli_arguments(agent, launch.model, launch.effort)? {
+            command.push(' ');
+            command.push_str(&shell_quote(&argument));
+        }
+    }
+    command.push(' ');
+    command.push_str(&shell_quote(prompt));
     let args = vec![
         "new-session".into(),
         "-d".into(),
@@ -980,6 +990,32 @@ fn launch_tmux_agent(
     Ok(pane_id)
 }
 
+pub fn agent_cli_arguments(
+    agent: AgentKind,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Result<Vec<String>, String> {
+    let mut arguments = Vec::new();
+    if let Some(model) = model {
+        if model.trim().is_empty() {
+            return Err("agent model identifier cannot be blank".into());
+        }
+        arguments.extend(["--model".into(), model.into()]);
+    }
+    if let Some(effort) = effort {
+        if effort.trim().is_empty() {
+            return Err("agent effort identifier cannot be blank".into());
+        }
+        match agent {
+            AgentKind::Claude => arguments.extend(["--effort".into(), effort.into()]),
+            AgentKind::Codex => {
+                arguments.extend(["-c".into(), format!("model_reasoning_effort={effort}")])
+            }
+        }
+    }
+    Ok(arguments)
+}
+
 fn kill_tmux_session(machine: &Machine, session_name: &str) -> Result<(), String> {
     let args = vec!["kill-session".into(), "-t".into(), session_name.into()];
     run_tmux(machine, &args).map(|_| ())
@@ -1006,6 +1042,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn grill_launch_uses_provider_identifiers_for_model_and_effort() {
+        assert_eq!(
+            agent_cli_arguments(AgentKind::Claude, Some("claude-sonnet-4-5"), Some("high"))
+                .expect("Claude arguments should be valid"),
+            vec!["--model", "claude-sonnet-4-5", "--effort", "high"]
+        );
+        assert_eq!(
+            agent_cli_arguments(AgentKind::Codex, Some("codex-luna"), Some("xhigh"))
+                .expect("Codex arguments should be valid"),
+            vec![
+                "--model",
+                "codex-luna",
+                "-c",
+                "model_reasoning_effort=xhigh"
+            ]
+        );
+    }
+
+    #[test]
     fn local_agent_launch_returns_a_stable_tmux_pane_identity() {
         let directory = tempdir().expect("temporary launch directory should exist");
         let machine = Machine {
@@ -1028,6 +1083,9 @@ mod tests {
                 AgentLaunchContext {
                     run_id: 1,
                     state_file: &directory.path().join("state.json"),
+                    agent: None,
+                    model: None,
+                    effort: None,
                 },
             )
             .expect("tmux should launch the test process");
