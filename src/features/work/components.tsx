@@ -231,6 +231,7 @@ export function ItemCard({
   const [grillRunMachineId, setGrillRunMachineId] = useState<number>();
   const [grillRunRepositoryId, setGrillRunRepositoryId] = useState<number>();
   const [grillRunPreview, setGrillRunPreview] = useState<DirectRunPreview>();
+  const [grillRunPreviewError, setGrillRunPreviewError] = useState<string>();
   const [grillAgent, setGrillAgent] = useState<GrillConfiguration["agent"]>("claude");
   const [grillModel, setGrillModel] = useState("claude-sonnet-4-5");
   const [grillEffort, setGrillEffort] = useState("high");
@@ -290,6 +291,7 @@ export function ItemCard({
     setGrillRunMachineId(undefined);
     setGrillRunRepositoryId(undefined);
     setGrillRunPreview(undefined);
+    setGrillRunPreviewError(undefined);
     setGrillAgent(defaults?.agent ?? "claude");
     setGrillModel(defaults?.model ?? "claude-sonnet-4-5");
     setGrillEffort(defaults?.effort ?? "high");
@@ -307,6 +309,7 @@ export function ItemCard({
     setGrillRunMachineId(machineId);
     setGrillRunRepositoryId(undefined);
     setGrillRunPreview(undefined);
+    setGrillRunPreviewError(undefined);
     setGrillDirtyConfirmed(false);
     setGrillSharedConfirmed(false);
     if (!workspaceId) return;
@@ -318,8 +321,15 @@ export function ItemCard({
         false,
       );
       setGrillRunPreview(preview);
+      setGrillRunRepositoryId(
+        preview.checkoutDetails.length === 1
+          ? preview.checkoutDetails[0].repositoryId
+          : undefined,
+      );
     } catch (previewError) {
-      window.alert(errorMessage(previewError));
+      const message = errorMessage(previewError);
+      setGrillRunPreviewError(message);
+      window.alert(message);
     } finally {
       setIsSaving(false);
     }
@@ -1723,21 +1733,33 @@ export function ItemCard({
             className="space-y-5 pt-4"
           >
         {isGrillRunOpen && (
-          <form
-            className="grid gap-4 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4"
-            onSubmit={handleStartGrillRun}
+          <Dialog
+            open
+            onOpenChange={(open) => {
+              if (!open && !isSaving) {
+                setIsGrillRunOpen(false);
+                setGrillRunWorkspaceId(undefined);
+                setGrillRunPreview(undefined);
+                setGrillRunPreviewError(undefined);
+                setGrillPromptPreview("");
+              }
+            }}
           >
-            <div className="flex flex-wrap items-start justify-between gap-3">
-              <div>
-                <h4 className="m-0 text-base font-medium">Start Grill Run</h4>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  The Run uses this Item&apos;s Context defaults unless you override them here.
-                </p>
-              </div>
-              {grillRunPreview && (
-                <Badge variant="outline">Machine: {grillRunPreview.machineName}</Badge>
-              )}
-            </div>
+            <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-3xl">
+              <DialogHeader>
+                <div className="flex flex-wrap items-start justify-between gap-3 pr-8">
+                  <div className="grid gap-1">
+                    <DialogTitle>Start Grill Run</DialogTitle>
+                    <DialogDescription>
+                      The Run uses this Item&apos;s Context defaults unless you override them here.
+                    </DialogDescription>
+                  </div>
+                  {grillRunPreview && (
+                    <Badge variant="outline">Machine: {grillRunPreview.machineName}</Badge>
+                  )}
+                </div>
+              </DialogHeader>
+              <form className="grid gap-4" onSubmit={handleStartGrillRun}>
             {view.workspaces.length === 0 && (
               <Alert variant="destructive">
                 <AlertTitle>Workspace required</AlertTitle>
@@ -1788,6 +1810,18 @@ export function ItemCard({
                 </NativeSelect>
               </label>
             </div>
+            {grillRunPreviewError && (
+              <Alert variant="destructive">
+                <AlertTitle>Could not prepare the Grill checkout</AlertTitle>
+                <AlertDescription>
+                  <p>{grillRunPreviewError}</p>
+                  <p>
+                    Register this Repository&apos;s checkout for the selected Machine
+                    under Structure, then reopen the Grill Run.
+                  </p>
+                </AlertDescription>
+              </Alert>
+            )}
             {grillRunPreview && (
               <>
                 <label className="grid gap-1.5 text-sm font-medium">
@@ -1931,7 +1965,7 @@ export function ItemCard({
                 <Textarea value={grillPromptPreview} rows={8} readOnly />
               </label>
             )}
-            <div className="flex flex-wrap gap-2">
+            <DialogFooter>
               <Button
                 type="button"
                 size="sm"
@@ -1964,12 +1998,16 @@ export function ItemCard({
                   setIsGrillRunOpen(false);
                   setGrillRunWorkspaceId(undefined);
                   setGrillRunPreview(undefined);
+                  setGrillRunPreviewError(undefined);
+                  setGrillPromptPreview("");
                 }}
               >
                 Cancel
               </Button>
-            </div>
-          </form>
+            </DialogFooter>
+              </form>
+            </DialogContent>
+          </Dialog>
         )}
         <label className="grid gap-1.5 text-sm font-medium">
           <span>Notes</span>

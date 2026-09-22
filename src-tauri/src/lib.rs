@@ -7,8 +7,57 @@ mod provider;
 mod terminal;
 
 mod app;
+mod features;
+
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use tauri::Manager;
+
+fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
+    let mut sidecar = path.as_os_str().to_os_string();
+    sidecar.push(suffix);
+    PathBuf::from(sidecar)
+}
+
+fn database_path(home_dir: &Path, legacy_data_dir: &Path) -> std::io::Result<PathBuf> {
+    let data_dir = home_dir.join(".ai-mission-manager");
+    fs::create_dir_all(&data_dir)?;
+
+    let database_path = data_dir.join("mission-manager.sqlite");
+    let legacy_database_path = legacy_data_dir.join("mission-manager.sqlite");
+    if database_path.exists() || !legacy_database_path.exists() {
+        return Ok(database_path);
+    }
+
+    let mut moved_sidecars = Vec::new();
+    for suffix in ["-wal", "-shm"] {
+        let source = sqlite_sidecar(&legacy_database_path, suffix);
+        if !source.exists() {
+            continue;
+        }
+
+        let destination = sqlite_sidecar(&database_path, suffix);
+        if let Err(error) = fs::rename(&source, &destination) {
+            for (moved_source, moved_destination) in moved_sidecars.into_iter().rev() {
+                let _ = fs::rename(moved_destination, moved_source);
+            }
+            return Err(error);
+        }
+        moved_sidecars.push((source, destination));
+    }
+
+    if let Err(error) = fs::rename(&legacy_database_path, &database_path) {
+        for (source, destination) in moved_sidecars.into_iter().rev() {
+            let _ = fs::rename(destination, source);
+        }
+        return Err(error);
+    }
+
+    Ok(database_path)
+}
 
 pub fn run() {
     tauri::Builder::default()
@@ -18,13 +67,16 @@ pub fn run() {
                 window.open_devtools();
             }
 
-            let data_dir = app.path().app_data_dir()?;
-            std::fs::create_dir_all(&data_dir)?;
-            let database_path = data_dir.join("mission-manager.sqlite");
-            let runtime = app::Runtime::open(database_path)?;
-            app.manage(std::sync::Mutex::new(runtime));
+            let database_path =
+                database_path(&app.path().home_dir()?, &app.path().app_data_dir()?)?;
+            let runtime = features::Runtime::open(database_path)?;
+            app.manage(features::SharedRuntime::new(runtime));
             Ok(())
         })
+        // Keep the stable `app::*` facade paths in the command registry while
+        // feature modules own the implementations. Tauri's generated command
+        // wrapper macros are path-sensitive, so this preserves registration
+        // without exposing feature implementation paths as a contract.
         .invoke_handler(tauri::generate_handler![
             app::list_contexts,
             app::list_grill_model_catalog,
@@ -112,6 +164,64 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running AI Mission Manager");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
+    use super::{database_path, sqlite_sidecar};
+
+    #[test]
+    fn stores_the_database_under_the_home_directory_and_migrates_the_legacy_file() {
+        let root = tempdir().expect("temporary root should be created");
+        let legacy = root.path().join("legacy-app-data");
+        fs::create_dir_all(&legacy).expect("legacy directory should be created");
+        let legacy_database = legacy.join("mission-manager.sqlite");
+        fs::write(&legacy_database, b"database").expect("legacy database should be created");
+        fs::write(sqlite_sidecar(&legacy_database, "-wal"), b"wal")
+            .expect("legacy WAL should be created");
+
+        let database = database_path(root.path(), &legacy).expect("database path should resolve");
+        let expected = root
+            .path()
+            .join(".ai-mission-manager/mission-manager.sqlite");
+        assert_eq!(database, expected);
+        assert_eq!(
+            fs::read(&database).expect("migrated database should exist"),
+            b"database"
+        );
+        assert_eq!(
+            fs::read(sqlite_sidecar(&database, "-wal")).expect("migrated WAL should exist"),
+            b"wal"
+        );
+        assert!(!legacy_database.exists());
+    }
+
+    #[test]
+    fn keeps_the_new_database_when_both_locations_exist() {
+        let root = tempdir().expect("temporary root should be created");
+        let legacy = root.path().join("legacy-app-data");
+        fs::create_dir_all(&legacy).expect("legacy directory should be created");
+        let new_data_dir = root.path().join(".ai-mission-manager");
+        fs::create_dir_all(&new_data_dir).expect("new data directory should be created");
+        fs::write(new_data_dir.join("mission-manager.sqlite"), b"new")
+            .expect("new database should be created");
+        let legacy_database = legacy.join("mission-manager.sqlite");
+        fs::write(&legacy_database, b"legacy").expect("legacy database should be created");
+
+        let database = database_path(root.path(), &legacy).expect("database path should resolve");
+        assert_eq!(
+            fs::read(database).expect("new database should remain"),
+            b"new"
+        );
+        assert_eq!(
+            fs::read(legacy_database).expect("legacy database should remain"),
+            b"legacy"
+        );
+    }
 }
 
 pub fn run_agent_state_hook(args: &[String]) -> Result<(), String> {

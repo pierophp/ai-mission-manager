@@ -1,138 +1,57 @@
+//! Stable Tauri command facade and the single shared application Runtime.
+//!
+//! Feature modules own workflow implementations. This module intentionally
+//! keeps command names, argument shapes, and serialized return types stable
+//! for the frontend and for Tauri's generated command wrappers.
+
 use std::{
     collections::HashMap,
-    env, fs,
     path::{Path, PathBuf},
     sync::Mutex,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, State};
 
 use crate::{
-    agent_state::{provision_hooks, read_state_file, state_file_path, AgentStateRecord},
-    dependencies::{check_command, resolve_executable, DependencyState, DependencyStatus},
+    dependencies::resolve_executable,
     domain::{
-        activity_tab_view, compose_grill_continuation_prompt as build_grill_continuation_prompt,
-        compose_grill_prompt as build_grill_prompt, compose_run_prompt as build_run_prompt, decide,
-        discover_downstream_issue_candidates, external_link_view, format_grill_response, home_view,
-        normalize_machine_path, parse_grill_question_group_since, plan_context_deletion,
-        plan_external_object_deletion, plan_item_deletion, plan_machine_deletion,
-        plan_project_deletion, plan_repository_deletion, plan_reset_local_data, run_is_active,
-        search_items, suggest_untracked_runs, worktree_path, ActivityTabView, AgentKind,
-        AgentPaneObservation, AuditAction, AuditEntry, ConfirmedDownstreamIssue, Context,
-        ContextAttentionDefault, DomainState, Effect, Event, ExecutionMode, ExecutionProfile,
-        ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
-        ExternalObjectDeletionSummary, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
-        ExternalSnapshot, GrillAnswer, GrillConfiguration, GrillContinuationAction, HomeView, Item,
-        ItemDeletionPlan, ItemDeletionSummary, ItemRelation, ItemRelationKind, ItemStatus,
-        ItemView, Machine, MachineDeletionPlan, MachineObservation, MachineTransport,
-        ParentDeletionPlan, Project, ProjectDefaults, Repository, RepositoryDeletionPlan,
-        ResetLocalDataPlan, ResetLocalDataSummary, Run, RunCheckout, RunPaneStatus,
+        decide, ActivityTabView, AgentKind, AuditEntry, Context, ContextAttentionDefault,
+        DomainState, Event, ExecutionMode, ExecutionProfile, ExternalChangePolicy,
+        ExternalLinkView, ExternalObjectKind, ExternalSnapshot, GrillAnswer, GrillConfiguration,
+        GrillContinuationAction, HomeView, Item, ItemRelation, ItemRelationKind, ItemStatus,
+        ItemView, Machine, MachineTransport, Project, Repository, Run, RunCheckout,
         RunPromptSelection, RunState, RunSuggestion, Workspace, WorkspaceRepositoryInput, Worktree,
     },
-    git::GitCli,
     persistence::SqliteStore,
-    provider::{classify_url, resolve_gh_executable, GithubCli},
-    terminal::{
-        capture_pane, capture_pane_transcript, find_agent_executable, list_agent_panes, list_panes,
-        open_pane_in_terminal, probe_local_runtime, probe_machine, send_input_to_pane,
-        terminal_transport, AgentLaunchContext, ExternalPaneIdentity, PaneSummary, TerminalRuntime,
-        TmuxControlPane, TmuxRuntime,
-    },
+    provider::resolve_gh_executable,
+    terminal::{find_agent_executable, PaneSummary, TmuxControlPane},
 };
 
-pub const RESET_CONFIRMATION_PHRASE: &str = "RESET ALL LOCAL DATA";
-
-fn machine_home_directory(machine: &Machine) -> String {
-    match &machine.transport {
-        MachineTransport::Local => env::var("HOME").unwrap_or_else(|_| "/".into()),
-        MachineTransport::Ssh { .. } => "~".into(),
-    }
-}
-
-fn resolve_machine_path(path: &str, machine_home: &str) -> PathBuf {
-    if path == "~" {
-        return PathBuf::from(machine_home);
-    }
-    if let Some(relative) = path.strip_prefix("~/") {
-        return Path::new(machine_home).join(relative);
-    }
-    let path = Path::new(path);
-    if path.is_absolute() {
-        path.to_owned()
-    } else {
-        Path::new(machine_home).join(path)
-    }
-}
+pub(crate) use crate::features::deletion::{
+    ExternalLinkDeletionResult, ExternalObjectDeletionPreview, ExternalObjectDeletionResult,
+    ItemDeletionPreview, ItemDeletionResult, MachineDeletionPreview, MachineDeletionResult,
+    ParentDeletionPreview, ParentDeletionResult, RepositoryDeletionPreview,
+    RepositoryDeletionResult, ResetLocalDataPreview, ResetLocalDataResult, WorkspaceRemovalReport,
+    WorkspaceRemovalResult, WorktreeRemovalReport, WorktreeRemovalResult,
+};
+pub use crate::features::setup::{HealthStatus, ProviderChoice, SetupState};
+pub(crate) use crate::features::work::{ExternalLinkAction, PollResult};
 
 pub struct Runtime {
-    store: SqliteStore,
-    state: DomainState,
-    gh_executable_path: Option<PathBuf>,
-    pending_worktree_removals: HashMap<i64, WorktreeRemovalReport>,
-    pending_workspace_removal: Option<WorkspaceRemovalReport>,
-    pending_item_deletion: Option<ItemDeletionPreview>,
-    pending_external_object_deletion: Option<ExternalObjectDeletionPreview>,
-    pending_repository_deletion: Option<RepositoryDeletionPreview>,
-    pending_machine_deletion: Option<MachineDeletionPreview>,
-    pending_parent_deletion: Option<ParentDeletionPreview>,
-    pending_reset_local_data: Option<ResetLocalDataPreview>,
-    terminal_connections: HashMap<String, TmuxControlPane>,
-    agent_state_directory: PathBuf,
-}
-
-#[allow(clippy::too_many_arguments)]
-fn worktree_run_event(
-    item_id: i64,
-    workspace_id: i64,
-    worktree_id: i64,
-    machine_id: i64,
-    agent: AgentKind,
-    execution_profile: ExecutionProfile,
-    prompt: String,
-    working_directory: String,
-    session_name: String,
-    pane_id: String,
-    started_at: i64,
-    prompt_selection: RunPromptSelection,
-) -> Event {
-    Event::StartWorktreeRun {
-        item_id,
-        workspace_id,
-        worktree_id,
-        machine_id,
-        agent,
-        execution_profile,
-        prompt,
-        working_directory,
-        session_name,
-        pane_id,
-        started_at,
-        prompt_selection,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ProviderChoice {
-    GitHub,
-    None,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SetupState {
-    pub completed: bool,
-    pub provider: ProviderChoice,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct HealthStatus {
-    pub runtime: DependencyStatus,
-    pub provider: DependencyStatus,
-    pub agents: Vec<DependencyStatus>,
-    pub checked_at: i64,
+    pub(crate) store: SqliteStore,
+    pub(crate) state: DomainState,
+    pub(crate) gh_executable_path: Option<PathBuf>,
+    pub(crate) pending_worktree_removals: HashMap<i64, WorktreeRemovalReport>,
+    pub(crate) pending_workspace_removal: Option<WorkspaceRemovalReport>,
+    pub(crate) pending_item_deletion: Option<ItemDeletionPreview>,
+    pub(crate) pending_external_object_deletion: Option<ExternalObjectDeletionPreview>,
+    pub(crate) pending_repository_deletion: Option<RepositoryDeletionPreview>,
+    pub(crate) pending_machine_deletion: Option<MachineDeletionPreview>,
+    pub(crate) pending_parent_deletion: Option<ParentDeletionPreview>,
+    pub(crate) pending_reset_local_data: Option<ResetLocalDataPreview>,
+    pub(crate) terminal_connections: HashMap<String, TmuxControlPane>,
+    pub(crate) agent_state_directory: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -207,279 +126,7 @@ impl Runtime {
         Ok(runtime)
     }
 
-    fn create_context(&mut self, name: String) -> Result<Context, String> {
-        let decision = decide(self.state.clone(), Event::CreateContext { name })
-            .map_err(|error| error.to_string())?;
-        let context = decision
-            .state
-            .contexts
-            .last()
-            .cloned()
-            .ok_or_else(|| "Context creation produced no Context".to_owned())?;
-        self.commit(decision)?;
-        Ok(context)
-    }
-
-    fn set_context_grill_defaults(
-        &mut self,
-        context_id: i64,
-        defaults: GrillConfiguration,
-    ) -> Result<Context, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::SetContextGrillDefaults {
-                context_id,
-                defaults,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let context = decision
-            .state
-            .contexts
-            .iter()
-            .find(|context| context.id == context_id)
-            .cloned()
-            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
-        self.commit(decision)?;
-        Ok(context)
-    }
-
-    fn setup_state(&self) -> Result<SetupState, String> {
-        let completed = self
-            .store
-            .setting("setup_completed")
-            .map_err(|error| error.to_string())?
-            .as_deref()
-            == Some("true");
-        let provider = match self
-            .store
-            .setting("provider_choice")
-            .map_err(|error| error.to_string())?
-            .as_deref()
-        {
-            Some("github") | None => ProviderChoice::GitHub,
-            Some("none") => ProviderChoice::None,
-            Some(other) => return Err(format!("Unknown provider choice: {other}")),
-        };
-        Ok(SetupState {
-            completed,
-            provider,
-        })
-    }
-
-    fn complete_setup(
-        &mut self,
-        context_name: String,
-        provider: ProviderChoice,
-    ) -> Result<SetupState, String> {
-        let context_name = context_name.trim();
-        if context_name.is_empty() {
-            return Err("A Context name is required to finish setup".into());
-        }
-        if !self
-            .state
-            .contexts
-            .iter()
-            .any(|context| context.name == context_name)
-        {
-            self.create_context(context_name.to_owned())?;
-        }
-        self.store
-            .set_setting("setup_completed", "true")
-            .and_then(|_| {
-                self.store.set_setting(
-                    "provider_choice",
-                    match provider {
-                        ProviderChoice::GitHub => "github",
-                        ProviderChoice::None => "none",
-                    },
-                )
-            })
-            .map_err(|error| error.to_string())?;
-        Ok(SetupState {
-            completed: true,
-            provider,
-        })
-    }
-
-    fn health_status(
-        &mut self,
-        provider_override: Option<ProviderChoice>,
-    ) -> Result<HealthStatus, String> {
-        let runtime = self.check_runtime_dependency()?;
-        let setup = self.setup_state()?;
-        let provider = match provider_override.unwrap_or(setup.provider) {
-            ProviderChoice::GitHub => self.check_github_dependency()?,
-            ProviderChoice::None => DependencyStatus {
-                key: "github".into(),
-                label: "GitHub provider".into(),
-                state: DependencyState::NotConfigured,
-                executable_path: None,
-                message: "No provider selected; local Items remain available.".into(),
-                action: Some(
-                    "Choose GitHub in setup when you are ready to link external work.".into(),
-                ),
-            },
-        };
-        let agents = [
-            ("claude", "Claude Code", "claude_executable_path"),
-            ("codex", "Codex", "codex_executable_path"),
-        ]
-        .into_iter()
-        .map(|(key, label, setting_key)| {
-            self.check_local_dependency(
-                key,
-                label,
-                setting_key,
-                &[],
-                &format!("Install {label} before starting a Run with it."),
-            )
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-        Ok(HealthStatus {
-            runtime,
-            provider,
-            agents,
-            checked_at: current_unix_seconds(),
-        })
-    }
-
-    fn check_runtime_dependency(&mut self) -> Result<DependencyStatus, String> {
-        let path = self.resolve_and_store_executable("tmux", "tmux_executable_path")?;
-        let Some(path) = path else {
-            return Ok(DependencyStatus {
-                key: "tmux".into(),
-                label: "tmux runtime".into(),
-                state: DependencyState::Missing,
-                executable_path: None,
-                message: "tmux was not found.".into(),
-                action: Some(
-                    "Install tmux (for example, with `brew install tmux`) and check again.".into(),
-                ),
-            });
-        };
-        match probe_local_runtime(&path) {
-            Ok(()) => Ok(DependencyStatus {
-                key: "tmux".into(),
-                label: "tmux runtime".into(),
-                state: DependencyState::Available,
-                executable_path: Some(path.to_string_lossy().into_owned()),
-                message: "tmux is ready.".into(),
-                action: None,
-            }),
-            Err(detail) => Ok(DependencyStatus {
-                key: "tmux".into(),
-                label: "tmux runtime".into(),
-                state: DependencyState::Unavailable,
-                executable_path: Some(path.to_string_lossy().into_owned()),
-                message: format!("tmux could not be checked: {detail}"),
-                action: Some("Repair or reinstall tmux, then check again.".into()),
-            }),
-        }
-    }
-
-    fn check_github_dependency(&mut self) -> Result<DependencyStatus, String> {
-        let path = self.resolve_and_store_executable("gh", "gh_executable_path")?;
-        let Some(path) = path else {
-            return Ok(DependencyStatus {
-                key: "github".into(),
-                label: "GitHub provider".into(),
-                state: DependencyState::Missing,
-                executable_path: None,
-                message: "GitHub CLI (`gh`) was not found.".into(),
-                action: Some(
-                    "Install GitHub CLI, then authenticate it with `gh auth login`.".into(),
-                ),
-            });
-        };
-        if let Err(detail) = check_command(&path, &["--version"]) {
-            return Ok(DependencyStatus {
-                key: "github".into(),
-                label: "GitHub provider".into(),
-                state: DependencyState::Unavailable,
-                executable_path: Some(path.to_string_lossy().into_owned()),
-                message: format!("GitHub CLI could not run: {detail}"),
-                action: Some("Repair or reinstall GitHub CLI, then check again.".into()),
-            });
-        }
-        match check_command(&path, &["auth", "status", "--hostname", "github.com"]) {
-            Ok(()) => Ok(DependencyStatus {
-                key: "github".into(),
-                label: "GitHub provider".into(),
-                state: DependencyState::Available,
-                executable_path: Some(path.to_string_lossy().into_owned()),
-                message: "GitHub CLI is installed and authenticated.".into(),
-                action: None,
-            }),
-            Err(detail) if looks_like_authentication_failure(&detail) => Ok(DependencyStatus {
-                key: "github".into(),
-                label: "GitHub provider".into(),
-                state: DependencyState::Unauthenticated,
-                executable_path: Some(path.to_string_lossy().into_owned()),
-                message: format!("GitHub CLI is not authenticated: {detail}"),
-                action: Some("Run `gh auth login` in your terminal; Mission Manager will not log in for you.".into()),
-            }),
-            Err(detail) => Ok(DependencyStatus {
-                key: "github".into(),
-                label: "GitHub provider".into(),
-                state: DependencyState::Unavailable,
-                executable_path: Some(path.to_string_lossy().into_owned()),
-                message: format!("GitHub authentication status could not be checked: {detail}"),
-                action: Some("Check network access to github.com, then check again.".into()),
-            }),
-        }
-    }
-
-    fn check_local_dependency(
-        &mut self,
-        key: &str,
-        label: &str,
-        setting_key: &str,
-        args: &[&str],
-        missing_action: &str,
-    ) -> Result<DependencyStatus, String> {
-        let path = self.resolve_and_store_executable(key, setting_key)?;
-        let Some(path) = path else {
-            return Ok(DependencyStatus {
-                key: key.into(),
-                label: label.into(),
-                state: DependencyState::Missing,
-                executable_path: None,
-                message: format!("{label} was not found."),
-                action: Some(missing_action.into()),
-            });
-        };
-        if args.is_empty() {
-            return Ok(DependencyStatus {
-                key: key.into(),
-                label: label.into(),
-                state: DependencyState::Available,
-                executable_path: Some(path.to_string_lossy().into_owned()),
-                message: format!("{label} is installed."),
-                action: None,
-            });
-        }
-        match check_command(&path, args) {
-            Ok(()) => Ok(DependencyStatus {
-                key: key.into(),
-                label: label.into(),
-                state: DependencyState::Available,
-                executable_path: Some(path.to_string_lossy().into_owned()),
-                message: format!("{label} is ready."),
-                action: None,
-            }),
-            Err(detail) => Ok(DependencyStatus {
-                key: key.into(),
-                label: label.into(),
-                state: DependencyState::Unavailable,
-                executable_path: Some(path.to_string_lossy().into_owned()),
-                message: format!("{label} could not be checked: {detail}"),
-                action: Some(missing_action.into()),
-            }),
-        }
-    }
-
-    fn resolve_and_store_executable(
+    pub(crate) fn resolve_and_store_executable(
         &mut self,
         name: &str,
         setting_key: &str,
@@ -499,7 +146,11 @@ impl Runtime {
         Ok(path)
     }
 
-    fn agent_executable(&mut self, machine: &Machine, agent: AgentKind) -> Result<PathBuf, String> {
+    pub(crate) fn agent_executable(
+        &mut self,
+        machine: &Machine,
+        agent: AgentKind,
+    ) -> Result<PathBuf, String> {
         let name = agent_executable_name(agent);
         let setting_key = if matches!(&machine.transport, MachineTransport::Local) {
             format!("{name}_executable_path")
@@ -525,658 +176,7 @@ impl Runtime {
         Ok(executable)
     }
 
-    fn create_project(
-        &mut self,
-        name: String,
-        context_id: i64,
-        defaults: ProjectDefaults,
-    ) -> Result<Project, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::CreateProject {
-                context_id,
-                name,
-                defaults,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let project = decision
-            .state
-            .projects
-            .last()
-            .cloned()
-            .ok_or_else(|| "Project creation produced no Project".to_owned())?;
-        self.commit(decision)?;
-        Ok(project)
-    }
-
-    fn register_repository(
-        &mut self,
-        project_id: i64,
-        name: String,
-        remote_url: String,
-    ) -> Result<Repository, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::RegisterRepository {
-                project_id,
-                name,
-                remote_url,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let repository = decision
-            .state
-            .repositories
-            .last()
-            .cloned()
-            .ok_or_else(|| "Repository registration produced no Repository".to_owned())?;
-        self.commit(decision)?;
-        Ok(repository)
-    }
-
-    // Keep this orchestration seam aligned with the registration form and its Tauri command.
-    #[allow(clippy::too_many_arguments)]
-    fn register_repository_at_location(
-        &mut self,
-        project_id: i64,
-        name: String,
-        remote_url: Option<String>,
-        base_branch: String,
-        machine_id: i64,
-        checkout_path: String,
-        worktree_root: Option<String>,
-        clone_into_destination: bool,
-    ) -> Result<Repository, String> {
-        let project = self
-            .state
-            .projects
-            .iter()
-            .find(|project| project.id == project_id)
-            .ok_or_else(|| format!("Project {project_id} does not exist"))?;
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
-        if machine.context_id != project.context_id {
-            return Err(format!(
-                "Machine {} is not available in Project {}'s Context",
-                machine.name, project.name
-            ));
-        }
-
-        let machine_home = machine_home_directory(&machine);
-        let normalized_checkout_path = normalize_machine_path(&checkout_path, &machine_home)
-            .map_err(|error| error.to_string())?;
-        let resolved_checkout_path = resolve_machine_path(&normalized_checkout_path, &machine_home);
-        let worktree_root = worktree_root
-            .filter(|root| !root.trim().is_empty())
-            .unwrap_or_else(|| "~/worktrees".into());
-        let normalized_worktree_root = normalize_machine_path(&worktree_root, &machine_home)
-            .map_err(|error| error.to_string())?;
-        let git = GitCli::system();
-        let effective_remote = if clone_into_destination {
-            let remote_url = remote_url
-                .as_deref()
-                .map(str::trim)
-                .filter(|remote| !remote.is_empty())
-                .ok_or_else(|| "A remote URL is required when cloning a Repository".to_owned())?;
-            git.clone_repository_on_machine(&machine, remote_url, &resolved_checkout_path)
-                .map_err(|error| error.to_string())?;
-            remote_url.to_owned()
-        } else {
-            let inspection = git
-                .adopt_repository_on_machine(
-                    &machine,
-                    &resolved_checkout_path,
-                    remote_url.as_deref(),
-                )
-                .map_err(|error| error.to_string())?;
-            inspection
-                .remote_url
-                .ok_or_else(|| "The existing checkout has no Git remote".to_owned())?
-        };
-
-        let existing_repository_id = self
-            .state
-            .repositories
-            .iter()
-            .find(|repository| repository.project_id == project_id && repository.name == name)
-            .map(|repository| repository.id);
-        let decision = decide(
-            self.state.clone(),
-            Event::RegisterRepositoryAtLocation {
-                project_id,
-                name: name.clone(),
-                remote_url: effective_remote,
-                base_branch,
-                machine_id,
-                checkout_path: normalized_checkout_path,
-                worktree_root: normalized_worktree_root,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let repository = decision
-            .state
-            .repositories
-            .iter()
-            .find(|repository| Some(repository.id) == existing_repository_id)
-            .or_else(|| decision.state.repositories.last())
-            .cloned()
-            .ok_or_else(|| "Repository registration produced no Repository".to_owned())?;
-        self.commit(decision)?;
-        Ok(repository)
-    }
-
-    fn create_workspace(
-        &mut self,
-        item_id: i64,
-        repositories: Vec<WorkspaceRepositoryInput>,
-    ) -> Result<Workspace, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::CreateWorkspace {
-                item_id,
-                repositories,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let workspace = decision
-            .state
-            .workspaces
-            .last()
-            .cloned()
-            .ok_or_else(|| "Workspace creation produced no Workspace".to_owned())?;
-        self.commit(decision)?;
-        Ok(workspace)
-    }
-
-    fn create_worktree(
-        &mut self,
-        workspace_id: i64,
-        repository_id: i64,
-        machine_id: i64,
-        path: String,
-        branch: String,
-        base_branch: String,
-    ) -> Result<Worktree, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::CreateWorktree {
-                workspace_id,
-                repository_id,
-                machine_id,
-                path,
-                branch,
-                base_branch,
-                is_dirty: false,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let worktree = decision
-            .state
-            .worktrees
-            .last()
-            .cloned()
-            .ok_or_else(|| "Worktree creation produced no Worktree".to_owned())?;
-        self.commit(decision)?;
-        Ok(worktree)
-    }
-
-    fn prepare_worktree(
-        &mut self,
-        workspace_id: i64,
-        repository_id: i64,
-        machine_id: i64,
-        reuse_existing_branch: bool,
-        confirm_dirty_attachment: bool,
-    ) -> Result<Worktree, String> {
-        let (workspace, selected, repository, machine, location) =
-            self.worktree_inputs(workspace_id, repository_id, machine_id)?;
-        self.ensure_worktree_not_recorded(workspace_id, repository_id)?;
-
-        let machine_home = machine_home_directory(&machine);
-        let canonical_checkout = resolve_machine_path(&location.checkout_path, &machine_home);
-        let worktree_root = resolve_machine_path(&location.worktree_root, &machine_home);
-        let destination = worktree_path(
-            &worktree_root,
-            workspace.id,
-            &selected.branch,
-            &repository.name,
-        );
-        let inspection = match GitCli::system().prepare_worktree_on_machine(
-            &machine,
-            &repository,
-            &canonical_checkout,
-            &destination,
-            &selected.branch,
-            &selected.base_branch,
-            reuse_existing_branch,
-            confirm_dirty_attachment,
-        ) {
-            Ok(inspection) => inspection,
-            Err(error) => {
-                let mark_error = self.mark_workspace_resumable(workspace_id).err();
-                return Err(format_commit_error(error.to_string(), mark_error));
-            }
-        };
-        let path = normalize_machine_path(&destination.to_string_lossy(), &machine_home)
-            .map_err(|error| error.to_string())?;
-        self.persist_prepared_worktree(
-            workspace_id,
-            repository_id,
-            machine_id,
-            path,
-            selected.branch,
-            selected.base_branch,
-            inspection.is_dirty,
-        )
-    }
-
-    fn mark_workspace_resumable(&mut self, workspace_id: i64) -> Result<(), String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::MarkWorkspaceResumable { workspace_id },
-        )
-        .map_err(|error| error.to_string())?;
-        self.commit(decision)
-    }
-
-    fn attach_worktree(
-        &mut self,
-        workspace_id: i64,
-        repository_id: i64,
-        machine_id: i64,
-        path: String,
-        confirm_dirty_attachment: bool,
-    ) -> Result<Worktree, String> {
-        let (_workspace, selected, repository, machine, location) =
-            self.worktree_inputs(workspace_id, repository_id, machine_id)?;
-        self.ensure_worktree_not_recorded(workspace_id, repository_id)?;
-
-        let machine_home = machine_home_directory(&machine);
-        let canonical_checkout = resolve_machine_path(&location.checkout_path, &machine_home);
-        let path =
-            normalize_machine_path(&path, &machine_home).map_err(|error| error.to_string())?;
-        let worktree_path = resolve_machine_path(&path, &machine_home);
-        let inspection = GitCli::system()
-            .validate_worktree_attachment_on_machine(
-                &machine,
-                &repository,
-                &canonical_checkout,
-                &worktree_path,
-                &selected.branch,
-                confirm_dirty_attachment,
-            )
-            .map_err(|error| error.to_string())?;
-        self.persist_prepared_worktree(
-            workspace_id,
-            repository_id,
-            machine_id,
-            path,
-            selected.branch,
-            selected.base_branch,
-            inspection.is_dirty,
-        )
-    }
-
-    fn worktree_inputs(
-        &mut self,
-        workspace_id: i64,
-        repository_id: i64,
-        machine_id: i64,
-    ) -> Result<
-        (
-            Workspace,
-            crate::domain::WorkspaceRepository,
-            Repository,
-            Machine,
-            crate::domain::RepositoryLocation,
-        ),
-        String,
-    > {
-        let workspace = self
-            .state
-            .workspaces
-            .iter()
-            .find(|workspace| workspace.id == workspace_id)
-            .cloned()
-            .ok_or_else(|| format!("Workspace {workspace_id} does not exist"))?;
-        let selected = workspace
-            .repositories
-            .iter()
-            .find(|repository| repository.repository_id == repository_id)
-            .cloned()
-            .ok_or_else(|| {
-                format!("Repository {repository_id} is not selected in Workspace {workspace_id}")
-            })?;
-        let repository = self
-            .state
-            .repositories
-            .iter()
-            .find(|repository| repository.id == repository_id)
-            .cloned()
-            .ok_or_else(|| format!("Repository {repository_id} does not exist"))?;
-        let machine = self.machine_for_item(workspace.item_id, Some(machine_id))?;
-        let location = self
-            .state
-            .repository_locations
-            .iter()
-            .find(|location| {
-                location.repository_id == repository_id && location.machine_id == machine_id
-            })
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "Repository {} has no checkout registered on Machine {}",
-                    repository.name, machine.name
-                )
-            })?;
-        Ok((workspace, selected, repository, machine, location))
-    }
-
-    fn ensure_worktree_not_recorded(
-        &self,
-        workspace_id: i64,
-        repository_id: i64,
-    ) -> Result<(), String> {
-        if self.state.worktrees.iter().any(|worktree| {
-            worktree.workspace_id == workspace_id && worktree.repository_id == repository_id
-        }) {
-            return Err(format!(
-                "Workspace {workspace_id} already has a recorded Worktree for Repository {repository_id}"
-            ));
-        }
-        Ok(())
-    }
-
-    // These values are the complete persisted Worktree record; bundling them would obscure the
-    // one-to-one mapping with Event::CreateWorktree without reducing call-site complexity.
-    #[allow(clippy::too_many_arguments)]
-    fn persist_prepared_worktree(
-        &mut self,
-        workspace_id: i64,
-        repository_id: i64,
-        machine_id: i64,
-        path: String,
-        branch: String,
-        base_branch: String,
-        is_dirty: bool,
-    ) -> Result<Worktree, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::CreateWorktree {
-                workspace_id,
-                repository_id,
-                machine_id,
-                path,
-                branch,
-                base_branch,
-                is_dirty,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let worktree = decision
-            .state
-            .worktrees
-            .last()
-            .cloned()
-            .ok_or_else(|| "Worktree creation produced no Worktree".to_owned())?;
-        self.commit(decision)?;
-        Ok(worktree)
-    }
-
-    fn build_worktree_removal_report(
-        &self,
-        worktree_id: i64,
-    ) -> Result<WorktreeRemovalReport, String> {
-        let worktree = self
-            .state
-            .worktrees
-            .iter()
-            .find(|worktree| worktree.id == worktree_id)
-            .cloned()
-            .ok_or_else(|| format!("Worktree {worktree_id} does not exist"))?;
-        let repository = self.repository(worktree.repository_id)?;
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == worktree.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", worktree.machine_id))?;
-        let location = self
-            .state
-            .repository_locations
-            .iter()
-            .find(|location| {
-                location.repository_id == worktree.repository_id
-                    && location.machine_id == worktree.machine_id
-            })
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "Repository {} has no checkout registered on Machine {}",
-                    repository.name, machine.name
-                )
-            })?;
-        let machine_home = machine_home_directory(&machine);
-        let canonical_checkout = resolve_machine_path(&location.checkout_path, &machine_home);
-        let path = resolve_machine_path(&worktree.path, &machine_home);
-        let inspection = GitCli::system()
-            .validate_worktree_attachment_on_machine(
-                &machine,
-                &repository,
-                &canonical_checkout,
-                &path,
-                &worktree.branch,
-                true,
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(WorktreeRemovalReport {
-            worktree_id,
-            workspace_id: worktree.workspace_id,
-            repository_id: worktree.repository_id,
-            repository_name: repository.name,
-            machine_id: worktree.machine_id,
-            path: worktree.path,
-            branch: worktree.branch,
-            is_dirty: inspection.is_dirty,
-            requires_destructive_confirmation: inspection.is_dirty,
-        })
-    }
-
-    fn prepare_worktree_removal(
-        &mut self,
-        worktree_id: i64,
-    ) -> Result<WorktreeRemovalReport, String> {
-        let report = self.build_worktree_removal_report(worktree_id)?;
-        self.pending_worktree_removals
-            .insert(worktree_id, report.clone());
-        Ok(report)
-    }
-
-    fn remove_worktree(
-        &mut self,
-        worktree_id: i64,
-        confirmed: bool,
-        destructive_confirmed: bool,
-    ) -> Result<WorktreeRemovalResult, String> {
-        if !confirmed {
-            return Err(
-                "Worktree removal requires explicit confirmation after reviewing its safety report"
-                    .into(),
-            );
-        }
-        let pending = self
-            .pending_worktree_removals
-            .get(&worktree_id)
-            .cloned()
-            .ok_or_else(|| {
-                "Review the Worktree removal safety report before removing it".to_owned()
-            })?;
-        let current = self.build_worktree_removal_report(worktree_id)?;
-        if current != pending {
-            return Err("The Worktree changed after the safety report; review the updated report before removing it".into());
-        }
-        if current.requires_destructive_confirmation && !destructive_confirmed {
-            return Err("Removing a dirty Worktree requires destructive confirmation".into());
-        }
-        self.remove_worktree_physical(&current)?;
-        let decision = decide(self.state.clone(), Event::RemoveWorktree { worktree_id })
-            .map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        self.pending_worktree_removals.remove(&worktree_id);
-        Ok(WorktreeRemovalResult {
-            worktree_id,
-            branch_preserved: true,
-        })
-    }
-
-    fn remove_worktree_physical(&self, report: &WorktreeRemovalReport) -> Result<(), String> {
-        let worktree = self
-            .state
-            .worktrees
-            .iter()
-            .find(|worktree| worktree.id == report.worktree_id)
-            .ok_or_else(|| format!("Worktree {} does not exist", report.worktree_id))?;
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == worktree.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", worktree.machine_id))?;
-        let location = self
-            .state
-            .repository_locations
-            .iter()
-            .find(|location| {
-                location.repository_id == worktree.repository_id
-                    && location.machine_id == worktree.machine_id
-            })
-            .cloned()
-            .ok_or_else(|| "The Repository checkout location no longer exists".to_owned())?;
-        let machine_home = machine_home_directory(&machine);
-        GitCli::system()
-            .remove_worktree_on_machine(
-                &machine,
-                &resolve_machine_path(&location.checkout_path, &machine_home),
-                &resolve_machine_path(&worktree.path, &machine_home),
-                report.requires_destructive_confirmation,
-            )
-            .map_err(|error| error.to_string())
-    }
-
-    fn build_workspace_removal_report(
-        &self,
-        workspace_id: i64,
-    ) -> Result<WorkspaceRemovalReport, String> {
-        if !self
-            .state
-            .workspaces
-            .iter()
-            .any(|workspace| workspace.id == workspace_id)
-        {
-            return Err(format!("Workspace {workspace_id} does not exist"));
-        }
-        let worktrees = self
-            .state
-            .worktrees
-            .iter()
-            .filter(|worktree| worktree.workspace_id == workspace_id)
-            .map(|worktree| self.build_worktree_removal_report(worktree.id))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut blockers = Vec::new();
-        if self
-            .state
-            .runs
-            .iter()
-            .any(|run| run.workspace_id == Some(workspace_id))
-        {
-            blockers.push("This Workspace has Run history and cannot be removed.".into());
-        }
-        Ok(WorkspaceRemovalReport {
-            workspace_id,
-            worktrees,
-            safe: blockers.is_empty(),
-            blockers,
-        })
-    }
-
-    fn prepare_workspace_removal(
-        &mut self,
-        workspace_id: i64,
-    ) -> Result<WorkspaceRemovalReport, String> {
-        let report = self.build_workspace_removal_report(workspace_id)?;
-        self.pending_workspace_removal = Some(report.clone());
-        Ok(report)
-    }
-
-    fn remove_workspace(
-        &mut self,
-        workspace_id: i64,
-        confirmed_worktree_ids: Vec<i64>,
-        destructive_worktree_ids: Vec<i64>,
-        confirmed: bool,
-    ) -> Result<WorkspaceRemovalResult, String> {
-        if !confirmed {
-            return Err(
-                "Workspace removal requires explicit confirmation for every Worktree".into(),
-            );
-        }
-        let pending = self
-            .pending_workspace_removal
-            .as_ref()
-            .filter(|report| report.workspace_id == workspace_id)
-            .cloned()
-            .ok_or_else(|| "Review the Workspace removal report before removing it".to_owned())?;
-        let current = self.build_workspace_removal_report(workspace_id)?;
-        if current != pending {
-            return Err("The Workspace changed after the safety report; review the updated report before removing it".into());
-        }
-        if !current.safe {
-            return Err(format!(
-                "Workspace removal is blocked:\n{}",
-                current.blockers.join("\n")
-            ));
-        }
-        let mut expected_ids = current
-            .worktrees
-            .iter()
-            .map(|worktree| worktree.worktree_id)
-            .collect::<Vec<_>>();
-        let mut confirmed_ids = confirmed_worktree_ids;
-        expected_ids.sort_unstable();
-        confirmed_ids.sort_unstable();
-        if expected_ids != confirmed_ids {
-            return Err("Confirm each listed Worktree before removing the Workspace".into());
-        }
-        if current.worktrees.iter().any(|worktree| {
-            worktree.requires_destructive_confirmation
-                && !destructive_worktree_ids.contains(&worktree.worktree_id)
-        }) {
-            return Err("Each dirty Worktree requires destructive confirmation".into());
-        }
-        for worktree in &current.worktrees {
-            self.remove_worktree_physical(worktree)?;
-        }
-        let worktree_count = current.worktrees.len();
-        let decision = decide(self.state.clone(), Event::RemoveWorkspace { workspace_id })
-            .map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        self.pending_workspace_removal = None;
-        Ok(WorkspaceRemovalResult {
-            workspace_id,
-            worktree_count,
-            branches_preserved: true,
-        })
-    }
-
-    fn local_machine_for_item(&mut self, item_id: i64) -> Result<Machine, String> {
+    pub(crate) fn local_machine_for_item(&mut self, item_id: i64) -> Result<Machine, String> {
         let context_id = self.item_context_id(item_id)?;
         if let Some(machine) = self
             .state
@@ -1208,7 +208,7 @@ impl Runtime {
         Ok(machine)
     }
 
-    fn machine_for_item(
+    pub(crate) fn machine_for_item(
         &mut self,
         item_id: i64,
         machine_id: Option<i64>,
@@ -1232,2947 +232,12 @@ impl Runtime {
         }
         Ok(machine)
     }
-
-    fn register_machine(
-        &mut self,
-        context_id: i64,
-        name: String,
-        socket_name: String,
-        transport: MachineTransport,
-    ) -> Result<Machine, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::RegisterMachine {
-                context_id,
-                name,
-                socket_name,
-                transport,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let machine = decision
-            .state
-            .machines
-            .last()
-            .cloned()
-            .ok_or_else(|| "Machine registration produced no Machine".to_owned())?;
-        self.commit(decision)?;
-        Ok(machine)
-    }
-
-    fn observe_machine(
-        &mut self,
-        machine_id: i64,
-        observation: MachineObservation,
-    ) -> Result<Machine, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::ObserveMachine {
-                machine_id,
-                observation,
-                observed_at: current_unix_seconds(),
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let machine = decision
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
-        self.commit(decision)?;
-        Ok(machine)
-    }
-
-    fn check_machine(&mut self, machine_id: i64) -> Result<Machine, String> {
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
-        probe_machine(&machine)
-            .map_err(|error| format!("Could not check Machine {}: {error}", machine.name))?;
-        self.observe_machine(machine_id, MachineObservation::Available)
-    }
-
-    fn compose_run_prompt(
-        &self,
-        item_id: i64,
-        execution_profile: ExecutionProfile,
-        selection: RunPromptSelection,
-        custom_prompt: Option<String>,
-    ) -> Result<String, String> {
-        build_run_prompt(
-            &self.state,
-            item_id,
-            execution_profile,
-            &selection,
-            custom_prompt.as_deref(),
-        )
-        .map_err(|error| error.to_string())
-    }
-
-    fn compose_grill_prompt(
-        &self,
-        item_id: i64,
-        configuration: GrillConfiguration,
-        initial_prompt: String,
-    ) -> Result<String, String> {
-        build_grill_prompt(&self.state, item_id, &configuration, &initial_prompt)
-            .map_err(|error| error.to_string())
-    }
-
-    fn inspect_direct_checkouts(
-        &mut self,
-        item_id: i64,
-        workspace_id: i64,
-        machine_id: Option<i64>,
-    ) -> Result<(Machine, Vec<DirectRunCheckoutPreview>), String> {
-        let workspace = self
-            .state
-            .workspaces
-            .iter()
-            .find(|workspace| workspace.id == workspace_id && workspace.item_id == item_id)
-            .cloned()
-            .ok_or_else(|| format!("Workspace {workspace_id} does not belong to Item {item_id}"))?;
-        let machine = self.machine_for_item(item_id, machine_id)?;
-        let machine_home = machine_home_directory(&machine);
-        let git = GitCli::system();
-        let mut previews = Vec::with_capacity(workspace.repositories.len());
-
-        for selected in workspace.repositories {
-            let repository = self
-                .state
-                .repositories
-                .iter()
-                .find(|repository| repository.id == selected.repository_id)
-                .ok_or_else(|| format!("Repository {} does not exist", selected.repository_id))?;
-            let location = self
-                .state
-                .repository_locations
-                .iter()
-                .find(|location| {
-                    location.repository_id == selected.repository_id
-                        && location.machine_id == machine.id
-                })
-                .ok_or_else(|| {
-                    format!(
-                        "Repository {} has no checkout registered on Machine {}",
-                        repository.name, machine.name
-                    )
-                })?;
-            let path = match machine.transport {
-                MachineTransport::Local => {
-                    resolve_machine_path(&location.checkout_path, &machine_home)
-                }
-                MachineTransport::Ssh { .. } => PathBuf::from(&location.checkout_path),
-            };
-            let inspection = git
-                .inspect_checkout_on_machine(&machine, &path)
-                .map_err(|error| {
-                    format!(
-                        "Could not inspect Repository {} on Machine {}: {error}",
-                        repository.name, machine.name
-                    )
-                })?;
-            if let Some(remote_url) = inspection.remote_url.as_deref() {
-                if remote_url != repository.remote_url {
-                    return Err(format!(
-                        "Repository {} checkout remote does not match its registered Repository",
-                        repository.name
-                    ));
-                }
-            }
-            previews.push(DirectRunCheckoutPreview {
-                repository_id: repository.id,
-                repository_name: repository.name.clone(),
-                path: path.to_string_lossy().into_owned(),
-                branch: inspection.current_branch,
-                is_dirty: inspection.is_dirty,
-            });
-        }
-
-        Ok((machine, previews))
-    }
-
-    fn prepare_direct_run(
-        &mut self,
-        item_id: i64,
-        workspace_id: i64,
-        machine_id: Option<i64>,
-    ) -> Result<DirectRunPreview, String> {
-        let (machine, checkout_details) =
-            self.inspect_direct_checkouts(item_id, workspace_id, machine_id)?;
-        let checkouts = checkout_details
-            .iter()
-            .map(|checkout| RunCheckout {
-                repository_id: checkout.repository_id,
-                path: checkout.path.clone(),
-                branch: checkout.branch.clone(),
-                is_dirty: checkout.is_dirty,
-            })
-            .collect::<Vec<_>>();
-        let dirty_repository_ids = checkouts
-            .iter()
-            .filter(|checkout| checkout.is_dirty)
-            .map(|checkout| checkout.repository_id)
-            .collect::<Vec<_>>();
-        let mut shared_runs = Vec::new();
-        let mut shared_paths = Vec::new();
-        for run in self.state.runs.iter().filter(|run| {
-            run.machine_id == machine.id
-                && run_is_active(run)
-                && run.pane_status != RunPaneStatus::Missing
-        }) {
-            for checkout in &checkouts {
-                if run
-                    .direct_checkouts
-                    .iter()
-                    .any(|active| active.path == checkout.path)
-                {
-                    shared_runs.push(DirectRunSharedRun {
-                        run_id: run.id,
-                        item_id: run.item_id,
-                        path: checkout.path.clone(),
-                    });
-                    shared_paths.push(checkout.path.clone());
-                }
-            }
-        }
-        shared_runs.sort_by_key(|run| (run.run_id, run.path.clone()));
-        shared_paths.sort();
-        shared_paths.dedup();
-        Ok(DirectRunPreview {
-            workspace_id,
-            machine_id: machine.id,
-            machine_name: machine.name,
-            working_directory: checkouts
-                .first()
-                .map(|checkout| checkout.path.clone())
-                .ok_or_else(|| "Workspace has no selected Repositories".to_owned())?,
-            current_branches: checkouts
-                .iter()
-                .map(|checkout| checkout.branch.clone())
-                .collect(),
-            checkouts,
-            checkout_details,
-            dirty_repository_ids,
-            shared_runs,
-            shared_paths,
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn start_direct_run(
-        &mut self,
-        item_id: i64,
-        workspace_id: i64,
-        machine_id: Option<i64>,
-        primary_repository_id: i64,
-        agent: AgentKind,
-        execution_profile: ExecutionProfile,
-        prompt: String,
-        prompt_selection: RunPromptSelection,
-        expected_checkouts: Vec<RunCheckout>,
-        allow_dirty: bool,
-        allow_shared_checkouts: bool,
-    ) -> Result<Run, String> {
-        let (machine, checkout_details) =
-            self.inspect_direct_checkouts(item_id, workspace_id, machine_id)?;
-        let current_checkouts = checkout_details
-            .iter()
-            .map(|checkout| RunCheckout {
-                repository_id: checkout.repository_id,
-                path: checkout.path.clone(),
-                branch: checkout.branch.clone(),
-                is_dirty: checkout.is_dirty,
-            })
-            .collect::<Vec<_>>();
-        if current_checkouts != expected_checkouts {
-            return Err(
-                "A Direct checkout changed after the preview (branch or dirty state); review the Direct Run preview again before starting"
-                    .into(),
-            );
-        }
-        let working_directory = current_checkouts
-            .iter()
-            .find(|checkout| checkout.repository_id == primary_repository_id)
-            .map(|checkout| checkout.path.clone())
-            .ok_or_else(|| "Workspace has no selected Repositories".to_owned())?;
-        let run_id = self.state.next_run_id;
-        let session_name = format!("mission-item-{item_id}-run-{run_id}");
-        let preflight = decide(
-            self.state.clone(),
-            Event::StartDirectRun {
-                item_id,
-                workspace_id,
-                machine_id: machine.id,
-                agent,
-                execution_profile,
-                prompt: prompt.clone(),
-                working_directory: working_directory.clone(),
-                session_name: format!("{session_name}-preflight"),
-                pane_id: "%preflight".into(),
-                started_at: current_unix_seconds(),
-                prompt_selection: prompt_selection.clone(),
-                checkouts: current_checkouts.clone(),
-                repository_id: primary_repository_id,
-                allow_dirty,
-                allow_shared_checkouts,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-
-        if let Err(error) = probe_machine(&machine) {
-            return Err(format!(
-                "Could not reach Machine {}. The Run was not started locally: {error}",
-                machine.name
-            ));
-        }
-        self.observe_machine(machine.id, MachineObservation::Available)?;
-        if matches!(machine.transport, MachineTransport::Local) {
-            self.provision_agent_hooks()?;
-        }
-        let state_file = if matches!(machine.transport, MachineTransport::Local) {
-            state_file_path(&self.agent_state_directory, run_id)
-        } else {
-            PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
-        };
-        let executable = self
-            .agent_executable(&machine, agent)
-            .map_err(|error| format!("{}: {error}", agent_display_name(agent)))?;
-        let (_, before_launch) =
-            self.inspect_direct_checkouts(item_id, workspace_id, Some(machine.id))?;
-        let before_launch = before_launch
-            .iter()
-            .map(|checkout| RunCheckout {
-                repository_id: checkout.repository_id,
-                path: checkout.path.clone(),
-                branch: checkout.branch.clone(),
-                is_dirty: checkout.is_dirty,
-            })
-            .collect::<Vec<_>>();
-        if before_launch != current_checkouts {
-            return Err(
-                "A Direct checkout changed while preparing the Run; review the Direct Run preview again"
-                    .into(),
-            );
-        }
-        let terminal = TmuxRuntime;
-        let pane_id = terminal.launch_agent(
-            &machine,
-            &session_name,
-            Path::new(&working_directory),
-            &executable,
-            &prompt,
-            AgentLaunchContext {
-                run_id,
-                state_file: &state_file,
-                agent: None,
-                model: None,
-                effort: None,
-            },
-        )?;
-        let (_, after_launch) =
-            match self.inspect_direct_checkouts(item_id, workspace_id, Some(machine.id)) {
-                Ok(value) => value,
-                Err(error) => {
-                    let cleanup = terminal.kill_session(&machine, &session_name);
-                    return Err(format_commit_error(error, cleanup.err()));
-                }
-            };
-        let after_launch = after_launch
-            .iter()
-            .map(|checkout| RunCheckout {
-                repository_id: checkout.repository_id,
-                path: checkout.path.clone(),
-                branch: checkout.branch.clone(),
-                is_dirty: checkout.is_dirty,
-            })
-            .collect::<Vec<_>>();
-        if after_launch != current_checkouts {
-            let cleanup = terminal.kill_session(&machine, &session_name);
-            return Err(format_commit_error(
-                "A Direct checkout changed before the Run was recorded; review the Direct Run preview again".into(),
-                cleanup.err(),
-            ));
-        }
-        let decision = match decide(
-            self.state.clone(),
-            Event::StartDirectRun {
-                item_id,
-                workspace_id,
-                machine_id: machine.id,
-                agent,
-                execution_profile,
-                prompt,
-                working_directory,
-                session_name: session_name.clone(),
-                pane_id,
-                started_at: current_unix_seconds(),
-                prompt_selection,
-                checkouts: after_launch,
-                repository_id: primary_repository_id,
-                allow_dirty,
-                allow_shared_checkouts,
-            },
-        ) {
-            Ok(decision) => decision,
-            Err(error) => {
-                let cleanup = terminal.kill_session(&machine, &session_name);
-                return Err(format_commit_error(error.to_string(), cleanup.err()));
-            }
-        };
-        let run = decision
-            .state
-            .runs
-            .last()
-            .cloned()
-            .ok_or_else(|| "Direct Run creation produced no Run".to_owned())?;
-        if let Err(error) = self.commit(decision) {
-            let cleanup = terminal.kill_session(&machine, &run.session_name);
-            return Err(format_commit_error(error, cleanup.err()));
-        }
-        let _ = preflight;
-        Ok(run)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn start_grill_run(
-        &mut self,
-        item_id: i64,
-        workspace_id: i64,
-        machine_id: Option<i64>,
-        primary_repository_id: i64,
-        configuration: GrillConfiguration,
-        initial_prompt: String,
-        expected_checkouts: Vec<RunCheckout>,
-        allow_dirty: bool,
-        allow_shared_checkouts: bool,
-    ) -> Result<Run, String> {
-        let (machine, checkout_details) =
-            self.inspect_direct_checkouts(item_id, workspace_id, machine_id)?;
-        let current_checkouts = checkout_details
-            .iter()
-            .map(|checkout| RunCheckout {
-                repository_id: checkout.repository_id,
-                path: checkout.path.clone(),
-                branch: checkout.branch.clone(),
-                is_dirty: checkout.is_dirty,
-            })
-            .collect::<Vec<_>>();
-        if current_checkouts != expected_checkouts {
-            return Err(
-                "A Grill checkout changed after the preview (branch or dirty state); review the Grill preview again before starting"
-                    .into(),
-            );
-        }
-        let working_directory = current_checkouts
-            .iter()
-            .find(|checkout| checkout.repository_id == primary_repository_id)
-            .map(|checkout| checkout.path.clone())
-            .ok_or_else(|| "Choose a selected Repository checkout for the Grill".to_owned())?;
-        if !allow_dirty {
-            let dirty_repository_ids = current_checkouts
-                .iter()
-                .filter(|checkout| checkout.is_dirty)
-                .map(|checkout| checkout.repository_id)
-                .collect::<Vec<_>>();
-            if !dirty_repository_ids.is_empty() {
-                return Err(format!(
-                    "Grill checkout(s) are dirty: {}; review the preview and confirm before starting",
-                    dirty_repository_ids
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-        }
-        if !allow_shared_checkouts {
-            let shared_paths = self
-                .state
-                .runs
-                .iter()
-                .filter(|run| {
-                    run.machine_id == machine.id
-                        && run_is_active(run)
-                        && run.pane_status != RunPaneStatus::Missing
-                })
-                .flat_map(|run| {
-                    current_checkouts.iter().filter_map(move |checkout| {
-                        run.direct_checkouts
-                            .iter()
-                            .any(|active| active.path == checkout.path)
-                            .then_some(checkout.path.clone())
-                    })
-                })
-                .collect::<Vec<_>>();
-            if !shared_paths.is_empty() {
-                return Err(format!(
-                    "Grill checkout(s) are already used by an active Run: {}; review the preview and confirm before starting",
-                    shared_paths.join(", ")
-                ));
-            }
-        }
-        let prompt = self.compose_grill_prompt(item_id, configuration.clone(), initial_prompt)?;
-        let run_id = self.state.next_run_id;
-        let session_name = format!("mission-item-{item_id}-grill-{run_id}");
-        let preflight = decide(
-            self.state.clone(),
-            Event::StartGrillRun {
-                item_id,
-                workspace_id,
-                repository_id: primary_repository_id,
-                machine_id: machine.id,
-                configuration: configuration.clone(),
-                prompt: prompt.clone(),
-                skill_snapshot: crate::domain::GRILL_SKILL_SNAPSHOT.into(),
-                working_directory: working_directory.clone(),
-                session_name: format!("{session_name}-preflight"),
-                pane_id: "%preflight".into(),
-                started_at: current_unix_seconds(),
-                checkouts: current_checkouts.clone(),
-            },
-        )
-        .map_err(|error| error.to_string())?;
-
-        if let Err(error) = probe_machine(&machine) {
-            return Err(format!(
-                "Could not reach Machine {}. The Grill was not started locally: {error}",
-                machine.name
-            ));
-        }
-        self.observe_machine(machine.id, MachineObservation::Available)?;
-        if matches!(machine.transport, MachineTransport::Local) {
-            self.provision_agent_hooks()?;
-        }
-        let state_file = if matches!(machine.transport, MachineTransport::Local) {
-            state_file_path(&self.agent_state_directory, run_id)
-        } else {
-            PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
-        };
-        let executable = self
-            .agent_executable(&machine, configuration.agent)
-            .map_err(|error| format!("{}: {error}", agent_display_name(configuration.agent)))?;
-        let terminal = TmuxRuntime;
-        let pane_id = terminal.launch_agent(
-            &machine,
-            &session_name,
-            Path::new(&working_directory),
-            &executable,
-            &prompt,
-            AgentLaunchContext {
-                run_id,
-                state_file: &state_file,
-                agent: Some(configuration.agent),
-                model: Some(&configuration.model),
-                effort: Some(&configuration.effort),
-            },
-        )?;
-        let (_, after_launch) =
-            match self.inspect_direct_checkouts(item_id, workspace_id, Some(machine.id)) {
-                Ok(value) => value,
-                Err(error) => {
-                    let cleanup = terminal.kill_session(&machine, &session_name);
-                    return Err(format_commit_error(error, cleanup.err()));
-                }
-            };
-        let after_launch = after_launch
-            .iter()
-            .map(|checkout| RunCheckout {
-                repository_id: checkout.repository_id,
-                path: checkout.path.clone(),
-                branch: checkout.branch.clone(),
-                is_dirty: checkout.is_dirty,
-            })
-            .collect::<Vec<_>>();
-        if after_launch != current_checkouts {
-            let cleanup = terminal.kill_session(&machine, &session_name);
-            return Err(format_commit_error(
-                "A Grill checkout changed before the Run was recorded; review the Grill preview again"
-                    .into(),
-                cleanup.err(),
-            ));
-        }
-        let decision = match decide(
-            self.state.clone(),
-            Event::StartGrillRun {
-                item_id,
-                workspace_id,
-                repository_id: primary_repository_id,
-                machine_id: machine.id,
-                configuration,
-                prompt,
-                skill_snapshot: crate::domain::GRILL_SKILL_SNAPSHOT.into(),
-                working_directory,
-                session_name: session_name.clone(),
-                pane_id,
-                started_at: current_unix_seconds(),
-                checkouts: after_launch,
-            },
-        ) {
-            Ok(decision) => decision,
-            Err(error) => {
-                let cleanup = terminal.kill_session(&machine, &session_name);
-                return Err(format_commit_error(error.to_string(), cleanup.err()));
-            }
-        };
-        let run = decision
-            .state
-            .runs
-            .last()
-            .cloned()
-            .ok_or_else(|| "Grill Run creation produced no Run".to_owned())?;
-        if let Err(error) = self.commit(decision) {
-            let cleanup = terminal.kill_session(&machine, &run.session_name);
-            return Err(format_commit_error(error, cleanup.err()));
-        }
-        let _ = (preflight, allow_dirty, allow_shared_checkouts);
-        Ok(run)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn start_worktree_run(
-        &mut self,
-        item_id: i64,
-        workspace_id: i64,
-        worktree_id: i64,
-        agent: AgentKind,
-        execution_profile: ExecutionProfile,
-        prompt: String,
-        prompt_selection: RunPromptSelection,
-    ) -> Result<Run, String> {
-        let worktree = self
-            .state
-            .worktrees
-            .iter()
-            .find(|worktree| worktree.id == worktree_id && worktree.workspace_id == workspace_id)
-            .cloned()
-            .ok_or_else(|| {
-                format!("Worktree {worktree_id} does not belong to Workspace {workspace_id}")
-            })?;
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == worktree.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", worktree.machine_id))?;
-        let working_directory = worktree.path.clone();
-        let run_id = self.state.next_run_id;
-        let session_name = format!("mission-item-{item_id}-run-{run_id}");
-        let preflight = decide(
-            self.state.clone(),
-            worktree_run_event(
-                item_id,
-                workspace_id,
-                worktree_id,
-                machine.id,
-                agent,
-                execution_profile,
-                prompt.clone(),
-                working_directory.clone(),
-                format!("{session_name}-preflight"),
-                "%preflight".into(),
-                current_unix_seconds(),
-                prompt_selection.clone(),
-            ),
-        )
-        .map_err(|error| error.to_string())?;
-
-        if let Err(error) = probe_machine(&machine) {
-            return Err(format!(
-                "Could not reach Machine {}. The Run was not started locally: {error}",
-                machine.name
-            ));
-        }
-        self.observe_machine(machine.id, MachineObservation::Available)?;
-        if matches!(machine.transport, MachineTransport::Local) {
-            self.provision_agent_hooks()?;
-        }
-        let state_file = if matches!(machine.transport, MachineTransport::Local) {
-            state_file_path(&self.agent_state_directory, run_id)
-        } else {
-            PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
-        };
-        let executable = self
-            .agent_executable(&machine, agent)
-            .map_err(|error| format!("{}: {error}", agent_display_name(agent)))?;
-        let terminal = TmuxRuntime;
-        let pane_id = terminal.launch_agent(
-            &machine,
-            &session_name,
-            Path::new(&working_directory),
-            &executable,
-            &prompt,
-            AgentLaunchContext {
-                run_id,
-                state_file: &state_file,
-                agent: None,
-                model: None,
-                effort: None,
-            },
-        )?;
-        let decision = match decide(
-            self.state.clone(),
-            worktree_run_event(
-                item_id,
-                workspace_id,
-                worktree_id,
-                machine.id,
-                agent,
-                execution_profile,
-                prompt,
-                working_directory,
-                session_name.clone(),
-                pane_id,
-                current_unix_seconds(),
-                prompt_selection,
-            ),
-        ) {
-            Ok(decision) => decision,
-            Err(error) => {
-                let cleanup = terminal.kill_session(&machine, &session_name);
-                return Err(format_commit_error(error.to_string(), cleanup.err()));
-            }
-        };
-        let run = decision
-            .state
-            .runs
-            .last()
-            .cloned()
-            .ok_or_else(|| "Worktree Run creation produced no Run".to_owned())?;
-        if let Err(error) = self.commit(decision) {
-            let cleanup = terminal.kill_session(&machine, &run.session_name);
-            return Err(format_commit_error(error, cleanup.err()));
-        }
-        let _ = preflight;
-        Ok(run)
-    }
-
-    fn list_run_suggestions(&mut self) -> Result<Vec<RunSuggestion>, String> {
-        self.recover_run_states()?;
-        let local_machine_item_ids = self
-            .state
-            .workspaces
-            .iter()
-            .map(|workspace| workspace.item_id)
-            .collect::<Vec<_>>();
-        for item_id in local_machine_item_ids {
-            self.local_machine_for_item(item_id)?;
-        }
-        let observations = self
-            .state
-            .machines
-            .iter()
-            .flat_map(|machine| match list_agent_panes(machine) {
-                Ok(panes) => panes
-                    .into_iter()
-                    .map(|pane| AgentPaneObservation {
-                        machine_id: machine.id,
-                        agent: pane.agent,
-                        session_name: pane.session_name,
-                        pane_id: pane.pane_id,
-                        current_path: pane.current_path,
-                    })
-                    .collect::<Vec<_>>(),
-                Err(error) => {
-                    eprintln!(
-                        "Could not inspect Machine {} for agent Panes: {error}",
-                        machine.name
-                    );
-                    Vec::new()
-                }
-            })
-            .collect::<Vec<_>>();
-        Ok(suggest_untracked_runs(&self.state, &observations))
-    }
-
-    fn attach_run(&mut self, suggestion: RunSuggestion) -> Result<Run, String> {
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == suggestion.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", suggestion.machine_id))?;
-        let observation = list_agent_panes(&machine)?
-            .into_iter()
-            .find(|pane| {
-                pane.agent == suggestion.agent
-                    && pane.session_name == suggestion.session_name
-                    && pane.pane_id == suggestion.pane_id
-            })
-            .ok_or_else(|| "The suggested agent is no longer available".to_owned())?;
-        let canonical = suggest_untracked_runs(
-            &self.state,
-            &[AgentPaneObservation {
-                machine_id: suggestion.machine_id,
-                agent: observation.agent,
-                session_name: observation.session_name.clone(),
-                pane_id: observation.pane_id.clone(),
-                current_path: observation.current_path,
-            }],
-        )
-        .into_iter()
-        .find(|candidate| {
-            candidate.item_id == suggestion.item_id
-                && candidate.machine_id == suggestion.machine_id
-                && candidate.session_name == suggestion.session_name
-                && candidate.pane_id == suggestion.pane_id
-                && candidate.workspace_id == suggestion.workspace_id
-                && candidate.repository_id == suggestion.repository_id
-                && candidate.worktree_id == suggestion.worktree_id
-                && candidate.location_path == suggestion.location_path
-        })
-        .ok_or_else(|| {
-            "The suggested agent no longer matches its registered working location".to_owned()
-        })?;
-        let decision = if let Some(workspace_id) = canonical.workspace_id {
-            let repository_id = canonical
-                .repository_id
-                .ok_or_else(|| "The suggested Workspace location has no Repository".to_owned())?;
-            decide(
-                self.state.clone(),
-                Event::AttachRun {
-                    item_id: canonical.item_id,
-                    workspace_id,
-                    worktree_id: canonical.worktree_id,
-                    repository_id,
-                    machine_id: canonical.machine_id,
-                    agent: canonical.agent,
-                    working_directory: canonical
-                        .location_path
-                        .clone()
-                        .unwrap_or(canonical.current_path.clone()),
-                    session_name: canonical.session_name,
-                    pane_id: canonical.pane_id,
-                    attached_at: current_unix_seconds(),
-                },
-            )
-        } else {
-            return Err("The suggested agent is not in a registered Workspace location".into());
-        }
-        .map_err(|error| error.to_string())?;
-        let run = decision
-            .state
-            .runs
-            .last()
-            .cloned()
-            .ok_or_else(|| "Run attachment produced no Run".to_owned())?;
-        self.commit(decision)?;
-        Ok(run)
-    }
-
-    fn open_terminal(
-        &mut self,
-        app: &AppHandle,
-        run_id: i64,
-        terminal_id: String,
-        session_name: String,
-        pane_id: String,
-    ) -> Result<TerminalAttachment, String> {
-        if terminal_id.trim().is_empty() {
-            return Err("A terminal identity is required".to_owned());
-        }
-        let run = self
-            .state
-            .runs
-            .iter()
-            .find(|run| run.id == run_id && run.session_name == session_name)
-            .cloned()
-            .ok_or_else(|| "The Pane does not belong to that Run".to_owned())?;
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == run.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-        let pane_exists = list_panes(&machine, &session_name)?
-            .iter()
-            .any(|pane| pane.pane_id == pane_id);
-        if !pane_exists {
-            return Err(format!(
-                "Pane {pane_id} is not available in session {session_name}"
-            ));
-        }
-
-        if let Some(previous) = self.terminal_connections.remove(&terminal_id) {
-            previous.close()?;
-        }
-        let output_app = app.clone();
-        let output_terminal_id = terminal_id.clone();
-        let output_pane_id = pane_id.clone();
-        let exit_app = app.clone();
-        let exit_terminal_id = terminal_id.clone();
-        let exit_pane_id = pane_id.clone();
-        let state_app = app.clone();
-        let connection = TmuxControlPane::attach(
-            &machine,
-            &session_name,
-            &pane_id,
-            move |data| {
-                let _ = output_app.emit(
-                    "terminal-output",
-                    TerminalOutputEvent {
-                        terminal_id: output_terminal_id.clone(),
-                        pane_id: output_pane_id.clone(),
-                        data,
-                    },
-                );
-            },
-            move |record| {
-                let run_id = record.run_id.parse::<i64>().ok();
-                let Some(app_state) = state_app.try_state::<Mutex<Runtime>>() else {
-                    return;
-                };
-                let Ok(mut runtime) = app_state.lock() else {
-                    return;
-                };
-                if let Some(run_id) = run_id {
-                    match runtime.apply_agent_state_record(run_id, record.clone()) {
-                        Ok(true) => {
-                            let _ = state_app.emit(
-                                "run-state-changed",
-                                RunStateChangedEvent {
-                                    run_id,
-                                    state: record.state,
-                                },
-                            );
-                        }
-                        Ok(false) => {}
-                        Err(error) => {
-                            eprintln!("Could not persist state for Run {run_id}: {error}");
-                        }
-                    }
-                    if matches!(record.state, RunState::Blocked | RunState::Finished) {
-                        match runtime.capture_grill_transcript(run_id) {
-                            Ok(true) => {
-                                let _ = state_app.emit("run-questions-changed", run_id);
-                            }
-                            Ok(false) => {}
-                            Err(error) => {
-                                eprintln!(
-                                    "Could not retain transcript for waiting Grill Run {run_id}: {error}"
-                                );
-                            }
-                        }
-                    }
-                }
-            },
-            move |code| {
-                let _ = exit_app.emit(
-                    "terminal-exit",
-                    TerminalExitEvent {
-                        terminal_id: exit_terminal_id.clone(),
-                        pane_id: exit_pane_id.clone(),
-                        code,
-                    },
-                );
-            },
-        )?;
-        let snapshot = match capture_pane(&machine, &pane_id) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                let _ = connection.close();
-                return Err(error);
-            }
-        };
-        let panes = match self.list_run_panes(run_id) {
-            Ok(panes) => panes,
-            Err(error) => {
-                let _ = connection.close();
-                return Err(error);
-            }
-        };
-        if run.pane_status != RunPaneStatus::Available {
-            let decision = decide(
-                self.state.clone(),
-                Event::SetRunPaneStatus {
-                    run_id,
-                    status: RunPaneStatus::Available,
-                },
-            )
-            .map_err(|error| error.to_string())?;
-            if let Err(error) = self.commit(decision) {
-                let _ = connection.close();
-                return Err(error);
-            }
-        }
-        if run.execution_profile == ExecutionProfile::Grill {
-            if let Err(error) = self.capture_grill_transcript(run_id) {
-                eprintln!(
-                    "Could not capture transcript while reopening Grill Run {run_id}: {error}"
-                );
-            }
-        }
-        self.terminal_connections
-            .insert(terminal_id.clone(), connection);
-        Ok(TerminalAttachment {
-            terminal_id,
-            session_name,
-            pane_id,
-            snapshot,
-            panes,
-        })
-    }
-
-    fn list_run_panes(&mut self, run_id: i64) -> Result<Vec<PaneTab>, String> {
-        self.recover_run_states()?;
-        let run = self
-            .state
-            .runs
-            .iter()
-            .find(|run| run.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == run.machine_id)
-            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-        let panes = list_panes(machine, &run.session_name)?;
-        Ok(panes
-            .into_iter()
-            .map(|pane| PaneTab::from_summary(&run, &run.session_name, pane, true))
-            .collect())
-    }
-
-    fn terminal_input(&self, terminal_id: &str, input: Vec<u8>) -> Result<(), String> {
-        self.terminal_connections
-            .get(terminal_id)
-            .ok_or_else(|| "The embedded terminal is not attached".to_owned())?
-            .send_input(&input)
-    }
-
-    fn terminal_resize(&self, terminal_id: &str, columns: u16, rows: u16) -> Result<(), String> {
-        self.terminal_connections
-            .get(terminal_id)
-            .ok_or_else(|| "The embedded terminal is not attached".to_owned())?
-            .resize(columns, rows)
-    }
-
-    fn close_terminal(&mut self, terminal_id: &str) -> Result<(), String> {
-        if let Some(connection) = self.terminal_connections.remove(terminal_id) {
-            connection.close()?;
-        }
-        Ok(())
-    }
-
-    fn capture_grill_transcript(&mut self, run_id: i64) -> Result<bool, String> {
-        let run = self
-            .state
-            .runs
-            .iter()
-            .find(|run| run.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        if run.execution_profile != ExecutionProfile::Grill {
-            return Ok(false);
-        }
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == run.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-        let transcript = match capture_pane_transcript(&machine, &run.pane_id) {
-            Ok(transcript) => String::from_utf8_lossy(&transcript).into_owned(),
-            Err(error) => {
-                if run.grill_action.is_some() && !run.transcript.trim().is_empty() {
-                    self.capture_downstream_issues(run_id, &run.transcript)?;
-                }
-                return Err(error);
-            }
-        };
-        let captured_question_group =
-            parse_grill_question_group_since(&run.transcript, &transcript);
-        let question_group = match (run.grill_question_group.as_ref(), captured_question_group) {
-            (Some(previous), None) if run.state == RunState::Working => Some(previous.clone()),
-            (Some(previous), Some(captured))
-                if previous.questions.len() == captured.questions.len()
-                    && previous
-                        .questions
-                        .iter()
-                        .zip(captured.questions.iter())
-                        .all(|(previous, captured)| {
-                            previous.number == captured.number
-                                && captured.prompt.starts_with(&previous.prompt)
-                        }) =>
-            {
-                Some(previous.clone())
-            }
-            (_, captured) => captured,
-        };
-        if run.transcript == transcript && run.grill_question_group == question_group {
-            self.capture_downstream_issues(run_id, &transcript)?;
-            return Ok(false);
-        }
-        let captured_transcript = transcript.clone();
-        let decision = decide(
-            self.state.clone(),
-            Event::RecordRunTranscript {
-                run_id,
-                transcript,
-                question_group,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        self.capture_downstream_issues(run_id, &captured_transcript)?;
-        Ok(true)
-    }
-
-    fn capture_downstream_issues(&mut self, run_id: i64, transcript: &str) -> Result<(), String> {
-        let run = self
-            .state
-            .runs
-            .iter()
-            .find(|run| run.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        let Some(action) = run.grill_action else {
-            return Ok(());
-        };
-        if !matches!(
-            action,
-            GrillContinuationAction::ToSpec | GrillContinuationAction::ToTickets
-        ) {
-            return Ok(());
-        }
-
-        let candidates = discover_downstream_issue_candidates(transcript)
-            .into_iter()
-            .filter(|candidate| {
-                candidate
-                    .run_id
-                    .is_none_or(|candidate_run_id| candidate_run_id == run_id)
-                    && candidate
-                        .action
-                        .is_none_or(|candidate_action| candidate_action == action)
-            })
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            return Ok(());
-        }
-
-        let executable = match self.gh_executable_path() {
-            Ok(executable) => executable,
-            Err(error) => {
-                eprintln!("Could not confirm downstream GitHub Issues for Run {run_id}: {error}");
-                return Ok(());
-            }
-        };
-        let github = GithubCli::new(executable);
-        let mut confirmed = Vec::new();
-        for candidate in candidates {
-            let object = match classify_url(&candidate.url) {
-                Ok(object)
-                    if object.provider == ExternalProvider::GitHub
-                        && object.kind == ExternalObjectKind::Issue =>
-                {
-                    object
-                }
-                Ok(_) | Err(_) => continue,
-            };
-            let snapshot = match github.fetch(&object, current_unix_seconds()) {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    eprintln!(
-                        "Could not confirm downstream GitHub Issue {} for Run {run_id}: {error}",
-                        candidate.url
-                    );
-                    continue;
-                }
-            };
-            if confirmed.iter().any(|issue: &ConfirmedDownstreamIssue| {
-                issue.object.external_key == object.external_key
-            }) {
-                continue;
-            }
-            confirmed.push(ConfirmedDownstreamIssue {
-                object,
-                snapshot,
-                discovery: candidate.discovery,
-            });
-        }
-        if confirmed.is_empty() {
-            return Ok(());
-        }
-
-        let decision = decide(
-            self.state.clone(),
-            Event::CaptureDownstreamIssues {
-                run_id,
-                action,
-                issues: confirmed,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        self.commit(decision)
-    }
-
-    fn submit_grill_answers(
-        &mut self,
-        run_id: i64,
-        answers: Vec<GrillAnswer>,
-    ) -> Result<Run, String> {
-        let run = self
-            .state
-            .runs
-            .iter()
-            .find(|run| run.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        if run.execution_profile != ExecutionProfile::Grill {
-            return Err(format!("Run {run_id} is not a Grill Run"));
-        }
-        if run.state != RunState::Blocked {
-            return Err(format!("Run {run_id} is not waiting for Grill answers"));
-        }
-        let answers_decision = decide(
-            self.state.clone(),
-            Event::RecordGrillAnswers { run_id, answers },
-        )
-        .map_err(|error| error.to_string())?;
-        let answered_run = answers_decision
-            .state
-            .runs
-            .iter()
-            .find(|candidate| candidate.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        let response = format_grill_response(&answered_run.grill_answers)
-            .map_err(|error| error.to_string())?;
-        self.commit(answers_decision)?;
-
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == answered_run.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", answered_run.machine_id))?;
-        let mut input = response.into_bytes();
-        input.push(b'\n');
-        send_input_to_pane(&machine, &answered_run.pane_id, &input)?;
-
-        let response = String::from_utf8(input)
-            .map_err(|_| "The grouped Grill response was not valid UTF-8".to_owned())?;
-        let response = response.trim_end_matches('\n').to_owned();
-        let decision = decide(
-            self.state.clone(),
-            Event::RecordGrillResponse { run_id, response },
-        )
-        .map_err(|error| error.to_string())?;
-        let submitted_run = decision
-            .state
-            .runs
-            .iter()
-            .find(|candidate| candidate.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        self.commit(decision)?;
-        Ok(submitted_run)
-    }
-
-    fn continue_grill(
-        &mut self,
-        run_id: i64,
-        action: GrillContinuationAction,
-    ) -> Result<Run, String> {
-        let run = self
-            .state
-            .runs
-            .iter()
-            .find(|run| run.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        let prompt = build_grill_continuation_prompt(&self.state, run_id, action)
-            .map_err(|error| error.to_string())?;
-        let decision = decide(self.state.clone(), Event::ContinueGrill { run_id, action })
-            .map_err(|error| error.to_string())?;
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == run.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-        let mut input = prompt.into_bytes();
-        input.push(b'\n');
-        send_input_to_pane(&machine, &run.pane_id, &input)?;
-
-        let continued = decision
-            .state
-            .runs
-            .iter()
-            .find(|candidate| candidate.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        self.commit(decision)?;
-        Ok(continued)
-    }
-
-    fn stop_run(&mut self, run_id: i64) -> Result<Run, String> {
-        let run = self
-            .state
-            .runs
-            .iter()
-            .find(|run| run.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == run.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-
-        TmuxRuntime
-            .kill_pane(&machine, &run.session_name, &run.pane_id)
-            .map_err(|error| format!("Could not stop Run {run_id}: {error}"))?;
-        let decision = decide(
-            self.state.clone(),
-            Event::SetRunPaneStatus {
-                run_id,
-                status: RunPaneStatus::Missing,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let stopped = decision
-            .state
-            .runs
-            .iter()
-            .find(|candidate| candidate.id == run_id)
-            .cloned()
-            .ok_or_else(|| "Run stop produced no Run".to_owned())?;
-        self.commit_with_audit(decision, &[AuditAction::RunStopped { run_id }])?;
-        Ok(stopped)
-    }
-
-    fn finish_run(&mut self, run_id: i64) -> Result<Run, String> {
-        let decision = decide(self.state.clone(), Event::FinishRun { run_id })
-            .map_err(|error| error.to_string())?;
-        let finished = decision
-            .state
-            .runs
-            .iter()
-            .find(|candidate| candidate.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        self.commit_with_audit(decision, &[AuditAction::RunFinished { run_id }])?;
-        Ok(finished)
-    }
-
-    fn open_external_terminal(&self, run_id: i64) -> Result<(), String> {
-        let run = self
-            .state
-            .runs
-            .iter()
-            .find(|run| run.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == run.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-        let panes = list_panes(&machine, &run.session_name).map_err(|error| {
-            format!(
-                "Pane {} is not available in session {}: {error}",
-                run.pane_id, run.session_name
-            )
-        })?;
-        if !panes.iter().any(|pane| pane.pane_id == run.pane_id) {
-            return Err(format!(
-                "Pane {} is not available in session {}",
-                run.pane_id, run.session_name
-            ));
-        }
-
-        let transport = terminal_transport(&machine);
-        let identity = ExternalPaneIdentity {
-            tmux_path: "tmux".into(),
-            socket_name: machine.socket_name,
-            session_name: run.session_name,
-            pane_id: run.pane_id,
-            transport,
-        };
-        open_pane_in_terminal(&identity)
-    }
-
-    fn provision_agent_hooks(&self) -> Result<(), String> {
-        let home = env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| "HOME is not set; agent hooks cannot be provisioned".to_owned())?;
-        let executable = env::current_exe()
-            .map_err(|error| format!("Could not locate the Mission Manager executable: {error}"))?;
-        provision_hooks(&home, &executable)
-    }
-
-    fn recover_run_states(&mut self) -> Result<(), String> {
-        for run in self.state.runs.clone() {
-            let path = state_file_path(&self.agent_state_directory, run.id);
-            let record = match read_state_file(&path) {
-                Ok(record) => record,
-                Err(error) => {
-                    if path.exists() {
-                        eprintln!(
-                            "Could not recover state for Run {} from {}: {error}",
-                            run.id,
-                            path.display()
-                        );
-                    }
-                    continue;
-                }
-            };
-            let Ok(record_run_id) = record.run_id.parse::<i64>() else {
-                continue;
-            };
-            if record_run_id != run.id || record.agent != run.agent {
-                continue;
-            }
-            self.apply_agent_state_record(record_run_id, record.clone())?;
-            if matches!(record.state, RunState::Blocked | RunState::Finished) {
-                if let Err(error) = self.capture_grill_transcript(record_run_id) {
-                    eprintln!(
-                        "Could not retain transcript for waiting Grill Run {record_run_id}: {error}"
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn reconcile_runs(&mut self) -> Result<(), String> {
-        self.recover_run_states()?;
-        for run in self.state.runs.clone() {
-            let Some(machine) = self
-                .state
-                .machines
-                .iter()
-                .find(|machine| machine.id == run.machine_id)
-            else {
-                continue;
-            };
-            let pane_status = if probe_machine(machine).is_err() {
-                RunPaneStatus::Unknown
-            } else {
-                match list_panes(machine, &run.session_name) {
-                    Ok(panes) if panes.iter().any(|pane| pane.pane_id == run.pane_id) => {
-                        RunPaneStatus::Available
-                    }
-                    Ok(_) | Err(_) => RunPaneStatus::Missing,
-                }
-            };
-            let phase_needs_recovery =
-                run.execution_profile == ExecutionProfile::Grill && run.grill_phase.is_none();
-            if pane_status == run.pane_status && !phase_needs_recovery {
-                if pane_status == RunPaneStatus::Available
-                    && run.execution_profile == ExecutionProfile::Grill
-                {
-                    if let Err(error) = self.capture_grill_transcript(run.id) {
-                        eprintln!(
-                            "Could not reconcile transcript for Grill Run {}: {error}",
-                            run.id
-                        );
-                    }
-                }
-                continue;
-            }
-            let decision = decide(
-                self.state.clone(),
-                Event::SetRunPaneStatus {
-                    run_id: run.id,
-                    status: pane_status,
-                },
-            )
-            .map_err(|error| error.to_string())?;
-            self.commit(decision)?;
-            if pane_status == RunPaneStatus::Available
-                && run.execution_profile == ExecutionProfile::Grill
-            {
-                if let Err(error) = self.capture_grill_transcript(run.id) {
-                    eprintln!(
-                        "Could not reconcile transcript for Grill Run {}: {error}",
-                        run.id
-                    );
-                }
-            }
-        }
-        Ok(())
-    }
-
-    fn apply_agent_state_record(
-        &mut self,
-        run_id: i64,
-        record: AgentStateRecord,
-    ) -> Result<bool, String> {
-        let Some(run) = self.state.runs.iter().find(|run| run.id == run_id) else {
-            return Ok(false);
-        };
-        if run.agent != record.agent || run.state == record.state {
-            return Ok(false);
-        }
-        let decision = decide(
-            self.state.clone(),
-            Event::UpdateRunState {
-                run_id,
-                state: record.state,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        Ok(true)
-    }
-
-    fn item_context_id(&self, item_id: i64) -> Result<i64, String> {
-        let item = self
-            .state
-            .items
-            .iter()
-            .find(|item| item.id == item_id)
-            .ok_or_else(|| format!("Item {item_id} does not exist"))?;
-        self.state
-            .projects
-            .iter()
-            .find(|project| project.id == item.project_id)
-            .map(|project| project.context_id)
-            .ok_or_else(|| format!("Project {} does not exist", item.project_id))
-    }
-
-    fn build_item_deletion_preview(&self, item_id: i64) -> Result<ItemDeletionPreview, String> {
-        let plan = plan_item_deletion(&self.state, item_id).map_err(|error| error.to_string())?;
-        let blockers = plan
-            .active_run_ids
-            .iter()
-            .map(|run_id| format!("Run #{run_id} is active; stop it before deleting this Item."))
-            .collect::<Vec<_>>();
-        Ok(ItemDeletionPreview { plan, blockers })
-    }
-
-    fn build_parent_deletion_preview(
-        &self,
-        target: ParentDeletionTarget,
-    ) -> Result<ParentDeletionPreview, String> {
-        let plan = match target {
-            ParentDeletionTarget::Project(project_id) => {
-                plan_project_deletion(&self.state, project_id)
-            }
-            ParentDeletionTarget::Context(context_id) => {
-                plan_context_deletion(&self.state, context_id)
-            }
-        }
-        .map_err(|error| error.to_string())?;
-        let mut blockers = plan
-            .active_run_ids
-            .iter()
-            .map(|run_id| {
-                format!(
-                    "Run #{run_id} is active; stop it before deleting this {}.",
-                    target.label()
-                )
-            })
-            .collect::<Vec<_>>();
-        if matches!(target, ParentDeletionTarget::Context(_)) && self.state.contexts.len() == 1 {
-            blockers.push(
-                "This is the last Context; create another Context before deleting it.".into(),
-            );
-        }
-        Ok(ParentDeletionPreview { plan, blockers })
-    }
-
-    fn prepare_project_deletion(
-        &mut self,
-        project_id: i64,
-    ) -> Result<ParentDeletionPreview, String> {
-        let preview =
-            self.build_parent_deletion_preview(ParentDeletionTarget::Project(project_id))?;
-        self.pending_parent_deletion = Some(preview.clone());
-        Ok(preview)
-    }
-
-    fn prepare_context_deletion(
-        &mut self,
-        context_id: i64,
-    ) -> Result<ParentDeletionPreview, String> {
-        let preview =
-            self.build_parent_deletion_preview(ParentDeletionTarget::Context(context_id))?;
-        self.pending_parent_deletion = Some(preview.clone());
-        Ok(preview)
-    }
-
-    fn build_reset_local_data_preview(&self) -> Result<ResetLocalDataPreview, String> {
-        let plan = plan_reset_local_data(&self.state);
-        let blockers = self
-            .state
-            .runs
-            .iter()
-            .filter(|run| run_is_active(run))
-            .map(|run| {
-                format!(
-                    "Run #{} is active; stop it before resetting local data.",
-                    run.id
-                )
-            })
-            .collect::<Vec<_>>();
-        Ok(ResetLocalDataPreview {
-            plan,
-            audit_entry_count: self
-                .store
-                .audit_entry_count()
-                .map_err(|error| error.to_string())?,
-            blockers,
-            confirmation_phrase: RESET_CONFIRMATION_PHRASE.into(),
-        })
-    }
-
-    fn prepare_reset_local_data(&mut self) -> Result<ResetLocalDataPreview, String> {
-        let preview = self.build_reset_local_data_preview()?;
-        self.pending_reset_local_data = Some(preview.clone());
-        Ok(preview)
-    }
-
-    fn reset_all_local_data(
-        &mut self,
-        confirmation: String,
-    ) -> Result<ResetLocalDataResult, String> {
-        if confirmation != RESET_CONFIRMATION_PHRASE {
-            return Err(format!(
-                "Reset requires the exact confirmation phrase: {RESET_CONFIRMATION_PHRASE}"
-            ));
-        }
-        let pending = self
-            .pending_reset_local_data
-            .as_ref()
-            .cloned()
-            .ok_or_else(|| "Review the reset preview before resetting local data".to_owned())?;
-        let current = self.build_reset_local_data_preview()?;
-        if current != pending {
-            return Err(
-                "The local model changed after the reset preview; review the updated preview before resetting local data"
-                    .into(),
-            );
-        }
-        if !current.blockers.is_empty() {
-            return Err(format!(
-                "Reset is blocked:\n{}",
-                current.blockers.join("\n")
-            ));
-        }
-
-        let decision =
-            decide(self.state.clone(), Event::ResetLocalData).map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        self.pending_reset_local_data = None;
-        self.pending_item_deletion = None;
-        self.pending_external_object_deletion = None;
-        self.pending_repository_deletion = None;
-        self.pending_machine_deletion = None;
-        self.pending_parent_deletion = None;
-        self.terminal_connections.clear();
-
-        if self.agent_state_directory.exists() {
-            let _ = fs::remove_dir_all(&self.agent_state_directory);
-        }
-
-        Ok(ResetLocalDataResult {
-            summary: current.plan.summary,
-            audit_entry_count: current.audit_entry_count,
-        })
-    }
-
-    fn delete_parent(
-        &mut self,
-        target: ParentDeletionTarget,
-        event: Event,
-        confirmed: bool,
-    ) -> Result<ParentDeletionResult, String> {
-        if !confirmed {
-            return Err(format!(
-                "{} deletion requires explicit confirmation after reviewing its deletion preview",
-                target.label()
-            ));
-        }
-        let pending = self
-            .pending_parent_deletion
-            .as_ref()
-            .filter(|preview| target.matches(&preview.plan))
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "Review the {} deletion preview before deleting it",
-                    target.label()
-                )
-            })?;
-        let current = self.build_parent_deletion_preview(target)?;
-        if current != pending {
-            return Err(format!(
-                "The {} changed after the preview; review the updated deletion preview",
-                target.label()
-            ));
-        }
-        if !current.blockers.is_empty() {
-            return Err(format!(
-                "{} deletion is blocked:\n{}",
-                target.label(),
-                current.blockers.join("\n")
-            ));
-        }
-        let summary = current.plan.summary();
-        let decision = decide(self.state.clone(), event).map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        self.pending_parent_deletion = None;
-        Ok(ParentDeletionResult { summary })
-    }
-
-    fn delete_project(
-        &mut self,
-        project_id: i64,
-        item_ids: Vec<i64>,
-        repository_ids: Vec<i64>,
-        workspace_ids: Vec<i64>,
-        confirmed: bool,
-    ) -> Result<ParentDeletionResult, String> {
-        self.delete_parent(
-            ParentDeletionTarget::Project(project_id),
-            Event::DeleteProject {
-                project_id,
-                item_ids,
-                repository_ids,
-                workspace_ids,
-            },
-            confirmed,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn delete_context(
-        &mut self,
-        context_id: i64,
-        project_ids: Vec<i64>,
-        item_ids: Vec<i64>,
-        repository_ids: Vec<i64>,
-        workspace_ids: Vec<i64>,
-        machine_ids: Vec<i64>,
-        confirmed: bool,
-    ) -> Result<ParentDeletionResult, String> {
-        self.delete_parent(
-            ParentDeletionTarget::Context(context_id),
-            Event::DeleteContext {
-                context_id,
-                project_ids,
-                item_ids,
-                repository_ids,
-                workspace_ids,
-                machine_ids,
-            },
-            confirmed,
-        )
-    }
-
-    fn prepare_repository_deletion(
-        &mut self,
-        repository_id: i64,
-    ) -> Result<RepositoryDeletionPreview, String> {
-        let preview = self.build_repository_deletion_preview(repository_id)?;
-        self.pending_repository_deletion = Some(preview.clone());
-        Ok(preview)
-    }
-
-    fn build_machine_deletion_preview(
-        &self,
-        machine_id: i64,
-    ) -> Result<MachineDeletionPreview, String> {
-        let plan =
-            plan_machine_deletion(&self.state, machine_id).map_err(|error| error.to_string())?;
-        let blockers = plan
-            .active_run_ids
-            .iter()
-            .map(|run_id| {
-                format!(
-                    "Run #{run_id} is active on Machine {}; stop it before deleting the Machine.",
-                    plan.name
-                )
-            })
-            .collect();
-        Ok(MachineDeletionPreview { plan, blockers })
-    }
-
-    fn prepare_machine_deletion(
-        &mut self,
-        machine_id: i64,
-    ) -> Result<MachineDeletionPreview, String> {
-        let preview = self.build_machine_deletion_preview(machine_id)?;
-        self.pending_machine_deletion = Some(preview.clone());
-        Ok(preview)
-    }
-
-    fn prepare_item_deletion(&mut self, item_id: i64) -> Result<ItemDeletionPreview, String> {
-        let preview = self.build_item_deletion_preview(item_id)?;
-        self.pending_item_deletion = Some(preview.clone());
-        Ok(preview)
-    }
-
-    fn build_external_object_deletion_preview(
-        &self,
-        external_object_id: i64,
-    ) -> Result<ExternalObjectDeletionPreview, String> {
-        let plan = plan_external_object_deletion(&self.state, external_object_id)
-            .map_err(|error| error.to_string())?;
-        let links = plan
-            .link_ids
-            .iter()
-            .map(|link_id| {
-                let link = self
-                    .state
-                    .links
-                    .iter()
-                    .find(|link| link.id == *link_id)
-                    .ok_or_else(|| format!("Link {link_id} disappeared while building preview"))?;
-                let item = self
-                    .state
-                    .items
-                    .iter()
-                    .find(|item| item.id == link.item_id)
-                    .ok_or_else(|| {
-                        format!("Item {} disappeared while building preview", link.item_id)
-                    })?;
-                Ok(ExternalObjectLinkDeletionPreview {
-                    link_id: link.id,
-                    item_id: item.id,
-                    item_identifier: item.human_identifier.clone(),
-                    item_title: item.title.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-
-        Ok(ExternalObjectDeletionPreview {
-            plan,
-            links,
-            provider_warning: "This only removes local Mission Manager data. GitHub Issues, pull requests, and other provider-owned objects are never deleted.".into(),
-        })
-    }
-
-    fn prepare_external_object_deletion(
-        &mut self,
-        external_object_id: i64,
-    ) -> Result<ExternalObjectDeletionPreview, String> {
-        let preview = self.build_external_object_deletion_preview(external_object_id)?;
-        self.pending_external_object_deletion = Some(preview.clone());
-        Ok(preview)
-    }
-
-    fn delete_external_object(
-        &mut self,
-        external_object_id: i64,
-        confirmed: bool,
-    ) -> Result<ExternalObjectDeletionResult, String> {
-        if !confirmed {
-            return Err(
-                "External Object deletion requires explicit confirmation after reviewing its local deletion preview".into(),
-            );
-        }
-        let pending = self
-            .pending_external_object_deletion
-            .as_ref()
-            .filter(|preview| preview.plan.external_object_id == external_object_id)
-            .cloned()
-            .ok_or_else(|| {
-                "Review the External Object deletion preview before deleting it".to_owned()
-            })?;
-        let current = self.build_external_object_deletion_preview(external_object_id)?;
-        if current != pending {
-            return Err(
-                "The External Object or one of its Links changed after the preview; review the updated local deletion preview before deleting it".into(),
-            );
-        }
-
-        let summary = current.plan.summary();
-        let decision = decide(
-            self.state.clone(),
-            Event::DeleteExternalObject { external_object_id },
-        )
-        .map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        self.pending_external_object_deletion = None;
-        Ok(ExternalObjectDeletionResult { summary })
-    }
-
-    fn unlink_external_link(
-        &mut self,
-        link_id: i64,
-        confirmed: bool,
-    ) -> Result<ExternalLinkDeletionResult, String> {
-        if !confirmed {
-            return Err("Unlinking an Item requires explicit confirmation".into());
-        }
-        let external_object_id = self
-            .state
-            .links
-            .iter()
-            .find(|link| link.id == link_id)
-            .map(|link| link.external_object_id)
-            .ok_or_else(|| format!("Link {link_id} does not exist"))?;
-        let decision = decide(self.state.clone(), Event::DeleteLink { link_id })
-            .map_err(|error| error.to_string())?;
-        let external_object_deleted = !decision
-            .state
-            .external_objects
-            .iter()
-            .any(|object| object.id == external_object_id);
-        self.commit(decision)?;
-        Ok(ExternalLinkDeletionResult {
-            link_id,
-            external_object_id,
-            external_object_deleted,
-        })
-    }
-
-    fn build_repository_deletion_preview(
-        &self,
-        repository_id: i64,
-    ) -> Result<RepositoryDeletionPreview, String> {
-        let plan = plan_repository_deletion(&self.state, repository_id)
-            .map_err(|error| error.to_string())?;
-        let blockers = plan
-            .workspaces
-            .iter()
-            .filter_map(|workspace| {
-                self.state
-                    .runs
-                    .iter()
-                    .find(|run| run.workspace_id == Some(workspace.id))
-                    .map(|run| {
-                        format!(
-                            "Workspace #{} has Run #{} history and cannot be removed with the Repository.",
-                            workspace.id, run.id
-                        )
-                    })
-            })
-            .collect();
-        Ok(RepositoryDeletionPreview { plan, blockers })
-    }
-
-    fn delete_item(&mut self, item_id: i64, confirmed: bool) -> Result<ItemDeletionResult, String> {
-        if !confirmed {
-            return Err(
-                "Item deletion requires explicit confirmation after reviewing its deletion preview"
-                    .into(),
-            );
-        }
-        let pending = self
-            .pending_item_deletion
-            .as_ref()
-            .filter(|preview| preview.plan.item_id == item_id)
-            .cloned()
-            .ok_or_else(|| "Review the Item deletion preview before deleting it".to_owned())?;
-        let current = self.build_item_deletion_preview(item_id)?;
-        if current != pending {
-            return Err(
-                "The Item changed after the preview; review the updated deletion preview".into(),
-            );
-        }
-        if !current.blockers.is_empty() {
-            return Err(format!(
-                "Item deletion is blocked:\n{}",
-                current.blockers.join("\n")
-            ));
-        }
-        let summary = current.plan.summary();
-        let decision = decide(self.state.clone(), Event::DeleteItem { item_id })
-            .map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        self.pending_item_deletion = None;
-        Ok(ItemDeletionResult { summary })
-    }
-
-    fn delete_repository(
-        &mut self,
-        repository_id: i64,
-        _workspace_ids: Vec<i64>,
-        confirmed: bool,
-    ) -> Result<RepositoryDeletionResult, String> {
-        if !confirmed {
-            return Err("Repository deletion requires explicit confirmation after reviewing its deletion preview".into());
-        }
-        let pending = self
-            .pending_repository_deletion
-            .as_ref()
-            .filter(|preview| preview.plan.repository_id == repository_id)
-            .cloned()
-            .ok_or_else(|| {
-                "Review the Repository deletion preview before deleting it".to_owned()
-            })?;
-        let current = self.build_repository_deletion_preview(repository_id)?;
-        if current != pending {
-            return Err("The Repository or its Workspace relationships changed after the preview; review the updated deletion preview".into());
-        }
-        if !current.blockers.is_empty() {
-            return Err(format!(
-                "Repository deletion is blocked:\n{}",
-                current.blockers.join("\n")
-            ));
-        }
-        let workspace_count = current.plan.workspaces.len();
-        let decision = decide(
-            self.state.clone(),
-            Event::DeleteRepository {
-                repository_id,
-                workspace_ids: current
-                    .plan
-                    .workspaces
-                    .iter()
-                    .map(|workspace| workspace.id)
-                    .collect(),
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        self.pending_repository_deletion = None;
-        Ok(RepositoryDeletionResult {
-            repository_id,
-            workspace_count,
-        })
-    }
-
-    fn delete_machine(
-        &mut self,
-        machine_id: i64,
-        run_ids: Vec<i64>,
-        confirmed: bool,
-    ) -> Result<MachineDeletionResult, String> {
-        if !confirmed {
-            return Err(
-                "Machine deletion requires explicit confirmation after reviewing its deletion preview"
-                    .into(),
-            );
-        }
-        let pending = self
-            .pending_machine_deletion
-            .as_ref()
-            .filter(|preview| preview.plan.machine_id == machine_id)
-            .cloned()
-            .ok_or_else(|| "Review the Machine deletion preview before deleting it".to_owned())?;
-        let current = self.build_machine_deletion_preview(machine_id)?;
-        if current != pending {
-            return Err(
-                "The Machine or one of its Run states changed after the preview; review the updated deletion preview before deleting it"
-                    .into(),
-            );
-        }
-        if !current.blockers.is_empty() {
-            return Err(format!(
-                "Machine deletion is blocked:\n{}",
-                current.blockers.join("\n")
-            ));
-        }
-
-        let run_count = current.plan.runs.len();
-        let decision = decide(
-            self.state.clone(),
-            Event::DeleteMachine {
-                machine_id,
-                run_ids,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        self.pending_machine_deletion = None;
-
-        Ok(MachineDeletionResult {
-            machine_id,
-            run_count,
-        })
-    }
-
-    fn delete_run(&mut self, run_id: i64, confirmed: bool) -> Result<RunDeletionResult, String> {
-        if !confirmed {
-            return Err("Run deletion requires explicit confirmation".into());
-        }
-        let decision = decide(self.state.clone(), Event::DeleteRun { run_id })
-            .map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        Ok(RunDeletionResult { run_id })
-    }
-
-    fn repository(&self, repository_id: i64) -> Result<Repository, String> {
-        self.state
-            .repositories
-            .iter()
-            .find(|repository| repository.id == repository_id)
-            .cloned()
-            .ok_or_else(|| format!("Repository {repository_id} does not exist"))
-    }
-
-    fn create_item(
-        &mut self,
-        title: String,
-        context_id: i64,
-        project_id: i64,
-    ) -> Result<Item, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::CreateItem {
-                title,
-                context_id,
-                project_id,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let item = decision
-            .state
-            .items
-            .last()
-            .cloned()
-            .ok_or_else(|| "Item creation produced no Item".to_owned())?;
-        self.commit(decision)?;
-        Ok(item)
-    }
-
-    fn update_item(&mut self, event: Event, item_id: i64) -> Result<Item, String> {
-        let decision = decide(self.state.clone(), event).map_err(|error| error.to_string())?;
-        let item = decision
-            .state
-            .items
-            .iter()
-            .find(|item| item.id == item_id)
-            .cloned()
-            .ok_or_else(|| "Item update produced no Item".to_owned())?;
-        self.commit(decision)?;
-        Ok(item)
-    }
-
-    fn set_item_relation(
-        &mut self,
-        from_item_id: i64,
-        to_item_id: i64,
-        kind: ItemRelationKind,
-    ) -> Result<ItemRelation, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::SetItemRelation {
-                from_item_id,
-                to_item_id,
-                kind,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let relation = decision
-            .state
-            .relationships
-            .last()
-            .cloned()
-            .ok_or_else(|| "Item relationship produced no relationship".to_owned())?;
-        self.commit(decision)?;
-        Ok(relation)
-    }
-
-    fn link_external_object(
-        &mut self,
-        item_id: i64,
-        url: String,
-    ) -> Result<ExternalLinkAction, String> {
-        let object_input = classify_url(&url).map_err(|error| error.to_string())?;
-        let known_object = self.state.external_objects.iter().find(|object| {
-            object.provider == object_input.provider
-                && object.external_key == object_input.external_key
-        });
-        let mut warning = None;
-        let snapshot =
-            if object_input.provider == ExternalProvider::GitHub && known_object.is_none() {
-                match self.fetch_github_object(&object_input) {
-                    Ok(snapshot) => Some(snapshot),
-                    Err(error) => {
-                        warning = Some(error);
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-        let decision = decide(
-            self.state.clone(),
-            Event::LinkExternalObject {
-                item_id,
-                object: object_input,
-                snapshot,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let link = decision
-            .state
-            .links
-            .last()
-            .cloned()
-            .ok_or_else(|| "Link creation produced no Link".to_owned())?;
-        self.commit(decision)?;
-        let view = external_link_view(&self.state, &link)
-            .ok_or_else(|| "Link creation produced no External Object".to_owned())?;
-        Ok(ExternalLinkAction {
-            link: view,
-            warning,
-        })
-    }
-
-    fn create_github_issue(
-        &mut self,
-        item_id: i64,
-        repository: String,
-        title: String,
-        body: String,
-    ) -> Result<ExternalLinkAction, String> {
-        let item_exists = self.state.items.iter().any(|item| item.id == item_id);
-        if !item_exists {
-            return Err(format!("Item {item_id} does not exist"));
-        }
-        if repository.trim().is_empty() {
-            return Err("A GitHub repository is required".into());
-        }
-        if title.trim().is_empty() {
-            return Err("A GitHub Issue title is required".into());
-        }
-
-        let executable = self.gh_executable_path()?;
-        let created_url = GithubCli::new(executable.clone())
-            .create_issue(repository.trim(), title.trim(), &body)
-            .map_err(|error| error.to_string())?;
-        let object = classify_url(&created_url).map_err(|error| error.to_string())?;
-        if object.provider != ExternalProvider::GitHub || object.kind != ExternalObjectKind::Issue {
-            return Err("GitHub CLI returned a URL that is not a GitHub Issue".into());
-        }
-
-        let mut warning = None;
-        let snapshot = match GithubCli::new(executable).fetch(&object, current_unix_seconds()) {
-            Ok(snapshot) => Some(snapshot),
-            Err(error) => {
-                warning = Some(error.to_string());
-                None
-            }
-        };
-        let decision = decide(
-            self.state.clone(),
-            Event::LinkExternalObject {
-                item_id,
-                object,
-                snapshot,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let link = decision
-            .state
-            .links
-            .last()
-            .cloned()
-            .ok_or_else(|| "Issue creation produced no Link".to_owned())?;
-        self.commit(decision)?;
-        let view = external_link_view(&self.state, &link)
-            .ok_or_else(|| "Issue creation produced no External Object".to_owned())?;
-        Ok(ExternalLinkAction {
-            link: view,
-            warning,
-        })
-    }
-
-    fn add_external_comment(
-        &mut self,
-        link_id: i64,
-        body: String,
-    ) -> Result<ExternalLinkView, String> {
-        let body = body.trim().to_owned();
-        if body.is_empty() {
-            return Err("A GitHub comment cannot be blank".into());
-        }
-        let link = self
-            .state
-            .links
-            .iter()
-            .find(|link| link.id == link_id)
-            .cloned()
-            .ok_or_else(|| format!("Link {link_id} does not exist"))?;
-        let object = self
-            .state
-            .external_objects
-            .iter()
-            .find(|object| object.id == link.external_object_id)
-            .cloned()
-            .ok_or_else(|| "The linked External Object does not exist".to_owned())?;
-        if object.provider != ExternalProvider::GitHub || object.kind == ExternalObjectKind::Generic
-        {
-            return Err("Comments are only supported for GitHub Issues and pull requests".into());
-        }
-
-        let executable = self.gh_executable_path()?;
-        GithubCli::new(executable)
-            .add_comment(&object.canonical_url, &body)
-            .map_err(|error| error.to_string())?;
-        external_link_view(&self.state, &link)
-            .ok_or_else(|| "Comment target produced no External Object".to_owned())
-    }
-
-    fn refresh_external_object(
-        &mut self,
-        external_object_id: i64,
-    ) -> Result<ExternalSnapshot, String> {
-        let object = self
-            .state
-            .external_objects
-            .iter()
-            .find(|object| object.id == external_object_id)
-            .cloned()
-            .ok_or_else(|| format!("External Object {external_object_id} does not exist"))?;
-        if object.provider != ExternalProvider::GitHub {
-            return Err("Only GitHub External Objects can be refreshed".into());
-        }
-        let input = ExternalObjectInput {
-            provider: object.provider,
-            kind: object.kind,
-            external_key: object.external_key.clone(),
-            canonical_url: object.canonical_url.clone(),
-        };
-        let snapshot = self.fetch_github_object(&input)?;
-        let decision = decide(
-            self.state.clone(),
-            Event::RefreshExternalObject {
-                external_object_id,
-                snapshot,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let snapshot = decision
-            .state
-            .snapshots
-            .iter()
-            .find(|snapshot| snapshot.external_object_id == external_object_id)
-            .cloned()
-            .ok_or_else(|| "Refresh produced no External snapshot".to_owned())?;
-        self.commit(decision)?;
-        Ok(snapshot)
-    }
-
-    fn poll_external_objects(&mut self) -> PollResult {
-        let mut object_ids = self
-            .state
-            .links
-            .iter()
-            .filter_map(|link| {
-                self.state
-                    .external_objects
-                    .iter()
-                    .find(|object| object.id == link.external_object_id)
-                    .filter(|object| object.provider == ExternalProvider::GitHub)
-                    .map(|object| object.id)
-            })
-            .collect::<Vec<_>>();
-        object_ids.sort_unstable();
-        object_ids.dedup();
-
-        let mut result = PollResult {
-            refreshed: 0,
-            failures: Vec::new(),
-        };
-        for external_object_id in object_ids {
-            match self.refresh_external_object(external_object_id) {
-                Ok(_) => result.refreshed += 1,
-                Err(error) => result.failures.push(PollFailure {
-                    external_object_id,
-                    error,
-                }),
-            }
-        }
-        result
-    }
-
-    fn set_link_attention_policy(
-        &mut self,
-        link_id: i64,
-        policy: Option<ExternalChangePolicy>,
-    ) -> Result<ExternalLinkView, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::SetLinkAttentionPolicy { link_id, policy },
-        )
-        .map_err(|error| error.to_string())?;
-        let link = decision
-            .state
-            .links
-            .iter()
-            .find(|link| link.id == link_id)
-            .cloned()
-            .ok_or_else(|| "Link policy update produced no Link".to_owned())?;
-        self.commit(decision)?;
-        external_link_view(&self.state, &link)
-            .ok_or_else(|| "Link policy update produced no External Object".to_owned())
-    }
-
-    fn set_link_schedule(
-        &mut self,
-        event: Event,
-        link_id: i64,
-        error_prefix: &str,
-    ) -> Result<ExternalLinkView, String> {
-        let decision = decide(self.state.clone(), event).map_err(|error| error.to_string())?;
-        let link = decision
-            .state
-            .links
-            .iter()
-            .find(|link| link.id == link_id)
-            .cloned()
-            .ok_or_else(|| format!("{error_prefix} produced no Link"))?;
-        self.commit(decision)?;
-        external_link_view(&self.state, &link)
-            .ok_or_else(|| format!("{error_prefix} produced no External Object"))
-    }
-
-    fn set_context_attention_default(
-        &mut self,
-        context_id: i64,
-        object_kind: ExternalObjectKind,
-        policy: ExternalChangePolicy,
-    ) -> Result<ContextAttentionDefault, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::SetContextAttentionDefault {
-                context_id,
-                object_kind,
-                policy,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let attention_default = decision
-            .state
-            .attention_defaults
-            .iter()
-            .find(|attention_default| {
-                attention_default.context_id == context_id
-                    && attention_default.object_kind == object_kind
-            })
-            .cloned()
-            .ok_or_else(|| "Context default update produced no default".to_owned())?;
-        self.commit(decision)?;
-        Ok(attention_default)
-    }
-
-    fn mark_link_reviewed(&mut self, link_id: i64) -> Result<ExternalLinkView, String> {
-        let decision = decide(self.state.clone(), Event::MarkLinkReviewed { link_id })
-            .map_err(|error| error.to_string())?;
-        let link = decision
-            .state
-            .links
-            .iter()
-            .find(|link| link.id == link_id)
-            .cloned()
-            .ok_or_else(|| "Mark reviewed produced no Link".to_owned())?;
-        self.commit(decision)?;
-        external_link_view(&self.state, &link)
-            .ok_or_else(|| "Mark reviewed produced no External Object".to_owned())
-    }
-
-    fn fetch_github_object(
-        &mut self,
-        object: &ExternalObjectInput,
-    ) -> Result<crate::domain::ExternalSnapshotData, String> {
-        let executable = self.gh_executable_path()?;
-        GithubCli::new(executable)
-            .fetch(object, current_unix_seconds())
-            .map_err(|error| error.to_string())
-    }
-
-    fn gh_executable_path(&mut self) -> Result<PathBuf, String> {
-        let stored_path = self.gh_executable_path.as_deref();
-        let executable = resolve_gh_executable(stored_path).map_err(|error| error.to_string())?;
-        if self.gh_executable_path.as_deref() != Some(executable.as_path()) {
-            self.store
-                .set_gh_executable_path(&executable)
-                .map_err(|error| error.to_string())?;
-            self.gh_executable_path = Some(executable.clone());
-        }
-        Ok(executable)
-    }
-
-    fn list_audit_history(&self) -> Result<Vec<AuditEntry>, String> {
-        self.store
-            .list_audit_history()
-            .map_err(|error| error.to_string())
-    }
-
-    fn activity_tab(&self) -> Result<ActivityTabView, String> {
-        let audit_entries = self
-            .store
-            .list_audit_history()
-            .map_err(|error| error.to_string())?;
-        Ok(activity_tab_view(&self.state, audit_entries))
-    }
-
-    fn commit(&mut self, decision: crate::domain::Decision) -> Result<(), String> {
-        self.commit_with_audit(decision, &[])
-    }
-
-    fn commit_with_audit(
-        &mut self,
-        decision: crate::domain::Decision,
-        additional_actions: &[AuditAction],
-    ) -> Result<(), String> {
-        let mut audit_actions = audit_actions(&self.state, &decision.effects);
-        audit_actions.extend_from_slice(additional_actions);
-        self.store
-            .apply_with_audit(&decision.effects, &audit_actions)
-            .map_err(|error| error.to_string())?;
-        self.state = decision.state;
-        Ok(())
-    }
-}
-
-fn looks_like_authentication_failure(detail: &str) -> bool {
-    let detail = detail.to_ascii_lowercase();
-    [
-        "not logged in",
-        "not authenticated",
-        "no accounts",
-        "authentication token",
-        "token is invalid",
-    ]
-    .iter()
-    .any(|marker| detail.contains(marker))
-}
-
-fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
-    effects
-        .iter()
-        .filter_map(|effect| match effect {
-            Effect::PersistContext { context, .. } => Some(AuditAction::ContextCreated {
-                context_id: context.id,
-            }),
-            Effect::PersistContextGrillDefaults { .. } => None,
-            Effect::PersistProject { project, .. } => Some(AuditAction::ProjectCreated {
-                project_id: project.id,
-            }),
-            Effect::PersistRepository { repository, .. } => {
-                Some(AuditAction::RepositoryRegistered {
-                    repository_id: repository.id,
-                })
-            }
-            Effect::ResetLocalData {
-                context, project, ..
-            } => Some(AuditAction::ResetBoundary {
-                context_id: context.id,
-                project_id: project.id,
-            }),
-            Effect::PersistItem { item, .. } => Some(AuditAction::ItemCreated { item_id: item.id }),
-            Effect::PersistItemUpdate { item } => {
-                let previous = before
-                    .items
-                    .iter()
-                    .find(|candidate| candidate.id == item.id);
-                match previous {
-                    Some(previous) if previous.title != item.title => {
-                        Some(AuditAction::ItemTitleChanged { item_id: item.id })
-                    }
-                    Some(previous) if previous.status != item.status => {
-                        Some(AuditAction::ItemStatusChanged {
-                            item_id: item.id,
-                            from: previous.status,
-                            to: item.status,
-                        })
-                    }
-                    Some(previous) if previous.notes != item.notes => {
-                        Some(AuditAction::ItemNotesChanged { item_id: item.id })
-                    }
-                    Some(_) => None,
-                    None => Some(AuditAction::ItemNotesChanged { item_id: item.id }),
-                }
-            }
-            Effect::PersistItemReminders { item, .. } => {
-                Some(AuditAction::ItemRemindersChanged { item_id: item.id })
-            }
-            Effect::PersistWorkspace { workspace, .. } => Some(AuditAction::WorkspaceCreated {
-                workspace_id: workspace.id,
-            }),
-            Effect::PersistWorkspaceUpdate { workspace } => {
-                let previous = before
-                    .workspaces
-                    .iter()
-                    .find(|candidate| candidate.id == workspace.id);
-                match previous {
-                    Some(previous)
-                        if previous.item_id == workspace.item_id
-                            && previous.repositories == workspace.repositories
-                            && previous.preparation_state == workspace.preparation_state =>
-                    {
-                        None
-                    }
-                    _ => Some(AuditAction::WorkspaceUpdated {
-                        workspace_id: workspace.id,
-                    }),
-                }
-            }
-            Effect::RemoveWorkspace { workspace_id } => Some(AuditAction::WorkspaceRemoved {
-                workspace_id: *workspace_id,
-                repository_count: before
-                    .workspaces
-                    .iter()
-                    .find(|workspace| workspace.id == *workspace_id)
-                    .map(|workspace| workspace.repositories.len())
-                    .unwrap_or_default()
-                    .into(),
-            }),
-            Effect::RemoveRepository { repository_id } => Some(AuditAction::RepositoryDeleted {
-                repository_id: *repository_id,
-                workspace_count: before
-                    .workspaces
-                    .iter()
-                    .filter(|workspace| {
-                        workspace
-                            .repositories
-                            .iter()
-                            .any(|repository| repository.repository_id == *repository_id)
-                    })
-                    .count()
-                    .into(),
-            }),
-            Effect::RemoveMachine { machine_id } => Some(AuditAction::MachineDeleted {
-                machine_id: *machine_id,
-                run_count: before
-                    .runs
-                    .iter()
-                    .filter(|run| run.machine_id == *machine_id)
-                    .count()
-                    .into(),
-            }),
-            Effect::RemoveRun { run_id } => Some(AuditAction::RunDeleted { run_id: *run_id }),
-            Effect::RemoveLink {
-                link_id,
-                external_object_id,
-            } => Some(AuditAction::LinkDeleted {
-                link_id: *link_id,
-                external_object_id: Some(*external_object_id),
-                external_object_deleted: Some(
-                    before
-                        .links
-                        .iter()
-                        .filter(|link| link.external_object_id == *external_object_id)
-                        .count()
-                        == 1,
-                ),
-            }),
-            Effect::RemoveExternalObject { external_object_id } => {
-                Some(AuditAction::ExternalObjectDeleted {
-                    external_object_id: *external_object_id,
-                    link_count: Some(
-                        before
-                            .links
-                            .iter()
-                            .filter(|link| link.external_object_id == *external_object_id)
-                            .count(),
-                    ),
-                    snapshot_count: Some(
-                        before
-                            .snapshots
-                            .iter()
-                            .filter(|snapshot| snapshot.external_object_id == *external_object_id)
-                            .count(),
-                    ),
-                    activity_count: Some(
-                        before
-                            .activities
-                            .iter()
-                            .filter(|activity| activity.external_object_id == *external_object_id)
-                            .count(),
-                    ),
-                })
-            }
-            Effect::RemoveItemCascade { summary, .. } => Some(AuditAction::ItemDeleted {
-                summary: summary.clone(),
-            }),
-            Effect::RemoveProjectCascade { summary, .. } => Some(AuditAction::ProjectDeleted {
-                summary: summary.clone(),
-            }),
-            Effect::RemoveContextCascade { summary, .. } => Some(AuditAction::ContextDeleted {
-                summary: summary.clone(),
-            }),
-            Effect::PersistMachine { machine, .. } => Some(AuditAction::MachineRegistered {
-                machine_id: machine.id,
-            }),
-            Effect::PersistMachineObservation { machine } => {
-                let previous = before
-                    .machines
-                    .iter()
-                    .find(|candidate| candidate.id == machine.id);
-                (previous.is_none()
-                    || previous.map(|candidate| candidate.last_observed)
-                        != Some(machine.last_observed)
-                    || previous.and_then(|candidate| candidate.last_observed_at)
-                        != machine.last_observed_at)
-                    .then_some(AuditAction::MachineObserved {
-                        machine_id: machine.id,
-                        observation: machine.last_observed,
-                    })
-            }
-            Effect::PersistRun { run, .. } => Some(AuditAction::RunCreated { run_id: run.id }),
-            Effect::PersistRunState { run } => {
-                let previous = before.runs.iter().find(|candidate| candidate.id == run.id);
-                previous
-                    .filter(|previous| previous.state != run.state)
-                    .map(|previous| AuditAction::RunStateChanged {
-                        run_id: run.id,
-                        from: previous.state,
-                        to: run.state,
-                    })
-            }
-            Effect::PersistRunTranscript { .. }
-            | Effect::PersistGrillAnswers { .. }
-            | Effect::PersistGrillResponse { .. } => None,
-            Effect::PersistRunPaneStatus { run } => {
-                let previous = before.runs.iter().find(|candidate| candidate.id == run.id);
-                previous
-                    .filter(|previous| previous.pane_status != run.pane_status)
-                    .map(|previous| AuditAction::RunPaneStatusChanged {
-                        run_id: run.id,
-                        from: previous.pane_status,
-                        to: run.pane_status,
-                    })
-            }
-            Effect::PersistWorktree { .. }
-            | Effect::RemoveWorktree { .. }
-            | Effect::UpdateRepository { .. }
-            | Effect::PersistRepositoryLocation { .. } => None,
-            Effect::PersistItemRelation { relation } => Some(AuditAction::ItemRelationChanged {
-                from_item_id: relation.from_item_id,
-                to_item_id: relation.to_item_id,
-                kind: relation.kind,
-            }),
-            Effect::PersistExternalObject { object, .. } => {
-                Some(AuditAction::ExternalObjectCreated {
-                    external_object_id: object.id,
-                })
-            }
-            Effect::PersistLink { link, .. } => Some(AuditAction::LinkCreated { link_id: link.id }),
-            Effect::PersistLinkState { link } => {
-                let previous = before
-                    .links
-                    .iter()
-                    .find(|candidate| candidate.id == link.id);
-                previous
-                    .filter(|previous| previous != &link)
-                    .map(|_| AuditAction::LinkUpdated { link_id: link.id })
-            }
-            Effect::PersistActivity { activity, .. } => {
-                Some(AuditAction::ExternalObjectRefreshed {
-                    external_object_id: activity.external_object_id,
-                })
-            }
-            Effect::PersistExternalSnapshot { .. } => None,
-            Effect::PersistContextAttentionDefault { attention_default } => {
-                Some(AuditAction::ContextAttentionDefaultChanged {
-                    context_id: attention_default.context_id,
-                    object_kind: attention_default.object_kind,
-                })
-            }
-        })
-        .collect()
-}
-
-fn format_commit_error(error: String, cleanup_error: Option<String>) -> String {
-    match cleanup_error {
-        Some(cleanup_error) => format!("{error}; {cleanup_error}"),
-        None => error,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ParentDeletionTarget {
-    Project(i64),
-    Context(i64),
-}
-
-impl ParentDeletionTarget {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Project(_) => "Project",
-            Self::Context(_) => "Context",
-        }
-    }
-
-    fn matches(self, plan: &ParentDeletionPlan) -> bool {
-        match self {
-            Self::Project(project_id) => plan.project_id == Some(project_id),
-            Self::Context(context_id) => plan.context_id == Some(context_id),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorktreeRemovalReport {
-    pub worktree_id: i64,
-    pub workspace_id: i64,
-    pub repository_id: i64,
-    pub repository_name: String,
-    pub machine_id: i64,
-    pub path: String,
-    pub branch: String,
-    pub is_dirty: bool,
-    pub requires_destructive_confirmation: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceRemovalReport {
-    pub workspace_id: i64,
-    pub worktrees: Vec<WorktreeRemovalReport>,
-    pub safe: bool,
-    pub blockers: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ItemDeletionPreview {
-    pub plan: ItemDeletionPlan,
-    pub blockers: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ItemDeletionResult {
-    pub summary: ItemDeletionSummary,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExternalObjectLinkDeletionPreview {
-    pub link_id: i64,
-    pub item_id: i64,
-    pub item_identifier: String,
-    pub item_title: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExternalObjectDeletionPreview {
-    pub plan: ExternalObjectDeletionPlan,
-    pub links: Vec<ExternalObjectLinkDeletionPreview>,
-    pub provider_warning: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExternalObjectDeletionResult {
-    pub summary: ExternalObjectDeletionSummary,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ExternalLinkDeletionResult {
-    pub link_id: i64,
-    pub external_object_id: i64,
-    pub external_object_deleted: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RepositoryDeletionPreview {
-    pub plan: RepositoryDeletionPlan,
-    pub blockers: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MachineDeletionPreview {
-    pub plan: MachineDeletionPlan,
-    pub blockers: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ParentDeletionPreview {
-    pub plan: ParentDeletionPlan,
-    pub blockers: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResetLocalDataPreview {
-    pub plan: ResetLocalDataPlan,
-    pub audit_entry_count: usize,
-    pub blockers: Vec<String>,
-    pub confirmation_phrase: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ResetLocalDataResult {
-    pub summary: ResetLocalDataSummary,
-    pub audit_entry_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ParentDeletionResult {
-    pub summary: crate::domain::ParentDeletionSummary,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MachineDeletionResult {
-    pub machine_id: i64,
-    pub run_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunDeletionResult {
     pub run_id: i64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RepositoryDeletionResult {
-    pub repository_id: i64,
-    pub workspace_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorktreeRemovalResult {
-    pub worktree_id: i64,
-    pub branch_preserved: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkspaceRemovalResult {
-    pub workspace_id: i64,
-    pub worktree_count: usize,
-    pub branches_preserved: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct ExternalLinkAction {
-    pub link: ExternalLinkView,
-    pub warning: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct PollFailure {
-    pub external_object_id: i64,
-    pub error: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct PollResult {
-    pub refreshed: usize,
-    pub failures: Vec<PollFailure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -4193,7 +258,12 @@ pub struct PaneTab {
 }
 
 impl PaneTab {
-    fn from_summary(run: &Run, session_name: &str, pane: PaneSummary, available: bool) -> Self {
+    pub(crate) fn from_summary(
+        run: &Run,
+        session_name: &str,
+        pane: PaneSummary,
+        available: bool,
+    ) -> Self {
         let label = if pane.pane_id == run.pane_id {
             format!("Run #{}", run.id)
         } else {
@@ -4249,7 +319,7 @@ pub struct RunStateChangedEvent {
     pub state: RunState,
 }
 
-fn current_unix_seconds() -> i64 {
+pub(crate) fn current_unix_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_secs().min(i64::MAX as u64) as i64)
@@ -4263,24 +333,14 @@ fn agent_executable_name(agent: AgentKind) -> &'static str {
     }
 }
 
-fn agent_display_name(agent: AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Claude => "Claude Code",
-        AgentKind::Codex => "Codex",
-    }
-}
-
 #[tauri::command]
 pub fn list_contexts(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Context>, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())
-        .map(|runtime| runtime.state.contexts.clone())
+    crate::features::structure::list_contexts(state)
 }
 
 #[tauri::command]
 pub fn list_grill_model_catalog() -> Vec<crate::domain::GrillAgentCatalog> {
-    crate::domain::grill_model_catalog()
+    crate::features::setup::list_grill_model_catalog()
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4289,52 +349,34 @@ pub fn set_context_grill_defaults(
     defaults: GrillConfiguration,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Context, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .set_context_grill_defaults(context_id, defaults)
+    crate::features::structure::set_context_grill_defaults(context_id, defaults, state)
 }
 
 #[tauri::command]
 pub fn list_projects(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Project>, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())
-        .map(|runtime| runtime.state.projects.clone())
+    crate::features::structure::list_projects(state)
 }
 
 #[tauri::command]
 pub fn list_repositories(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Repository>, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())
-        .map(|runtime| runtime.state.repositories.clone())
+    crate::features::structure::list_repositories(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn list_repository_locations(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Vec<crate::domain::RepositoryLocation>, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())
-        .map(|runtime| runtime.state.repository_locations.clone())
+    crate::features::structure::list_repository_locations(state)
 }
 
 #[tauri::command]
 pub fn list_machines(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Machine>, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())
-        .map(|runtime| runtime.state.machines.clone())
+    crate::features::structure::list_machines(state)
 }
 
 #[tauri::command]
 pub fn get_setup_state(state: State<'_, Mutex<Runtime>>) -> Result<SetupState, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .setup_state()
+    crate::features::setup::get_setup_state(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4343,10 +385,7 @@ pub fn complete_setup(
     provider: ProviderChoice,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<SetupState, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .complete_setup(context_name, provider)
+    crate::features::setup::complete_setup(state, context_name, provider)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4354,10 +393,7 @@ pub fn get_health_status(
     provider: Option<ProviderChoice>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<HealthStatus, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .health_status(provider)
+    crate::features::setup::get_health_status(state, provider)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4368,10 +404,13 @@ pub fn compose_run_prompt(
     custom_prompt: Option<String>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<String, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .compose_run_prompt(item_id, execution_profile, prompt_selection, custom_prompt)
+    crate::features::work::compose_run_prompt(
+        item_id,
+        execution_profile,
+        prompt_selection,
+        custom_prompt,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4381,10 +420,7 @@ pub fn compose_grill_prompt(
     initial_prompt: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<String, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .compose_grill_prompt(item_id, configuration, initial_prompt)
+    crate::features::work::compose_grill_prompt(item_id, configuration, initial_prompt, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4394,10 +430,7 @@ pub fn prepare_direct_run(
     machine_id: Option<i64>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<DirectRunPreview, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .prepare_direct_run(item_id, workspace_id, machine_id)
+    crate::features::work::prepare_direct_run(item_id, workspace_id, machine_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4407,10 +440,7 @@ pub fn prepare_grill_run(
     machine_id: Option<i64>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<DirectRunPreview, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .prepare_direct_run(item_id, workspace_id, machine_id)
+    crate::features::work::prepare_grill_run(item_id, workspace_id, machine_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4429,22 +459,20 @@ pub fn start_direct_run(
     allow_shared_checkouts: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .start_direct_run(
-            item_id,
-            workspace_id,
-            machine_id,
-            primary_repository_id,
-            agent,
-            execution_profile,
-            prompt,
-            prompt_selection,
-            expected_checkouts,
-            allow_dirty,
-            allow_shared_checkouts,
-        )
+    crate::features::work::start_direct_run(
+        item_id,
+        workspace_id,
+        machine_id,
+        primary_repository_id,
+        agent,
+        execution_profile,
+        prompt,
+        prompt_selection,
+        expected_checkouts,
+        allow_dirty,
+        allow_shared_checkouts,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4461,20 +489,18 @@ pub fn start_grill_run(
     allow_shared_checkouts: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .start_grill_run(
-            item_id,
-            workspace_id,
-            machine_id,
-            primary_repository_id,
-            configuration,
-            initial_prompt,
-            expected_checkouts,
-            allow_dirty,
-            allow_shared_checkouts,
-        )
+    crate::features::work::start_grill_run(
+        item_id,
+        workspace_id,
+        machine_id,
+        primary_repository_id,
+        configuration,
+        initial_prompt,
+        expected_checkouts,
+        allow_dirty,
+        allow_shared_checkouts,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4489,28 +515,23 @@ pub fn start_worktree_run(
     prompt_selection: RunPromptSelection,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .start_worktree_run(
-            item_id,
-            workspace_id,
-            worktree_id,
-            agent,
-            execution_profile,
-            prompt,
-            prompt_selection,
-        )
+    crate::features::work::start_worktree_run(
+        item_id,
+        workspace_id,
+        worktree_id,
+        agent,
+        execution_profile,
+        prompt,
+        prompt_selection,
+        state,
+    )
 }
 
 #[tauri::command]
 pub fn list_run_suggestions(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Vec<RunSuggestion>, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .list_run_suggestions()
+    crate::features::work::list_run_suggestions(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4518,10 +539,7 @@ pub fn attach_run(
     suggestion: RunSuggestion,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .attach_run(suggestion)
+    crate::features::work::attach_run(suggestion, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4532,18 +550,12 @@ pub fn register_machine(
     transport: MachineTransport,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Machine, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .register_machine(context_id, name, socket_name, transport)
+    crate::features::structure::register_machine(context_id, name, socket_name, transport, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn check_machine(machine_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Machine, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .check_machine(machine_id)
+    crate::features::structure::check_machine(machine_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4555,10 +567,7 @@ pub fn open_terminal(
     app: AppHandle,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<TerminalAttachment, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .open_terminal(&app, run_id, terminal_id, session_name, pane_id)
+    crate::features::work::open_terminal(&app, run_id, terminal_id, session_name, pane_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4567,10 +576,7 @@ pub fn terminal_input(
     input: Vec<u8>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .terminal_input(&terminal_id, input)
+    crate::features::work::terminal_input(terminal_id, input, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4579,10 +585,7 @@ pub fn submit_grill_answers(
     answers: Vec<GrillAnswer>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .submit_grill_answers(run_id, answers)
+    crate::features::work::submit_grill_answers(run_id, answers, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4591,10 +594,7 @@ pub fn continue_grill(
     action: GrillContinuationAction,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .continue_grill(run_id, action)
+    crate::features::work::continue_grill(run_id, action, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4604,68 +604,44 @@ pub fn terminal_resize(
     rows: u16,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .terminal_resize(&terminal_id, columns, rows)
+    crate::features::work::terminal_resize(terminal_id, columns, rows, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn close_terminal(terminal_id: String, state: State<'_, Mutex<Runtime>>) -> Result<(), String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .close_terminal(&terminal_id)
+    crate::features::work::close_terminal(terminal_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn open_external_terminal(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<(), String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .open_external_terminal(run_id)
+    crate::features::work::open_external_terminal(run_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn stop_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .stop_run(run_id)
+    crate::features::work::stop_run(run_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
 pub fn finish_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .finish_run(run_id)
+    crate::features::work::finish_run(run_id, state)
 }
 
 #[tauri::command]
 pub fn list_audit_history(state: State<'_, Mutex<Runtime>>) -> Result<Vec<AuditEntry>, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .list_audit_history()
+    crate::features::activity::list_audit_history(state)
 }
 
 #[tauri::command]
 pub fn get_activity_tab(state: State<'_, Mutex<Runtime>>) -> Result<ActivityTabView, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .activity_tab()
+    crate::features::activity::get_activity_tab(state)
 }
 
 #[tauri::command]
 pub fn list_context_attention_defaults(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Vec<ContextAttentionDefault>, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())
-        .map(|runtime| runtime.state.attention_defaults.clone())
+    crate::features::structure::list_context_attention_defaults(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4674,21 +650,12 @@ pub fn get_home(
     now: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<HomeView, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())
-        .and_then(|mut runtime| {
-            runtime.recover_run_states()?;
-            Ok(home_view(&runtime.state, context_id, &now))
-        })
+    crate::features::work::get_home(context_id, now, state)
 }
 
 #[tauri::command]
 pub fn reconcile_runs(state: State<'_, Mutex<Runtime>>) -> Result<(), String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .reconcile_runs()
+    crate::features::work::reconcile_runs(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4697,18 +664,12 @@ pub fn search_items_command(
     context_id: Option<i64>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Vec<ItemView>, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())
-        .map(|runtime| search_items(&runtime.state, &query, context_id))
+    crate::features::work::search_items_command(query, context_id, state)
 }
 
 #[tauri::command]
 pub fn create_context(name: String, state: State<'_, Mutex<Runtime>>) -> Result<Context, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .create_context(name)
+    crate::features::structure::create_context(name, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4719,17 +680,13 @@ pub fn create_project(
     execution_mode: Option<ExecutionMode>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Project, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .create_project(
-            name,
-            context_id,
-            ProjectDefaults {
-                item_status: default_item_status,
-                execution_mode: execution_mode.unwrap_or(ExecutionMode::Worktree),
-            },
-        )
+    crate::features::structure::create_project(
+        name,
+        context_id,
+        default_item_status,
+        execution_mode,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4739,10 +696,7 @@ pub fn register_repository(
     remote_url: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Repository, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .register_repository(project_id, name, remote_url)
+    crate::features::structure::register_repository(project_id, name, remote_url, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4758,19 +712,17 @@ pub fn register_repository_at_location(
     clone_into_destination: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Repository, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .register_repository_at_location(
-            project_id,
-            name,
-            remote_url,
-            base_branch,
-            machine_id,
-            checkout_path,
-            worktree_root,
-            clone_into_destination,
-        )
+    crate::features::structure::register_repository_at_location(
+        project_id,
+        name,
+        remote_url,
+        base_branch,
+        machine_id,
+        checkout_path,
+        worktree_root,
+        clone_into_destination,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4778,10 +730,7 @@ pub fn prepare_project_deletion(
     project_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ParentDeletionPreview, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .prepare_project_deletion(project_id)
+    crate::features::structure::prepare_project_deletion(project_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4793,16 +742,14 @@ pub fn delete_project(
     confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ParentDeletionResult, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .delete_project(
-            project_id,
-            item_ids,
-            repository_ids,
-            workspace_ids,
-            confirmed,
-        )
+    crate::features::structure::delete_project(
+        project_id,
+        item_ids,
+        repository_ids,
+        workspace_ids,
+        confirmed,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4810,10 +757,7 @@ pub fn prepare_context_deletion(
     context_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ParentDeletionPreview, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .prepare_context_deletion(context_id)
+    crate::features::structure::prepare_context_deletion(context_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4828,28 +772,23 @@ pub fn delete_context(
     confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ParentDeletionResult, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .delete_context(
-            context_id,
-            project_ids,
-            item_ids,
-            repository_ids,
-            workspace_ids,
-            machine_ids,
-            confirmed,
-        )
+    crate::features::structure::delete_context(
+        context_id,
+        project_ids,
+        item_ids,
+        repository_ids,
+        workspace_ids,
+        machine_ids,
+        confirmed,
+        state,
+    )
 }
 
 #[tauri::command]
 pub fn prepare_reset_local_data(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ResetLocalDataPreview, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .prepare_reset_local_data()
+    crate::features::structure::prepare_reset_local_data(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4857,10 +796,7 @@ pub fn reset_all_local_data(
     confirmation: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ResetLocalDataResult, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .reset_all_local_data(confirmation)
+    crate::features::structure::reset_all_local_data(confirmation, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4869,10 +805,7 @@ pub fn create_workspace(
     repositories: Vec<WorkspaceRepositoryInput>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Workspace, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .create_workspace(item_id, repositories)
+    crate::features::work::create_workspace(item_id, repositories, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4885,17 +818,15 @@ pub fn create_worktree(
     base_branch: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Worktree, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .create_worktree(
-            workspace_id,
-            repository_id,
-            machine_id,
-            path,
-            branch,
-            base_branch,
-        )
+    crate::features::work::create_worktree(
+        workspace_id,
+        repository_id,
+        machine_id,
+        path,
+        branch,
+        base_branch,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4907,16 +838,14 @@ pub fn prepare_worktree(
     confirm_dirty_attachment: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Worktree, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .prepare_worktree(
-            workspace_id,
-            repository_id,
-            machine_id,
-            reuse_existing_branch,
-            confirm_dirty_attachment,
-        )
+    crate::features::work::prepare_worktree(
+        workspace_id,
+        repository_id,
+        machine_id,
+        reuse_existing_branch,
+        confirm_dirty_attachment,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4924,10 +853,7 @@ pub fn prepare_worktree_removal(
     worktree_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<WorktreeRemovalReport, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .prepare_worktree_removal(worktree_id)
+    crate::features::work::prepare_worktree_removal(worktree_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4937,10 +863,7 @@ pub fn remove_worktree(
     destructive_confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<WorktreeRemovalResult, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .remove_worktree(worktree_id, confirmed, destructive_confirmed)
+    crate::features::work::remove_worktree(worktree_id, confirmed, destructive_confirmed, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4948,10 +871,7 @@ pub fn prepare_workspace_removal(
     workspace_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<WorkspaceRemovalReport, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .prepare_workspace_removal(workspace_id)
+    crate::features::work::prepare_workspace_removal(workspace_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4962,15 +882,13 @@ pub fn remove_workspace(
     confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<WorkspaceRemovalResult, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .remove_workspace(
-            workspace_id,
-            confirmed_worktree_ids,
-            destructive_worktree_ids,
-            confirmed,
-        )
+    crate::features::work::remove_workspace(
+        workspace_id,
+        confirmed_worktree_ids,
+        destructive_worktree_ids,
+        confirmed,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4982,16 +900,14 @@ pub fn attach_worktree(
     confirm_dirty_attachment: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Worktree, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .attach_worktree(
-            workspace_id,
-            repository_id,
-            machine_id,
-            path,
-            confirm_dirty_attachment,
-        )
+    crate::features::work::attach_worktree(
+        workspace_id,
+        repository_id,
+        machine_id,
+        path,
+        confirm_dirty_attachment,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -4999,10 +915,7 @@ pub fn prepare_repository_deletion(
     repository_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<RepositoryDeletionPreview, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .prepare_repository_deletion(repository_id)
+    crate::features::structure::prepare_repository_deletion(repository_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5012,10 +925,7 @@ pub fn delete_repository(
     confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<RepositoryDeletionResult, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .delete_repository(repository_id, workspace_ids, confirmed)
+    crate::features::structure::delete_repository(repository_id, workspace_ids, confirmed, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5023,10 +933,7 @@ pub fn prepare_machine_deletion(
     machine_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<MachineDeletionPreview, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .prepare_machine_deletion(machine_id)
+    crate::features::structure::prepare_machine_deletion(machine_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5036,10 +943,7 @@ pub fn delete_machine(
     confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<MachineDeletionResult, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .delete_machine(machine_id, run_ids, confirmed)
+    crate::features::structure::delete_machine(machine_id, run_ids, confirmed, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5047,10 +951,7 @@ pub fn prepare_item_deletion(
     item_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ItemDeletionPreview, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .prepare_item_deletion(item_id)
+    crate::features::work::prepare_item_deletion(item_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5059,10 +960,7 @@ pub fn delete_item(
     confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ItemDeletionResult, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .delete_item(item_id, confirmed)
+    crate::features::work::delete_item(item_id, confirmed, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5070,10 +968,7 @@ pub fn prepare_external_object_deletion(
     external_object_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalObjectDeletionPreview, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .prepare_external_object_deletion(external_object_id)
+    crate::features::work::prepare_external_object_deletion(external_object_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5082,10 +977,7 @@ pub fn delete_external_object(
     confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalObjectDeletionResult, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .delete_external_object(external_object_id, confirmed)
+    crate::features::work::delete_external_object(external_object_id, confirmed, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5094,10 +986,7 @@ pub fn unlink_external_link(
     confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkDeletionResult, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .unlink_external_link(link_id, confirmed)
+    crate::features::work::unlink_external_link(link_id, confirmed, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5106,26 +995,12 @@ pub fn delete_run(
     confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<RunDeletionResult, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .delete_run(run_id, confirmed)
+    crate::features::work::delete_run(run_id, confirmed, state)
 }
 
 #[tauri::command]
 pub fn list_inbox_items(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Item>, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())
-        .map(|runtime| {
-            runtime
-                .state
-                .items
-                .iter()
-                .filter(|item| item.status == ItemStatus::Inbox)
-                .cloned()
-                .collect()
-        })
+    crate::features::work::list_inbox_items(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5135,10 +1010,7 @@ pub fn create_item(
     project_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Item, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .create_item(title, context_id, project_id)
+    crate::features::work::create_item(title, context_id, project_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5147,10 +1019,7 @@ pub fn set_item_status(
     status: ItemStatus,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Item, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .update_item(Event::SetItemStatus { item_id, status }, item_id)
+    crate::features::work::set_item_status(item_id, status, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5159,10 +1028,7 @@ pub fn set_item_title(
     title: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Item, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .update_item(Event::SetItemTitle { item_id, title }, item_id)
+    crate::features::work::set_item_title(item_id, title, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5171,10 +1037,7 @@ pub fn set_item_notes(
     notes: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Item, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .update_item(Event::SetItemNotes { item_id, notes }, item_id)
+    crate::features::work::set_item_notes(item_id, notes, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5183,10 +1046,7 @@ pub fn add_item_reminder(
     remind_at: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Item, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .update_item(Event::AddItemReminder { item_id, remind_at }, item_id)
+    crate::features::work::add_item_reminder(item_id, remind_at, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5195,16 +1055,7 @@ pub fn remove_item_reminder(
     reminder_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Item, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .update_item(
-            Event::RemoveItemReminder {
-                item_id,
-                reminder_id,
-            },
-            item_id,
-        )
+    crate::features::work::remove_item_reminder(item_id, reminder_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5214,10 +1065,7 @@ pub fn set_item_relation(
     kind: ItemRelationKind,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ItemRelation, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .set_item_relation(from_item_id, to_item_id, kind)
+    crate::features::work::set_item_relation(from_item_id, to_item_id, kind, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5226,10 +1074,7 @@ pub fn link_external_object(
     url: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkAction, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .link_external_object(item_id, url)
+    crate::features::work::link_external_object(item_id, url, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5240,10 +1085,7 @@ pub fn create_github_issue(
     body: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkAction, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .create_github_issue(item_id, repository, title, body)
+    crate::features::work::create_github_issue(item_id, repository, title, body, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5252,10 +1094,7 @@ pub fn add_external_comment(
     body: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkView, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .add_external_comment(link_id, body)
+    crate::features::work::add_external_comment(link_id, body, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5263,18 +1102,12 @@ pub fn refresh_external_object(
     external_object_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalSnapshot, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .refresh_external_object(external_object_id)
+    crate::features::work::refresh_external_object(external_object_id, state)
 }
 
 #[tauri::command]
 pub fn poll_external_objects(state: State<'_, Mutex<Runtime>>) -> Result<PollResult, String> {
-    Ok(state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .poll_external_objects())
+    crate::features::work::poll_external_objects(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5283,10 +1116,7 @@ pub fn set_link_attention_policy(
     policy: Option<ExternalChangePolicy>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkView, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .set_link_attention_policy(link_id, policy)
+    crate::features::work::set_link_attention_policy(link_id, policy, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5295,17 +1125,7 @@ pub fn set_link_watch_until(
     watch_until: Option<String>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkView, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .set_link_schedule(
-            Event::SetLinkWatchUntil {
-                link_id,
-                watch_until,
-            },
-            link_id,
-            "Setting watch period",
-        )
+    crate::features::work::set_link_watch_until(link_id, watch_until, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5314,14 +1134,7 @@ pub fn set_link_review_at(
     review_at: Option<String>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkView, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .set_link_schedule(
-            Event::SetLinkReviewAt { link_id, review_at },
-            link_id,
-            "Setting review date",
-        )
+    crate::features::work::set_link_review_at(link_id, review_at, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5329,14 +1142,7 @@ pub fn clear_link_review_at(
     link_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkView, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .set_link_schedule(
-            Event::ClearLinkReviewAt { link_id },
-            link_id,
-            "Clearing review date",
-        )
+    crate::features::work::clear_link_review_at(link_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5346,10 +1152,12 @@ pub fn set_context_attention_default(
     policy: ExternalChangePolicy,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ContextAttentionDefault, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .set_context_attention_default(context_id, object_kind, policy)
+    crate::features::structure::set_context_attention_default(
+        context_id,
+        object_kind,
+        policy,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5357,10 +1165,7 @@ pub fn mark_link_reviewed(
     link_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkView, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .mark_link_reviewed(link_id)
+    crate::features::work::mark_link_reviewed(link_id, state)
 }
 
 #[cfg(test)]
@@ -5370,38 +1175,12 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::domain::{parse_grill_question_group, GrillPhase, GRILL_SKILL_SNAPSHOT};
+    use crate::domain::{
+        parse_grill_question_group, search_items, AuditAction, GrillPhase, MachineObservation,
+        ProjectDefaults, RunPaneStatus, GRILL_SKILL_SNAPSHOT,
+    };
+    use crate::features::deletion::RESET_CONFIRMATION_PHRASE;
     use crate::persistence::SqliteStore;
-
-    #[test]
-    fn setup_completion_reuses_the_default_context_and_survives_reopening() {
-        let directory = tempdir().expect("temporary app directory should exist");
-        let database = directory.path().join("mission-manager.sqlite");
-        let mut runtime = Runtime::open(&database).expect("runtime should open");
-
-        assert!(
-            !runtime
-                .setup_state()
-                .expect("setup state should be readable")
-                .completed
-        );
-        let setup = runtime
-            .complete_setup("Personal".into(), ProviderChoice::GitHub)
-            .expect("setup should complete");
-
-        assert!(setup.completed);
-        assert_eq!(setup.provider, ProviderChoice::GitHub);
-        assert_eq!(runtime.state.contexts.len(), 1);
-
-        let reopened = Runtime::open(&database).expect("runtime should reopen");
-        assert_eq!(
-            reopened
-                .setup_state()
-                .expect("setup state should survive reopening"),
-            setup
-        );
-        assert_eq!(reopened.state.contexts.len(), 1);
-    }
 
     #[test]
     fn creating_multiple_workspaces_through_the_application_persists_them_for_the_item() {
@@ -5546,63 +1325,6 @@ mod tests {
                 ..
             }]
         ));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn health_reports_an_unauthenticated_provider_without_hiding_a_healthy_runtime() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let directory = tempdir().expect("temporary app directory should exist");
-        let database = directory.path().join("mission-manager.sqlite");
-        let tmux = directory.path().join("tmux");
-        let gh = directory.path().join("gh");
-        fs::write(&tmux, "#!/bin/sh\nprintf 'tmux 3.4\\n'\n").expect("fake tmux should be written");
-        fs::write(
-            &gh,
-            "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then exit 0; fi\nprintf 'not logged in\\n' >&2\nexit 1\n",
-        )
-        .expect("fake gh should be written");
-        for path in [&tmux, &gh] {
-            fs::set_permissions(path, fs::Permissions::from_mode(0o755))
-                .expect("fake dependency should be executable");
-        }
-
-        let mut runtime = Runtime::open(&database).expect("runtime should open");
-        runtime
-            .complete_setup("Personal".into(), ProviderChoice::GitHub)
-            .expect("setup should complete");
-        runtime
-            .store
-            .set_executable_path("tmux_executable_path", &tmux)
-            .expect("tmux path should persist");
-        runtime
-            .store
-            .set_executable_path("gh_executable_path", &gh)
-            .expect("gh path should persist");
-
-        let health = runtime
-            .health_status(None)
-            .expect("health checks should return independent statuses");
-
-        assert_eq!(health.runtime.state, DependencyState::Available);
-        assert_eq!(health.provider.state, DependencyState::Unauthenticated);
-        assert!(Path::new(health.runtime.executable_path.as_deref().unwrap()).is_absolute());
-        assert_eq!(
-            runtime
-                .store
-                .executable_path("tmux_executable_path")
-                .expect("tmux path should remain readable")
-                .unwrap()
-                .to_string_lossy(),
-            health.runtime.executable_path.as_deref().unwrap()
-        );
-        assert!(health
-            .provider
-            .action
-            .as_deref()
-            .unwrap()
-            .contains("gh auth login"));
     }
 
     #[test]
@@ -6446,7 +2168,7 @@ https://example.com/unrelated"#;
 
     #[test]
     fn worktree_run_event_targets_the_registered_worktree_location() {
-        let event = worktree_run_event(
+        let event = crate::features::work::worktree_run_event(
             7,
             11,
             13,
