@@ -10,6 +10,7 @@
     "build": "tsc --noEmit && vp build",
     "dev": "vp dev --host 127.0.0.1",
     "tauri": "tauri",
+    "tauri:dev": "tauri dev",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && npm run build"
   },

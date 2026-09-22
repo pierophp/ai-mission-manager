@@ -3,3 +3,4 @@ dist/
 target/
 src-tauri/gen/
 .DS_Store
+.history/*
