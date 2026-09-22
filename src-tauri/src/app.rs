@@ -16,9 +16,9 @@ use crate::{
         home_view, normalize_machine_path, plan_context_deletion, plan_external_object_deletion,
         plan_item_deletion, plan_machine_deletion, plan_project_deletion, plan_repository_deletion,
         plan_reset_local_data, search_items, suggest_untracked_runs, worktree_path,
-        ActivityTabView, AgentKind, AgentPaneObservation, AuditAction,
-        AuditEntry, Context, ContextAttentionDefault, DomainState, Effect, Event, ExecutionMode,
-        ExecutionProfile, ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
+        ActivityTabView, AgentKind, AgentPaneObservation, AuditAction, AuditEntry, Context,
+        ContextAttentionDefault, DomainState, Effect, Event, ExecutionMode, ExecutionProfile,
+        ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
         ExternalObjectDeletionSummary, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
         ExternalSnapshot, HomeView, Item, ItemDeletionPlan, ItemDeletionSummary, ItemRelation,
         ItemRelationKind, ItemStatus, ItemView, Machine, MachineDeletionPlan, MachineObservation,
@@ -32,9 +32,8 @@ use crate::{
     provider::{classify_url, resolve_gh_executable, GithubCli},
     terminal::{
         capture_pane, find_agent_executable, list_agent_panes, list_panes, open_pane_in_terminal,
-        probe_local_runtime, probe_machine, terminal_transport,
-        AgentLaunchContext, ExternalPaneIdentity, PaneSummary, TerminalRuntime, TmuxControlPane,
-        TmuxRuntime,
+        probe_local_runtime, probe_machine, terminal_transport, AgentLaunchContext,
+        ExternalPaneIdentity, PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime,
     },
 };
 
@@ -619,38 +618,6 @@ impl Runtime {
         Ok(repository)
     }
 
-    #[cfg(any())]
-    fn create_workset(
-        &mut self,
-        item_id: i64,
-        root_directory: String,
-        branch: String,
-        repositories: Vec<WorksetRepositoryInput>,
-    ) -> Result<Workset, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::CreateWorkset {
-                item_id,
-                root_directory,
-                branch,
-                repositories,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let workset = decision
-            .state
-            .worksets
-            .last()
-            .cloned()
-            .ok_or_else(|| "Workset creation produced no Workset".to_owned())?;
-        let checkout = self.checkout_new_workset(&workset)?;
-        if let Err(error) = self.commit(decision) {
-            let cleanup_error = checkout.cleanup().err();
-            return Err(format_commit_error(error, cleanup_error));
-        }
-        Ok(workset)
-    }
-
     fn create_workspace(
         &mut self,
         item_id: i64,
@@ -1153,39 +1120,6 @@ impl Runtime {
         })
     }
 
-    #[cfg(any())]
-    fn attach_workset(&mut self, item_id: i64, root_directory: String) -> Result<Workset, String> {
-        let root = Path::new(&root_directory);
-        let repositories = GitCli::system()
-            .inspect_workset(root)
-            .map_err(|error| error.to_string())?
-            .into_iter()
-            .map(|repository| AttachedRepositoryInput {
-                name: repository.name,
-                remote_url: repository.remote_url,
-                current_branch: repository.current_branch,
-                is_dirty: repository.is_dirty,
-            })
-            .collect();
-        let decision = decide(
-            self.state.clone(),
-            Event::AttachWorkset {
-                item_id,
-                root_directory,
-                repositories,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let workset = decision
-            .state
-            .worksets
-            .last()
-            .cloned()
-            .ok_or_else(|| "Workset attachment produced no Workset".to_owned())?;
-        self.commit(decision)?;
-        Ok(workset)
-    }
-
     fn local_machine_for_item(&mut self, item_id: i64) -> Result<Machine, String> {
         let context_id = self.item_context_id(item_id)?;
         if let Some(machine) = self
@@ -1323,94 +1257,6 @@ impl Runtime {
             custom_prompt.as_deref(),
         )
         .map_err(|error| error.to_string())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(any())]
-    fn start_run(
-        &mut self,
-        item_id: i64,
-        workset_id: i64,
-        machine_id: Option<i64>,
-        agent: AgentKind,
-        execution_profile: ExecutionProfile,
-        prompt: String,
-        prompt_selection: RunPromptSelection,
-    ) -> Result<Run, String> {
-        let workset = self
-            .state
-            .worksets
-            .iter()
-            .find(|workset| workset.id == workset_id && workset.item_id == item_id)
-            .cloned()
-            .ok_or_else(|| format!("Workset {workset_id} does not belong to Item {item_id}"))?;
-        let machine = self.machine_for_item(item_id, machine_id)?;
-        if let Err(error) = probe_machine(&machine) {
-            return Err(format!(
-                "Could not reach Machine {}. The Run was not started locally: {error}",
-                machine.name
-            ));
-        }
-        self.observe_machine(machine.id, MachineObservation::Available)?;
-        let root = Path::new(&workset.root_directory);
-        workset_root_exists(&machine, root)?;
-        if matches!(machine.transport, MachineTransport::Local) {
-            self.provision_agent_hooks()?;
-        }
-        let run_id = self.state.next_run_id;
-        let session_name = format!("mission-item-{item_id}-run-{run_id}");
-        let state_file = if matches!(machine.transport, MachineTransport::Local) {
-            state_file_path(&self.agent_state_directory, run_id)
-        } else {
-            PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
-        };
-        let executable = self
-            .agent_executable(&machine, agent)
-            .map_err(|error| format!("{}: {error}", agent_display_name(agent)))?;
-        let terminal = TmuxRuntime;
-        let pane_id = terminal.launch_agent(
-            &machine,
-            &session_name,
-            root,
-            &executable,
-            &prompt,
-            AgentLaunchContext {
-                run_id,
-                state_file: &state_file,
-            },
-        )?;
-        let decision = decide(
-            self.state.clone(),
-            Event::StartRun {
-                item_id,
-                workset_id,
-                machine_id: machine.id,
-                agent,
-                execution_profile,
-                prompt,
-                working_directory: workset.root_directory,
-                session_name: session_name.clone(),
-                pane_id,
-                started_at: current_unix_seconds(),
-                prompt_selection,
-            },
-        )
-        .map_err(|error| {
-            let cleanup =
-                terminal.kill_session(&machine, &format!("mission-item-{item_id}-run-{run_id}"));
-            format_commit_error(error.to_string(), cleanup.err())
-        })?;
-        let run = decision
-            .state
-            .runs
-            .last()
-            .cloned()
-            .ok_or_else(|| "Run creation produced no Run".to_owned())?;
-        if let Err(error) = self.commit(decision) {
-            let cleanup = terminal.kill_session(&machine, &run.session_name);
-            return Err(format_commit_error(error, cleanup.err()));
-        }
-        Ok(run)
     }
 
     fn inspect_direct_checkouts(
@@ -1725,63 +1571,6 @@ impl Runtime {
         Ok(run)
     }
 
-    #[cfg(any())]
-    fn list_workset_panes(&mut self, workset_id: i64) -> Result<Vec<PaneTab>, String> {
-        self.recover_run_states()?;
-        if !self
-            .state
-            .worksets
-            .iter()
-            .any(|workset| workset.id == workset_id)
-        {
-            return Err(format!("Workset {workset_id} does not exist"));
-        }
-
-        let mut tabs = Vec::new();
-        let mut seen = HashSet::new();
-        for run in self
-            .state
-            .runs
-            .iter()
-            .filter(|run| run.workset_id == Some(workset_id))
-        {
-            let machine = self
-                .state
-                .machines
-                .iter()
-                .find(|machine| machine.id == run.machine_id)
-                .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-            match list_panes(machine, &run.session_name) {
-                Ok(panes) => {
-                    for pane in panes {
-                        if seen.insert((run.session_name.clone(), pane.pane_id.clone())) {
-                            tabs.push(PaneTab::from_summary(run, &run.session_name, pane, true));
-                        }
-                    }
-                }
-                Err(_) if seen.insert((run.session_name.clone(), run.pane_id.clone())) => {
-                    tabs.push(PaneTab::from_summary(
-                        run,
-                        &run.session_name,
-                        PaneSummary {
-                            pane_id: run.pane_id.clone(),
-                            pane_index: 0,
-                            pid: 0,
-                            columns: 0,
-                            rows: 0,
-                            title: String::new(),
-                            current_command: String::new(),
-                            current_path: run.working_directory.clone(),
-                        },
-                        false,
-                    ));
-                }
-                _ => {}
-            }
-        }
-        Ok(tabs)
-    }
-
     fn list_run_suggestions(&mut self) -> Result<Vec<RunSuggestion>, String> {
         self.recover_run_states()?;
         let local_machine_item_ids = self
@@ -1883,7 +1672,7 @@ impl Runtime {
                 },
             )
         } else {
-            return Err("The suggested agent is not in a registered Workspace location".into())
+            return Err("The suggested agent is not in a registered Workspace location".into());
         }
         .map_err(|error| error.to_string())?;
         let run = decision
@@ -2247,183 +2036,6 @@ impl Runtime {
             .ok_or_else(|| format!("Project {} does not exist", item.project_id))
     }
 
-    #[cfg(any())]
-    fn add_repository_to_workset(
-        &mut self,
-        workset_id: i64,
-        repository_id: i64,
-        branch_override: Option<String>,
-        base_branch_override: Option<String>,
-    ) -> Result<Workset, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::AddRepositoryToWorkset {
-                workset_id,
-                repository_id,
-                branch_override,
-                base_branch_override,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let workset = decision
-            .state
-            .worksets
-            .iter()
-            .find(|workset| workset.id == workset_id)
-            .cloned()
-            .ok_or_else(|| "Workset update produced no Workset".to_owned())?;
-        let selected = workset
-            .repositories
-            .iter()
-            .find(|selected| selected.repository_id == repository_id)
-            .ok_or_else(|| "Workset update produced no Repository selection".to_owned())?;
-        let repository = self
-            .state
-            .repositories
-            .iter()
-            .find(|repository| repository.id == repository_id)
-            .cloned()
-            .ok_or_else(|| "Workset update produced no Repository".to_owned())?;
-        let destination = match self.checkout_repository(
-            &workset,
-            &repository,
-            selected.branch_override.as_deref(),
-            selected.base_branch_override.as_deref(),
-        ) {
-            Ok(destination) => destination,
-            Err(error) => {
-                let cleanup_error = CheckoutReceipt {
-                    root: Path::new(&workset.root_directory).to_owned(),
-                    root_was_created: false,
-                    destinations: vec![Path::new(&workset.root_directory).join(&repository.name)],
-                }
-                .cleanup()
-                .err();
-                return Err(format_commit_error(error, cleanup_error));
-            }
-        };
-        if let Err(error) = self.commit(decision) {
-            let cleanup_error = CheckoutReceipt {
-                root: Path::new(&workset.root_directory).to_owned(),
-                root_was_created: false,
-                destinations: vec![destination],
-            }
-            .cleanup()
-            .err();
-            return Err(format_commit_error(error, cleanup_error));
-        }
-        Ok(workset)
-    }
-
-    #[cfg(any())]
-    fn set_workset_archived(&mut self, workset_id: i64, archived: bool) -> Result<Workset, String> {
-        let decision = decide(
-            self.state.clone(),
-            Event::SetWorksetArchived {
-                workset_id,
-                archived,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let workset = decision
-            .state
-            .worksets
-            .iter()
-            .find(|workset| workset.id == workset_id)
-            .cloned()
-            .ok_or_else(|| "Workset archive update produced no Workset".to_owned())?;
-        self.commit(decision)?;
-        Ok(workset)
-    }
-
-    #[cfg(any())]
-    fn build_workset_removal_report(
-        &self,
-        workset_id: i64,
-    ) -> Result<WorksetRemovalReport, String> {
-        let workset = self
-            .state
-            .worksets
-            .iter()
-            .find(|workset| workset.id == workset_id)
-            .ok_or_else(|| format!("Workset {workset_id} does not exist"))?;
-        let root = Path::new(&workset.root_directory);
-        let inspected = GitCli::system()
-            .inspect_workset(root)
-            .map_err(|error| error.to_string())?;
-        let repositories = workset
-            .repositories
-            .iter()
-            .map(|selected| {
-                let repository = self.repository(selected.repository_id)?;
-                let repository_state = inspected
-                    .iter()
-                    .find(|candidate| candidate.name == repository.name)
-                    .ok_or_else(|| {
-                        format!(
-                            "Repository directory is missing from Workset: {}",
-                            repository.name
-                        )
-                    })?;
-                Ok(RepositoryRemovalReport {
-                    repository_id: repository.id,
-                    name: repository.name.clone(),
-                    path: root.join(&repository.name).to_string_lossy().into_owned(),
-                    current_branch: repository_state.current_branch.clone(),
-                    unpushed_commits: repository_state.unpushed_commits.clone(),
-                    unpushed_commits_unknown: repository_state.unpushed_commits_unknown,
-                    uncommitted_changes: repository_state.uncommitted_changes.clone(),
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-
-        let mut report = WorksetRemovalReport {
-            workset_id,
-            root_directory: workset.root_directory.clone(),
-            repositories,
-            safe: true,
-            blockers: Vec::new(),
-        };
-        report.blockers = workset_safety_blockers(&report);
-        if self.state.worksets.iter().any(|candidate| {
-            candidate.id != workset_id && candidate.root_directory == workset.root_directory
-        }) {
-            report.blockers.push(
-                "Another Workset references this physical root; separate the roots before deleting."
-                    .into(),
-            );
-        }
-        report.safe = report.blockers.is_empty();
-        Ok(report)
-    }
-
-    #[cfg(any())]
-    fn prepare_workset_removal(&mut self, workset_id: i64) -> Result<WorksetRemovalReport, String> {
-        let report = self.build_standalone_workset_removal_report(workset_id)?;
-        self.pending_workset_removal = Some(report.clone());
-        Ok(report)
-    }
-
-    #[cfg(any())]
-    fn build_standalone_workset_removal_report(
-        &self,
-        workset_id: i64,
-    ) -> Result<WorksetRemovalReport, String> {
-        let mut report = self.build_workset_removal_report(workset_id)?;
-        if self
-            .state
-            .runs
-            .iter()
-            .any(|run| run.workset_id == Some(workset_id))
-        {
-            report
-                .blockers
-                .push("This Workset has Run history and cannot be removed directly.".into());
-            report.safe = false;
-        }
-        Ok(report)
-    }
-
     fn build_item_deletion_preview(&self, item_id: i64) -> Result<ItemDeletionPreview, String> {
         let plan = plan_item_deletion(&self.state, item_id).map_err(|error| error.to_string())?;
         let blockers = plan
@@ -2516,7 +2128,10 @@ impl Runtime {
         Ok(preview)
     }
 
-    fn reset_all_local_data(&mut self, confirmation: String) -> Result<ResetLocalDataResult, String> {
+    fn reset_all_local_data(
+        &mut self,
+        confirmation: String,
+    ) -> Result<ResetLocalDataResult, String> {
         if confirmation != RESET_CONFIRMATION_PHRASE {
             return Err(format!(
                 "Reset requires the exact confirmation phrase: {RESET_CONFIRMATION_PHRASE}"
@@ -2541,8 +2156,8 @@ impl Runtime {
             ));
         }
 
-        let decision = decide(self.state.clone(), Event::ResetLocalData)
-            .map_err(|error| error.to_string())?;
+        let decision =
+            decide(self.state.clone(), Event::ResetLocalData).map_err(|error| error.to_string())?;
         self.commit(decision)?;
         self.pending_reset_local_data = None;
         self.pending_item_deletion = None;
@@ -2562,13 +2177,11 @@ impl Runtime {
         })
     }
 
-    #[cfg(any())]
     fn delete_parent(
         &mut self,
         target: ParentDeletionTarget,
         event: Event,
         confirmed: bool,
-        delete_workset_directories: bool,
     ) -> Result<ParentDeletionResult, String> {
         if !confirmed {
             return Err(format!(
@@ -2590,132 +2203,6 @@ impl Runtime {
         let current = self.build_parent_deletion_preview(target)?;
         if current != pending {
             return Err(format!(
-                "The {} or one of its Workset safety reports changed after the preview; review the updated deletion preview before deleting it",
-                target.label()
-            ));
-        }
-        if !current.blockers.is_empty() {
-            return Err(format!(
-                "{} deletion is blocked:\n{}",
-                target.label(),
-                current.blockers.join("\n")
-            ));
-        }
-        if delete_workset_directories {
-            let physical_blockers = current
-                .worksets
-                .iter()
-                .flat_map(|workset| {
-                    workset
-                        .blockers
-                        .iter()
-                        .map(move |blocker| format!("Workset #{}: {blocker}", workset.workset_id))
-                })
-                .collect::<Vec<_>>();
-            if !physical_blockers.is_empty() {
-                return Err(format!(
-                    "{} Workset directory cleanup is blocked:\n{}",
-                    target.label(),
-                    physical_blockers.join("\n")
-                ));
-            }
-        }
-
-        let mut staged = Vec::new();
-        if delete_workset_directories {
-            for workset in &current.plan.worksets {
-                let root = Path::new(&workset.root_directory);
-                let staging = match workset_removal_staging_path(root, workset.id) {
-                    Ok(staging) => staging,
-                    Err(error) => {
-                        let restore_error = restore_staged_directories(&staged);
-                        return Err(format_commit_error(error, restore_error));
-                    }
-                };
-                if let Err(error) = fs::rename(root, &staging) {
-                    let restore_error = restore_staged_directories(&staged);
-                    return Err(format_commit_error(
-                        format!(
-                            "Could not stage Workset directory for {} deletion: {error}",
-                            target.label()
-                        ),
-                        restore_error,
-                    ));
-                }
-                staged.push((root.to_owned(), staging));
-            }
-        }
-
-        let decision = match decide(self.state.clone(), event) {
-            Ok(decision) => decision,
-            Err(error) => {
-                let restore_error = restore_staged_directories(&staged);
-                return Err(format_commit_error(error.to_string(), restore_error));
-            }
-        };
-        let summary = current.plan.summary();
-        if let Err(error) = self.commit(decision) {
-            let restore_error = restore_staged_directories(&staged);
-            return Err(format_commit_error(error, restore_error));
-        }
-        self.pending_parent_deletion = None;
-
-        let physical_cleanup_warning = if delete_workset_directories {
-            let mut cleanup_errors = Vec::new();
-            for (_, staging) in staged {
-                if let Err(error) = fs::remove_dir_all(&staging) {
-                    cleanup_errors.push(format!("{}: {error}", staging.display()));
-                }
-            }
-            (!cleanup_errors.is_empty()).then(|| {
-                format!(
-                    "{} records were deleted, but some Workset directories could not be removed: {}",
-                    target.label(),
-                    cleanup_errors.join(", ")
-                )
-            })
-        } else if current.plan.worksets.is_empty() {
-            None
-        } else if current.worksets.iter().any(|workset| !workset.safe) {
-            Some(format!(
-                "{} records were deleted; Workset directories were left on disk because physical cleanup was not safe.",
-                target.label()
-            ))
-        } else {
-            Some(format!(
-                "{} records were deleted; Workset directories were left on disk by choice.",
-                target.label()
-            ))
-        };
-
-        Ok(ParentDeletionResult {
-            summary,
-            workset_directories_deleted: delete_workset_directories,
-            physical_cleanup_warning,
-        })
-    }
-
-    fn delete_parent(
-        &mut self,
-        target: ParentDeletionTarget,
-        event: Event,
-        confirmed: bool,
-    ) -> Result<ParentDeletionResult, String> {
-        if !confirmed {
-            return Err(format!(
-                "{} deletion requires explicit confirmation after reviewing its deletion preview",
-                target.label()
-            ));
-        }
-        let pending = self
-            .pending_parent_deletion
-            .as_ref()
-            .filter(|preview| target.matches(&preview.plan))
-            .cloned()
-            .ok_or_else(|| format!("Review the {} deletion preview before deleting it", target.label()))?;
-        let current = self.build_parent_deletion_preview(target)?;
-        if current != pending {
-            return Err(format!(
                 "The {} changed after the preview; review the updated deletion preview",
                 target.label()
             ));
@@ -2734,57 +2221,6 @@ impl Runtime {
         Ok(ParentDeletionResult { summary })
     }
 
-    #[cfg(any())]
-    fn delete_project(
-        &mut self,
-        project_id: i64,
-        item_ids: Vec<i64>,
-        repository_ids: Vec<i64>,
-        workset_ids: Vec<i64>,
-        confirmed: bool,
-        delete_workset_directories: bool,
-    ) -> Result<ParentDeletionResult, String> {
-        self.delete_parent(
-            ParentDeletionTarget::Project(project_id),
-            Event::DeleteProject {
-                project_id,
-                item_ids,
-                repository_ids,
-                workset_ids,
-            },
-            confirmed,
-            delete_workset_directories,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    #[cfg(any())]
-    fn delete_context(
-        &mut self,
-        context_id: i64,
-        project_ids: Vec<i64>,
-        item_ids: Vec<i64>,
-        repository_ids: Vec<i64>,
-        workset_ids: Vec<i64>,
-        machine_ids: Vec<i64>,
-        confirmed: bool,
-        delete_workset_directories: bool,
-    ) -> Result<ParentDeletionResult, String> {
-        self.delete_parent(
-            ParentDeletionTarget::Context(context_id),
-            Event::DeleteContext {
-                context_id,
-                project_ids,
-                item_ids,
-                repository_ids,
-                workset_ids,
-                machine_ids,
-            },
-            confirmed,
-            delete_workset_directories,
-        )
-    }
-
     fn delete_project(
         &mut self,
         project_id: i64,
@@ -2828,83 +2264,6 @@ impl Runtime {
             },
             confirmed,
         )
-    }
-
-    #[cfg(any())]
-    fn build_workset_deletion_preview(
-        &self,
-        workset_id: i64,
-        root_directory: &str,
-        branch: &str,
-        archived: bool,
-    ) -> WorksetDeletionPreview {
-        match self.build_workset_removal_report(workset_id) {
-            Ok(report) => WorksetDeletionPreview {
-                workset_id,
-                root_directory: root_directory.into(),
-                branch: branch.into(),
-                archived,
-                safe: report.safe,
-                blockers: report.blockers.clone(),
-                safety_report: Some(report),
-            },
-            Err(error) => WorksetDeletionPreview {
-                workset_id,
-                root_directory: root_directory.into(),
-                branch: branch.into(),
-                archived,
-                safe: false,
-                blockers: vec![error],
-                safety_report: None,
-            },
-        }
-    }
-
-    #[cfg(any())]
-    fn build_repository_deletion_preview(
-        &self,
-        repository_id: i64,
-    ) -> Result<RepositoryDeletionPreview, String> {
-        let plan = plan_repository_deletion(&self.state, repository_id)
-            .map_err(|error| error.to_string())?;
-        let mut blockers = Vec::new();
-        let worksets = plan
-            .worksets
-            .iter()
-            .map(|workset| {
-                let mut preview = self.build_workset_deletion_preview(
-                    workset.id,
-                    &workset.root_directory,
-                    &workset.branch,
-                    workset.archived,
-                );
-                if self
-                    .state
-                    .runs
-                    .iter()
-                    .any(|run| run.workset_id == Some(workset.id))
-                {
-                    preview.blockers.push(
-                        "This Workset has Run history and cannot be removed with the Repository."
-                            .into(),
-                    );
-                    preview.safe = false;
-                }
-                blockers.extend(
-                    preview
-                        .blockers
-                        .iter()
-                        .map(|blocker| format!("Workset #{}: {blocker}", workset.id)),
-                );
-                preview
-            })
-            .collect();
-
-        Ok(RepositoryDeletionPreview {
-            plan,
-            worksets,
-            blockers,
-        })
     }
 
     fn prepare_repository_deletion(
@@ -3065,213 +2424,6 @@ impl Runtime {
         })
     }
 
-    #[cfg(any())]
-    fn delete_item(
-        &mut self,
-        item_id: i64,
-        confirmed: bool,
-        delete_workset_directories: bool,
-    ) -> Result<ItemDeletionResult, String> {
-        if !confirmed {
-            return Err(
-                "Item deletion requires explicit confirmation after reviewing its deletion preview"
-                    .into(),
-            );
-        }
-        let pending = self
-            .pending_item_deletion
-            .as_ref()
-            .filter(|preview| preview.plan.item_id == item_id)
-            .cloned()
-            .ok_or_else(|| "Review the Item deletion preview before deleting it".to_owned())?;
-        let current = self.build_item_deletion_preview(item_id)?;
-        if current != pending {
-            return Err(
-                "The Item or a Workset safety report changed after the preview; review the updated deletion preview before deleting it"
-                    .into(),
-            );
-        }
-        if !current.blockers.is_empty() {
-            return Err(format!(
-                "Item deletion is blocked:\n{}",
-                current.blockers.join("\n")
-            ));
-        }
-
-        let mut staged = Vec::new();
-        if delete_workset_directories {
-            for workset in &current.plan.worksets {
-                let root = Path::new(&workset.root_directory);
-                let staging = match workset_removal_staging_path(root, workset.id) {
-                    Ok(staging) => staging,
-                    Err(error) => {
-                        let restore_error = restore_staged_directories(&staged);
-                        return Err(format_commit_error(error, restore_error));
-                    }
-                };
-                if let Err(error) = fs::rename(root, &staging) {
-                    let restore_error = restore_staged_directories(&staged);
-                    return Err(format_commit_error(
-                        format!("Could not stage Workset directory for Item deletion: {error}"),
-                        restore_error,
-                    ));
-                }
-                staged.push((root.to_owned(), staging));
-            }
-        }
-
-        let decision = match decide(self.state.clone(), Event::DeleteItem { item_id }) {
-            Ok(decision) => decision,
-            Err(error) => {
-                let restore_error = restore_staged_directories(&staged);
-                return Err(format_commit_error(error.to_string(), restore_error));
-            }
-        };
-        let summary = current.plan.summary();
-        if let Err(error) = self.commit(decision) {
-            let restore_error = restore_staged_directories(&staged);
-            return Err(format_commit_error(error, restore_error));
-        }
-        self.pending_item_deletion = None;
-
-        let physical_cleanup_warning = if delete_workset_directories {
-            let mut cleanup_errors = Vec::new();
-            for (_, staging) in staged {
-                if let Err(error) = fs::remove_dir_all(&staging) {
-                    cleanup_errors.push(format!("{}: {error}", staging.display()));
-                }
-            }
-            (!cleanup_errors.is_empty()).then(|| {
-                format!(
-                    "Item records were deleted, but some Workset directories could not be removed: {}",
-                    cleanup_errors.join(", ")
-                )
-            })
-        } else if current.plan.worksets.is_empty() {
-            None
-        } else {
-            Some(
-                "Item records were deleted; Workset directories were left on disk by choice."
-                    .into(),
-            )
-        };
-
-        Ok(ItemDeletionResult {
-            summary,
-            workset_directories_deleted: delete_workset_directories,
-            physical_cleanup_warning,
-        })
-    }
-
-    #[cfg(any())]
-    fn delete_repository(
-        &mut self,
-        repository_id: i64,
-        workset_ids: Vec<i64>,
-        confirmed: bool,
-        delete_workset_directories: bool,
-    ) -> Result<RepositoryDeletionResult, String> {
-        if !confirmed {
-            return Err(
-                "Repository deletion requires explicit confirmation after reviewing its deletion preview"
-                    .into(),
-            );
-        }
-        let pending = self
-            .pending_repository_deletion
-            .as_ref()
-            .filter(|preview| preview.plan.repository_id == repository_id)
-            .cloned()
-            .ok_or_else(|| {
-                "Review the Repository deletion preview before deleting it".to_owned()
-            })?;
-        let current = self.build_repository_deletion_preview(repository_id)?;
-        if current != pending {
-            return Err(
-                "The Repository or a Workset safety report changed after the preview; review the updated deletion preview before deleting it"
-                    .into(),
-            );
-        }
-        if !current.blockers.is_empty() {
-            return Err(format!(
-                "Repository deletion is blocked:\n{}",
-                current.blockers.join("\n")
-            ));
-        }
-
-        let mut staged = Vec::new();
-        if delete_workset_directories {
-            for workset in &current.plan.worksets {
-                let root = Path::new(&workset.root_directory);
-                let staging = match workset_removal_staging_path(root, workset.id) {
-                    Ok(staging) => staging,
-                    Err(error) => {
-                        let restore_error = restore_staged_directories(&staged);
-                        return Err(format_commit_error(error, restore_error));
-                    }
-                };
-                if let Err(error) = fs::rename(root, &staging) {
-                    let restore_error = restore_staged_directories(&staged);
-                    return Err(format_commit_error(
-                        format!(
-                            "Could not stage Workset directory for Repository deletion: {error}"
-                        ),
-                        restore_error,
-                    ));
-                }
-                staged.push((root.to_owned(), staging));
-            }
-        }
-
-        let decision = match decide(
-            self.state.clone(),
-            Event::DeleteRepository {
-                repository_id,
-                workset_ids,
-            },
-        ) {
-            Ok(decision) => decision,
-            Err(error) => {
-                let restore_error = restore_staged_directories(&staged);
-                return Err(format_commit_error(error.to_string(), restore_error));
-            }
-        };
-        if let Err(error) = self.commit(decision) {
-            let restore_error = restore_staged_directories(&staged);
-            return Err(format_commit_error(error, restore_error));
-        }
-        self.pending_repository_deletion = None;
-
-        let physical_cleanup_warning = if delete_workset_directories {
-            let mut cleanup_errors = Vec::new();
-            for (_, staging) in staged {
-                if let Err(error) = fs::remove_dir_all(&staging) {
-                    cleanup_errors.push(format!("{}: {error}", staging.display()));
-                }
-            }
-            (!cleanup_errors.is_empty()).then(|| {
-                format!(
-                    "Repository and Workset records were deleted, but some Workset directories could not be removed: {}",
-                    cleanup_errors.join(", ")
-                )
-            })
-        } else if current.plan.worksets.is_empty() {
-            None
-        } else {
-            Some(
-                "Repository and Workset records were deleted; Workset directories were left on disk by choice."
-                    .into(),
-            )
-        };
-
-        Ok(RepositoryDeletionResult {
-            repository_id,
-            workset_count: current.plan.worksets.len(),
-            workset_directories_deleted: delete_workset_directories,
-            physical_cleanup_warning,
-        })
-    }
-
     fn build_repository_deletion_preview(
         &self,
         repository_id: i64,
@@ -3297,13 +2449,12 @@ impl Runtime {
         Ok(RepositoryDeletionPreview { plan, blockers })
     }
 
-    fn delete_item(
-        &mut self,
-        item_id: i64,
-        confirmed: bool,
-    ) -> Result<ItemDeletionResult, String> {
+    fn delete_item(&mut self, item_id: i64, confirmed: bool) -> Result<ItemDeletionResult, String> {
         if !confirmed {
-            return Err("Item deletion requires explicit confirmation after reviewing its deletion preview".into());
+            return Err(
+                "Item deletion requires explicit confirmation after reviewing its deletion preview"
+                    .into(),
+            );
         }
         let pending = self
             .pending_item_deletion
@@ -3313,10 +2464,15 @@ impl Runtime {
             .ok_or_else(|| "Review the Item deletion preview before deleting it".to_owned())?;
         let current = self.build_item_deletion_preview(item_id)?;
         if current != pending {
-            return Err("The Item changed after the preview; review the updated deletion preview".into());
+            return Err(
+                "The Item changed after the preview; review the updated deletion preview".into(),
+            );
         }
         if !current.blockers.is_empty() {
-            return Err(format!("Item deletion is blocked:\n{}", current.blockers.join("\n")));
+            return Err(format!(
+                "Item deletion is blocked:\n{}",
+                current.blockers.join("\n")
+            ));
         }
         let summary = current.plan.summary();
         let decision = decide(self.state.clone(), Event::DeleteItem { item_id })
@@ -3340,20 +2496,30 @@ impl Runtime {
             .as_ref()
             .filter(|preview| preview.plan.repository_id == repository_id)
             .cloned()
-            .ok_or_else(|| "Review the Repository deletion preview before deleting it".to_owned())?;
+            .ok_or_else(|| {
+                "Review the Repository deletion preview before deleting it".to_owned()
+            })?;
         let current = self.build_repository_deletion_preview(repository_id)?;
         if current != pending {
             return Err("The Repository or its Workspace relationships changed after the preview; review the updated deletion preview".into());
         }
         if !current.blockers.is_empty() {
-            return Err(format!("Repository deletion is blocked:\n{}", current.blockers.join("\n")));
+            return Err(format!(
+                "Repository deletion is blocked:\n{}",
+                current.blockers.join("\n")
+            ));
         }
         let workspace_count = current.plan.workspaces.len();
         let decision = decide(
             self.state.clone(),
             Event::DeleteRepository {
                 repository_id,
-                workspace_ids: current.plan.workspaces.iter().map(|workspace| workspace.id).collect(),
+                workspace_ids: current
+                    .plan
+                    .workspaces
+                    .iter()
+                    .map(|workspace| workspace.id)
+                    .collect(),
             },
         )
         .map_err(|error| error.to_string())?;
@@ -3423,156 +2589,6 @@ impl Runtime {
             .map_err(|error| error.to_string())?;
         self.commit(decision)?;
         Ok(RunDeletionResult { run_id })
-    }
-
-    #[cfg(any())]
-    fn remove_workset(
-        &mut self,
-        workset_id: i64,
-        confirmed: bool,
-    ) -> Result<WorksetRemovalResult, String> {
-        if !confirmed {
-            return Err(
-                "Workset removal requires explicit confirmation after reviewing its safety report"
-                    .into(),
-            );
-        }
-        let pending = self
-            .pending_workset_removal
-            .as_ref()
-            .filter(|report| report.workset_id == workset_id)
-            .cloned()
-            .ok_or_else(|| {
-                "Review the Workset removal safety report before removing it".to_owned()
-            })?;
-        let current = self.build_standalone_workset_removal_report(workset_id)?;
-        if current != pending {
-            return Err(
-                "The Workset changed after the safety report; review the updated report before removing it"
-                    .into(),
-            );
-        }
-        if !current.safe {
-            return Err(format!(
-                "Workset removal is blocked:\n{}",
-                current.blockers.join("\n")
-            ));
-        }
-
-        let decision = decide(self.state.clone(), Event::RemoveWorkset { workset_id })
-            .map_err(|error| error.to_string())?;
-        let root = Path::new(&current.root_directory);
-        let staging = workset_removal_staging_path(root, workset_id)?;
-        fs::rename(root, &staging)
-            .map_err(|error| format!("Could not stage Workset directory for removal: {error}"))?;
-        if let Err(error) = self.commit(decision) {
-            let restore_error = fs::rename(&staging, root).err().map(|restore_error| {
-                format!(
-                    "could not restore Workset directory after persistence failed: {restore_error}"
-                )
-            });
-            return Err(format_commit_error(error, restore_error));
-        }
-        self.pending_workset_removal = None;
-        let physical_cleanup_warning = fs::remove_dir_all(&staging).err().map(|error| {
-            format!(
-                "Workset was removed from Mission Manager, but its staged directory could not be deleted at {}: {error}",
-                staging.display()
-            )
-        });
-        Ok(WorksetRemovalResult {
-            workset_id,
-            workset_directories_deleted: true,
-            physical_cleanup_warning,
-        })
-    }
-
-    #[cfg(any())]
-    fn checkout_new_workset(&self, workset: &Workset) -> Result<CheckoutReceipt, String> {
-        let root = Path::new(&workset.root_directory);
-        let root_was_created = if root.exists() {
-            if !root.is_dir() {
-                return Err(format!(
-                    "Workset root is not a directory: {}",
-                    root.display()
-                ));
-            }
-            if fs::read_dir(root)
-                .map_err(|error| format!("Could not inspect Workset root: {error}"))?
-                .next()
-                .is_some()
-            {
-                return Err(format!("Workset root is not empty: {}", root.display()));
-            }
-            false
-        } else {
-            fs::create_dir_all(root)
-                .map_err(|error| format!("Could not create Workset root: {error}"))?;
-            true
-        };
-
-        let mut destinations = Vec::new();
-        for selected in &workset.repositories {
-            let repository = self.repository(selected.repository_id)?;
-            let destination = root.join(&repository.name);
-            if destination.exists() {
-                if root_was_created {
-                    let _ = fs::remove_dir(root);
-                }
-                return Err(format!(
-                    "Repository checkout destination already exists: {}",
-                    destination.display()
-                ));
-            }
-            destinations.push((repository, selected.clone(), destination));
-        }
-
-        let mut attempted = Vec::new();
-        for (repository, selected, destination) in destinations {
-            attempted.push(destination.clone());
-            if let Err(error) = self.checkout_repository(
-                workset,
-                &repository,
-                selected.branch_override.as_deref(),
-                selected.base_branch_override.as_deref(),
-            ) {
-                for attempted_destination in attempted.iter().rev() {
-                    if attempted_destination.exists() {
-                        let _ = fs::remove_dir_all(attempted_destination);
-                    }
-                }
-                if root_was_created && root.exists() {
-                    let is_empty = fs::read_dir(root)
-                        .map(|mut entries| entries.next().is_none())
-                        .unwrap_or(false);
-                    if is_empty {
-                        let _ = fs::remove_dir(root);
-                    }
-                }
-                return Err(error);
-            }
-        }
-        Ok(CheckoutReceipt {
-            root: root.to_owned(),
-            root_was_created,
-            destinations: attempted,
-        })
-    }
-
-    #[cfg(any())]
-    fn checkout_repository(
-        &self,
-        workset: &Workset,
-        repository: &Repository,
-        branch_override: Option<&str>,
-        base_branch_override: Option<&str>,
-    ) -> Result<PathBuf, String> {
-        let branch = branch_override.unwrap_or(&workset.branch);
-        let destination = Path::new(&workset.root_directory).join(&repository.name);
-        GitCli::system()
-            .checkout_repository(repository, &destination, branch, base_branch_override)
-            .map_err(|error| error.to_string())
-            .map(|()| destination)
     }
 
     fn repository(&self, repository_id: i64) -> Result<Repository, String> {
@@ -4288,59 +3304,6 @@ fn format_commit_error(error: String, cleanup_error: Option<String>) -> String {
     }
 }
 
-#[cfg(any())]
-fn workset_removal_staging_path(root: &Path, workset_id: i64) -> Result<PathBuf, String> {
-    let parent = root.parent().unwrap_or_else(|| Path::new("."));
-    let name = root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .ok_or_else(|| {
-            format!(
-                "Workset root has no usable directory name: {}",
-                root.display()
-            )
-        })?;
-    let staging = parent.join(format!(".{name}.mission-manager-removing-{workset_id}"));
-    if staging.exists() {
-        return Err(format!(
-            "Workset removal staging path already exists: {}",
-            staging.display()
-        ));
-    }
-    Ok(staging)
-}
-
-#[cfg(any())]
-fn workset_safety_blockers(report: &WorksetRemovalReport) -> Vec<String> {
-    report
-        .repositories
-        .iter()
-        .flat_map(|repository| {
-            let mut blockers = Vec::new();
-            if repository.unpushed_commits_unknown {
-                blockers.push(format!(
-                    "Repository {} has unverified unpushed commits; configure an upstream branch and review again.",
-                    repository.name
-                ));
-            } else if !repository.unpushed_commits.is_empty() {
-                blockers.push(format!(
-                    "Repository {} has {} unpushed commit{}; push or preserve the work before deleting.",
-                    repository.name,
-                    repository.unpushed_commits.len(),
-                    if repository.unpushed_commits.len() == 1 { "" } else { "s" }
-                ));
-            }
-            if !repository.uncommitted_changes.is_empty() {
-                blockers.push(format!(
-                    "Repository {} has uncommitted changes; commit or preserve the work before deleting.",
-                    repository.name
-                ));
-            }
-            blockers
-        })
-        .collect()
-}
-
 fn restore_staged_directories(staged: &[(PathBuf, PathBuf)]) -> Option<String> {
     let mut errors = Vec::new();
     for (root, staging) in staged.iter().rev() {
@@ -4389,16 +3352,6 @@ pub struct RepositoryRemovalReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[cfg(any())]
-pub struct WorksetRemovalReport {
-    pub workset_id: i64,
-    pub root_directory: String,
-    pub repositories: Vec<RepositoryRemovalReport>,
-    pub safe: bool,
-    pub blockers: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorktreeRemovalReport {
     pub worktree_id: i64,
@@ -4419,19 +3372,6 @@ pub struct WorkspaceRemovalReport {
     pub worktrees: Vec<WorktreeRemovalReport>,
     pub safe: bool,
     pub blockers: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg(any())]
-pub struct WorksetDeletionPreview {
-    pub workset_id: i64,
-    pub root_directory: String,
-    pub branch: String,
-    pub archived: bool,
-    pub safe: bool,
-    pub blockers: Vec<String>,
-    pub safety_report: Option<WorksetRemovalReport>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -4539,15 +3479,6 @@ pub struct RunDeletionResult {
 pub struct RepositoryDeletionResult {
     pub repository_id: i64,
     pub workspace_count: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-#[cfg(any())]
-pub struct WorksetRemovalResult {
-    pub workset_id: i64,
-    pub workset_directories_deleted: bool,
-    pub physical_cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -4766,33 +3697,6 @@ pub fn compose_run_prompt(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-#[allow(clippy::too_many_arguments)]
-#[cfg(any())]
-pub fn start_run(
-    item_id: i64,
-    workset_id: i64,
-    machine_id: Option<i64>,
-    agent: AgentKind,
-    execution_profile: ExecutionProfile,
-    prompt: String,
-    prompt_selection: RunPromptSelection,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<Run, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .start_run(
-            item_id,
-            workset_id,
-            machine_id,
-            agent,
-            execution_profile,
-            prompt,
-            prompt_selection,
-        )
-}
-
-#[tauri::command(rename_all = "camelCase")]
 pub fn prepare_direct_run(
     item_id: i64,
     workspace_id: i64,
@@ -4880,18 +3784,6 @@ pub fn check_machine(machine_id: i64, state: State<'_, Mutex<Runtime>>) -> Resul
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .check_machine(machine_id)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-#[cfg(any())]
-pub fn list_workset_panes(
-    workset_id: i64,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<Vec<PaneTab>, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .list_workset_panes(workset_id)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5179,21 +4071,6 @@ pub fn reset_all_local_data(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-#[cfg(any())]
-pub fn create_workset(
-    item_id: i64,
-    root_directory: String,
-    branch: String,
-    repositories: Vec<WorksetRepositoryInput>,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<Workset, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .create_workset(item_id, root_directory, branch, repositories)
-}
-
-#[tauri::command(rename_all = "camelCase")]
 pub fn create_workspace(
     item_id: i64,
     repositories: Vec<WorkspaceRepositoryInput>,
@@ -5325,52 +4202,6 @@ pub fn attach_worktree(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-#[cfg(any())]
-pub fn attach_workset(
-    item_id: i64,
-    root_directory: String,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<Workset, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .attach_workset(item_id, root_directory)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-#[cfg(any())]
-pub fn add_repository_to_workset(
-    workset_id: i64,
-    repository_id: i64,
-    branch_override: Option<String>,
-    base_branch_override: Option<String>,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<Workset, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .add_repository_to_workset(
-            workset_id,
-            repository_id,
-            branch_override,
-            base_branch_override,
-        )
-}
-
-#[tauri::command(rename_all = "camelCase")]
-#[cfg(any())]
-pub fn set_workset_archived(
-    workset_id: i64,
-    archived: bool,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<Workset, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .set_workset_archived(workset_id, archived)
-}
-
-#[tauri::command(rename_all = "camelCase")]
 pub fn prepare_repository_deletion(
     repository_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -5391,11 +4222,7 @@ pub fn delete_repository(
     state
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .delete_repository(
-            repository_id,
-            workspace_ids,
-            confirmed,
-        )
+        .delete_repository(repository_id, workspace_ids, confirmed)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5420,31 +4247,6 @@ pub fn delete_machine(
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .delete_machine(machine_id, run_ids, confirmed)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-#[cfg(any())]
-pub fn prepare_workset_removal(
-    workset_id: i64,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<WorksetRemovalReport, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .prepare_workset_removal(workset_id)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-#[cfg(any())]
-pub fn remove_workset(
-    workset_id: i64,
-    confirmed: bool,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<WorksetRemovalResult, String> {
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .remove_workset(workset_id, confirmed)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -5883,7 +4685,7 @@ mod tests {
             .expect("reset preview should be available");
         assert_eq!(preview.confirmation_phrase, RESET_CONFIRMATION_PHRASE);
         let error = runtime
-            .reset_all_local_data("RESET".into(), true)
+            .reset_all_local_data("RESET".into())
             .expect_err("a weaker confirmation should be rejected");
 
         assert!(error.contains(RESET_CONFIRMATION_PHRASE));
@@ -5914,7 +4716,7 @@ mod tests {
         assert_eq!(preview.plan.summary.project_count, 2);
         assert_eq!(preview.audit_entry_count, 2);
         let result = runtime
-            .reset_all_local_data(RESET_CONFIRMATION_PHRASE.into(), true)
+            .reset_all_local_data(RESET_CONFIRMATION_PHRASE.into())
             .expect("reset should succeed");
 
         assert_eq!(result.audit_entry_count, 2);
@@ -5950,78 +4752,6 @@ mod tests {
                 ..
             }]
         ));
-    }
-
-    #[test]
-    fn reset_staging_failure_leaves_the_working_model_and_roots_intact() {
-        let directory = tempdir().expect("temporary repository directory should exist");
-        let seed = directory.path().join("seed");
-        run_git(directory.path(), &["init", "--initial-branch=main", "seed"]);
-        run_git(&seed, &["config", "user.email", "test@example.com"]);
-        run_git(&seed, &["config", "user.name", "Test User"]);
-        fs::write(seed.join("README.md"), "safe\n").expect("seed file should be written");
-        run_git(&seed, &["add", "README.md"]);
-        run_git(&seed, &["commit", "-m", "initial"]);
-        let origin = directory.path().join("service.git");
-        run_git(directory.path(), &["init", "--bare", "service.git"]);
-        let origin_url = origin.to_string_lossy().into_owned();
-        run_git(&seed, &["remote", "add", "origin", &origin_url]);
-        run_git(&seed, &["push", "origin", "main"]);
-
-        let database = directory.path().join("mission-manager.sqlite");
-        let mut runtime = Runtime::open(&database).expect("runtime should open");
-        runtime
-            .register_repository(1, "service".into(), origin_url)
-            .expect("Repository should register");
-        runtime
-            .create_item("Reset the safe Workset".into(), 1, 1)
-            .expect("Item should be created");
-        let root = directory.path().join("workset-root");
-        runtime
-            .create_workset(
-                1,
-                root.to_string_lossy().into_owned(),
-                "feature/reset-safe".into(),
-                vec![WorksetRepositoryInput {
-                    repository_id: 1,
-                    branch_override: None,
-                    base_branch_override: Some("main".into()),
-                }],
-            )
-            .expect("Workset should be created");
-        run_git(
-            &root.join("service"),
-            &["branch", "--set-upstream-to=origin/main"],
-        );
-
-        let preview = runtime
-            .prepare_reset_local_data()
-            .expect("reset preview should be available");
-        assert!(preview.blockers.is_empty());
-        let blocking_staging_path = directory
-            .path()
-            .join(".workset-root.mission-manager-removing-1");
-        fs::create_dir(&blocking_staging_path).expect("the staging blocker should be created");
-        let staging_error = runtime
-            .reset_all_local_data(RESET_CONFIRMATION_PHRASE.into(), true)
-            .expect_err("a staging failure should abort before logical reset");
-        assert!(staging_error.contains("staging path already exists"));
-        assert!(root.is_dir());
-        assert_eq!(runtime.state.items.len(), 1);
-        assert_eq!(runtime.state.worksets.len(), 1);
-
-        fs::remove_dir_all(&blocking_staging_path).expect("the staging blocker should be removed");
-        runtime
-            .prepare_reset_local_data()
-            .expect("fresh reset preview should be available");
-        let result = runtime
-            .reset_all_local_data(RESET_CONFIRMATION_PHRASE.into(), true)
-            .expect("reset should remove safe Workset roots");
-        assert!(result.workset_directories_deleted);
-        assert!(result.physical_cleanup_warning.is_none());
-        assert!(!root.exists());
-        assert!(runtime.state.items.is_empty());
-        assert!(runtime.state.worksets.is_empty());
     }
 
     #[cfg(unix)]
@@ -6092,7 +4822,6 @@ mod tests {
         runtime.state.runs.push(Run {
             id: 1,
             item_id: 1,
-            workset_id: Some(1),
             machine_id: 1,
             agent: AgentKind::Claude,
             execution_profile: ExecutionProfile::Implement,
@@ -6182,7 +4911,6 @@ mod tests {
         runtime.state.runs.push(Run {
             id: 1,
             item_id: 1,
-            workset_id: Some(1),
             machine_id: 1,
             agent: AgentKind::Claude,
             execution_profile: ExecutionProfile::Implement,
@@ -6229,7 +4957,6 @@ mod tests {
         runtime.state.runs.push(Run {
             id: 1,
             item_id: 1,
-            workset_id: Some(1),
             machine_id: 1,
             agent: AgentKind::Claude,
             execution_profile: ExecutionProfile::Implement,
@@ -6300,7 +5027,6 @@ mod tests {
             Run {
                 id: 1,
                 item_id: 1,
-                workset_id: Some(1),
                 machine_id: 1,
                 agent: AgentKind::Claude,
                 execution_profile: ExecutionProfile::Implement,
@@ -6319,7 +5045,6 @@ mod tests {
             Run {
                 id: 2,
                 item_id: 1,
-                workset_id: Some(1),
                 machine_id: 1,
                 agent: AgentKind::Codex,
                 execution_profile: ExecutionProfile::Review,
@@ -6338,7 +5063,6 @@ mod tests {
             Run {
                 id: 3,
                 item_id: 1,
-                workset_id: Some(1),
                 machine_id: 1,
                 agent: AgentKind::Claude,
                 execution_profile: ExecutionProfile::Investigate,
@@ -6365,126 +5089,6 @@ mod tests {
         assert_eq!(runtime.state.runs[1].pane_status, RunPaneStatus::Missing);
         assert_eq!(runtime.state.runs[1].state, RunState::Blocked);
         assert_eq!(runtime.state.runs[2].pane_status, RunPaneStatus::Missing);
-        run_tmux(&[
-            "-f",
-            "/dev/null",
-            "-L",
-            &socket,
-            "kill-session",
-            "-t",
-            &session,
-        ]);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_manual_agent_pane_is_suggested_and_attaches_only_after_approval() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let directory = tempdir().expect("temporary app directory should exist");
-        let database = directory.path().join("mission-manager.sqlite");
-        let root = directory.path().join("manual-workset");
-        fs::create_dir_all(&root).expect("the Workset root should exist");
-        let agent = directory.path().join("claude");
-        fs::write(&agent, "#!/bin/sh\nwhile true; do sleep 1; done\n")
-            .expect("the fake agent should be written");
-        fs::set_permissions(&agent, fs::Permissions::from_mode(0o755))
-            .expect("the fake agent should be executable");
-
-        let socket = format!("mission-manager-suggestion-{}", std::process::id());
-        let session = format!("manual-agent-{}", std::process::id());
-        let root_string = root.to_string_lossy().into_owned();
-        let agent_string = agent.to_string_lossy().into_owned();
-        run_tmux(&[
-            "-f",
-            "/dev/null",
-            "-L",
-            &socket,
-            "new-session",
-            "-d",
-            "-s",
-            &session,
-            "-c",
-            &root_string,
-            &agent_string,
-        ]);
-        run_tmux(&[
-            "-f",
-            "/dev/null",
-            "-L",
-            &socket,
-            "select-pane",
-            "-t",
-            &session,
-            "-T",
-            "claude",
-        ]);
-
-        let mut runtime = Runtime::open(&database).expect("runtime should open");
-        let item = decide(
-            runtime.state.clone(),
-            Event::CreateItem {
-                title: "Attach the manual agent".into(),
-                context_id: 1,
-                project_id: 1,
-            },
-        )
-        .expect("the Item should be created");
-        runtime
-            .commit(item.clone())
-            .expect("the Item should persist");
-        let workset = decide(
-            item.state,
-            Event::AttachWorkset {
-                item_id: 1,
-                root_directory: root_string.clone(),
-                repositories: vec![AttachedRepositoryInput {
-                    name: "service".into(),
-                    remote_url: "https://example.com/service.git".into(),
-                    current_branch: "main".into(),
-                    is_dirty: false,
-                }],
-            },
-        )
-        .expect("the Workset should attach");
-        runtime
-            .commit(workset.clone())
-            .expect("the Workset should persist");
-        let machine = decide(
-            workset.state,
-            Event::RegisterMachine {
-                context_id: 1,
-                name: "Local Mac".into(),
-                socket_name: socket.clone(),
-                transport: MachineTransport::Local,
-            },
-        )
-        .expect("the Machine should register");
-        runtime.commit(machine).expect("the Machine should persist");
-
-        let suggestions = runtime
-            .list_run_suggestions()
-            .expect("manual agent detection should succeed");
-        assert_eq!(suggestions.len(), 1);
-        assert_eq!(suggestions[0].workset_id, 1);
-        assert_eq!(suggestions[0].item_identifier, "MC-1");
-        assert_eq!(suggestions[0].agent, AgentKind::Claude);
-        assert!(runtime.state.runs.is_empty());
-
-        let run = runtime
-            .attach_run(suggestions[0].clone())
-            .expect("the approved suggestion should attach");
-        assert_eq!(run.item_id, 1);
-        assert_eq!(run.state, RunState::Unknown);
-        assert_eq!(runtime.state.runs.len(), 1);
-        assert!(runtime
-            .list_run_suggestions()
-            .expect("the attached Pane should no longer be suggested")
-            .is_empty());
-
-        let reopened = Runtime::open(&database).expect("runtime should reopen");
-        assert_eq!(reopened.state.runs.len(), 1);
-        assert_eq!(reopened.state.runs[0].workset_id, Some(1));
         run_tmux(&[
             "-f",
             "/dev/null",
@@ -6565,145 +5169,6 @@ fi
     }
 
     #[test]
-    fn creating_a_workset_checks_out_a_repository_and_persists_the_execution_root() {
-        let directory = tempdir().expect("temporary app directory should exist");
-        let seed = directory.path().join("seed");
-        run_git(directory.path(), &["init", "--initial-branch=main", "seed"]);
-        run_git(&seed, &["config", "user.email", "test@example.com"]);
-        run_git(&seed, &["config", "user.name", "Test User"]);
-        fs::write(seed.join("README.md"), "service-a\n").expect("seed file should be written");
-        run_git(&seed, &["add", "README.md"]);
-        run_git(&seed, &["commit", "-m", "initial"]);
-        let origin = directory.path().join("service-a.git");
-        run_git(directory.path(), &["init", "--bare", "service-a.git"]);
-        let origin_url = origin.to_string_lossy().into_owned();
-        run_git(&seed, &["remote", "add", "origin", &origin_url]);
-        run_git(&seed, &["push", "origin", "main"]);
-
-        let database = directory.path().join("mission-manager.sqlite");
-        let mut runtime = Runtime::open(&database).expect("runtime should open");
-        runtime
-            .register_repository(1, "service-a".into(), origin.to_string_lossy().into_owned())
-            .expect("Repository should register");
-        runtime
-            .create_item("Implement the platform change".into(), 1, 1)
-            .expect("Item should be created");
-
-        let root = directory.path().join("workset-root");
-        let workset = runtime
-            .create_workset(
-                1,
-                root.to_string_lossy().into_owned(),
-                "feature/platform-change".into(),
-                vec![WorksetRepositoryInput {
-                    repository_id: 1,
-                    branch_override: None,
-                    base_branch_override: Some("main".into()),
-                }],
-            )
-            .expect("Workset should be created");
-
-        assert_eq!(workset.branch, "feature/platform-change");
-        assert!(root.join("service-a/README.md").is_file());
-        assert_eq!(
-            run_git_output(&root.join("service-a"), &["branch", "--show-current"]),
-            "feature/platform-change"
-        );
-        let reopened = Runtime::open(&database).expect("runtime should reopen");
-        assert_eq!(reopened.state.worksets, vec![workset]);
-    }
-
-    #[test]
-    fn attaching_a_workset_does_not_change_its_branch_configuration_or_files() {
-        let directory = tempdir().expect("temporary app directory should exist");
-        let root = directory.path().join("workset-root");
-        fs::create_dir(&root).expect("Workset root should exist");
-        let repository = root.join("service-a");
-        run_git(&root, &["init", "--initial-branch=main", "service-a"]);
-        run_git(&repository, &["config", "user.email", "test@example.com"]);
-        run_git(&repository, &["config", "user.name", "Test User"]);
-        fs::write(repository.join("README.md"), "service-a\n")
-            .expect("repository file should be written");
-        run_git(&repository, &["add", "README.md"]);
-        run_git(&repository, &["commit", "-m", "initial"]);
-        let origin = directory.path().join("service-a.git");
-        run_git(directory.path(), &["init", "--bare", "service-a.git"]);
-        let origin_url = origin.to_string_lossy().into_owned();
-        run_git(&repository, &["remote", "add", "origin", &origin_url]);
-        run_git(&repository, &["push", "--set-upstream", "origin", "main"]);
-        fs::write(repository.join("notes.txt"), "keep this work\n")
-            .expect("uncommitted file should be written");
-
-        let branch_before = run_git_output(&repository, &["branch", "--show-current"]);
-        let config_before = run_git_output(&repository, &["config", "--local", "--list"]);
-        let status_before = run_git_output(&repository, &["status", "--porcelain"]);
-        let database = directory.path().join("mission-manager.sqlite");
-        let mut runtime = Runtime::open(&database).expect("runtime should open");
-        runtime
-            .create_item("Adopt the platform change".into(), 1, 1)
-            .expect("Item should be created");
-
-        let workset = runtime
-            .attach_workset(1, root.to_string_lossy().into_owned())
-            .expect("Workset should attach");
-
-        assert_eq!(workset.branch, "main");
-        assert_eq!(workset.repositories[0].current_branch, "main");
-        assert!(workset.repositories[0].is_dirty);
-        assert_eq!(
-            run_git_output(&repository, &["branch", "--show-current"]),
-            branch_before
-        );
-        assert_eq!(
-            run_git_output(&repository, &["config", "--local", "--list"]),
-            config_before
-        );
-        assert_eq!(
-            run_git_output(&repository, &["status", "--porcelain"]),
-            status_before
-        );
-        let reopened = Runtime::open(&database).expect("runtime should reopen");
-        assert_eq!(reopened.state.worksets, vec![workset]);
-        assert_eq!(reopened.state.repositories[0].remote_url, origin_url);
-
-        runtime
-            .set_workset_archived(1, true)
-            .expect("Workset should be archivable");
-        assert!(root.is_dir(), "archiving must leave the Workset on disk");
-        assert!(runtime.state.worksets[0].archived);
-
-        let report = runtime
-            .prepare_workset_removal(1)
-            .expect("removal safety report should be available");
-        assert_eq!(report.repositories.len(), 1);
-        assert!(!report.repositories[0].uncommitted_changes.is_empty());
-        assert!(!report.safe);
-        assert!(report
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("uncommitted changes")));
-        assert!(runtime.remove_workset(1, true).is_err());
-        assert_eq!(runtime.state.worksets.len(), 1);
-        assert!(runtime.remove_workset(1, false).is_err());
-        assert!(
-            root.is_dir(),
-            "a rejected confirmation must keep the Workset"
-        );
-
-        fs::remove_file(repository.join("notes.txt")).expect("uncommitted file should be removed");
-        let safe_report = runtime
-            .prepare_workset_removal(1)
-            .expect("a safe removal report should be available");
-        assert!(safe_report.safe);
-        let result = runtime
-            .remove_workset(1, true)
-            .expect("confirmed removal should delete the Workset");
-        assert!(result.physical_cleanup_warning.is_none());
-        assert!(!root.exists());
-        assert!(runtime.state.worksets.is_empty());
-    }
-
-    #[test]
     fn item_deletion_requires_a_fresh_preview_and_records_a_summary() {
         let directory = tempdir().expect("temporary app directory should exist");
         let database = directory.path().join("mission-manager.sqlite");
@@ -6727,18 +5192,17 @@ fi
                 1,
             )
             .expect("Item changes should persist");
-        assert!(runtime.delete_item(1, true, false).is_err());
+        assert!(runtime.delete_item(1, true).is_err());
         assert_eq!(runtime.state.items.len(), 1);
 
         runtime
             .prepare_item_deletion(1)
             .expect("a fresh deletion preview should be available");
         let result = runtime
-            .delete_item(1, true, false)
+            .delete_item(1, true)
             .expect("the confirmed Item deletion should succeed");
         assert_eq!(result.summary.item_id, 1);
-        assert!(!result.workset_directories_deleted);
-        assert!(result.physical_cleanup_warning.is_none());
+        assert_eq!(result.summary.item_id, 1);
         assert!(runtime.state.items.is_empty());
         assert!(runtime
             .list_audit_history()
@@ -6785,7 +5249,7 @@ fi
             )
             .expect("Item should update");
         assert!(runtime
-            .delete_project(3, vec![1], Vec::new(), Vec::new(), true, false)
+            .delete_project(3, vec![1], Vec::new(), Vec::new(), true)
             .is_err());
         assert!(runtime.state.projects.iter().any(|project| project.id == 3));
 
@@ -6793,7 +5257,7 @@ fi
             .prepare_project_deletion(3)
             .expect("fresh Project preview should be available");
         let result = runtime
-            .delete_project(3, vec![1], Vec::new(), Vec::new(), true, false)
+            .delete_project(3, vec![1], Vec::new(), Vec::new(), true)
             .expect("Project deletion should succeed");
         assert_eq!(result.summary.item_count, 1);
         assert!(runtime.state.items.is_empty());
@@ -6804,7 +5268,7 @@ fi
             .prepare_project_deletion(2)
             .expect("the remaining Project preview should be available");
         runtime
-            .delete_project(2, Vec::new(), Vec::new(), Vec::new(), true, false)
+            .delete_project(2, Vec::new(), Vec::new(), Vec::new(), true)
             .expect("the last Project in a Context should be deletable");
         assert!(runtime
             .state
@@ -6825,7 +5289,6 @@ fi
                 Vec::new(),
                 Vec::new(),
                 true,
-                false,
             )
             .expect("the non-last empty Context should be deletable");
         let last_context = runtime
@@ -6844,7 +5307,6 @@ fi
                 Vec::new(),
                 Vec::new(),
                 true,
-                false,
             )
             .is_err());
 
@@ -6857,455 +5319,6 @@ fi
         assert!(history
             .iter()
             .any(|entry| matches!(entry.action, AuditAction::ContextDeleted { .. })));
-    }
-
-    #[test]
-    fn project_deletion_can_keep_an_unsafe_workset_directory() {
-        let directory = tempdir().expect("temporary app directory should exist");
-        let seed = directory.path().join("seed");
-        run_git(directory.path(), &["init", "--initial-branch=main", "seed"]);
-        run_git(&seed, &["config", "user.email", "test@example.com"]);
-        run_git(&seed, &["config", "user.name", "Test User"]);
-        fs::write(seed.join("README.md"), "preserve this work\n")
-            .expect("seed file should be written");
-        run_git(&seed, &["add", "README.md"]);
-        run_git(&seed, &["commit", "-m", "initial"]);
-        let origin = directory.path().join("service.git");
-        run_git(directory.path(), &["init", "--bare", "service.git"]);
-        let origin_url = origin.to_string_lossy().into_owned();
-        run_git(&seed, &["remote", "add", "origin", &origin_url]);
-        run_git(&seed, &["push", "origin", "main"]);
-
-        let database = directory.path().join("mission-manager.sqlite");
-        let mut runtime = Runtime::open(&database).expect("runtime should open");
-        runtime
-            .create_project(
-                "Billing".into(),
-                1,
-                ProjectDefaults {
-                    item_status: ItemStatus::Inbox,
-                    execution_mode: crate::domain::ExecutionMode::Worktree,
-                },
-            )
-            .expect("Project should be created");
-        runtime
-            .register_repository(2, "service".into(), origin_url)
-            .expect("Repository should register");
-        runtime
-            .create_item("Delete the Project records".into(), 1, 2)
-            .expect("Item should be created");
-        let root = directory.path().join("workset-root");
-        runtime
-            .create_workset(
-                1,
-                root.to_string_lossy().into_owned(),
-                "feature/delete-project".into(),
-                vec![WorksetRepositoryInput {
-                    repository_id: 1,
-                    branch_override: None,
-                    base_branch_override: Some("main".into()),
-                }],
-            )
-            .expect("Workset should be created");
-
-        let preview = runtime
-            .prepare_project_deletion(2)
-            .expect("Project deletion preview should be available");
-        assert!(preview
-            .worksets
-            .iter()
-            .flat_map(|workset| &workset.blockers)
-            .any(|blocker| blocker.contains("unverified unpushed commits")));
-        assert!(runtime
-            .delete_project(2, vec![1], vec![1], vec![1], true, true)
-            .is_err());
-
-        let result = runtime
-            .delete_project(2, vec![1], vec![1], vec![1], true, false)
-            .expect("Project records should be deletable while keeping the directory");
-        assert!(!result.workset_directories_deleted);
-        assert!(result
-            .physical_cleanup_warning
-            .as_deref()
-            .is_some_and(|warning| warning.contains("physical cleanup was not safe")));
-        assert!(root.exists());
-        assert!(runtime.state.projects.iter().all(|project| project.id != 2));
-        assert!(runtime.state.items.is_empty());
-    }
-
-    #[test]
-    fn machine_deletion_requires_finished_runs_and_a_fresh_preview() {
-        let directory = tempdir().expect("temporary app directory should exist");
-        let database = directory.path().join("mission-manager.sqlite");
-        let mut runtime = Runtime::open(&database).expect("runtime should open");
-        runtime
-            .create_item("Delete the old Machine".into(), 1, 1)
-            .expect("Item should be created");
-        let workset = decide(
-            runtime.state.clone(),
-            Event::AttachWorkset {
-                item_id: 1,
-                root_directory: "/tmp/machine-app-deletion".into(),
-                repositories: vec![AttachedRepositoryInput {
-                    name: "service".into(),
-                    remote_url: "https://example.com/service.git".into(),
-                    current_branch: "main".into(),
-                    is_dirty: false,
-                }],
-            },
-        )
-        .expect("Workset should attach");
-        runtime.commit(workset).expect("Workset should persist");
-        let machine = decide(
-            runtime.state.clone(),
-            Event::RegisterMachine {
-                context_id: 1,
-                name: "Old Machine".into(),
-                socket_name: "old-machine".into(),
-                transport: MachineTransport::Local,
-            },
-        )
-        .expect("Machine should register");
-        runtime.commit(machine).expect("Machine should persist");
-        let run = decide(
-            runtime.state.clone(),
-            Event::AttachRun {
-                item_id: 1,
-                workset_id: 1,
-                machine_id: 1,
-                agent: AgentKind::Codex,
-                working_directory: "/tmp/machine-app-deletion".into(),
-                session_name: "old-machine-run".into(),
-                pane_id: "%1".into(),
-                attached_at: 1,
-            },
-        )
-        .expect("Run should attach");
-        runtime.commit(run).expect("Run should persist");
-
-        let blocked_preview = runtime
-            .prepare_machine_deletion(1)
-            .expect("Machine deletion preview should be available");
-        assert_eq!(blocked_preview.plan.runs.len(), 1);
-        assert_eq!(blocked_preview.plan.active_run_ids, vec![1]);
-        assert!(blocked_preview
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("stop it before deleting the Machine")));
-        assert!(runtime.delete_machine(1, vec![1], true).is_err());
-
-        let finished = decide(
-            runtime.state.clone(),
-            Event::UpdateRunState {
-                run_id: 1,
-                state: RunState::Finished,
-            },
-        )
-        .expect("Run should finish");
-        runtime
-            .commit(finished)
-            .expect("finished state should persist");
-        assert!(runtime.delete_machine(1, vec![1], true).is_err());
-
-        let fresh_preview = runtime
-            .prepare_machine_deletion(1)
-            .expect("fresh Machine deletion preview should be available");
-        assert!(fresh_preview.blockers.is_empty());
-        let result = runtime
-            .delete_machine(1, vec![1], true)
-            .expect("Machine deletion should succeed after the Run finishes");
-        assert_eq!(result.run_count, 1);
-        assert!(runtime.state.machines.is_empty());
-        assert!(runtime.state.runs.is_empty());
-        let history = runtime
-            .list_audit_history()
-            .expect("audit history should load");
-        assert!(history
-            .iter()
-            .any(|entry| matches!(entry.action, AuditAction::RunDeleted { run_id: 1 })));
-        assert!(history.iter().any(|entry| matches!(
-            entry.action,
-            AuditAction::MachineDeleted { machine_id: 1, .. }
-        )));
-    }
-
-    #[test]
-    fn confirmed_item_deletion_stages_and_removes_safe_workset_directories() {
-        let directory = tempdir().expect("temporary app directory should exist");
-        let seed = directory.path().join("seed");
-        run_git(directory.path(), &["init", "--initial-branch=main", "seed"]);
-        run_git(&seed, &["config", "user.email", "test@example.com"]);
-        run_git(&seed, &["config", "user.name", "Test User"]);
-        fs::write(seed.join("README.md"), "safe\n").expect("seed file should be written");
-        run_git(&seed, &["add", "README.md"]);
-        run_git(&seed, &["commit", "-m", "initial"]);
-        let origin = directory.path().join("service.git");
-        run_git(directory.path(), &["init", "--bare", "service.git"]);
-        let origin_url = origin.to_string_lossy().into_owned();
-        run_git(&seed, &["remote", "add", "origin", &origin_url]);
-        run_git(&seed, &["push", "origin", "main"]);
-
-        let database = directory.path().join("mission-manager.sqlite");
-        let mut runtime = Runtime::open(&database).expect("runtime should open");
-        runtime
-            .register_repository(1, "service".into(), origin_url)
-            .expect("Repository should register");
-        runtime
-            .create_item("Delete the safe Workset".into(), 1, 1)
-            .expect("Item should be created");
-        let root = directory.path().join("workset-root");
-        runtime
-            .create_workset(
-                1,
-                root.to_string_lossy().into_owned(),
-                "feature/delete-safe".into(),
-                vec![WorksetRepositoryInput {
-                    repository_id: 1,
-                    branch_override: None,
-                    base_branch_override: Some("main".into()),
-                }],
-            )
-            .expect("Workset should be created");
-        run_git(
-            &root.join("service"),
-            &["branch", "--set-upstream-to=origin/main"],
-        );
-
-        let preview = runtime
-            .prepare_item_deletion(1)
-            .expect("deletion preview should be available");
-        assert!(preview.blockers.is_empty());
-        let result = runtime
-            .delete_item(1, true, true)
-            .expect("safe Item deletion should succeed");
-        assert!(result.workset_directories_deleted);
-        assert!(!root.exists());
-        assert!(runtime.state.items.is_empty());
-    }
-
-    #[test]
-    fn repository_deletion_stages_all_safe_workset_roots_and_audits_each_record() {
-        let directory = tempdir().expect("temporary repository directory should exist");
-        let seed = directory.path().join("seed");
-        run_git(directory.path(), &["init", "--initial-branch=main", "seed"]);
-        run_git(&seed, &["config", "user.email", "test@example.com"]);
-        run_git(&seed, &["config", "user.name", "Test User"]);
-        fs::write(seed.join("README.md"), "safe\n").expect("seed file should be written");
-        run_git(&seed, &["add", "README.md"]);
-        run_git(&seed, &["commit", "-m", "initial"]);
-        let origin = directory.path().join("service.git");
-        run_git(directory.path(), &["init", "--bare", "service.git"]);
-        let origin_url = origin.to_string_lossy().into_owned();
-        run_git(&seed, &["remote", "add", "origin", &origin_url]);
-        run_git(&seed, &["push", "origin", "main"]);
-
-        let database = directory.path().join("mission-manager.sqlite");
-        let mut runtime = Runtime::open(&database).expect("runtime should open");
-        runtime
-            .register_repository(1, "service".into(), origin_url)
-            .expect("Repository should register");
-        runtime
-            .create_item("Delete the Repository and its Worksets".into(), 1, 1)
-            .expect("Item should be created");
-        let first_root = directory.path().join("first-workset");
-        let second_root = directory.path().join("second-workset");
-        runtime
-            .create_workset(
-                1,
-                first_root.to_string_lossy().into_owned(),
-                "feature/first".into(),
-                vec![WorksetRepositoryInput {
-                    repository_id: 1,
-                    branch_override: None,
-                    base_branch_override: Some("main".into()),
-                }],
-            )
-            .expect("first Workset should be created");
-        runtime
-            .create_workset(
-                1,
-                second_root.to_string_lossy().into_owned(),
-                "feature/second".into(),
-                vec![WorksetRepositoryInput {
-                    repository_id: 1,
-                    branch_override: None,
-                    base_branch_override: Some("main".into()),
-                }],
-            )
-            .expect("second Workset should be created");
-        for root in [&first_root, &second_root] {
-            run_git(
-                &root.join("service"),
-                &["branch", "--set-upstream-to=origin/main"],
-            );
-        }
-        runtime
-            .set_workset_archived(2, true)
-            .expect("the second Workset should be archived");
-
-        let preview = runtime
-            .prepare_repository_deletion(1)
-            .expect("Repository deletion preview should be available");
-        assert_eq!(
-            preview
-                .plan
-                .worksets
-                .iter()
-                .map(|workset| workset.id)
-                .collect::<Vec<_>>(),
-            vec![1, 2]
-        );
-        assert!(preview.blockers.is_empty());
-        assert!(preview.worksets.iter().all(|workset| workset.safe));
-
-        let blocking_staging_path = directory
-            .path()
-            .join(".second-workset.mission-manager-removing-2");
-        fs::create_dir(&blocking_staging_path).expect("the staging-path blocker should be created");
-        let staging_error = runtime
-            .delete_repository(1, vec![1, 2], true, true)
-            .expect_err("a staging failure should abort before logical deletion");
-        assert!(staging_error.contains("staging path already exists"));
-        assert!(first_root.is_dir());
-        assert!(second_root.is_dir());
-        assert_eq!(runtime.state.repositories.len(), 1);
-        assert_eq!(runtime.state.worksets.len(), 2);
-        fs::remove_dir_all(&blocking_staging_path)
-            .expect("the staging-path blocker should be removed");
-
-        let result = runtime
-            .delete_repository(1, vec![1, 2], true, true)
-            .expect("Repository deletion should remove all explicitly included Worksets");
-        assert_eq!(result.workset_count, 2);
-        assert!(result.workset_directories_deleted);
-        assert!(result.physical_cleanup_warning.is_none());
-        assert!(!first_root.exists());
-        assert!(!second_root.exists());
-        assert!(runtime.state.repositories.is_empty());
-        assert!(runtime.state.worksets.is_empty());
-        assert_eq!(runtime.state.items.len(), 1);
-        let history = runtime
-            .list_audit_history()
-            .expect("audit history should be available");
-        assert_eq!(
-            history
-                .iter()
-                .filter(|entry| matches!(entry.action, AuditAction::WorksetRemoved { .. }))
-                .count(),
-            2
-        );
-        assert!(history.iter().any(|entry| matches!(
-            entry.action,
-            AuditAction::RepositoryDeleted {
-                repository_id: 1,
-                ..
-            }
-        )));
-    }
-
-    #[test]
-    fn reopening_recovers_a_run_state_written_while_the_connection_was_down() {
-        let directory = tempdir().expect("temporary app directory should exist");
-        let database = directory.path().join("mission-manager.sqlite");
-        let mut store = SqliteStore::open(&database).expect("database should open");
-
-        let item = decide(
-            store.load_state().expect("state should load"),
-            Event::CreateItem {
-                title: "Recover the blocked Run".into(),
-                context_id: 1,
-                project_id: 1,
-            },
-        )
-        .expect("Item should be created");
-        store.apply(&item.effects).expect("Item should persist");
-        let repository = decide(
-            item.state,
-            Event::RegisterRepository {
-                project_id: 1,
-                name: "service".into(),
-                remote_url: "https://example.com/service.git".into(),
-            },
-        )
-        .expect("Repository should register");
-        store
-            .apply(&repository.effects)
-            .expect("Repository should persist");
-        let workset = decide(
-            repository.state,
-            Event::CreateWorkset {
-                item_id: 1,
-                root_directory: "/tmp/recovery-workset".into(),
-                branch: "main".into(),
-                repositories: vec![WorksetRepositoryInput {
-                    repository_id: 1,
-                    branch_override: None,
-                    base_branch_override: None,
-                }],
-            },
-        )
-        .expect("Workset should be created");
-        store
-            .apply(&workset.effects)
-            .expect("Workset should persist");
-        let machine = decide(
-            workset.state,
-            Event::RegisterMachine {
-                context_id: 1,
-                name: "Local Mac".into(),
-                socket_name: "mission-manager".into(),
-                transport: MachineTransport::Local,
-            },
-        )
-        .expect("Machine should register");
-        store
-            .apply(&machine.effects)
-            .expect("Machine should persist");
-        let run = decide(
-            machine.state,
-            Event::StartRun {
-                item_id: 1,
-                workset_id: 1,
-                machine_id: 1,
-                agent: AgentKind::Claude,
-                execution_profile: ExecutionProfile::Implement,
-                prompt: "Do the work".into(),
-                working_directory: "/tmp/recovery-workset".into(),
-                session_name: "mission-item-1-run-1".into(),
-                pane_id: "%1".into(),
-                started_at: 123,
-                prompt_selection: RunPromptSelection {
-                    include_objective: true,
-                    include_notes: false,
-                    external_object_ids: Vec::new(),
-                },
-            },
-        )
-        .expect("Run should start");
-        store.apply(&run.effects).expect("Run should persist");
-        drop(store);
-
-        let state_file = state_file_path(&directory.path().join("agent-state"), 1);
-        fs::create_dir_all(state_file.parent().expect("state directory should exist"))
-            .expect("state directory should be created");
-        fs::write(
-            &state_file,
-            serde_json::json!({
-                "agent": "claude",
-                "runId": "1",
-                "state": "blocked",
-                "updatedAt": "2026-09-19T12:34:56Z"
-            })
-            .to_string(),
-        )
-        .expect("hook state should be written");
-
-        let reopened = Runtime::open(&database).expect("runtime should reopen");
-        assert_eq!(reopened.state.runs[0].state, RunState::Blocked);
-        assert_eq!(
-            home_view(&reopened.state, None, "2026-09-19T13:00").attention_entries[0].kind,
-            crate::domain::AttentionEntryKind::BlockedRun
-        );
     }
 
     #[test]
