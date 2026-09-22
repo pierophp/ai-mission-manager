@@ -240,6 +240,8 @@ impl GitCli {
         }
     }
 
+    // The arguments mirror the two user-facing worktree preparation modes.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_worktree_on_machine(
         &self,
         machine: &Machine,
@@ -741,6 +743,8 @@ impl GitCli {
             .ok())
     }
 
+    // Keep the Git adapter seam explicit: each option maps to one Git operation or safety check.
+    #[allow(clippy::too_many_arguments)]
     pub fn prepare_worktree(
         &self,
         repository: &Repository,
@@ -1092,6 +1096,42 @@ impl GitCli {
             Ok(None)
         }
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn machine_path_arg(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    if path == "~" {
+        "~".into()
+    } else if let Some(relative) = path.strip_prefix("~/") {
+        format!("~/{}", shell_quote(relative))
+    } else {
+        shell_quote(&path)
+    }
+}
+
+fn parse_worktree_list(output: &str) -> Vec<GitWorktreeEntry> {
+    let mut entries = Vec::new();
+    let mut path = None;
+    let mut branch = None;
+    for line in output.lines().chain(std::iter::once("")) {
+        if let Some(value) = line.strip_prefix("worktree ") {
+            path = Some(PathBuf::from(value));
+        } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
+            branch = Some(value.to_owned());
+        } else if line.is_empty() {
+            if let Some(path) = path.take() {
+                entries.push(GitWorktreeEntry {
+                    path,
+                    branch: branch.take(),
+                });
+            }
+        }
+    }
+    entries
 }
 
 #[cfg(test)]
@@ -1683,40 +1723,4 @@ mod tests {
             last_observed_at: None,
         }
     }
-}
-
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-fn machine_path_arg(path: &Path) -> String {
-    let path = path.to_string_lossy();
-    if path == "~" {
-        "~".into()
-    } else if let Some(relative) = path.strip_prefix("~/") {
-        format!("~/{}", shell_quote(relative))
-    } else {
-        shell_quote(&path)
-    }
-}
-
-fn parse_worktree_list(output: &str) -> Vec<GitWorktreeEntry> {
-    let mut entries = Vec::new();
-    let mut path = None;
-    let mut branch = None;
-    for line in output.lines().chain(std::iter::once("")) {
-        if let Some(value) = line.strip_prefix("worktree ") {
-            path = Some(PathBuf::from(value));
-        } else if let Some(value) = line.strip_prefix("branch refs/heads/") {
-            branch = Some(value.to_owned());
-        } else if line.is_empty() {
-            if let Some(path) = path.take() {
-                entries.push(GitWorktreeEntry {
-                    path,
-                    branch: branch.take(),
-                });
-            }
-        }
-    }
-    entries
 }

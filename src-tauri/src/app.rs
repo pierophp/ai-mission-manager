@@ -547,6 +547,8 @@ impl Runtime {
         Ok(repository)
     }
 
+    // Keep this orchestration seam aligned with the registration form and its Tauri command.
+    #[allow(clippy::too_many_arguments)]
     fn register_repository_at_location(
         &mut self,
         project_id: i64,
@@ -605,10 +607,9 @@ impl Runtime {
                     remote_url.as_deref(),
                 )
                 .map_err(|error| error.to_string())?;
-            let detected_remote = inspection
+            inspection
                 .remote_url
-                .ok_or_else(|| "The existing checkout has no Git remote".to_owned())?;
-            detected_remote
+                .ok_or_else(|| "The existing checkout has no Git remote".to_owned())?
         };
 
         let existing_repository_id = self
@@ -864,6 +865,9 @@ impl Runtime {
         Ok(())
     }
 
+    // These values are the complete persisted Worktree record; bundling them would obscure the
+    // one-to-one mapping with Event::CreateWorktree without reducing call-site complexity.
+    #[allow(clippy::too_many_arguments)]
     fn persist_prepared_worktree(
         &mut self,
         workspace_id: i64,
@@ -1663,7 +1667,7 @@ impl Runtime {
             .agent_executable(&machine, agent)
             .map_err(|error| format!("{}: {error}", agent_display_name(agent)))?;
         let terminal = TmuxRuntime;
-        let pane_id = match terminal.launch_agent(
+        let pane_id = terminal.launch_agent(
             &machine,
             &session_name,
             Path::new(&working_directory),
@@ -1673,10 +1677,7 @@ impl Runtime {
                 run_id,
                 state_file: &state_file,
             },
-        ) {
-            Ok(pane_id) => pane_id,
-            Err(error) => return Err(error),
-        };
+        )?;
         let decision = match decide(
             self.state.clone(),
             worktree_run_event(
@@ -1963,7 +1964,7 @@ impl Runtime {
             .iter()
             .find(|machine| machine.id == run.machine_id)
             .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-        let panes = list_panes(&machine, &run.session_name)?;
+        let panes = list_panes(machine, &run.session_name)?;
         Ok(panes
             .into_iter()
             .map(|pane| PaneTab::from_summary(&run, &run.session_name, pane, true))
@@ -3406,59 +3407,11 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
         .collect()
 }
 
-struct CheckoutReceipt {
-    root: PathBuf,
-    root_was_created: bool,
-    destinations: Vec<PathBuf>,
-}
-
-impl CheckoutReceipt {
-    fn cleanup(self) -> Result<(), String> {
-        let mut errors = Vec::new();
-        for destination in self.destinations.iter().rev() {
-            if destination.exists() {
-                if let Err(error) = fs::remove_dir_all(destination) {
-                    errors.push(format!("{}: {error}", destination.display()));
-                }
-            }
-        }
-        if self.root_was_created && self.root.exists() {
-            let is_empty = fs::read_dir(&self.root)
-                .map(|mut entries| entries.next().is_none())
-                .unwrap_or(false);
-            if is_empty {
-                if let Err(error) = fs::remove_dir(&self.root) {
-                    errors.push(format!("{}: {error}", self.root.display()));
-                }
-            }
-        }
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(format!("could not remove checkout: {}", errors.join(", ")))
-        }
-    }
-}
-
 fn format_commit_error(error: String, cleanup_error: Option<String>) -> String {
     match cleanup_error {
         Some(cleanup_error) => format!("{error}; {cleanup_error}"),
         None => error,
     }
-}
-
-fn restore_staged_directories(staged: &[(PathBuf, PathBuf)]) -> Option<String> {
-    let mut errors = Vec::new();
-    for (root, staging) in staged.iter().rev() {
-        if let Err(error) = fs::rename(staging, root) {
-            errors.push(format!(
-                "could not restore {} to {}: {error}",
-                staging.display(),
-                root.display()
-            ));
-        }
-    }
-    (!errors.is_empty()).then(|| errors.join(", "))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3481,17 +3434,6 @@ impl ParentDeletionTarget {
             Self::Context(context_id) => plan.context_id == Some(context_id),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-pub struct RepositoryRemovalReport {
-    pub repository_id: i64,
-    pub name: String,
-    pub path: String,
-    pub current_branch: String,
-    pub unpushed_commits: Vec<String>,
-    pub unpushed_commits_unknown: bool,
-    pub uncommitted_changes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -4123,6 +4065,7 @@ pub fn register_repository(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
 pub fn register_repository_at_location(
     project_id: i64,
     name: String,
@@ -5601,16 +5544,6 @@ fi
             "Git failed: {}",
             String::from_utf8_lossy(&output.stderr)
         );
-    }
-
-    fn run_git_output(directory: &Path, args: &[&str]) -> String {
-        let output = Command::new("git")
-            .current_dir(directory)
-            .args(args)
-            .output()
-            .expect("Git should start");
-        assert!(output.status.success());
-        String::from_utf8_lossy(&output.stdout).trim().to_owned()
     }
 
     fn run_tmux(args: &[&str]) -> String {

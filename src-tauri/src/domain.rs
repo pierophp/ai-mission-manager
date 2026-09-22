@@ -4170,13 +4170,40 @@ pub fn suggest_untracked_runs(
 fn path_is_within(root: &str, path: &str) -> bool {
     let root = without_macos_private_prefix(root).trim_end_matches('/');
     let path = without_macos_private_prefix(path);
-    if let Some(home_relative_root) = root.strip_prefix("~/") {
-        return path == home_relative_root
-            || path.ends_with(&format!("/{home_relative_root}"))
-            || path.ends_with(&format!("/{home_relative_root}/"))
-            || path.contains(&format!("/{home_relative_root}/"));
+    if root == "/" {
+        return true;
     }
-    root == "/" || path == root || path.starts_with(&format!("{root}/"))
+
+    if root == "~" || root.starts_with("~/") {
+        if same_or_descendant_path(root, path) {
+            return true;
+        }
+
+        let Some(home) = std::env::var("HOME").ok() else {
+            return false;
+        };
+        let home = without_macos_private_prefix(&home).trim_end_matches('/');
+        if home.is_empty() {
+            return false;
+        }
+        let Some(relative_path) = path.strip_prefix(home) else {
+            return false;
+        };
+        if !relative_path.is_empty() && !relative_path.starts_with('/') {
+            return false;
+        }
+        let home_relative_path = format!("~{relative_path}");
+        return same_or_descendant_path(root, &home_relative_path);
+    }
+
+    same_or_descendant_path(root, path)
+}
+
+fn same_or_descendant_path(root: &str, path: &str) -> bool {
+    path == root
+        || path
+            .strip_prefix(root)
+            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 fn without_macos_private_prefix(path: &str) -> &str {
@@ -4654,12 +4681,6 @@ fn normalize_workspace_repositories(
     Ok(normalized)
 }
 
-fn clean_optional_branch(branch: Option<String>) -> Result<Option<String>, DomainError> {
-    branch
-        .map(|branch| clean_name(branch, DomainError::EmptyBranch))
-        .transpose()
-}
-
 fn clean_repository_name(name: String) -> Result<String, DomainError> {
     let name = clean_name(name, DomainError::EmptyRepositoryName)?;
     if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
@@ -5056,5 +5077,20 @@ mod workspace_contract_tests {
             suggestions[0].location_path.as_deref(),
             Some("/tmp/checkouts/repo")
         );
+    }
+
+    #[test]
+    fn home_relative_paths_do_not_match_unrelated_absolute_path_components() {
+        assert!(path_is_within("~/src/repo", "~/src/repo/service"));
+        let home = std::env::var("HOME").expect("the test environment should have a home");
+        assert!(path_is_within(
+            "~/src/repo",
+            &format!("{home}/src/repo/service")
+        ));
+        assert!(!path_is_within("~/src/repo", "/tmp/src/repo/service"));
+        assert!(!path_is_within(
+            "/tmp/src/repo",
+            "/tmp/src/repository/service"
+        ));
     }
 }
