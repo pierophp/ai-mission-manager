@@ -266,6 +266,21 @@ pub fn parse_grill_question_group(transcript: &str) -> Option<GrillQuestionGroup
     (!questions.is_empty()).then_some(GrillQuestionGroup { questions })
 }
 
+/// Parse only the newly captured portion of a Pane transcript. The Terminal
+/// Runtime retains scrollback, so reparsing the whole Pane would surface an
+/// earlier question group when a downstream skill asks a new one.
+pub fn parse_grill_question_group_since(
+    previous_transcript: &str,
+    transcript: &str,
+) -> Option<GrillQuestionGroup> {
+    let previous_transcript = strip_terminal_escape_sequences(previous_transcript);
+    let transcript = strip_terminal_escape_sequences(transcript);
+    let response = transcript
+        .strip_prefix(previous_transcript.as_str())
+        .unwrap_or(transcript.as_str());
+    parse_grill_question_group(response)
+}
+
 pub fn format_grill_response(answers: &[GrillAnswer]) -> Result<String, DomainError> {
     let mut answers = answers.to_vec();
     answers.sort_by_key(|answer| answer.question_number);
@@ -4658,12 +4673,10 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 return Err(DomainError::NotGrillRun { run_id });
             }
             run.transcript = transcript;
-            if let Some(question_group) = question_group {
-                if run.grill_question_group.as_ref() != Some(&question_group) {
-                    run.grill_answers.clear();
-                    run.grill_response = None;
-                    run.grill_question_group = Some(question_group);
-                }
+            if run.grill_question_group != question_group {
+                run.grill_answers.clear();
+                run.grill_response = None;
+                run.grill_question_group = question_group;
             }
             let run = run.clone();
 
@@ -6546,6 +6559,90 @@ mod grill_contract_tests {
     }
 
     #[test]
+    fn parsing_a_later_grill_response_ignores_questions_from_the_retained_scrollback() {
+        let first_transcript = "❓ Q1: Which layout should we keep?\nA) Current\n";
+        let transcript =
+            format!("{first_transcript}1. Current\n\n❓ Q1: Confirm the specification?\n➡️ Yes\n");
+
+        let group = parse_grill_question_group_since(first_transcript, &transcript)
+            .expect("the later response should contain a question group");
+
+        assert_eq!(group.questions.len(), 1);
+        assert_eq!(group.questions[0].prompt, "Confirm the specification?");
+    }
+
+    #[test]
+    fn an_unparseable_later_grill_response_clears_the_previous_pending_group() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let first_group = parse_grill_question_group("❓ Q1: Which layout should we keep?")
+            .expect("the first response should parse");
+        let waiting = decide(
+            started.state,
+            Event::RecordRunTranscript {
+                run_id: 1,
+                transcript: "first response".into(),
+                question_group: Some(first_group),
+            },
+        )
+        .expect("the first response should be retained");
+        let pane_lost = decide(
+            waiting.state,
+            Event::SetRunPaneStatus {
+                run_id: 1,
+                status: RunPaneStatus::Missing,
+            },
+        )
+        .expect("a missing Pane should preserve the waiting Run");
+        let reconnected = decide(
+            pane_lost.state,
+            Event::SetRunPaneStatus {
+                run_id: 1,
+                status: RunPaneStatus::Available,
+            },
+        )
+        .expect("the exact Pane should be recoverable");
+        let answered = decide(
+            reconnected.state,
+            Event::RecordGrillAnswers {
+                run_id: 1,
+                answers: vec![GrillAnswer {
+                    question_number: 1,
+                    answer: "Keep current".into(),
+                }],
+            },
+        )
+        .expect("the first answer should be retained");
+        let responded = decide(
+            answered.state,
+            Event::RecordGrillResponse {
+                run_id: 1,
+                response: "1. Keep current".into(),
+            },
+        )
+        .expect("the first response should be retained");
+
+        let recaptured = decide(
+            responded.state,
+            Event::RecordRunTranscript {
+                run_id: 1,
+                transcript: "a later response with no parseable question markers".into(),
+                question_group: None,
+            },
+        )
+        .expect("an unparseable response should still be retained");
+        let run = &recaptured.state.runs[0];
+
+        assert!(run.grill_question_group.is_none());
+        assert!(run.grill_answers.is_empty());
+        assert!(run.grill_response.is_none());
+        assert_eq!(
+            run.transcript,
+            "a later response with no parseable question markers"
+        );
+    }
+
+    #[test]
     fn one_grill_answer_event_persists_a_stable_numbered_response() {
         let started = decide(state(), start_event(GrillConfiguration::default()))
             .expect("the Grill should start");
@@ -6875,6 +6972,160 @@ mod grill_contract_tests {
             Some(GrillPhase::WaitingForAnswers)
         );
         assert_eq!(recorded.state.runs[0].session_name, "mission-item-1-run-1");
+    }
+
+    #[test]
+    fn the_work_projection_keeps_one_grill_run_through_answers_recovery_and_both_downstream_skills()
+    {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let working = decide(
+            started.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Working,
+            },
+        )
+        .expect("the hook should report the active Grill");
+        let first_group = parse_grill_question_group("❓ Q1: Which decision should we keep?")
+            .expect("the first question group should parse");
+        let transcript = decide(
+            working.state,
+            Event::RecordRunTranscript {
+                run_id: 1,
+                transcript: "initial Grill response\n❓ Q1: Which decision should we keep?".into(),
+                question_group: Some(first_group),
+            },
+        )
+        .expect("the initial transcript should be retained");
+        let waiting = decide(
+            transcript.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Blocked,
+            },
+        )
+        .expect("the hook should put the Run into the waiting phase");
+        let answered = decide(
+            waiting.state,
+            Event::RecordGrillAnswers {
+                run_id: 1,
+                answers: vec![GrillAnswer {
+                    question_number: 1,
+                    answer: "Keep the reversible design".into(),
+                }],
+            },
+        )
+        .expect("the grouped answer should be persisted");
+        let responded = decide(
+            answered.state,
+            Event::RecordGrillResponse {
+                run_id: 1,
+                response: "1. Keep the reversible design".into(),
+            },
+        )
+        .expect("the grouped answer should be recorded as a response");
+        let grill_finished = decide(
+            responded.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the completed Grill should await a downstream action");
+        assert_eq!(
+            grill_finished.state.runs[0].grill_phase,
+            Some(GrillPhase::AwaitingNextAction)
+        );
+
+        let to_spec = decide(
+            grill_finished.state,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToSpec,
+            },
+        )
+        .expect("to-spec should reuse the Run");
+        let spec_finished = decide(
+            to_spec.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("to-spec should return to the downstream action frontier");
+        let spec_issue = confirmed_downstream_issue("https://github.com/acme/app/issues/7");
+        let spec_captured = decide(
+            spec_finished.state,
+            Event::CaptureDownstreamIssues {
+                run_id: 1,
+                action: GrillContinuationAction::ToSpec,
+                issues: vec![spec_issue],
+            },
+        )
+        .expect("to-spec output should link its confirmed Issue");
+
+        let to_tickets = decide(
+            spec_captured.state,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+            },
+        )
+        .expect("to-tickets should reuse the same Run");
+        let tickets_finished = decide(
+            to_tickets.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("to-tickets should return to the downstream action frontier");
+        let tickets_issue = confirmed_downstream_issue("https://github.com/acme/app/issues/8");
+        let captured = decide(
+            tickets_finished.state,
+            Event::CaptureDownstreamIssues {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                issues: vec![tickets_issue],
+            },
+        )
+        .expect("to-tickets output should link its confirmed Issue");
+
+        let view = home_view(&captured.state, None, "2026-09-22T12:00");
+        let item = view
+            .running
+            .iter()
+            .find(|item| item.item.id == 1)
+            .expect("the Item should remain in its original Work column");
+        assert_eq!(item.item.status, ItemStatus::Active);
+        assert_eq!(item.runs.len(), 1);
+        assert_eq!(item.runs[0].id, 1);
+        assert_eq!(item.runs[0].pane_id, "%1");
+        assert_eq!(item.runs[0].working_directory, "/tmp/mission-manager");
+        assert_eq!(item.links.len(), 2);
+        assert_eq!(
+            item.links
+                .iter()
+                .map(|link| link
+                    .link
+                    .provenance
+                    .as_ref()
+                    .map(|provenance| provenance.action))
+                .collect::<Vec<_>>(),
+            vec![
+                Some(GrillContinuationAction::ToSpec),
+                Some(GrillContinuationAction::ToTickets)
+            ]
+        );
+
+        let finished = decide(captured.state, Event::FinishRun { run_id: 1 })
+            .expect("finishing the Run should be explicit");
+        assert_eq!(finished.state.items[0].status, ItemStatus::Active);
+        assert_eq!(
+            finished.state.runs[0].grill_phase,
+            Some(GrillPhase::Finished)
+        );
     }
 
     #[test]

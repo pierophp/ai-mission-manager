@@ -15,7 +15,7 @@ use crate::{
         activity_tab_view, compose_grill_continuation_prompt as build_grill_continuation_prompt,
         compose_grill_prompt as build_grill_prompt, compose_run_prompt as build_run_prompt, decide,
         discover_downstream_issue_candidates, external_link_view, format_grill_response, home_view,
-        normalize_machine_path, parse_grill_question_group, plan_context_deletion,
+        normalize_machine_path, parse_grill_question_group_since, plan_context_deletion,
         plan_external_object_deletion, plan_item_deletion, plan_machine_deletion,
         plan_project_deletion, plan_repository_deletion, plan_reset_local_data, run_is_active,
         search_items, suggest_untracked_runs, worktree_path, ActivityTabView, AgentKind,
@@ -2292,7 +2292,25 @@ impl Runtime {
                 return Err(error);
             }
         };
-        let question_group = parse_grill_question_group(&transcript);
+        let captured_question_group =
+            parse_grill_question_group_since(&run.transcript, &transcript);
+        let question_group = match (run.grill_question_group.as_ref(), captured_question_group) {
+            (Some(previous), None) if run.state == RunState::Working => Some(previous.clone()),
+            (Some(previous), Some(captured))
+                if previous.questions.len() == captured.questions.len()
+                    && previous
+                        .questions
+                        .iter()
+                        .zip(captured.questions.iter())
+                        .all(|(previous, captured)| {
+                            previous.number == captured.number
+                                && captured.prompt.starts_with(&previous.prompt)
+                        }) =>
+            {
+                Some(previous.clone())
+            }
+            (_, captured) => captured,
+        };
         if run.transcript == transcript && run.grill_question_group == question_group {
             self.capture_downstream_issues(run_id, &transcript)?;
             return Ok(false);
@@ -5352,7 +5370,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::domain::{GrillPhase, GRILL_SKILL_SNAPSHOT};
+    use crate::domain::{parse_grill_question_group, GrillPhase, GRILL_SKILL_SNAPSHOT};
     use crate::persistence::SqliteStore;
 
     #[test]
