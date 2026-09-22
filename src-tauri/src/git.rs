@@ -2,6 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
 };
 
 use thiserror::Error;
@@ -57,6 +58,20 @@ pub enum GitError {
 #[derive(Debug, Clone)]
 pub struct GitCli {
     executable: PathBuf,
+    machine_shell: Arc<dyn MachineShell>,
+}
+
+trait MachineShell: std::fmt::Debug + Send + Sync {
+    fn run(&self, machine: &Machine, command: &str) -> Result<String, String>;
+}
+
+#[derive(Debug, Default)]
+struct SystemMachineShell;
+
+impl MachineShell for SystemMachineShell {
+    fn run(&self, machine: &Machine, command: &str) -> Result<String, String> {
+        run_machine_shell(machine, command)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,7 +93,21 @@ impl GitCli {
     }
 
     pub fn new(executable: PathBuf) -> Self {
-        Self { executable }
+        Self {
+            executable,
+            machine_shell: Arc::new(SystemMachineShell),
+        }
+    }
+
+    #[cfg(test)]
+    fn with_machine_shell<S>(executable: PathBuf, machine_shell: S) -> Self
+    where
+        S: MachineShell + 'static,
+    {
+        Self {
+            executable,
+            machine_shell: Arc::new(machine_shell),
+        }
     }
 
     pub fn inspect_checkout(&self, checkout_path: &Path) -> Result<CheckoutInspection, GitError> {
@@ -155,6 +184,60 @@ impl GitCli {
         }
         let destination = destination.to_string_lossy().into_owned();
         self.run("clone the repository", &["clone", remote_url, &destination])
+    }
+
+    pub fn clone_repository_on_machine(
+        &self,
+        machine: &Machine,
+        remote_url: &str,
+        destination: &Path,
+    ) -> Result<CheckoutInspection, GitError> {
+        let remote_url = remote_url.trim();
+        if remote_url.is_empty() {
+            return Err(GitError::Failed {
+                operation: "clone the repository",
+                details: "remote URL cannot be blank".into(),
+            });
+        }
+        if matches!(machine.transport, MachineTransport::Local) {
+            self.clone_repository(remote_url, destination)?;
+        } else {
+            self.remote_command(
+                machine,
+                "clone the repository",
+                &format!(
+                    "git clone {} {}",
+                    shell_quote(remote_url),
+                    machine_path_arg(destination)
+                ),
+            )?;
+        }
+        self.adopt_repository_on_machine(machine, destination, Some(remote_url))
+    }
+
+    pub fn adopt_repository_on_machine(
+        &self,
+        machine: &Machine,
+        checkout_path: &Path,
+        expected_remote_url: Option<&str>,
+    ) -> Result<CheckoutInspection, GitError> {
+        let inspection = self.inspect_checkout_on_machine(machine, checkout_path)?;
+        let Some(expected_remote_url) = expected_remote_url
+            .map(str::trim)
+            .filter(|remote_url| !remote_url.is_empty())
+        else {
+            return Ok(inspection);
+        };
+        match inspection.remote_url.as_deref() {
+            Some(actual) if actual == expected_remote_url => Ok(inspection),
+            Some(actual) => Err(GitError::RemoteMismatch {
+                expected: expected_remote_url.to_owned(),
+                actual: actual.to_owned(),
+            }),
+            None => Err(GitError::RemoteNotConfigured {
+                expected: expected_remote_url.to_owned(),
+            }),
+        }
     }
 
     pub fn prepare_worktree_on_machine(
@@ -589,16 +672,20 @@ impl GitCli {
     }
 
     fn remote_path_exists(&self, machine: &Machine, path: &Path) -> Result<bool, GitError> {
-        Ok(run_machine_shell(machine, &format!("test -e {}", machine_path_arg(path))).is_ok())
+        Ok(self
+            .machine_shell
+            .run(machine, &format!("test -e {}", machine_path_arg(path)))
+            .is_ok())
     }
 
     fn remote_canonical_path(&self, machine: &Machine, path: &Path) -> Result<PathBuf, GitError> {
-        let output =
-            run_machine_shell(machine, &format!("cd {} && pwd -P", machine_path_arg(path)))
-                .map_err(|details| GitError::Failed {
-                    operation: "canonicalize a remote Worktree path",
-                    details,
-                })?;
+        let output = self
+            .machine_shell
+            .run(machine, &format!("cd {} && pwd -P", machine_path_arg(path)))
+            .map_err(|details| GitError::Failed {
+                operation: "canonicalize a remote Worktree path",
+                details,
+            })?;
         Ok(PathBuf::from(output.trim()))
     }
 
@@ -608,7 +695,8 @@ impl GitCli {
         operation: &'static str,
         command: &str,
     ) -> Result<String, GitError> {
-        run_machine_shell(machine, command)
+        self.machine_shell
+            .run(machine, command)
             .map_err(|details| GitError::Failed { operation, details })
     }
 
@@ -644,11 +732,13 @@ impl GitCli {
         arguments: &str,
     ) -> Result<Option<String>, GitError> {
         let _ = operation;
-        Ok(run_machine_shell(
-            machine,
-            &format!("git -C {} {}", machine_path_arg(checkout_path), arguments),
-        )
-        .ok())
+        Ok(self
+            .machine_shell
+            .run(
+                machine,
+                &format!("git -C {} {}", machine_path_arg(checkout_path), arguments),
+            )
+            .ok())
     }
 
     pub fn prepare_worktree(
@@ -1060,6 +1150,55 @@ mod tests {
             .clone_repository(&path_arg(&origin), &destination)
             .expect_err("clone should reject a non-empty destination");
         assert!(matches!(error, GitError::DestinationNotEmpty { .. }));
+    }
+
+    #[test]
+    fn remote_clone_and_adoption_run_git_on_the_machine_and_validate_identity() {
+        let directory = tempdir().expect("temporary Git directory should exist");
+        let seed = directory.path().join("seed");
+        run_git(directory.path(), &["init", "--initial-branch=main", "seed"]);
+        run_git(&seed, &["config", "user.email", "test@example.com"]);
+        run_git(&seed, &["config", "user.name", "Test User"]);
+        fs::write(seed.join("README.md"), "remote\n").expect("README should be written");
+        run_git(&seed, &["add", "README.md"]);
+        run_git(&seed, &["commit", "-m", "initial"]);
+        let origin = directory.path().join("origin.git");
+        run_git(directory.path(), &["init", "--bare", "origin.git"]);
+        let origin_url = path_arg(&origin);
+        run_git(&origin, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        run_git(&seed, &["remote", "add", "origin", &origin_url]);
+        run_git(&seed, &["push", "origin", "main"]);
+
+        let remote_home = directory.path().join("remote-home");
+        fs::create_dir_all(remote_home.join("checkouts"))
+            .expect("remote checkout parent should exist");
+        let machine = test_ssh_machine();
+        let git = GitCli::with_machine_shell(
+            PathBuf::from("git"),
+            TestMachineShell {
+                home: remote_home.clone(),
+            },
+        );
+        let destination = PathBuf::from("~/checkouts/service-a");
+
+        let cloned = git
+            .clone_repository_on_machine(&machine, &origin_url, &destination)
+            .expect("the Repository should be cloned on the SSH Machine");
+        assert_eq!(cloned.remote_url, Some(origin_url.clone()));
+        assert!(remote_home.join("checkouts/service-a/.git").is_dir());
+
+        let adopted = git
+            .adopt_repository_on_machine(&machine, &destination, Some(&origin_url))
+            .expect("the remote checkout should be adoptable");
+        assert_eq!(adopted.current_branch, "main");
+
+        let error = git
+            .adopt_repository_on_machine(&machine, &destination, Some("https://wrong.example/repo"))
+            .expect_err("adoption must reject an unexpected remote identity");
+        assert!(
+            matches!(error, GitError::RemoteMismatch { expected, actual }
+            if expected == "https://wrong.example/repo" && actual == origin_url)
+        );
     }
 
     #[test]
@@ -1505,6 +1644,45 @@ mod tests {
     fn path_arg(path: &Path) -> String {
         PathBuf::from(path).to_string_lossy().into_owned()
     }
+
+    #[derive(Debug)]
+    struct TestMachineShell {
+        home: PathBuf,
+    }
+
+    impl MachineShell for TestMachineShell {
+        fn run(&self, _machine: &Machine, command: &str) -> Result<String, String> {
+            let output = Command::new("sh")
+                .args(["-lc", command])
+                .env("HOME", &self.home)
+                .output()
+                .map_err(|error| error.to_string())?;
+            if output.status.success() {
+                Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+            } else {
+                Err(String::from_utf8_lossy(&output.stderr).trim().to_owned())
+            }
+        }
+    }
+
+    fn test_ssh_machine() -> Machine {
+        Machine {
+            id: 1,
+            context_id: 1,
+            name: "Test SSH Machine".into(),
+            socket_name: "mission-manager-test".into(),
+            transport: MachineTransport::Ssh {
+                host: "test.example".into(),
+                user: Some("runner".into()),
+                port: None,
+                identity_file: None,
+                known_hosts_file: None,
+                strict_host_key_checking: Some("yes".into()),
+            },
+            last_observed: crate::domain::MachineObservation::Unknown,
+            last_observed_at: None,
+        }
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -1512,7 +1690,14 @@ fn shell_quote(value: &str) -> String {
 }
 
 fn machine_path_arg(path: &Path) -> String {
-    shell_quote(&path.to_string_lossy())
+    let path = path.to_string_lossy();
+    if path == "~" {
+        "~".into()
+    } else if let Some(relative) = path.strip_prefix("~/") {
+        format!("~/{}", shell_quote(relative))
+    } else {
+        shell_quote(&path)
+    }
 }
 
 fn parse_worktree_list(output: &str) -> Vec<GitWorktreeEntry> {

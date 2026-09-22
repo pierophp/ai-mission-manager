@@ -594,27 +594,20 @@ impl Runtime {
                 .map(str::trim)
                 .filter(|remote| !remote.is_empty())
                 .ok_or_else(|| "A remote URL is required when cloning a Repository".to_owned())?;
-            git.clone_repository(remote_url, &resolved_checkout_path)
+            git.clone_repository_on_machine(&machine, remote_url, &resolved_checkout_path)
                 .map_err(|error| error.to_string())?;
             remote_url.to_owned()
         } else {
             let inspection = git
-                .inspect_checkout(&resolved_checkout_path)
+                .adopt_repository_on_machine(
+                    &machine,
+                    &resolved_checkout_path,
+                    remote_url.as_deref(),
+                )
                 .map_err(|error| error.to_string())?;
             let detected_remote = inspection
                 .remote_url
                 .ok_or_else(|| "The existing checkout has no Git remote".to_owned())?;
-            if let Some(configured_remote) = remote_url
-                .as_deref()
-                .map(str::trim)
-                .filter(|remote| !remote.is_empty())
-            {
-                if configured_remote != detected_remote {
-                    return Err(format!(
-                        "The existing checkout remote does not match the configured Repository: {configured_remote} != {detected_remote}"
-                    ));
-                }
-            }
             detected_remote
         };
 
