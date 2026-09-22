@@ -1859,7 +1859,15 @@ fn migrate_legacy_workset_data(connection: &mut Connection) -> Result<(), StoreE
         transaction.execute("DELETE FROM worksets", [])?;
     }
     if runs_have_legacy_link {
-        transaction.execute_batch(
+        let direct_checkouts_select = if run_columns
+            .iter()
+            .any(|column| column == "direct_checkouts_json")
+        {
+            "direct_checkouts_json"
+        } else {
+            "'[]'"
+        };
+        transaction.execute_batch(&format!(
             "ALTER TABLE runs RENAME TO runs_legacy;
              CREATE TABLE runs (
                  id INTEGER PRIMARY KEY NOT NULL,
@@ -1887,10 +1895,10 @@ fn migrate_legacy_workset_data(connection: &mut Connection) -> Result<(), StoreE
              )
              SELECT id, item_id, NULL, NULL, NULL, machine_id, agent, execution_profile,
                     prompt, working_directory, session_name, pane_id, started_at,
-                    state, pane_status, direct_checkouts_json
+                    state, pane_status, {direct_checkouts_select}
              FROM runs_legacy;
-             DROP TABLE runs_legacy;",
-        )?;
+             DROP TABLE runs_legacy;"
+        ))?;
     }
     if workset_repositories_exist {
         transaction.execute_batch("DROP INDEX IF EXISTS workset_repositories_by_repository; DROP TABLE workset_repositories;")?;
@@ -2260,5 +2268,229 @@ fn parse_status(status: &str) -> Result<ItemStatus, &str> {
         "Waiting" => Ok(ItemStatus::Waiting),
         "Done" => Ok(ItemStatus::Done),
         other => Err(other),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use rusqlite::Connection;
+    use tempfile::tempdir;
+
+    use super::{migrate_legacy_workset_data, table_columns};
+
+    fn create_legacy_schema(connection: &Connection) {
+        connection
+            .execute_batch(
+                "CREATE TABLE metadata (
+                     key TEXT PRIMARY KEY NOT NULL,
+                     value INTEGER NOT NULL
+                 );
+                 INSERT INTO metadata (key, value)
+                 VALUES ('workset_migration_completed', 0);
+                 CREATE TABLE worksets (
+                     id INTEGER PRIMARY KEY NOT NULL,
+                     item_id INTEGER NOT NULL,
+                     root_directory TEXT NOT NULL,
+                     branch TEXT NOT NULL,
+                     archived INTEGER NOT NULL DEFAULT 0
+                 );
+                 CREATE TABLE workset_repositories (
+                     workset_id INTEGER NOT NULL,
+                     repository_id INTEGER NOT NULL,
+                     branch_override TEXT,
+                     base_branch_override TEXT,
+                     current_branch TEXT NOT NULL,
+                     is_dirty INTEGER NOT NULL DEFAULT 0,
+                     PRIMARY KEY (workset_id, repository_id)
+                 );
+                 CREATE TABLE external_links (
+                     item_id INTEGER NOT NULL,
+                     external_object_id INTEGER NOT NULL
+                 );
+                 CREATE TABLE activities (
+                     id INTEGER PRIMARY KEY NOT NULL,
+                     external_object_id INTEGER NOT NULL,
+                     observed_at INTEGER NOT NULL,
+                     changes_json TEXT NOT NULL
+                 );
+                 CREATE TABLE audit_entries (
+                     id INTEGER PRIMARY KEY NOT NULL,
+                     recorded_at INTEGER NOT NULL,
+                     action_json TEXT NOT NULL
+                 );
+                 CREATE TABLE items (id INTEGER PRIMARY KEY NOT NULL);
+                 CREATE TABLE workspaces (id INTEGER PRIMARY KEY NOT NULL);
+                 CREATE TABLE repositories (id INTEGER PRIMARY KEY NOT NULL);
+                 CREATE TABLE machines (id INTEGER PRIMARY KEY NOT NULL);
+                 CREATE TABLE worktrees (id INTEGER PRIMARY KEY NOT NULL);
+                 INSERT INTO items (id) VALUES (1);
+                 INSERT INTO machines (id) VALUES (1);
+                 CREATE TABLE runs (
+                     id INTEGER PRIMARY KEY NOT NULL,
+                     item_id INTEGER NOT NULL,
+                     workset_id INTEGER,
+                     workspace_id INTEGER,
+                     machine_id INTEGER NOT NULL,
+                     agent TEXT NOT NULL,
+                     execution_profile TEXT NOT NULL,
+                     prompt TEXT NOT NULL,
+                     working_directory TEXT NOT NULL,
+                     session_name TEXT NOT NULL,
+                     pane_id TEXT NOT NULL,
+                     started_at INTEGER NOT NULL,
+                     state TEXT NOT NULL DEFAULT 'unknown',
+                     pane_status TEXT NOT NULL DEFAULT 'unknown'
+                 );
+                 CREATE INDEX runs_by_workset ON runs (workset_id, id);",
+            )
+            .expect("legacy schema should be created");
+    }
+
+    #[test]
+    fn migrates_actual_legacy_runs_schema_without_direct_checkouts_column() {
+        let directory = tempdir().expect("temporary directory should exist");
+        let legacy_workset_directory = directory.path().join("legacy-workset");
+        fs::create_dir(&legacy_workset_directory).expect("legacy directory should exist");
+        fs::write(legacy_workset_directory.join("keep.txt"), "keep")
+            .expect("legacy directory marker should be written");
+
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        create_legacy_schema(&connection);
+        let legacy_workset_directory_path = legacy_workset_directory.to_string_lossy().to_string();
+        connection
+            .execute(
+                "INSERT INTO worksets (id, item_id, root_directory, branch)
+                 VALUES (1, 1, ?1, 'legacy-branch')",
+                [&legacy_workset_directory_path],
+            )
+            .expect("legacy workset should be inserted");
+        connection
+            .execute(
+                "INSERT INTO runs
+                    (id, item_id, workset_id, workspace_id, machine_id, agent,
+                     execution_profile, prompt, working_directory, session_name, pane_id,
+                     started_at)
+                 VALUES (1, 1, 1, NULL, 1, 'codex', 'implement', 'remove me', '/tmp',
+                         'session-1', '%1', 123)",
+                [],
+            )
+            .expect("legacy run should be inserted");
+        connection
+            .execute(
+                "INSERT INTO runs
+                    (id, item_id, workset_id, workspace_id, machine_id, agent,
+                     execution_profile, prompt, working_directory, session_name, pane_id,
+                     started_at)
+                 VALUES (2, 1, NULL, NULL, 1, 'codex', 'implement', 'keep me', '/tmp',
+                         'session-2', '%2', 456)",
+                [],
+            )
+            .expect("unassociated legacy run should be inserted");
+
+        migrate_legacy_workset_data(&mut connection).expect("legacy data should migrate");
+
+        assert!(table_columns(&connection, "worksets")
+            .expect("workset table lookup should succeed")
+            .is_empty());
+        assert!(table_columns(&connection, "workset_repositories")
+            .expect("workset repository table lookup should succeed")
+            .is_empty());
+        assert!(table_columns(&connection, "runs")
+            .expect("runs table lookup should succeed")
+            .contains(&"direct_checkouts_json".to_owned()));
+        let direct_checkouts: String = connection
+            .query_row(
+                "SELECT direct_checkouts_json FROM runs WHERE id = 2",
+                [],
+                |row| row.get(0),
+            )
+            .expect("surviving run should have direct checkout data");
+        assert_eq!(direct_checkouts, "[]");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM runs WHERE id = 1", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("deleted run count should be readable"),
+            0
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = 'workset_migration_completed'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("migration marker should be written"),
+            1
+        );
+        assert!(legacy_workset_directory.join("keep.txt").exists());
+    }
+
+    #[test]
+    fn rolls_back_legacy_cleanup_when_a_later_step_fails() {
+        let mut connection = Connection::open_in_memory().expect("database should open");
+        create_legacy_schema(&connection);
+        connection
+            .execute(
+                "INSERT INTO worksets (id, item_id, root_directory, branch)
+                 VALUES (1, 1, '/tmp/legacy-workset', 'legacy-branch')",
+                [],
+            )
+            .expect("legacy workset should be inserted");
+        connection
+            .execute(
+                "INSERT INTO runs
+                    (id, item_id, workset_id, workspace_id, machine_id, agent,
+                     execution_profile, prompt, working_directory, session_name, pane_id,
+                     started_at)
+                 VALUES (1, 1, 1, NULL, 1, 'codex', 'implement', 'keep me', '/tmp',
+                         'session-1', '%1', 123)",
+                [],
+            )
+            .expect("legacy run should be inserted");
+        connection
+            .execute_batch(
+                "CREATE TRIGGER fail_workset_cleanup
+                 BEFORE DELETE ON worksets
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced migration failure');
+                 END;",
+            )
+            .expect("failure trigger should be created");
+
+        let result = migrate_legacy_workset_data(&mut connection);
+        assert!(result.is_err());
+
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM worksets", [], |row| row
+                    .get::<_, i64>(0))
+                .expect("workset count should be readable"),
+            1
+        );
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM runs", [], |row| row.get::<_, i64>(0))
+                .expect("run count should be readable"),
+            1
+        );
+        assert!(table_columns(&connection, "runs")
+            .expect("runs table lookup should succeed")
+            .contains(&"workset_id".to_owned()));
+        assert!(!table_columns(&connection, "runs")
+            .expect("runs table lookup should succeed")
+            .contains(&"direct_checkouts_json".to_owned()));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT value FROM metadata WHERE key = 'workset_migration_completed'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("migration marker should be readable"),
+            0
+        );
     }
 }
