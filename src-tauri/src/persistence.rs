@@ -1803,49 +1803,6 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     Ok(())
 }
 
-fn migrate_runs_for_workspace_execution(connection: &mut Connection) -> Result<(), StoreError> {
-    let columns = table_columns(connection, "runs")?;
-    if columns.is_empty() || columns.iter().any(|column| column == "workspace_id") {
-        return Ok(());
-    }
-
-    connection.execute_batch(
-        "ALTER TABLE runs RENAME TO runs_legacy;
-         CREATE TABLE runs (
-             id INTEGER PRIMARY KEY NOT NULL,
-             item_id INTEGER NOT NULL REFERENCES items(id),
-             workset_id INTEGER REFERENCES worksets(id),
-             workspace_id INTEGER REFERENCES workspaces(id),
-             repository_id INTEGER REFERENCES repositories(id),
-             worktree_id INTEGER REFERENCES worktrees(id),
-             machine_id INTEGER NOT NULL REFERENCES machines(id),
-             agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
-             execution_profile TEXT NOT NULL
-                 CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom')),
-             prompt TEXT NOT NULL,
-             working_directory TEXT NOT NULL,
-             session_name TEXT NOT NULL,
-             pane_id TEXT NOT NULL,
-             started_at INTEGER NOT NULL,
-             state TEXT NOT NULL DEFAULT 'unknown',
-             pane_status TEXT NOT NULL DEFAULT 'unknown',
-             direct_checkouts_json TEXT NOT NULL DEFAULT '[]'
-         );
-         INSERT INTO runs (
-             id, item_id, workset_id, workspace_id, repository_id, worktree_id, machine_id,
-             agent, execution_profile,
-             prompt, working_directory, session_name, pane_id, started_at, state, pane_status,
-             direct_checkouts_json
-         )
-         SELECT id, item_id, workset_id, NULL, NULL, NULL, machine_id, agent, execution_profile,
-                prompt, working_directory, session_name, pane_id, started_at, state, pane_status,
-                '[]'
-         FROM runs_legacy;
-         DROP TABLE runs_legacy;",
-    )?;
-    Ok(())
-}
-
 /// Remove data owned by the legacy Workset model exactly once.
 ///
 /// This deliberately only changes SQLite state. Any old Workset directories are

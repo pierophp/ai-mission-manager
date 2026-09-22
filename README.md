@@ -18,7 +18,7 @@ The central entity is an **Item**: something you have decided to do, delegate, o
 ~~~text
 Item
 ├── Links to GitHub Issues, pull requests, or other URLs
-├── Worksets containing one or more repositories
+├── Workspaces grouping one or more repositories
 └── Runs of Claude Code or Codex inside a terminal Pane
 ~~~
 
@@ -31,7 +31,7 @@ The first vertical slice covers:
 - **Capture and organisation** — Contexts, Projects, stable MC-* Item identifiers, Inbox/Active/Waiting/Done states, notes, relationships, and cross-Context search.
 - **GitHub tracking** — paste a GitHub Issue or pull request URL, keep a cached snapshot, deduplicate External Objects, create an Issue from an editable preview, add comments, and refresh manually. Unrecognised URLs remain generic Links.
 - **Attention management** — Activity history, per-Link review watermarks, Context and Link attention policies, Watch dates, Item Reminders, and grouped Attention Entries.
-- **Worksets** — combine repositories under one working directory, configure branches, attach an existing directory without changing Git state, archive safely, and inspect uncommitted or unpushed work before removal.
+- **Workspaces and Worktrees** — group repositories logically, run against registered checkouts directly, and prepare or attach real Git Worktrees with explicit dirty-state cleanup.
 - **Agent Runs** — launch Claude Code or Codex with an explicit Execution Profile and reviewed prompt, keep Run history, attach a manually started agent only after approval, and report unknown, working, blocked, or finished state.
 - **Terminal access** — embed the real tmux Pane, send input and resize it, open the exact Pane in macOS Terminal, and recover Run associations after an app or connection restart.
 - **Remote execution** — run the same terminal flow on a remote Machine over SSH, without silently falling back to local execution.
@@ -47,8 +47,9 @@ The project uses a small, deliberate vocabulary:
 | **Item** | The user's durable unit of intent. |
 | **External Object** | A provider-owned object such as a GitHub Issue or pull request. |
 | **Link** | One Item's relationship with one External Object, including its own watch and review state. |
-| **Workset** | A persistent working directory containing one checkout per selected Repository. |
-| **Run** | One historical attempt by one agent inside a Workset. |
+| **Workspace** | A persistent logical grouping of selected Repositories for one Item. |
+| **Worktree** | A physical Git worktree for one Repository, associated with a Workspace. |
+| **Run** | One historical attempt by one agent in a Workspace checkout or Worktree. |
 | **Pane** | A terminal owned by the Terminal Runtime and associated with a Run when an agent is running there. |
 | **Needs Attention** | The unified view of changes and situations that currently require the user's involvement. |
 
@@ -109,7 +110,7 @@ npm install
 npm run tauri -- dev
 ~~~
 
-On first launch, the app creates a Personal Context with a Default Project. From there, capture an Item, add external work or a Workset when needed, and start a Run explicitly.
+On first launch, the app creates a Personal Context with a Default Project. From there, capture an Item, add external work or a Workspace when needed, and start a Run explicitly.
 
 npm run dev starts only the Vite front end. Use the Tauri command above for the complete desktop application and its Rust backend.
 

@@ -1269,9 +1269,10 @@ mod tests {
         assert_eq!(claude.session_name, "manual-session");
         assert_eq!(claude.pane_id, "%7");
 
-        let codex = parse_agent_pane_summary("manual-session\t%8\tcodex\tterminal\t/tmp/working-directory")
-            .expect("the Pane description should parse")
-            .expect("Codex should be recognized");
+        let codex =
+            parse_agent_pane_summary("manual-session\t%8\tcodex\tterminal\t/tmp/working-directory")
+                .expect("the Pane description should parse")
+                .expect("Codex should be recognized");
         assert_eq!(codex.agent, AgentKind::Codex);
 
         assert!(

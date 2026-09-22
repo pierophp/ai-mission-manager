@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     env, fs,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -2099,7 +2099,7 @@ impl Runtime {
 
     fn build_reset_local_data_preview(&self) -> Result<ResetLocalDataPreview, String> {
         let plan = plan_reset_local_data(&self.state);
-        let mut blockers = self
+        let blockers = self
             .state
             .runs
             .iter()

@@ -34,7 +34,7 @@ _Avoid_: checkout, clone, worktree
 
 **Workspace**:
 A persistent logical grouping of selected Repositories for one Item. It has no shared physical root directory; its physical isolation is represented by its Worktrees.
-_Avoid_: workset, sandbox
+_Avoid_: sandbox, checkout
 
 **Worktree**:
 One physical Git worktree for one Repository, associated with a Workspace, Machine, path, branch, and base branch.
@@ -50,12 +50,8 @@ _Avoid_: multiplexer, terminal, tmux
 An execution target reachable through the Terminal Runtime, whether the local Mac or a remote host.
 _Avoid_: host, server, node
 
-**Workset**:
-A legacy persistent multi-repository working environment representing one logical line of work: a root directory holding one independent checkout per included Repository. New execution contracts use Workspace and Worktree instead.
-_Avoid_: worktree, checkout, sandbox, workspace
-
 **Run**:
-One attempt at doing work inside a Workset by a single agent. Runs are historical records while they are retained, but finished Runs may be explicitly deleted as part of local cleanup; an active Run blocks deletion of its Item, Workset, Machine, Project, or Context.
+One attempt at doing work in a Workspace location by a single agent. A Run may use a registered Repository checkout directly or one physical Worktree. Runs are historical records while they are retained, but finished Runs may be explicitly deleted as part of local cleanup; an active Run blocks deletion of its Item, Workspace, Machine, Project, or Context.
 _Avoid_: session, job, execution, attempt
 
 **Pane**:
