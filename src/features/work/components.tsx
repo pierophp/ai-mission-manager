@@ -1817,7 +1817,7 @@ export function ItemCard({
                   <p>{grillRunPreviewError}</p>
                   <p>
                     Register this Repository&apos;s checkout for the selected Machine
-                    under Structure, then reopen the Grill Run.
+                    under Settings, then reopen the Grill Run.
                   </p>
                 </AlertDescription>
               </Alert>

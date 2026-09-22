@@ -7,12 +7,20 @@ export type StructureAction<TData> = () => Promise<TData>;
 
 export const structureActions = {
   createContext: (name: string) => () => structureAdapter.createContext(name),
+  updateContext: (contextId: number, name: string) =>
+    () => structureAdapter.updateContext(contextId, name),
   createProject: (
     name: string,
     contextId: number,
     defaultItemStatus: Parameters<typeof structureAdapter.createProject>[2],
     executionMode: Parameters<typeof structureAdapter.createProject>[3] = "worktree",
   ) => () => structureAdapter.createProject(name, contextId, defaultItemStatus, executionMode),
+  updateProject: (
+    projectId: number,
+    name: string,
+    defaultItemStatus: Parameters<typeof structureAdapter.updateProject>[2],
+    executionMode: Parameters<typeof structureAdapter.updateProject>[3] = "worktree",
+  ) => () => structureAdapter.updateProject(projectId, name, defaultItemStatus, executionMode),
   prepareProjectDeletion: (projectId: number) =>
     () => structureAdapter.prepareProjectDeletion(projectId),
   prepareContextDeletion: (contextId: number) =>
@@ -36,6 +44,14 @@ export const structureActions = {
     () => structureAdapter.registerRepository(projectId, name, remoteUrl),
   registerRepositoryAtLocation: (input: Parameters<typeof structureAdapter.registerRepositoryAtLocation>[0]) =>
     () => structureAdapter.registerRepositoryAtLocation(input),
+  updateRepositoryLocation: (input: Parameters<typeof structureAdapter.updateRepositoryLocation>[0]) =>
+    () => structureAdapter.updateRepositoryLocation(input),
+  updateRepository: (
+    repositoryId: number,
+    name: string,
+    remoteUrl: string,
+    baseBranch: string,
+  ) => () => structureAdapter.updateRepository(repositoryId, name, remoteUrl, baseBranch),
   prepareRepositoryDeletion: (repositoryId: number) =>
     () => structureAdapter.prepareRepositoryDeletion(repositoryId),
   deleteRepository: (
@@ -53,6 +69,12 @@ export const structureActions = {
     socketName: string,
     transport: Parameters<typeof structureAdapter.registerMachine>[3],
   ) => () => structureAdapter.registerMachine(contextId, name, socketName, transport),
+  updateMachine: (
+    machineId: number,
+    name: string,
+    socketName: string,
+    transport: Parameters<typeof structureAdapter.updateMachine>[3],
+  ) => () => structureAdapter.updateMachine(machineId, name, socketName, transport),
   checkMachine: (machineId: number) => () => structureAdapter.checkMachine(machineId),
   prepareMachineDeletion: (machineId: number) =>
     () => structureAdapter.prepareMachineDeletion(machineId),

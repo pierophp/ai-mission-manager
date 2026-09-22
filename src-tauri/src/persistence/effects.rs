@@ -36,6 +36,12 @@ impl SqliteStore {
                         params![next_context_id],
                     )?;
                 }
+                Effect::UpdateContext { context } => {
+                    transaction.execute(
+                        "UPDATE contexts SET name = ?1 WHERE id = ?2",
+                        params![context.name, context.id],
+                    )?;
+                }
                 Effect::PersistContextGrillDefaults { context } => {
                     transaction.execute(
                         "UPDATE contexts
@@ -70,6 +76,19 @@ impl SqliteStore {
                         params![next_project_id],
                     )?;
                 }
+                Effect::UpdateProject { project } => {
+                    transaction.execute(
+                        "UPDATE projects
+                         SET name = ?1, default_item_status = ?2, default_execution_mode = ?3
+                         WHERE id = ?4",
+                        params![
+                            project.name,
+                            item_status_as_str(project.defaults.item_status),
+                            execution_mode_as_str(project.defaults.execution_mode),
+                            project.id,
+                        ],
+                    )?;
+                }
                 Effect::PersistRepository {
                     repository,
                     next_repository_id,
@@ -93,9 +112,14 @@ impl SqliteStore {
                 Effect::UpdateRepository { repository } => {
                     transaction.execute(
                         "UPDATE repositories
-                         SET remote_url = ?1, base_branch = ?2
-                         WHERE id = ?3",
-                        params![repository.remote_url, repository.base_branch, repository.id],
+                         SET name = ?1, remote_url = ?2, base_branch = ?3
+                         WHERE id = ?4",
+                        params![
+                            repository.name,
+                            repository.remote_url,
+                            repository.base_branch,
+                            repository.id,
+                        ],
                     )?;
                 }
                 Effect::PersistRepositoryLocation { location } => {
@@ -103,6 +127,34 @@ impl SqliteStore {
                         "INSERT INTO repository_locations
                             (repository_id, machine_id, checkout_path, worktree_root)
                          VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            location.repository_id,
+                            location.machine_id,
+                            location.checkout_path,
+                            location.worktree_root,
+                        ],
+                    )?;
+                }
+                Effect::UpdateRepositoryLocation {
+                    previous_machine_id,
+                    location,
+                } => {
+                    if let Some(previous_machine_id) = previous_machine_id {
+                        if *previous_machine_id != location.machine_id {
+                            transaction.execute(
+                                "DELETE FROM repository_locations
+                                 WHERE repository_id = ?1 AND machine_id = ?2",
+                                params![location.repository_id, previous_machine_id],
+                            )?;
+                        }
+                    }
+                    transaction.execute(
+                        "INSERT INTO repository_locations
+                            (repository_id, machine_id, checkout_path, worktree_root)
+                         VALUES (?1, ?2, ?3, ?4)
+                         ON CONFLICT(repository_id, machine_id) DO UPDATE SET
+                            checkout_path = excluded.checkout_path,
+                            worktree_root = excluded.worktree_root",
                         params![
                             location.repository_id,
                             location.machine_id,
@@ -314,6 +366,23 @@ impl SqliteStore {
                     transaction.execute(
                         "UPDATE metadata SET value = ?1 WHERE key = 'next_machine_id'",
                         params![next_machine_id],
+                    )?;
+                }
+                Effect::UpdateMachine { machine } => {
+                    let transport_json =
+                        serde_json::to_string(&machine.transport).map_err(|error| {
+                            rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                        })?;
+                    transaction.execute(
+                        "UPDATE machines
+                         SET name = ?1, socket_name = ?2, transport_json = ?3
+                         WHERE id = ?4",
+                        params![
+                            machine.name,
+                            machine.socket_name,
+                            transport_json,
+                            machine.id
+                        ],
                     )?;
                 }
                 Effect::PersistMachineObservation { machine } => {

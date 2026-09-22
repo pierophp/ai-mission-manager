@@ -87,10 +87,60 @@ const workRoute = createRoute({
   component: WorkPage,
 });
 
-const structureRoute = createRoute({
+const settingsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings",
+  component: () => <StructurePage section="contexts" />,
+});
+
+const legacyStructureRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/structure",
-  component: StructurePage,
+  beforeLoad: () => {
+    throw redirect({ to: "/settings/contexts", replace: true });
+  },
+});
+
+const settingsContextsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/contexts",
+  component: () => <StructurePage section="contexts" />,
+});
+
+const settingsProjectsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/projects",
+  component: () => <StructurePage section="projects" />,
+});
+
+const settingsRepositoriesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/repositories",
+  component: () => <StructurePage section="repositories" />,
+});
+
+const settingsMachinesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/machines",
+  component: () => <StructurePage section="machines" />,
+});
+
+const settingsAttentionRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/attention",
+  component: () => <StructurePage section="attention" />,
+});
+
+const settingsGrillRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/grill",
+  component: () => <StructurePage section="grill" />,
+});
+
+const settingsResetRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/reset",
+  component: () => <StructurePage section="reset" />,
 });
 
 const activityRoute = createRoute({
@@ -105,7 +155,15 @@ const activityRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   indexRoute,
   workRoute,
-  structureRoute,
+  settingsRoute,
+  legacyStructureRoute,
+  settingsContextsRoute,
+  settingsProjectsRoute,
+  settingsRepositoriesRoute,
+  settingsMachinesRoute,
+  settingsAttentionRoute,
+  settingsGrillRoute,
+  settingsResetRoute,
   activityRoute,
 ]);
 

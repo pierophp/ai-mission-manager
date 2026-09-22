@@ -35,6 +35,8 @@ export const structureAdapter = {
   listGrillModelCatalog: () =>
     command<GrillAgentCatalog[]>("list_grill_model_catalog"),
   createContext: (name: string) => command<Context>("create_context", { name }),
+  updateContext: (contextId: number, name: string) =>
+    command<Context>("update_context", { contextId, name }),
   createProject: (
     name: string,
     contextId: number,
@@ -44,6 +46,18 @@ export const structureAdapter = {
     command<ProjectRecord>("create_project", {
       name,
       contextId,
+      defaultItemStatus,
+      executionMode,
+    }),
+  updateProject: (
+    projectId: number,
+    name: string,
+    defaultItemStatus: ItemStatus,
+    executionMode: ExecutionMode = "worktree",
+  ) =>
+    command<ProjectRecord>("update_project", {
+      projectId,
+      name,
       defaultItemStatus,
       executionMode,
     }),
@@ -93,6 +107,18 @@ export const structureAdapter = {
     }),
   registerRepository: (projectId: number, name: string, remoteUrl: string) =>
     command<Repository>("register_repository", { projectId, name, remoteUrl }),
+  updateRepository: (
+    repositoryId: number,
+    name: string,
+    remoteUrl: string,
+    baseBranch: string,
+  ) =>
+    command<Repository>("update_repository", {
+      repositoryId,
+      name,
+      remoteUrl,
+      baseBranch,
+    }),
   registerRepositoryAtLocation: (input: {
     projectId: number;
     name: string;
@@ -103,6 +129,13 @@ export const structureAdapter = {
     worktreeRoot: string | null;
     cloneIntoDestination: boolean;
   }) => command<Repository>("register_repository_at_location", input),
+  updateRepositoryLocation: (input: {
+    repositoryId: number;
+    previousMachineId: number | null;
+    machineId: number;
+    checkoutPath: string;
+    worktreeRoot: string;
+  }) => command<RepositoryLocation>("update_repository_location", input),
   prepareRepositoryDeletion: (repositoryId: number) =>
     command<RepositoryDeletionPreview>("prepare_repository_deletion", {
       repositoryId,
@@ -134,6 +167,18 @@ export const structureAdapter = {
   ) =>
     command<Machine>("register_machine", {
       contextId,
+      name,
+      socketName,
+      transport,
+    }),
+  updateMachine: (
+    machineId: number,
+    name: string,
+    socketName: string,
+    transport: MachineTransport,
+  ) =>
+    command<Machine>("update_machine", {
+      machineId,
       name,
       socketName,
       transport,

@@ -96,7 +96,9 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
             Effect::PersistContext { context, .. } => Some(AuditAction::ContextCreated {
                 context_id: context.id,
             }),
-            Effect::PersistContextGrillDefaults { .. } => None,
+            Effect::PersistContextGrillDefaults { .. }
+            | Effect::UpdateContext { .. }
+            | Effect::UpdateProject { .. } => None,
             Effect::PersistProject { project, .. } => Some(AuditAction::ProjectCreated {
                 project_id: project.id,
             }),
@@ -288,7 +290,9 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
             Effect::PersistWorktree { .. }
             | Effect::RemoveWorktree { .. }
             | Effect::UpdateRepository { .. }
-            | Effect::PersistRepositoryLocation { .. } => None,
+            | Effect::UpdateMachine { .. }
+            | Effect::PersistRepositoryLocation { .. }
+            | Effect::UpdateRepositoryLocation { .. } => None,
             Effect::PersistItemRelation { relation } => Some(AuditAction::ItemRelationChanged {
                 from_item_id: relation.from_item_id,
                 to_item_id: relation.to_item_id,

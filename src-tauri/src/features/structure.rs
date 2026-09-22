@@ -103,6 +103,14 @@ pub(crate) fn create_context(
     locked(state, |runtime| runtime.create_context(name))
 }
 
+pub(crate) fn update_context(
+    context_id: i64,
+    name: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    locked(state, |runtime| runtime.update_context(context_id, name))
+}
+
 pub(crate) fn set_context_grill_defaults(
     context_id: i64,
     defaults: crate::domain::GrillConfiguration,
@@ -132,6 +140,25 @@ pub(crate) fn create_project(
     })
 }
 
+pub(crate) fn update_project(
+    project_id: i64,
+    name: String,
+    default_item_status: crate::domain::ItemStatus,
+    execution_mode: Option<ExecutionMode>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Project, String> {
+    locked(state, |runtime| {
+        runtime.update_project(
+            project_id,
+            name,
+            ProjectDefaults {
+                item_status: default_item_status,
+                execution_mode: execution_mode.unwrap_or(ExecutionMode::Worktree),
+            },
+        )
+    })
+}
+
 pub(crate) fn register_repository(
     project_id: i64,
     name: String,
@@ -140,6 +167,18 @@ pub(crate) fn register_repository(
 ) -> Result<Repository, String> {
     locked(state, |runtime| {
         runtime.register_repository(project_id, name, remote_url)
+    })
+}
+
+pub(crate) fn update_repository(
+    repository_id: i64,
+    name: String,
+    remote_url: String,
+    base_branch: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Repository, String> {
+    locked(state, |runtime| {
+        runtime.update_repository(repository_id, name, remote_url, base_branch)
     })
 }
 
@@ -169,6 +208,25 @@ pub(crate) fn register_repository_at_location(
     })
 }
 
+pub(crate) fn update_repository_location(
+    repository_id: i64,
+    previous_machine_id: Option<i64>,
+    machine_id: i64,
+    checkout_path: String,
+    worktree_root: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<crate::domain::RepositoryLocation, String> {
+    locked(state, |runtime| {
+        runtime.update_repository_location(
+            repository_id,
+            previous_machine_id,
+            machine_id,
+            checkout_path,
+            worktree_root,
+        )
+    })
+}
+
 pub(crate) fn register_machine(
     context_id: i64,
     name: String,
@@ -178,6 +236,18 @@ pub(crate) fn register_machine(
 ) -> Result<Machine, String> {
     locked(state, |runtime| {
         runtime.register_machine(context_id, name, socket_name, transport)
+    })
+}
+
+pub(crate) fn update_machine(
+    machine_id: i64,
+    name: String,
+    socket_name: String,
+    transport: MachineTransport,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Machine, String> {
+    locked(state, |runtime| {
+        runtime.update_machine(machine_id, name, socket_name, transport)
     })
 }
 
@@ -327,6 +397,27 @@ impl Runtime {
         Ok(context)
     }
 
+    pub(crate) fn update_context(
+        &mut self,
+        context_id: i64,
+        name: String,
+    ) -> Result<Context, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::UpdateContext { context_id, name },
+        )
+        .map_err(|error| error.to_string())?;
+        let context = decision
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .cloned()
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+        self.commit(decision)?;
+        Ok(context)
+    }
+
     pub(crate) fn set_context_grill_defaults(
         &mut self,
         context_id: i64,
@@ -376,6 +467,32 @@ impl Runtime {
         Ok(project)
     }
 
+    pub(crate) fn update_project(
+        &mut self,
+        project_id: i64,
+        name: String,
+        defaults: ProjectDefaults,
+    ) -> Result<Project, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::UpdateProject {
+                project_id,
+                name,
+                defaults,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let project = decision
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == project_id)
+            .cloned()
+            .ok_or_else(|| format!("Project {project_id} does not exist"))?;
+        self.commit(decision)?;
+        Ok(project)
+    }
+
     pub(crate) fn register_repository(
         &mut self,
         project_id: i64,
@@ -397,6 +514,34 @@ impl Runtime {
             .last()
             .cloned()
             .ok_or_else(|| "Repository registration produced no Repository".to_owned())?;
+        self.commit(decision)?;
+        Ok(repository)
+    }
+
+    pub(crate) fn update_repository(
+        &mut self,
+        repository_id: i64,
+        name: String,
+        remote_url: String,
+        base_branch: String,
+    ) -> Result<Repository, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::UpdateRepository {
+                repository_id,
+                name,
+                remote_url,
+                base_branch,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let repository = decision
+            .state
+            .repositories
+            .iter()
+            .find(|repository| repository.id == repository_id)
+            .cloned()
+            .ok_or_else(|| format!("Repository {repository_id} does not exist"))?;
         self.commit(decision)?;
         Ok(repository)
     }
@@ -496,6 +641,38 @@ impl Runtime {
         Ok(repository)
     }
 
+    pub(crate) fn update_repository_location(
+        &mut self,
+        repository_id: i64,
+        previous_machine_id: Option<i64>,
+        machine_id: i64,
+        checkout_path: String,
+        worktree_root: String,
+    ) -> Result<crate::domain::RepositoryLocation, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::UpdateRepositoryLocation {
+                repository_id,
+                previous_machine_id,
+                machine_id,
+                checkout_path,
+                worktree_root,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let location = decision
+            .state
+            .repository_locations
+            .iter()
+            .find(|location| {
+                location.repository_id == repository_id && location.machine_id == machine_id
+            })
+            .cloned()
+            .ok_or_else(|| "Repository location update produced no location".to_owned())?;
+        self.commit(decision)?;
+        Ok(location)
+    }
+
     pub(crate) fn register_machine(
         &mut self,
         context_id: i64,
@@ -519,6 +696,34 @@ impl Runtime {
             .last()
             .cloned()
             .ok_or_else(|| "Machine registration produced no Machine".to_owned())?;
+        self.commit(decision)?;
+        Ok(machine)
+    }
+
+    pub(crate) fn update_machine(
+        &mut self,
+        machine_id: i64,
+        name: String,
+        socket_name: String,
+        transport: MachineTransport,
+    ) -> Result<Machine, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::UpdateMachine {
+                machine_id,
+                name,
+                socket_name,
+                transport,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let machine = decision
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
         self.commit(decision)?;
         Ok(machine)
     }

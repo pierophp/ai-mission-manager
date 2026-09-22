@@ -61,6 +61,7 @@ fn database_path(home_dir: &Path, legacy_data_dir: &Path) -> std::io::Result<Pat
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             #[cfg(debug_assertions)]
             if let Some(window) = app.get_webview_window("main") {
@@ -93,9 +94,13 @@ pub fn run() {
             app::reconcile_runs,
             app::search_items_command,
             app::create_context,
+            app::update_context,
             app::create_project,
+            app::update_project,
             app::register_repository,
+            app::update_repository,
             app::register_repository_at_location,
+            app::update_repository_location,
             app::prepare_project_deletion,
             app::delete_project,
             app::prepare_context_deletion,
@@ -103,6 +108,7 @@ pub fn run() {
             app::prepare_reset_local_data,
             app::reset_all_local_data,
             app::register_machine,
+            app::update_machine,
             app::check_machine,
             app::create_workspace,
             app::create_worktree,

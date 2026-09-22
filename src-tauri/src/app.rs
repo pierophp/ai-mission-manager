@@ -554,6 +554,17 @@ pub fn register_machine(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn update_machine(
+    machine_id: i64,
+    name: String,
+    socket_name: String,
+    transport: MachineTransport,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Machine, String> {
+    crate::features::structure::update_machine(machine_id, name, socket_name, transport, state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn check_machine(machine_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Machine, String> {
     crate::features::structure::check_machine(machine_id, state)
 }
@@ -673,6 +684,15 @@ pub fn create_context(name: String, state: State<'_, Mutex<Runtime>>) -> Result<
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn update_context(
+    context_id: i64,
+    name: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    crate::features::structure::update_context(context_id, name, state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn create_project(
     name: String,
     context_id: i64,
@@ -690,6 +710,23 @@ pub fn create_project(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn update_project(
+    project_id: i64,
+    name: String,
+    default_item_status: ItemStatus,
+    execution_mode: Option<ExecutionMode>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Project, String> {
+    crate::features::structure::update_project(
+        project_id,
+        name,
+        default_item_status,
+        execution_mode,
+        state,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn register_repository(
     project_id: i64,
     name: String,
@@ -697,6 +734,23 @@ pub fn register_repository(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Repository, String> {
     crate::features::structure::register_repository(project_id, name, remote_url, state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn update_repository(
+    repository_id: i64,
+    name: String,
+    remote_url: String,
+    base_branch: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Repository, String> {
+    crate::features::structure::update_repository(
+        repository_id,
+        name,
+        remote_url,
+        base_branch,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -721,6 +775,25 @@ pub fn register_repository_at_location(
         checkout_path,
         worktree_root,
         clone_into_destination,
+        state,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn update_repository_location(
+    repository_id: i64,
+    previous_machine_id: Option<i64>,
+    machine_id: i64,
+    checkout_path: String,
+    worktree_root: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<crate::domain::RepositoryLocation, String> {
+    crate::features::structure::update_repository_location(
+        repository_id,
+        previous_machine_id,
+        machine_id,
+        checkout_path,
+        worktree_root,
         state,
     )
 }

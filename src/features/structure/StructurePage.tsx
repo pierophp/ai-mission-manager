@@ -1,9 +1,10 @@
-import { type ChangeEvent, type FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import { open } from "@tauri-apps/plugin-dialog";
 
 import { Alert, AlertDescription } from "../../components/ui/alert";
 import { useAppShell } from "../../components/app-shell";
-import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import {
   Card,
@@ -14,6 +15,16 @@ import {
 } from "../../components/ui/card";
 import { Checkbox } from "../../components/ui/checkbox";
 import { ConfirmationDialog } from "../../components/ui/confirmation-dialog";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "../../components/ui/dialog";
 import { EmptyDescription } from "../../components/ui/empty";
 import { Input } from "../../components/ui/input";
 import {
@@ -77,7 +88,34 @@ type StructureConfirmation = {
   onConfirm: (confirmationPhrase: string) => void;
 };
 
-export function StructurePage() {
+type SettingsSection =
+  | "contexts"
+  | "projects"
+  | "repositories"
+  | "machines"
+  | "attention"
+  | "grill"
+  | "reset";
+
+type AddDialog = "context" | "project" | "repository" | "machine";
+
+type EditDialog = {
+  kind: AddDialog;
+  id: number;
+};
+
+const settingsSections = [
+  { id: "contexts", label: "Contexts", path: "/settings/contexts" },
+  { id: "projects", label: "Projects", path: "/settings/projects" },
+  { id: "repositories", label: "Repositories", path: "/settings/repositories" },
+  { id: "machines", label: "Machines", path: "/settings/machines" },
+  { id: "attention", label: "Attention defaults", path: "/settings/attention" },
+  { id: "grill", label: "Grill defaults", path: "/settings/grill" },
+  { id: "reset", label: "Reset local data", path: "/settings/reset" },
+] as const;
+
+export function StructurePage({ section }: { section: SettingsSection }) {
+  const activeSection = section;
   const { closeTerminal } = useAppShell();
   const queryClient = useQueryClient();
   const structureCommand = useStructureCommand();
@@ -112,8 +150,8 @@ export function StructurePage() {
   const [repositoryCheckoutPath, setRepositoryCheckoutPath] = useState("");
   const [repositoryWorktreeRoot, setRepositoryWorktreeRoot] = useState("~/worktrees");
   const [repositoryMachineId, setRepositoryMachineId] = useState<number>();
+  const [originalRepositoryMachineId, setOriginalRepositoryMachineId] = useState<number | null>(null);
   const [repositoryPreparation, setRepositoryPreparation] = useState<"existing" | "clone">("existing");
-  const repositoryDirectoryInput = useRef<HTMLInputElement>(null);
   const [machineName, setMachineName] = useState("");
   const [machineSocketName, setMachineSocketName] = useState(
     "ai-mission-manager",
@@ -144,6 +182,8 @@ export function StructurePage() {
   const [confirmation, setConfirmation] = useState<StructureConfirmation>();
   const [confirmationPhrase, setConfirmationPhrase] = useState("");
   const [isSaving, setIsSaving] = useState(false);
+  const [addDialog, setAddDialog] = useState<AddDialog>();
+  const [editDialog, setEditDialog] = useState<EditDialog>();
 
   const selectedProjects = projects.filter(
     (project) => project.context_id === selectedContextId,
@@ -207,19 +247,90 @@ export function StructurePage() {
     );
   }
 
+  function openEditContext(context: Context) {
+    setContextName(context.name);
+    setEditDialog({ kind: "context", id: context.id });
+    setAddDialog(undefined);
+  }
+
+  function openEditProject(project: (typeof projects)[number]) {
+    setSelectedContextId(project.context_id);
+    setSelectedProjectId(project.id);
+    setProjectName(project.name);
+    setProjectDefaultStatus(project.defaults.item_status);
+    setProjectExecutionMode(project.defaults.execution_mode);
+    setEditDialog({ kind: "project", id: project.id });
+    setAddDialog(undefined);
+  }
+
+  function openEditRepository(repository: (typeof repositories)[number]) {
+    const project = projects.find((candidate) => candidate.id === repository.project_id);
+    const location = repositoryLocations.find(
+      (candidate) => candidate.repository_id === repository.id,
+    );
+    if (project) {
+      setSelectedContextId(project.context_id);
+      setSelectedProjectId(project.id);
+    }
+    setRepositoryName(repository.name);
+    setRepositoryRemoteUrl(repository.remote_url);
+    setRepositoryBaseBranch(repository.base_branch);
+    setRepositoryPreparation("existing");
+    setRepositoryMachineId(location?.machine_id);
+    setOriginalRepositoryMachineId(location?.machine_id ?? null);
+    setRepositoryCheckoutPath(location?.checkout_path ?? "");
+    setRepositoryWorktreeRoot(location?.worktree_root ?? "~/worktrees");
+    setEditDialog({ kind: "repository", id: repository.id });
+    setAddDialog(undefined);
+  }
+
+  function openEditMachine(machine: (typeof machines)[number]) {
+    setSelectedContextId(machine.context_id);
+    setMachineName(machine.name);
+    setMachineSocketName(machine.socket_name);
+    if (machine.transport.kind === "local") {
+      setMachineKind("local");
+      setMachineHost("");
+      setMachineUser("");
+      setMachinePort("");
+      setMachineIdentityFile("");
+      setMachineKnownHostsFile("");
+      setMachineStrictHostKeyChecking("accept-new");
+    } else {
+      setMachineKind("ssh");
+      setMachineHost(machine.transport.host);
+      setMachineUser(machine.transport.user ?? "");
+      setMachinePort(machine.transport.port?.toString() ?? "");
+      setMachineIdentityFile(machine.transport.identityFile ?? "");
+      setMachineKnownHostsFile(machine.transport.knownHostsFile ?? "");
+      setMachineStrictHostKeyChecking(machine.transport.strictHostKeyChecking ?? "accept-new");
+    }
+    setEditDialog({ kind: "machine", id: machine.id });
+    setAddDialog(undefined);
+  }
+
   async function handleCreateContext(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!contextName.trim()) return;
 
+    const editingContextId = editDialog?.kind === "context" ? editDialog.id : undefined;
     setIsSaving(true);
     try {
-      const context = await structureCommand.execute(
-        structureActions.createContext(contextName.trim()),
-      );
+      const context = editingContextId
+        ? await structureCommand.execute(
+            structureActions.updateContext(editingContextId, contextName.trim()),
+          )
+        : await structureCommand.execute(
+            structureActions.createContext(contextName.trim()),
+          );
       await refreshAfterEdit();
-      setSelectedContextId(context.id);
-      setSelectedProjectId(undefined);
+      if (!editingContextId) {
+        setSelectedContextId(context.id);
+        setSelectedProjectId(undefined);
+      }
       setContextName("");
+      setAddDialog(undefined);
+      setEditDialog(undefined);
       setError(undefined);
     } catch (saveError) {
       setError(errorMessage(saveError));
@@ -230,26 +341,38 @@ export function StructurePage() {
 
   async function handleCreateProject(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedContextId || !projectName.trim()) {
+    const editingProjectId = editDialog?.kind === "project" ? editDialog.id : undefined;
+    if ((!selectedContextId && !editingProjectId) || !projectName.trim()) {
       setError("Choose a Context before creating a Project.");
       return;
     }
 
     setIsSaving(true);
     try {
-      const project = await structureCommand.execute(
-        structureActions.createProject(
-          projectName.trim(),
-          selectedContextId,
-          projectDefaultStatus,
-          projectExecutionMode,
-        ),
-      );
+      const project = editingProjectId
+        ? await structureCommand.execute(
+            structureActions.updateProject(
+              editingProjectId,
+              projectName.trim(),
+              projectDefaultStatus,
+              projectExecutionMode,
+            ),
+          )
+        : await structureCommand.execute(
+            structureActions.createProject(
+              projectName.trim(),
+              selectedContextId!,
+              projectDefaultStatus,
+              projectExecutionMode,
+            ),
+          );
       await refreshAfterEdit();
       setSelectedProjectId(project.id);
       setProjectName("");
       setProjectDefaultStatus("Inbox");
       setProjectExecutionMode("worktree");
+      setAddDialog(undefined);
+      setEditDialog(undefined);
       setError(undefined);
     } catch (saveError) {
       setError(errorMessage(saveError));
@@ -327,13 +450,8 @@ export function StructurePage() {
     }
 
     const { plan } = parentDeletionPreview;
-    setConfirmation({
-      title: "Delete Project " + plan.name + "?",
-      description:
-        "This removes the Project and its complete local dependency graph. Provider-owned Issues and pull requests are never deleted.",
-      confirmLabel: "Delete Project",
-      onConfirm: () => void executeDeleteProject(projectId, plan),
-    });
+    setParentDeletionPreview(undefined);
+    void executeDeleteProject(projectId, plan);
   }
 
   async function executeDeleteContext(
@@ -373,17 +491,61 @@ export function StructurePage() {
     }
 
     const { plan } = parentDeletionPreview;
-    setConfirmation({
-      title: "Delete Context " + plan.name + "?",
-      description:
-        "This removes the Context and its complete local dependency graph. Provider-owned Issues and pull requests are never deleted.",
-      confirmLabel: "Delete Context",
-      onConfirm: () => void executeDeleteContext(contextId, plan),
-    });
+    setParentDeletionPreview(undefined);
+    void executeDeleteContext(contextId, plan);
   }
 
   async function handleRegisterRepository(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const editingRepositoryId = editDialog?.kind === "repository" ? editDialog.id : undefined;
+    if (editingRepositoryId) {
+      if (
+        !repositoryMachineId ||
+        !repositoryName.trim() ||
+        !repositoryRemoteUrl.trim() ||
+        !repositoryCheckoutPath.trim() ||
+        !repositoryBaseBranch.trim()
+      ) {
+        setError("Provide the Repository name, remote URL, Machine, checkout path, and base branch.");
+        return;
+      }
+      setIsSaving(true);
+      try {
+        await structureCommand.execute(
+          structureActions.updateRepository(
+            editingRepositoryId,
+            repositoryName.trim(),
+            repositoryRemoteUrl.trim(),
+            repositoryBaseBranch.trim(),
+          ),
+        );
+        await structureCommand.execute(
+          structureActions.updateRepositoryLocation({
+            repositoryId: editingRepositoryId,
+            previousMachineId: originalRepositoryMachineId,
+            machineId: repositoryMachineId!,
+            checkoutPath: repositoryCheckoutPath.trim(),
+            worktreeRoot: repositoryWorktreeRoot.trim() || "~/worktrees",
+          }),
+        );
+        await refreshAfterEdit();
+        setRepositoryName("");
+        setRepositoryRemoteUrl("");
+        setRepositoryBaseBranch("main");
+        setRepositoryMachineId(undefined);
+        setOriginalRepositoryMachineId(null);
+        setRepositoryCheckoutPath("");
+        setRepositoryWorktreeRoot("~/worktrees");
+        setAddDialog(undefined);
+        setEditDialog(undefined);
+        setError(undefined);
+      } catch (saveError) {
+        setError(errorMessage(saveError));
+      } finally {
+        setIsSaving(false);
+      }
+      return;
+    }
     if (
       !selectedProjectId ||
       !repositoryMachineId ||
@@ -416,6 +578,8 @@ export function StructurePage() {
       setRepositoryBaseBranch("main");
       setRepositoryCheckoutPath("");
       setRepositoryWorktreeRoot("~/worktrees");
+      setAddDialog(undefined);
+      setEditDialog(undefined);
       setError(undefined);
     } catch (saveError) {
       setError(errorMessage(saveError));
@@ -424,14 +588,20 @@ export function StructurePage() {
     }
   }
 
-  function handleRepositoryDirectoryPick(event: ChangeEvent<HTMLInputElement>) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const selectedPath = (file as File & { path?: string }).path;
-    const relativeDirectory = file.webkitRelativePath.split("/")[0];
-    setRepositoryCheckoutPath(selectedPath ?? relativeDirectory);
-    setError(undefined);
-    event.target.value = "";
+  async function handleRepositoryDirectoryPick() {
+    try {
+      const selectedPath = await open({
+        directory: true,
+        multiple: false,
+        title: "Select repository checkout",
+      });
+      if (typeof selectedPath === "string") {
+        setRepositoryCheckoutPath(selectedPath);
+        setError(undefined);
+      }
+    } catch (pickerError) {
+      setError(errorMessage(pickerError));
+    }
   }
 
   async function handlePrepareRepositoryDeletion(repositoryId: number) {
@@ -483,18 +653,14 @@ export function StructurePage() {
     }
 
     const { plan } = repositoryDeletionPreview;
-    setConfirmation({
-      title: "Delete Repository " + plan.name + "?",
-      description:
-        "This removes the Repository record and its local Workspace records. Provider-owned data is never deleted.",
-      confirmLabel: "Delete Repository",
-      onConfirm: () => void executeDeleteRepository(repositoryId, plan),
-    });
+    setRepositoryDeletionPreview(undefined);
+    void executeDeleteRepository(repositoryId, plan);
   }
 
   async function handleRegisterMachine(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!selectedContextId || !machineName.trim() || !machineSocketName.trim()) {
+    const editingMachineId = editDialog?.kind === "machine" ? editDialog.id : undefined;
+    if ((!selectedContextId && !editingMachineId) || !machineName.trim() || !machineSocketName.trim()) {
       setError("Choose a Context and name the Machine before registering it.");
       return;
     }
@@ -515,12 +681,19 @@ export function StructurePage() {
     setIsSaving(true);
     try {
       await structureCommand.execute(
-        structureActions.registerMachine(
-          selectedContextId,
-          machineName.trim(),
-          machineSocketName.trim(),
-          transport,
-        ),
+        editingMachineId
+          ? structureActions.updateMachine(
+              editingMachineId,
+              machineName.trim(),
+              machineSocketName.trim(),
+              transport,
+            )
+          : structureActions.registerMachine(
+              selectedContextId!,
+              machineName.trim(),
+              machineSocketName.trim(),
+              transport,
+            ),
       );
       await refreshAfterEdit();
       setMachineName("");
@@ -529,6 +702,8 @@ export function StructurePage() {
       setMachinePort("");
       setMachineIdentityFile("");
       setMachineKnownHostsFile("");
+      setAddDialog(undefined);
+      setEditDialog(undefined);
       setError(undefined);
     } catch (saveError) {
       setError(errorMessage(saveError));
@@ -567,10 +742,7 @@ export function StructurePage() {
     }
   }
 
-  async function handleDeleteMachine(
-    machineId: number,
-    confirmed = false,
-  ) {
+  async function handleDeleteMachine(machineId: number) {
     if (
       !machineDeletionPreview ||
       machineDeletionPreview.plan.machineId !== machineId ||
@@ -579,18 +751,7 @@ export function StructurePage() {
       return;
     }
     const { plan } = machineDeletionPreview;
-    if (!confirmed) {
-      setConfirmation({
-        title: "Delete Machine " + plan.name + "?",
-        description: `This removes the Machine record and its ${plan.runs.length} Run record${plan.runs.length === 1 ? "" : "s"}. Panes remain owned by the Terminal Runtime.`,
-        confirmLabel: "Delete Machine",
-        onConfirm: () => {
-          void handleDeleteMachine(machineId, true);
-        },
-      });
-      return;
-    }
-
+    setMachineDeletionPreview(undefined);
     setIsSaving(true);
     try {
       const result = await structureCommand.execute(
@@ -612,18 +773,7 @@ export function StructurePage() {
     }
   }
 
-  async function handleDeleteFinishedRun(runId: number, confirmed = false) {
-    if (!confirmed) {
-      setConfirmation({
-        title: `Delete finished Run #${runId}?`,
-        description: "This removes the Run from history and cannot be undone.",
-        confirmLabel: "Delete Run",
-        onConfirm: () => {
-          void handleDeleteFinishedRun(runId, true);
-        },
-      });
-      return;
-    }
+  async function handleDeleteFinishedRun(runId: number) {
     setIsSaving(true);
     try {
       await structureCommand.execute(structureActions.deleteRun(runId));
@@ -687,6 +837,10 @@ export function StructurePage() {
   const selectedGrillModel = selectedGrillCatalog?.models.find(
     (model) => model.id === grillModel,
   );
+  const isEditingContext = editDialog?.kind === "context";
+  const isEditingProject = editDialog?.kind === "project";
+  const isEditingRepository = editDialog?.kind === "repository";
+  const isEditingMachine = editDialog?.kind === "machine";
 
   async function handlePrepareReset() {
     setIsSaving(true);
@@ -758,327 +912,276 @@ export function StructurePage() {
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
-      <Card>
-        <CardHeader className="border-b border-border/70">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <CardTitle>Contexts and Projects</CardTitle>
-              <CardDescription>
-                Define the boundaries that organize Items, Repositories, and Machines.
-              </CardDescription>
-            </div>
-            <Badge variant="secondary">{contexts.length} Contexts</Badge>
+
+      <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <aside className="h-fit rounded-xl border border-border/70 bg-card p-2" aria-label="Settings sections">
+          <div className="px-3 py-2">
+            <p className="text-xs font-bold uppercase tracking-[0.12em] text-muted-foreground">Settings</p>
+            <p className="mt-1 text-sm text-muted-foreground">Manage your work model</p>
           </div>
-        </CardHeader>
-        <CardContent className="grid gap-6 p-4 xl:grid-cols-2">
-          <EntitySection title="Contexts" description="A Context owns its Projects and Machines.">
-            <form className="grid gap-3 sm:grid-cols-[1fr_auto] sm:items-end" onSubmit={handleCreateContext}>
-              <Field label="New Context">
-                <Input value={contextName} onChange={(event) => setContextName(event.target.value)} placeholder="Work" disabled={isSaving} />
-              </Field>
-              <Button type="submit" disabled={isSaving || !contextName.trim()}>Add Context</Button>
-            </form>
-            <EntityList>
-              {contexts.length === 0 ? (
-                <EmptyDescription>No Contexts have been created yet.</EmptyDescription>
-              ) : (
-                contexts.map((context) => (
-                  <EntityRow key={context.id} title={context.name} detail={`${projects.filter((project) => project.context_id === context.id).length} Projects`}>
-                    <Button type="button" variant="outline" size="sm" disabled={isSaving} onClick={() => void handlePrepareContextDeletion(context.id)}>
-                      Review deletion
-                    </Button>
-                    {parentDeletionPreview?.plan.contextId === context.id && (
-                      <ParentDeletionPreviewCard preview={parentDeletionPreview} kind="Context" disabled={isSaving} onConfirm={() => void handleDeleteContext(context.id)} onCancel={() => setParentDeletionPreview(undefined)} />
-                    )}
-                  </EntityRow>
-                ))
-              )}
-            </EntityList>
-          </EntitySection>
+          <nav className="grid gap-1" aria-label="Settings sections">
+            {settingsSections.map(({ id, label, path }) => (
+              <Button
+                asChild
+                key={id}
+                variant="ghost"
+                className={`h-auto w-full justify-between rounded-lg px-3 py-2.5 text-left text-sm font-normal transition-colors hover:bg-secondary/60 hover:text-foreground ${
+                  section === id
+                    ? "bg-secondary font-semibold text-foreground"
+                    : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground"
+                }`}
+                aria-current={section === id ? "page" : undefined}
+              >
+                <Link to={path}>
+                  <span>{label}</span>
+                  {section === id && <span className="size-1.5 rounded-full bg-primary" aria-hidden="true" />}
+                </Link>
+              </Button>
+            ))}
+          </nav>
+        </aside>
 
-          <EntitySection title="Projects" description="Projects supply defaults for new Items.">
-            <form className="grid gap-3" onSubmit={handleCreateProject}>
-              <ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} />
-              <div className="grid gap-3 sm:grid-cols-3">
-                <Field label="New Project">
-                  <Input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="Billing" disabled={isSaving} />
-                </Field>
-                <Field label="New Item starts as">
-                  <NativeSelect value={projectDefaultStatus} onChange={(event) => setProjectDefaultStatus(event.target.value as ItemStatus)} disabled={isSaving}>
-                    {itemStatuses.map((status) => <NativeSelectOption value={status} key={status}>{status}</NativeSelectOption>)}
-                  </NativeSelect>
-                </Field>
-                <Field label="Default execution mode">
-                  <NativeSelect value={projectExecutionMode} onChange={(event) => setProjectExecutionMode(event.target.value as ExecutionMode)} disabled={isSaving}>
-                    <NativeSelectOption value="worktree">Worktree</NativeSelectOption>
-                    <NativeSelectOption value="direct">Direct checkout</NativeSelectOption>
-                  </NativeSelect>
-                </Field>
-              </div>
-              <Button type="submit" className="w-fit" disabled={isSaving || !projectName.trim() || !selectedContextId}>Add Project</Button>
-            </form>
-            <EntityList>
-              {selectedProjects.length === 0 ? (
-                <EmptyDescription>No Projects remain in this Context.</EmptyDescription>
-              ) : (
-                selectedProjects.map((project) => (
-                  <EntityRow key={project.id} title={project.name} detail={`${allItems.filter((item) => item.item.project_id === project.id).length} Items · starts ${project.defaults.item_status} · ${project.defaults.execution_mode === "worktree" ? "Worktree" : "Direct"} default`}>
-                    <Button type="button" variant="outline" size="sm" disabled={isSaving} onClick={() => void handlePrepareProjectDeletion(project.id)}>
-                      Review deletion
-                    </Button>
-                    {parentDeletionPreview?.plan.projectId === project.id && (
-                      <ParentDeletionPreviewCard preview={parentDeletionPreview} kind="Project" disabled={isSaving} onConfirm={() => void handleDeleteProject(project.id)} onCancel={() => setParentDeletionPreview(undefined)} />
-                    )}
-                  </EntityRow>
-                ))
-              )}
-            </EntityList>
-          </EntitySection>
-        </CardContent>
-      </Card>
-
-      <div className="grid gap-6 xl:grid-cols-2">
-        <Card>
-          <CardHeader className="border-b border-border/70">
-            <CardTitle>Repositories</CardTitle>
-            <CardDescription>Register a Repository identity and its checkout on a Machine.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4 p-4">
-            <form className="grid gap-3" onSubmit={handleRegisterRepository}>
-              <Field label="Project">
-                <NativeSelect value={selectedProjectId ?? ""} onChange={(event) => setSelectedProjectId(Number(event.target.value) || undefined)} disabled={isSaving || selectedProjects.length === 0}>
-                  <NativeSelectOption value="">Choose a Project</NativeSelectOption>
-                  {selectedProjects.map((project) => <NativeSelectOption value={project.id} key={project.id}>{project.name}</NativeSelectOption>)}
-                </NativeSelect>
-              </Field>
-              <Field label="Machine">
-                <NativeSelect value={repositoryMachineId ?? ""} onChange={(event) => setRepositoryMachineId(Number(event.target.value) || undefined)} disabled={isSaving || selectedMachines.length === 0}>
-                  <NativeSelectOption value="">Choose a Machine</NativeSelectOption>
-                  {selectedMachines.map((machine) => <NativeSelectOption value={machine.id} key={machine.id}>{machine.name}</NativeSelectOption>)}
-                </NativeSelect>
-              </Field>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Directory name">
-                  <Input value={repositoryName} onChange={(event) => setRepositoryName(event.target.value)} placeholder="service-a" disabled={isSaving} />
-                </Field>
-                <Field label="Preparation">
-                  <NativeSelect value={repositoryPreparation} onChange={(event) => setRepositoryPreparation(event.target.value as "existing" | "clone")} disabled={isSaving}>
-                    <NativeSelectOption value="existing">Adopt existing checkout</NativeSelectOption>
-                    <NativeSelectOption value="clone">Clone into destination</NativeSelectOption>
-                  </NativeSelect>
-                </Field>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Checkout path">
-                  <div className="flex gap-2">
-                    <Input value={repositoryCheckoutPath} onChange={(event) => setRepositoryCheckoutPath(event.target.value)} placeholder="~/src/service-a or relative/path" disabled={isSaving} />
-                    <Button type="button" variant="outline" onClick={() => repositoryDirectoryInput.current?.click()} disabled={isSaving}>Browse</Button>
-                    <input ref={(input) => { if (input) (input as HTMLInputElement & { webkitdirectory?: boolean }).webkitdirectory = true; repositoryDirectoryInput.current = input; }} type="file" className="hidden" onChange={handleRepositoryDirectoryPick} />
+        <div className="min-w-0 space-y-6">
+          {activeSection === "contexts" && (
+            <Card>
+              <CardHeader className="border-b border-border/70">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <CardTitle>Contexts</CardTitle>
+                    <CardDescription>A Context owns its Projects and Machines.</CardDescription>
                   </div>
-                </Field>
-                <Field label="Default base branch">
-                  <Input value={repositoryBaseBranch} onChange={(event) => setRepositoryBaseBranch(event.target.value)} placeholder="main" disabled={isSaving} />
-                </Field>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Remote URL">
-                  <Input value={repositoryRemoteUrl} onChange={(event) => setRepositoryRemoteUrl(event.target.value)} placeholder={repositoryPreparation === "existing" ? "Optional; detected from checkout" : "git@github.com:acme/service-a.git"} disabled={isSaving} />
-                </Field>
-                <Field label="Default Worktree root">
-                  <Input value={repositoryWorktreeRoot} onChange={(event) => setRepositoryWorktreeRoot(event.target.value)} placeholder="~/worktrees" disabled={isSaving} />
-                </Field>
-              </div>
-              <Button type="submit" className="w-fit" disabled={isSaving || !selectedProjectId || !repositoryMachineId || !repositoryName.trim() || !repositoryCheckoutPath.trim() || !repositoryBaseBranch.trim() || (repositoryPreparation === "clone" && !repositoryRemoteUrl.trim())}>Register Repository</Button>
-            </form>
-            <EntityList>
-              {selectedRepositories.length === 0 ? <EmptyDescription>No Repositories are registered under this Project.</EmptyDescription> : selectedRepositories.map((repository) => (
-                <EntityRow key={repository.id} title={repository.name} detail={`${repository.remote_url} · base ${repository.base_branch} · ${repositoryLocations.filter((location) => location.repository_id === repository.id).length} Machine location(s)`}>
-                  <Button type="button" variant="outline" size="sm" disabled={isSaving} onClick={() => void handlePrepareRepositoryDeletion(repository.id)}>Review deletion</Button>
-                  {repositoryDeletionPreview?.plan.repositoryId === repository.id && (
-                    <RepositoryDeletionPreviewCard preview={repositoryDeletionPreview} disabled={isSaving} onConfirm={() => void handleDeleteRepository(repository.id)} onCancel={() => setRepositoryDeletionPreview(undefined)} />
-                  )}
-                </EntityRow>
-              ))}
-            </EntityList>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader className="border-b border-border/70">
-            <CardTitle>Machines</CardTitle>
-            <CardDescription>Configure local or SSH execution targets for Runs.</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4 p-4">
-            <form className="grid gap-3" onSubmit={handleRegisterMachine}>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} />
-                <Field label="Name">
-                  <Input value={machineName} onChange={(event) => setMachineName(event.target.value)} placeholder="Build Mac" disabled={isSaving} />
-                </Field>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <Field label="Transport">
-                  <NativeSelect value={machineKind} onChange={(event) => setMachineKind(event.target.value as "local" | "ssh")} disabled={isSaving}>
-                    <NativeSelectOption value="ssh">SSH remote</NativeSelectOption>
-                    <NativeSelectOption value="local">Local</NativeSelectOption>
-                  </NativeSelect>
-                </Field>
-                <Field label="tmux socket">
-                  <Input value={machineSocketName} onChange={(event) => setMachineSocketName(event.target.value)} placeholder="ai-mission-manager" disabled={isSaving} />
-                </Field>
-              </div>
-              {machineKind === "ssh" && (
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <Field label="Host"><Input value={machineHost} onChange={(event) => setMachineHost(event.target.value)} placeholder="build.example.com" disabled={isSaving} /></Field>
-                  <Field label="User"><Input value={machineUser} onChange={(event) => setMachineUser(event.target.value)} placeholder="runner" disabled={isSaving} /></Field>
-                  <Field label="Port"><Input type="number" min="1" value={machinePort} onChange={(event) => setMachinePort(event.target.value)} placeholder="22" disabled={isSaving} /></Field>
-                  <Field label="Identity file"><Input value={machineIdentityFile} onChange={(event) => setMachineIdentityFile(event.target.value)} placeholder="~/.ssh/mission" disabled={isSaving} /></Field>
-                  <Field label="Known hosts file"><Input value={machineKnownHostsFile} onChange={(event) => setMachineKnownHostsFile(event.target.value)} placeholder="~/.ssh/known_hosts" disabled={isSaving} /></Field>
-                  <Field label="Host-key checking">
-                    <NativeSelect value={machineStrictHostKeyChecking} onChange={(event) => setMachineStrictHostKeyChecking(event.target.value)} disabled={isSaving}>
-                      <NativeSelectOption value="yes">Strict</NativeSelectOption>
-                      <NativeSelectOption value="accept-new">Accept new</NativeSelectOption>
-                      <NativeSelectOption value="no">Disabled</NativeSelectOption>
-                    </NativeSelect>
-                  </Field>
+                  <Dialog open={addDialog === "context" || isEditingContext} onOpenChange={(open) => { if (open) { setAddDialog("context"); setEditDialog(undefined); } else { setAddDialog(undefined); setEditDialog(undefined); } }}>
+                    <DialogTrigger asChild>
+                      <Button type="button">Add Context</Button>
+                    </DialogTrigger>
+                    <DialogContent className="sm:max-w-lg">
+                      <form className="grid gap-4" onSubmit={handleCreateContext}>
+                        <DialogHeader>
+                          <DialogTitle>{isEditingContext ? "Edit Context" : "Add Context"}</DialogTitle>
+                          <DialogDescription>{isEditingContext ? "Update the name of this Context." : "Create a new boundary for Projects, Machines, and Items."}</DialogDescription>
+                        </DialogHeader>
+                        <Field label="Context name">
+                          <Input value={contextName} onChange={(event) => setContextName(event.target.value)} placeholder="Work" disabled={isSaving} autoFocus />
+                        </Field>
+                        <DialogFooter>
+                          <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
+                          <Button type="submit" disabled={isSaving || !contextName.trim()}>{isEditingContext ? "Save changes" : "Add Context"}</Button>
+                        </DialogFooter>
+                      </form>
+                    </DialogContent>
+                  </Dialog>
                 </div>
-              )}
-              <Button type="submit" className="w-fit" disabled={isSaving || !selectedContextId || !machineName.trim() || !machineSocketName.trim() || (machineKind === "ssh" && !machineHost.trim())}>Register Machine</Button>
-            </form>
-            <EntityList>
-              {selectedMachines.length === 0 ? <EmptyDescription>No Machines are registered in this Context.</EmptyDescription> : selectedMachines.map((machine) => (
-                <EntityRow key={machine.id} title={`${machine.name} · ${machine.transport.kind === "ssh" ? "SSH" : "Local"}`} detail={`Last observed: ${machine.last_observed}${machine.last_observed_at ? ` · ${new Date(machine.last_observed_at * 1000).toLocaleString()}` : ""}`}>
-                  <div className="flex flex-wrap gap-2">
-                    <Button type="button" variant="ghost" size="sm" disabled={isSaving} onClick={() => void handleCheckMachine(machine.id)}>Check</Button>
-                    <Button type="button" variant="outline" size="sm" disabled={isSaving} onClick={() => void handlePrepareMachineDeletion(machine.id)}>Review deletion</Button>
+              </CardHeader>
+              <CardContent className="p-4">
+                <EntityList>
+                  {contexts.length === 0 ? (
+                    <EmptyDescription>No Contexts have been created yet.</EmptyDescription>
+                  ) : contexts.map((context) => (
+                    <EntityRow key={context.id} title={context.name} detail={`${projects.filter((project) => project.context_id === context.id).length} Projects`}>
+                      <Button type="button" variant="ghost" size="sm" disabled={isSaving} onClick={() => openEditContext(context)}>Edit</Button>
+                      <Button type="button" variant="outline" size="sm" disabled={isSaving} onClick={() => void handlePrepareContextDeletion(context.id)}>Delete</Button>
+                    </EntityRow>
+                  ))}
+                </EntityList>
+              </CardContent>
+            </Card>
+          )}
+
+          {activeSection === "projects" && (
+            <Card>
+              <CardHeader className="border-b border-border/70">
+                <div className="flex flex-wrap items-end justify-between gap-4">
+                  <div>
+                    <CardTitle>Projects</CardTitle>
+                    <CardDescription>Projects supply defaults for new Items.</CardDescription>
                   </div>
-                  {machineDeletionPreview?.plan.machineId === machine.id && (
-                    <MachineDeletionPreviewCard preview={machineDeletionPreview} disabled={isSaving} onConfirm={() => void handleDeleteMachine(machine.id)} onDeleteRun={(runId) => void handleDeleteFinishedRun(runId)} onCancel={() => setMachineDeletionPreview(undefined)} />
-                  )}
-                </EntityRow>
-              ))}
-            </EntityList>
-          </CardContent>
-        </Card>
+                  <div className="flex flex-wrap items-end gap-3">
+                    <ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} />
+                    <Dialog open={addDialog === "project" || isEditingProject} onOpenChange={(open) => { if (open) { setAddDialog("project"); setEditDialog(undefined); } else { setAddDialog(undefined); setEditDialog(undefined); } }}>
+                      <DialogTrigger asChild>
+                        <Button type="button" disabled={!selectedContextId}>Add Project</Button>
+                      </DialogTrigger>
+                      <DialogContent className="sm:max-w-2xl">
+                        <form className="grid gap-4" onSubmit={handleCreateProject}>
+                          <DialogHeader>
+                            <DialogTitle>{isEditingProject ? "Edit Project" : "Add Project"}</DialogTitle>
+                            <DialogDescription>{isEditingProject ? "Update this Project&apos;s name and defaults." : "Choose the Context that will own this Project and its defaults."}</DialogDescription>
+                          </DialogHeader>
+                          {!isEditingProject && <ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} />}
+                          <div className="grid gap-3 sm:grid-cols-3">
+                            <Field label="Project name"><Input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder="Billing" disabled={isSaving} autoFocus /></Field>
+                            <Field label="New Item starts as"><NativeSelect value={projectDefaultStatus} onChange={(event) => setProjectDefaultStatus(event.target.value as ItemStatus)} disabled={isSaving}>{itemStatuses.map((status) => <NativeSelectOption value={status} key={status}>{status}</NativeSelectOption>)}</NativeSelect></Field>
+                            <Field label="Default execution mode"><NativeSelect value={projectExecutionMode} onChange={(event) => setProjectExecutionMode(event.target.value as ExecutionMode)} disabled={isSaving}><NativeSelectOption value="worktree">Worktree</NativeSelectOption><NativeSelectOption value="direct">Direct checkout</NativeSelectOption></NativeSelect></Field>
+                          </div>
+                          <DialogFooter>
+                            <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
+                            <Button type="submit" disabled={isSaving || !projectName.trim() || (!selectedContextId && !isEditingProject)}>{isEditingProject ? "Save changes" : "Add Project"}</Button>
+                          </DialogFooter>
+                        </form>
+                      </DialogContent>
+                    </Dialog>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="p-4">
+                <EntityList>
+                  {selectedProjects.length === 0 ? <EmptyDescription>No Projects remain in this Context.</EmptyDescription> : selectedProjects.map((project) => (
+                    <EntityRow key={project.id} title={project.name} detail={`${allItems.filter((item) => item.item.project_id === project.id).length} Items · starts ${project.defaults.item_status} · ${project.defaults.execution_mode === "worktree" ? "Worktree" : "Direct"} default`}>
+                      <Button type="button" variant="ghost" size="sm" disabled={isSaving} onClick={() => openEditProject(project)}>Edit</Button>
+                      <Button type="button" variant="outline" size="sm" disabled={isSaving} onClick={() => void handlePrepareProjectDeletion(project.id)}>Delete</Button>
+                    </EntityRow>
+                  ))}
+                </EntityList>
+              </CardContent>
+            </Card>
+          )}
+
+          {activeSection === "repositories" && (
+            <Card>
+              <CardHeader className="border-b border-border/70">
+                <div className="flex flex-wrap items-end justify-between gap-4">
+                  <div>
+                    <CardTitle>Repositories</CardTitle>
+                    <CardDescription>Register a Repository identity and its checkout on a Machine.</CardDescription>
+                  </div>
+                  <div className="flex flex-wrap items-end gap-3">
+                    <ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} />
+                    <Field label="Project"><NativeSelect value={selectedProjectId ?? ""} onChange={(event) => setSelectedProjectId(Number(event.target.value) || undefined)} disabled={isSaving || selectedProjects.length === 0}><NativeSelectOption value="">Choose a Project</NativeSelectOption>{selectedProjects.map((project) => <NativeSelectOption value={project.id} key={project.id}>{project.name}</NativeSelectOption>)}</NativeSelect></Field>
+                    <Dialog open={addDialog === "repository" || isEditingRepository} onOpenChange={(open) => { if (open) { setAddDialog("repository"); setEditDialog(undefined); } else { setAddDialog(undefined); setEditDialog(undefined); } }}>
+                      <DialogTrigger asChild><Button type="button" disabled={!selectedProjectId || !repositoryMachineId}>Add Repository</Button></DialogTrigger>
+                      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+                        <form className="grid gap-4" onSubmit={handleRegisterRepository}>
+                          <DialogHeader><DialogTitle>{isEditingRepository ? "Edit Repository" : "Add Repository"}</DialogTitle><DialogDescription>{isEditingRepository ? "Update this Repository&apos;s identity and checkout location." : "Register the checkout that a Project will use on a Machine."}</DialogDescription></DialogHeader>
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <Field label="Project"><NativeSelect value={selectedProjectId ?? ""} onChange={(event) => setSelectedProjectId(Number(event.target.value) || undefined)} disabled={isSaving || isEditingRepository || selectedProjects.length === 0}><NativeSelectOption value="">Choose a Project</NativeSelectOption>{selectedProjects.map((project) => <NativeSelectOption value={project.id} key={project.id}>{project.name}</NativeSelectOption>)}</NativeSelect></Field>
+                            <Field label="Machine"><NativeSelect value={repositoryMachineId ?? ""} onChange={(event) => setRepositoryMachineId(Number(event.target.value) || undefined)} disabled={isSaving || selectedMachines.length === 0}><NativeSelectOption value="">Choose a Machine</NativeSelectOption>{selectedMachines.map((machine) => <NativeSelectOption value={machine.id} key={machine.id}>{machine.name}</NativeSelectOption>)}</NativeSelect></Field>
+                          </div>
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <Field label={isEditingRepository ? "Repository name" : "Directory name"}><Input value={repositoryName} onChange={(event) => setRepositoryName(event.target.value)} placeholder="service-a" disabled={isSaving} autoFocus /></Field>
+                            <Field label="Preparation"><NativeSelect value={repositoryPreparation} onChange={(event) => setRepositoryPreparation(event.target.value as "existing" | "clone")} disabled={isSaving || isEditingRepository}><NativeSelectOption value="existing">Adopt existing checkout</NativeSelectOption><NativeSelectOption value="clone">Clone into destination</NativeSelectOption></NativeSelect></Field>
+                          </div>
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <Field label="Checkout path"><div className="flex gap-2"><Input value={repositoryCheckoutPath} onChange={(event) => setRepositoryCheckoutPath(event.target.value)} placeholder="~/src/service-a or relative/path" disabled={isSaving} /><Button type="button" variant="outline" onClick={() => void handleRepositoryDirectoryPick()} disabled={isSaving}>Browse</Button></div></Field>
+                            <Field label="Default base branch"><Input value={repositoryBaseBranch} onChange={(event) => setRepositoryBaseBranch(event.target.value)} placeholder="main" disabled={isSaving} /></Field>
+                          </div>
+                          <div className="grid gap-3 sm:grid-cols-2">
+                            <Field label="Remote URL"><Input value={repositoryRemoteUrl} onChange={(event) => setRepositoryRemoteUrl(event.target.value)} placeholder={repositoryPreparation === "existing" ? "Optional; detected from checkout" : "git@github.com:acme/service-a.git"} disabled={isSaving} /></Field>
+                            <Field label="Default Worktree root"><Input value={repositoryWorktreeRoot} onChange={(event) => setRepositoryWorktreeRoot(event.target.value)} placeholder="~/worktrees" disabled={isSaving} /></Field>
+                          </div>
+                          <DialogFooter><DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose><Button type="submit" disabled={isSaving || (isEditingRepository ? !repositoryName.trim() || !repositoryRemoteUrl.trim() || !repositoryMachineId || !repositoryCheckoutPath.trim() || !repositoryBaseBranch.trim() : !selectedProjectId || !repositoryMachineId || !repositoryName.trim() || !repositoryCheckoutPath.trim() || !repositoryBaseBranch.trim() || (repositoryPreparation === "clone" && !repositoryRemoteUrl.trim()))}>{isEditingRepository ? "Save changes" : "Add Repository"}</Button></DialogFooter>
+                        </form>
+                      </DialogContent>
+                    </Dialog>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="p-4">
+                <EntityList>
+                  {selectedRepositories.length === 0 ? <EmptyDescription>No Repositories are registered under this Project.</EmptyDescription> : selectedRepositories.map((repository) => (
+                    <EntityRow key={repository.id} title={repository.name} detail={`${repository.remote_url} · base ${repository.base_branch} · ${repositoryLocations.filter((location) => location.repository_id === repository.id).length} Machine location(s)`}>
+                      <Button type="button" variant="ghost" size="sm" disabled={isSaving} onClick={() => openEditRepository(repository)}>Edit</Button>
+                      <Button type="button" variant="outline" size="sm" disabled={isSaving} onClick={() => void handlePrepareRepositoryDeletion(repository.id)}>Delete</Button>
+                    </EntityRow>
+                  ))}
+                </EntityList>
+              </CardContent>
+            </Card>
+          )}
+
+          {activeSection === "machines" && (
+            <Card>
+              <CardHeader className="border-b border-border/70">
+                <div className="flex flex-wrap items-end justify-between gap-4">
+                  <div><CardTitle>Machines</CardTitle><CardDescription>Configure local or SSH execution targets for Runs.</CardDescription></div>
+                  <div className="flex flex-wrap items-end gap-3">
+                    <ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} />
+                    <Dialog open={addDialog === "machine" || isEditingMachine} onOpenChange={(open) => { if (open) { setAddDialog("machine"); setEditDialog(undefined); } else { setAddDialog(undefined); setEditDialog(undefined); } }}>
+                      <DialogTrigger asChild><Button type="button" disabled={!selectedContextId}>Add Machine</Button></DialogTrigger>
+                      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+                        <form className="grid gap-4" onSubmit={handleRegisterMachine}>
+                          <DialogHeader><DialogTitle>{isEditingMachine ? "Edit Machine" : "Add Machine"}</DialogTitle><DialogDescription>{isEditingMachine ? "Update this Machine&apos;s connection settings." : "Configure a local or SSH execution target for Runs."}</DialogDescription></DialogHeader>
+                          <div className="grid gap-3 sm:grid-cols-2">{!isEditingMachine && <ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} />}<Field label="Name"><Input value={machineName} onChange={(event) => setMachineName(event.target.value)} placeholder="Build Mac" disabled={isSaving} autoFocus /></Field></div>
+                          <div className="grid gap-3 sm:grid-cols-2"><Field label="Transport"><NativeSelect value={machineKind} onChange={(event) => setMachineKind(event.target.value as "local" | "ssh")} disabled={isSaving}><NativeSelectOption value="ssh">SSH remote</NativeSelectOption><NativeSelectOption value="local">Local</NativeSelectOption></NativeSelect></Field><Field label="tmux socket"><Input value={machineSocketName} onChange={(event) => setMachineSocketName(event.target.value)} placeholder="ai-mission-manager" disabled={isSaving} /></Field></div>
+                          {machineKind === "ssh" && <div className="grid gap-3 sm:grid-cols-2"><Field label="Host"><Input value={machineHost} onChange={(event) => setMachineHost(event.target.value)} placeholder="build.example.com" disabled={isSaving} /></Field><Field label="User"><Input value={machineUser} onChange={(event) => setMachineUser(event.target.value)} placeholder="runner" disabled={isSaving} /></Field><Field label="Port"><Input type="number" min="1" value={machinePort} onChange={(event) => setMachinePort(event.target.value)} placeholder="22" disabled={isSaving} /></Field><Field label="Identity file"><Input value={machineIdentityFile} onChange={(event) => setMachineIdentityFile(event.target.value)} placeholder="~/.ssh/mission" disabled={isSaving} /></Field><Field label="Known hosts file"><Input value={machineKnownHostsFile} onChange={(event) => setMachineKnownHostsFile(event.target.value)} placeholder="~/.ssh/known_hosts" disabled={isSaving} /></Field><Field label="Host-key checking"><NativeSelect value={machineStrictHostKeyChecking} onChange={(event) => setMachineStrictHostKeyChecking(event.target.value)} disabled={isSaving}><NativeSelectOption value="yes">Strict</NativeSelectOption><NativeSelectOption value="accept-new">Accept new</NativeSelectOption><NativeSelectOption value="no">Disabled</NativeSelectOption></NativeSelect></Field></div>}
+                          <DialogFooter><DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose><Button type="submit" disabled={isSaving || (!selectedContextId && !isEditingMachine) || !machineName.trim() || !machineSocketName.trim() || (machineKind === "ssh" && !machineHost.trim())}>{isEditingMachine ? "Save changes" : "Add Machine"}</Button></DialogFooter>
+                        </form>
+                      </DialogContent>
+                    </Dialog>
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="p-4">
+                <EntityList>
+                  {selectedMachines.length === 0 ? <EmptyDescription>No Machines are registered in this Context.</EmptyDescription> : selectedMachines.map((machine) => (
+                    <EntityRow key={machine.id} title={`${machine.name} · ${machine.transport.kind === "ssh" ? "SSH" : "Local"}`} detail={`Last observed: ${machine.last_observed}${machine.last_observed_at ? ` · ${new Date(machine.last_observed_at * 1000).toLocaleString()}` : ""}`}>
+                      <div className="flex flex-wrap gap-2"><Button type="button" variant="ghost" size="sm" disabled={isSaving} onClick={() => openEditMachine(machine)}>Edit</Button><Button type="button" variant="ghost" size="sm" disabled={isSaving} onClick={() => void handleCheckMachine(machine.id)}>Check</Button><Button type="button" variant="outline" size="sm" disabled={isSaving} onClick={() => void handlePrepareMachineDeletion(machine.id)}>Delete</Button></div>
+                    </EntityRow>
+                  ))}
+                </EntityList>
+              </CardContent>
+            </Card>
+          )}
+
+          {activeSection === "attention" && <Card><CardHeader className="border-b border-border/70"><CardTitle>Attention defaults</CardTitle><CardDescription>Choose which External Object changes interrupt Links in a Context.</CardDescription></CardHeader><CardContent className="space-y-4 p-4"><form className="grid gap-4 lg:grid-cols-[1fr_1fr_2fr_auto] lg:items-end" onSubmit={saveAttentionDefault}><ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} /><Field label="External Object type"><NativeSelect value={attentionObjectKind} onChange={(event) => setAttentionObjectKind(event.target.value as ExternalObjectKind)} disabled={isSaving}>{objectKinds.map((kind) => <NativeSelectOption value={kind} key={kind}>{externalObjectKindLabel(kind)}</NativeSelectOption>)}</NativeSelect></Field><div className="flex flex-wrap gap-4 pb-1">{(["title", "state", "metadata"] as const).map((kind) => <label className="flex items-center gap-2 text-sm" key={kind}><Checkbox checked={attentionDefaultPolicy[kind]} onCheckedChange={(checked) => setAttentionDefaultPolicy((current) => ({ ...current, [kind]: checked === true }))} disabled={isSaving} />{kind[0].toUpperCase() + kind.slice(1)} changes</label>)}</div><Button type="submit" disabled={isSaving || !selectedContextId}>Save defaults</Button></form></CardContent></Card>}
+
+          {activeSection === "grill" && <Card><CardHeader className="border-b border-border/70"><CardTitle>Grill defaults</CardTitle><CardDescription>Context-scoped agent, model, and effort defaults for starting a Grill Run from an Item.</CardDescription></CardHeader><CardContent className="space-y-4 p-4"><form className="grid gap-4 lg:grid-cols-[1fr_1fr_1fr_1fr_auto] lg:items-end" onSubmit={saveGrillDefaults}><ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} /><Field label="Agent"><NativeSelect value={grillAgent} onChange={(event) => { const nextAgent = event.target.value as GrillConfiguration["agent"]; const nextCatalog = grillModelCatalog.find((catalog) => catalog.agent === nextAgent); const nextModel = nextCatalog?.models[0]; setGrillAgent(nextAgent); setGrillModel(nextModel?.id ?? ""); setGrillEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || grillModelCatalog.length === 0}>{grillModelCatalog.map((catalog) => <NativeSelectOption value={catalog.agent} key={catalog.agent}>{catalog.agent === "claude" ? "Claude Code" : "Codex"}</NativeSelectOption>)}</NativeSelect></Field><Field label="Model"><NativeSelect value={grillModel} onChange={(event) => { const nextModel = selectedGrillCatalog?.models.find((model) => model.id === event.target.value); setGrillModel(event.target.value); setGrillEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || !selectedGrillCatalog}>{selectedGrillCatalog?.models.map((model) => <NativeSelectOption value={model.id} key={model.id}>{model.label} ({model.id})</NativeSelectOption>)}</NativeSelect></Field><Field label="Effort"><NativeSelect value={grillEffort} onChange={(event) => setGrillEffort(event.target.value)} disabled={isSaving || !selectedGrillModel}>{selectedGrillModel?.efforts.map((effort) => <NativeSelectOption value={effort.id} key={effort.id}>{effort.label} ({effort.id})</NativeSelectOption>)}</NativeSelect></Field><Button type="submit" disabled={isSaving || !selectedContextId || !selectedGrillModel}>Save defaults</Button></form></CardContent></Card>}
+
+          {activeSection === "reset" && <Card className="border-destructive/30 bg-destructive/5"><CardHeader><CardTitle>Reset all local data</CardTitle><CardDescription>Remove Mission Manager&apos;s local working model, cached External Objects, and Activity history. Provider-owned Issues and pull requests are never deleted.</CardDescription></CardHeader><CardContent className="space-y-4"><Button type="button" variant="destructive" disabled={isSaving} onClick={() => void handlePrepareReset()}>Review reset impact</Button>{resetLocalDataPreview && <ResetLocalDataPreviewCard preview={resetLocalDataPreview} disabled={isSaving} onConfirm={() => void handleReset()} onCancel={() => setResetLocalDataPreview(undefined)} />}</CardContent></Card>}
+        </div>
       </div>
-
-      <Card>
-        <CardHeader className="border-b border-border/70">
-          <CardTitle>Attention defaults</CardTitle>
-          <CardDescription>Choose which External Object changes interrupt Links in a Context.</CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4 p-4">
-          <form className="grid gap-4 lg:grid-cols-[1fr_1fr_2fr_auto] lg:items-end" onSubmit={saveAttentionDefault}>
-            <ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} />
-            <Field label="External Object type">
-              <NativeSelect value={attentionObjectKind} onChange={(event) => setAttentionObjectKind(event.target.value as ExternalObjectKind)} disabled={isSaving}>
-                {objectKinds.map((kind) => <NativeSelectOption value={kind} key={kind}>{externalObjectKindLabel(kind)}</NativeSelectOption>)}
-              </NativeSelect>
-            </Field>
-            <div className="flex flex-wrap gap-4 pb-1">
-              {(["title", "state", "metadata"] as const).map((kind) => (
-                <label className="flex items-center gap-2 text-sm" key={kind}>
-                  <Checkbox checked={attentionDefaultPolicy[kind]} onCheckedChange={(checked) => setAttentionDefaultPolicy((current) => ({ ...current, [kind]: checked === true }))} disabled={isSaving} />
-                  {kind[0].toUpperCase() + kind.slice(1)} changes
-                </label>
-              ))}
-            </div>
-            <Button type="submit" disabled={isSaving || !selectedContextId}>Save defaults</Button>
-          </form>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader className="border-b border-border/70">
-          <CardTitle>Grill defaults</CardTitle>
-          <CardDescription>
-            Context-scoped agent, model, and effort defaults for starting a Grill Run from an Item.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4 p-4">
-          <form
-            className="grid gap-4 lg:grid-cols-[1fr_1fr_1fr_1fr_auto] lg:items-end"
-            onSubmit={saveGrillDefaults}
-          >
-            <ContextSelect
-              contexts={contexts}
-              value={selectedContextId}
-              onChange={handleContextChange}
+      <Dialog
+        open={Boolean(
+          parentDeletionPreview ||
+            repositoryDeletionPreview ||
+            machineDeletionPreview,
+        )}
+        onOpenChange={(open) => {
+          if (!open && !isSaving) {
+            setParentDeletionPreview(undefined);
+            setRepositoryDeletionPreview(undefined);
+            setMachineDeletionPreview(undefined);
+          }
+        }}
+      >
+        <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Review deletion</DialogTitle>
+            <DialogDescription>
+              Review the local records that will be removed before confirming.
+            </DialogDescription>
+          </DialogHeader>
+          {parentDeletionPreview && (
+            <ParentDeletionPreviewCard
+              preview={parentDeletionPreview}
+              kind={parentDeletionPreview.plan.contextId !== null ? "Context" : "Project"}
               disabled={isSaving}
+              onConfirm={() =>
+                void (parentDeletionPreview.plan.contextId !== null
+                  ? handleDeleteContext(parentDeletionPreview.plan.contextId)
+                  : handleDeleteProject(parentDeletionPreview.plan.projectId!))
+              }
+              onCancel={() => setParentDeletionPreview(undefined)}
             />
-            <Field label="Agent">
-              <NativeSelect
-                value={grillAgent}
-                onChange={(event) => {
-                  const nextAgent = event.target.value as GrillConfiguration["agent"];
-                  const nextCatalog = grillModelCatalog.find(
-                    (catalog) => catalog.agent === nextAgent,
-                  );
-                  const nextModel = nextCatalog?.models[0];
-                  setGrillAgent(nextAgent);
-                  setGrillModel(nextModel?.id ?? "");
-                  setGrillEffort(nextModel?.efforts[0]?.id ?? "");
-                }}
-                disabled={isSaving || grillModelCatalog.length === 0}
-              >
-                {grillModelCatalog.map((catalog) => (
-                  <NativeSelectOption value={catalog.agent} key={catalog.agent}>
-                    {catalog.agent === "claude" ? "Claude Code" : "Codex"}
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
-            </Field>
-            <Field label="Model">
-              <NativeSelect
-                value={grillModel}
-                onChange={(event) => {
-                  const nextModel = selectedGrillCatalog?.models.find(
-                    (model) => model.id === event.target.value,
-                  );
-                  setGrillModel(event.target.value);
-                  setGrillEffort(nextModel?.efforts[0]?.id ?? "");
-                }}
-                disabled={isSaving || !selectedGrillCatalog}
-              >
-                {selectedGrillCatalog?.models.map((model) => (
-                  <NativeSelectOption value={model.id} key={model.id}>
-                    {model.label} ({model.id})
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
-            </Field>
-            <Field label="Effort">
-              <NativeSelect
-                value={grillEffort}
-                onChange={(event) => setGrillEffort(event.target.value)}
-                disabled={isSaving || !selectedGrillModel}
-              >
-                {selectedGrillModel?.efforts.map((effort) => (
-                  <NativeSelectOption value={effort.id} key={effort.id}>
-                    {effort.label} ({effort.id})
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
-            </Field>
-            <Button type="submit" disabled={isSaving || !selectedContextId || !selectedGrillModel}>
-              Save defaults
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
-
-      <Card className="border-destructive/30 bg-destructive/5">
-        <CardHeader>
-          <CardTitle>Reset all local data</CardTitle>
-          <CardDescription>
-            Remove Mission Manager&apos;s local working model, cached External Objects, and Activity history. Provider-owned Issues and pull requests are never deleted.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <Button type="button" variant="destructive" disabled={isSaving} onClick={() => void handlePrepareReset()}>Review reset impact</Button>
-          {resetLocalDataPreview && <ResetLocalDataPreviewCard preview={resetLocalDataPreview} disabled={isSaving} onConfirm={() => void handleReset()} onCancel={() => setResetLocalDataPreview(undefined)} />}
-        </CardContent>
-      </Card>
+          )}
+          {repositoryDeletionPreview && (
+            <RepositoryDeletionPreviewCard
+              preview={repositoryDeletionPreview}
+              disabled={isSaving}
+              onConfirm={() => void handleDeleteRepository(repositoryDeletionPreview.plan.repositoryId)}
+              onCancel={() => setRepositoryDeletionPreview(undefined)}
+            />
+          )}
+          {machineDeletionPreview && (
+            <MachineDeletionPreviewCard
+              preview={machineDeletionPreview}
+              disabled={isSaving}
+              onConfirm={() => void handleDeleteMachine(machineDeletionPreview.plan.machineId)}
+              onDeleteRun={(runId) => void handleDeleteFinishedRun(runId)}
+              onCancel={() => setMachineDeletionPreview(undefined)}
+            />
+          )}
+        </DialogContent>
+      </Dialog>
       {confirmation && (
         <ConfirmationDialog
           open
@@ -1118,18 +1221,6 @@ export function StructurePage() {
         </ConfirmationDialog>
       )}
     </div>
-  );
-}
-
-function EntitySection({ title, description, children }: { title: string; description: string; children: React.ReactNode }) {
-  return (
-    <section className="space-y-4" aria-labelledby={`${title.toLowerCase()}-heading`}>
-      <div>
-        <h3 id={`${title.toLowerCase()}-heading`} className="font-heading text-base font-medium">{title}</h3>
-        <p className="mt-1 text-sm text-muted-foreground">{description}</p>
-      </div>
-      {children}
-    </section>
   );
 }
 
@@ -1185,7 +1276,7 @@ function ParentDeletionPreviewCard({ preview, kind, disabled, onConfirm, onCance
       {plan.workspaces.length > 0 && <PreviewList label="Workspaces" items={plan.workspaces.map((workspace) => `Workspace #${workspace.id} · Item #${workspace.itemId}`)} />}
       {preview.blockers.length > 0 && <PreviewWarnings title="Deletion blocked" items={preview.blockers} />}
       <div className="flex flex-wrap gap-2">
-        <Button type="button" variant="destructive" disabled={disabled || preview.blockers.length > 0} onClick={onConfirm}>Confirm and delete {kind}</Button>
+        <Button type="button" variant="destructive" disabled={disabled || preview.blockers.length > 0} onClick={onConfirm}>Delete {kind}</Button>
         <Button type="button" variant="ghost" disabled={disabled} onClick={onCancel}>Cancel</Button>
       </div>
     </div>
@@ -1200,7 +1291,7 @@ function RepositoryDeletionPreviewCard({ preview, disabled, onConfirm, onCancel 
       {preview.plan.workspaces.length > 0 ? <PreviewList label="Affected Workspaces" items={preview.plan.workspaces.map((workspace) => `Workspace #${workspace.id} · Item #${workspace.itemId}`)} /> : <p>No Workspaces reference this Repository.</p>}
       {preview.blockers.length > 0 && <PreviewWarnings title="Deletion blocked" items={preview.blockers} />}
       <div className="flex flex-wrap gap-2">
-        <Button type="button" variant="destructive" disabled={disabled || preview.blockers.length > 0} onClick={onConfirm}>Confirm logical deletion</Button>
+        <Button type="button" variant="destructive" disabled={disabled || preview.blockers.length > 0} onClick={onConfirm}>Delete Repository</Button>
         <Button type="button" variant="ghost" disabled={disabled} onClick={onCancel}>Cancel</Button>
       </div>
     </div>
@@ -1216,7 +1307,7 @@ function MachineDeletionPreviewCard({ preview, disabled, onConfirm, onDeleteRun,
       {preview.plan.runs.filter((run) => run.state === "finished").map((run) => <Button key={run.id} type="button" variant="ghost" size="sm" className="w-fit" disabled={disabled} onClick={() => onDeleteRun(run.id)}>Delete finished Run #{run.id}</Button>)}
       {preview.blockers.length > 0 && <PreviewWarnings title="Deletion blocked" items={preview.blockers} />}
       <div className="flex flex-wrap gap-2">
-        <Button type="button" variant="destructive" disabled={disabled || preview.blockers.length > 0} onClick={onConfirm}>Confirm and delete Machine</Button>
+        <Button type="button" variant="destructive" disabled={disabled || preview.blockers.length > 0} onClick={onConfirm}>Delete Machine</Button>
         <Button type="button" variant="ghost" disabled={disabled} onClick={onCancel}>Cancel</Button>
       </div>
     </div>

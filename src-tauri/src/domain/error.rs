@@ -56,6 +56,8 @@ pub enum DomainError {
     RepositoryProjectMismatch { repository_id: i64, project_id: i64 },
     #[error("Repository {repository_id} has already been configured on Machine {machine_id}")]
     RepositoryLocationAlreadyExists { repository_id: i64, machine_id: i64 },
+    #[error("Repository {repository_id} has no location on Machine {machine_id}")]
+    RepositoryLocationNotFound { repository_id: i64, machine_id: i64 },
     #[error(
         "Repository {repository_id} deletion must include Workspaces {expected_workspace_ids:?}; received {provided_workspace_ids:?}"
     )]

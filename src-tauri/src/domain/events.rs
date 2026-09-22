@@ -4,12 +4,21 @@ pub enum Event {
     CreateContext {
         name: String,
     },
+    UpdateContext {
+        context_id: i64,
+        name: String,
+    },
     SetContextGrillDefaults {
         context_id: i64,
         defaults: GrillConfiguration,
     },
     CreateProject {
         context_id: i64,
+        name: String,
+        defaults: ProjectDefaults,
+    },
+    UpdateProject {
+        project_id: i64,
         name: String,
         defaults: ProjectDefaults,
     },
@@ -32,6 +41,19 @@ pub enum Event {
         machine_id: i64,
         checkout_path: String,
         worktree_root: String,
+    },
+    UpdateRepositoryLocation {
+        repository_id: i64,
+        previous_machine_id: Option<i64>,
+        machine_id: i64,
+        checkout_path: String,
+        worktree_root: String,
+    },
+    UpdateRepository {
+        repository_id: i64,
+        name: String,
+        remote_url: String,
+        base_branch: String,
     },
     ResetLocalData,
     DeleteRepository {
@@ -85,6 +107,12 @@ pub enum Event {
     },
     RegisterMachine {
         context_id: i64,
+        name: String,
+        socket_name: String,
+        transport: MachineTransport,
+    },
+    UpdateMachine {
+        machine_id: i64,
         name: String,
         socket_name: String,
         transport: MachineTransport,
@@ -262,12 +290,18 @@ pub enum Effect {
         context: Context,
         next_context_id: i64,
     },
+    UpdateContext {
+        context: Context,
+    },
     PersistContextGrillDefaults {
         context: Context,
     },
     PersistProject {
         project: Project,
         next_project_id: i64,
+    },
+    UpdateProject {
+        project: Project,
     },
     PersistRepository {
         repository: Repository,
@@ -277,6 +311,10 @@ pub enum Effect {
         repository: Repository,
     },
     PersistRepositoryLocation {
+        location: RepositoryLocation,
+    },
+    UpdateRepositoryLocation {
+        previous_machine_id: Option<i64>,
         location: RepositoryLocation,
     },
     ResetLocalData {
@@ -316,6 +354,9 @@ pub enum Effect {
     PersistMachine {
         machine: Machine,
         next_machine_id: i64,
+    },
+    UpdateMachine {
+        machine: Machine,
     },
     PersistMachineObservation {
         machine: Machine,

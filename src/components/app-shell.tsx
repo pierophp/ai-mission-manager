@@ -46,13 +46,13 @@ export function useAppShell() {
   return value;
 }
 
-type AppTab = "work" | "structure" | "activity";
+type AppTab = "work" | "settings" | "activity";
 
 const appTabs: {
   id: AppTab;
   label: string;
   description: string;
-  path: `/${AppTab}`;
+  path: "/work" | "/settings/contexts" | "/activity";
 }[] = [
   {
     id: "work",
@@ -61,10 +61,10 @@ const appTabs: {
     path: "/work",
   },
   {
-    id: "structure",
-    label: "Structure",
-    description: "Contexts, Projects, Repositories, and Machines that support your work.",
-    path: "/structure",
+    id: "settings",
+    label: "Settings",
+    description: "Contexts, Projects, Repositories, Machines, and defaults for your work.",
+    path: "/settings/contexts",
   },
   {
     id: "activity",
@@ -78,7 +78,7 @@ const outlineButtonClass =
   "border-input bg-transparent text-muted-foreground hover:border-primary hover:bg-secondary hover:text-primary";
 
 function appTabForPath(pathname: string): AppTab {
-  if (pathname === "/structure") return "structure";
+  if (pathname.startsWith("/settings")) return "settings";
   if (pathname === "/activity") return "activity";
   return "work";
 }

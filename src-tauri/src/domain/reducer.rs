@@ -51,6 +51,27 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 ],
             })
         }
+        Event::UpdateContext { context_id, name } => {
+            let name = clean_name(name, DomainError::EmptyContextName)?;
+            if state
+                .contexts
+                .iter()
+                .any(|context| context.id != context_id && context.name == name)
+            {
+                return Err(DomainError::ContextNameTaken { name });
+            }
+            let context = state
+                .contexts
+                .iter_mut()
+                .find(|context| context.id == context_id)
+                .ok_or(DomainError::ContextNotFound { context_id })?;
+            context.name = name;
+            let context = context.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::UpdateContext { context }],
+            })
+        }
         Event::SetContextGrillDefaults {
             context_id,
             defaults,
@@ -103,6 +124,41 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 }],
             })
         }
+        Event::UpdateProject {
+            project_id,
+            name,
+            defaults,
+        } => {
+            let name = clean_name(name, DomainError::EmptyProjectName)?;
+            let project_context_id = state
+                .projects
+                .iter()
+                .find(|project| project.id == project_id)
+                .ok_or(DomainError::ProjectNotFound { project_id })?
+                .context_id;
+            if state.projects.iter().any(|project| {
+                project.id != project_id
+                    && project.context_id == project_context_id
+                    && project.name == name
+            }) {
+                return Err(DomainError::ProjectNameTaken {
+                    context_id: project_context_id,
+                    name,
+                });
+            }
+            let project = state
+                .projects
+                .iter_mut()
+                .find(|project| project.id == project_id)
+                .ok_or(DomainError::ProjectNotFound { project_id })?;
+            project.name = name;
+            project.defaults = defaults;
+            let project = project.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::UpdateProject { project }],
+            })
+        }
         Event::RegisterRepository {
             project_id,
             name,
@@ -144,6 +200,42 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     repository,
                     next_repository_id,
                 }],
+            })
+        }
+        Event::UpdateRepository {
+            repository_id,
+            name,
+            remote_url,
+            base_branch,
+        } => {
+            let name = clean_repository_name(name)?;
+            let remote_url = clean_name(remote_url, DomainError::EmptyRepositoryRemoteUrl)?;
+            let base_branch = clean_name(base_branch, DomainError::EmptyRepositoryBaseBranch)?;
+            let project_id = state
+                .repositories
+                .iter()
+                .find(|repository| repository.id == repository_id)
+                .ok_or(DomainError::RepositoryNotFound { repository_id })?
+                .project_id;
+            if state.repositories.iter().any(|repository| {
+                repository.id != repository_id
+                    && repository.project_id == project_id
+                    && repository.name == name
+            }) {
+                return Err(DomainError::RepositoryNameTaken { project_id, name });
+            }
+            let repository = state
+                .repositories
+                .iter_mut()
+                .find(|repository| repository.id == repository_id)
+                .ok_or(DomainError::RepositoryNotFound { repository_id })?;
+            repository.name = name;
+            repository.remote_url = remote_url;
+            repository.base_branch = base_branch;
+            let repository = repository.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::UpdateRepository { repository }],
             })
         }
         Event::RegisterRepositoryAtLocation {
@@ -243,6 +335,78 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     },
                     Effect::PersistRepositoryLocation { location },
                 ],
+            })
+        }
+        Event::UpdateRepositoryLocation {
+            repository_id,
+            previous_machine_id,
+            machine_id,
+            checkout_path,
+            worktree_root,
+        } => {
+            let repository = state
+                .repositories
+                .iter()
+                .find(|repository| repository.id == repository_id)
+                .ok_or(DomainError::RepositoryNotFound { repository_id })?;
+            let project = state
+                .projects
+                .iter()
+                .find(|project| project.id == repository.project_id)
+                .ok_or(DomainError::ProjectNotFound {
+                    project_id: repository.project_id,
+                })?;
+            let machine = state
+                .machines
+                .iter()
+                .find(|machine| machine.id == machine_id)
+                .ok_or(DomainError::MachineNotFound { machine_id })?;
+            if machine.context_id != project.context_id {
+                return Err(DomainError::MachineContextMismatch {
+                    machine_id,
+                    context_id: project.context_id,
+                });
+            }
+            if let Some(previous_machine_id) = previous_machine_id {
+                if !state.repository_locations.iter().any(|location| {
+                    location.repository_id == repository_id
+                        && location.machine_id == previous_machine_id
+                }) {
+                    return Err(DomainError::RepositoryLocationNotFound {
+                        repository_id,
+                        machine_id: previous_machine_id,
+                    });
+                }
+            }
+            if previous_machine_id != Some(machine_id)
+                && state.repository_locations.iter().any(|location| {
+                    location.repository_id == repository_id && location.machine_id == machine_id
+                })
+            {
+                return Err(DomainError::RepositoryLocationAlreadyExists {
+                    repository_id,
+                    machine_id,
+                });
+            }
+            let location = RepositoryLocation {
+                repository_id,
+                machine_id,
+                checkout_path: clean_name(checkout_path, DomainError::EmptyRepositoryCheckoutPath)?,
+                worktree_root: clean_name(worktree_root, DomainError::EmptyRepositoryWorktreeRoot)?,
+            };
+            if let Some(previous_machine_id) = previous_machine_id {
+                state.repository_locations.retain(|candidate| {
+                    !(candidate.repository_id == repository_id
+                        && candidate.machine_id == previous_machine_id)
+                });
+            }
+            state.repository_locations.push(location.clone());
+            Ok(Decision {
+                state,
+                effects: vec![Effect::UpdateRepositoryLocation {
+                    previous_machine_id,
+                    location,
+                }],
             })
         }
         Event::ConfigureRepositoryLocation {
@@ -973,6 +1137,45 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     machine,
                     next_machine_id,
                 }],
+            })
+        }
+        Event::UpdateMachine {
+            machine_id,
+            name,
+            socket_name,
+            transport,
+        } => {
+            let machine_context_id = state
+                .machines
+                .iter()
+                .find(|machine| machine.id == machine_id)
+                .ok_or(DomainError::MachineNotFound { machine_id })?
+                .context_id;
+            let name = clean_name(name, DomainError::EmptyMachineName)?;
+            let socket_name = clean_name(socket_name, DomainError::EmptyMachineSocketName)?;
+            let transport = clean_machine_transport(transport)?;
+            if state.machines.iter().any(|machine| {
+                machine.id != machine_id
+                    && machine.context_id == machine_context_id
+                    && machine.name == name
+            }) {
+                return Err(DomainError::MachineNameTaken {
+                    context_id: machine_context_id,
+                    name,
+                });
+            }
+            let machine = state
+                .machines
+                .iter_mut()
+                .find(|machine| machine.id == machine_id)
+                .ok_or(DomainError::MachineNotFound { machine_id })?;
+            machine.name = name;
+            machine.socket_name = socket_name;
+            machine.transport = transport;
+            let machine = machine.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::UpdateMachine { machine }],
             })
         }
         Event::ObserveMachine {
