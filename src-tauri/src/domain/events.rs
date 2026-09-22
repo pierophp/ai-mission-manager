@@ -87,6 +87,10 @@ pub enum Event {
         item_id: i64,
         repositories: Vec<WorkspaceRepositoryInput>,
     },
+    SetWorkspaceRepositories {
+        workspace_id: i64,
+        repositories: Vec<WorkspaceRepositoryInput>,
+    },
     CreateWorktree {
         workspace_id: i64,
         repository_id: i64,
@@ -101,9 +105,6 @@ pub enum Event {
     },
     RemoveWorktree {
         worktree_id: i64,
-    },
-    RemoveWorkspace {
-        workspace_id: i64,
     },
     RegisterMachine {
         context_id: i64,

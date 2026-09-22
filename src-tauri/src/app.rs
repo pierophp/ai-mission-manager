@@ -21,7 +21,7 @@ use crate::{
         ExternalLinkView, ExternalObjectKind, ExternalSnapshot, GrillAnswer, GrillConfiguration,
         GrillContinuationAction, HomeView, Item, ItemRelation, ItemRelationKind, ItemStatus,
         ItemView, Machine, MachineTransport, Project, Repository, Run, RunCheckout,
-        RunPromptSelection, RunState, RunSuggestion, Workspace, WorkspaceRepositoryInput, Worktree,
+        RunPromptSelection, RunState, RunSuggestion, Worktree,
     },
     persistence::SqliteStore,
     provider::resolve_gh_executable,
@@ -32,8 +32,8 @@ pub(crate) use crate::features::deletion::{
     ExternalLinkDeletionResult, ExternalObjectDeletionPreview, ExternalObjectDeletionResult,
     ItemDeletionPreview, ItemDeletionResult, MachineDeletionPreview, MachineDeletionResult,
     ParentDeletionPreview, ParentDeletionResult, RepositoryDeletionPreview,
-    RepositoryDeletionResult, ResetLocalDataPreview, ResetLocalDataResult, WorkspaceRemovalReport,
-    WorkspaceRemovalResult, WorktreeRemovalReport, WorktreeRemovalResult,
+    RepositoryDeletionResult, ResetLocalDataPreview, ResetLocalDataResult, WorktreeRemovalReport,
+    WorktreeRemovalResult,
 };
 pub use crate::features::setup::{HealthStatus, ProviderChoice, SetupState};
 pub(crate) use crate::features::work::{ExternalLinkAction, PollResult};
@@ -43,7 +43,6 @@ pub struct Runtime {
     pub(crate) state: DomainState,
     pub(crate) gh_executable_path: Option<PathBuf>,
     pub(crate) pending_worktree_removals: HashMap<i64, WorktreeRemovalReport>,
-    pub(crate) pending_workspace_removal: Option<WorkspaceRemovalReport>,
     pub(crate) pending_item_deletion: Option<ItemDeletionPreview>,
     pub(crate) pending_external_object_deletion: Option<ExternalObjectDeletionPreview>,
     pub(crate) pending_repository_deletion: Option<RepositoryDeletionPreview>,
@@ -112,7 +111,6 @@ impl Runtime {
             state,
             gh_executable_path,
             pending_worktree_removals: HashMap::new(),
-            pending_workspace_removal: None,
             pending_item_deletion: None,
             pending_external_object_deletion: None,
             pending_repository_deletion: None,
@@ -122,6 +120,7 @@ impl Runtime {
             terminal_connections: HashMap::new(),
             agent_state_directory,
         };
+        runtime.ensure_project_workspaces()?;
         runtime.recover_run_states()?;
         Ok(runtime)
     }
@@ -873,15 +872,6 @@ pub fn reset_all_local_data(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn create_workspace(
-    item_id: i64,
-    repositories: Vec<WorkspaceRepositoryInput>,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<Workspace, String> {
-    crate::features::work::create_workspace(item_id, repositories, state)
-}
-
-#[tauri::command(rename_all = "camelCase")]
 pub fn create_worktree(
     workspace_id: i64,
     repository_id: i64,
@@ -937,31 +927,6 @@ pub fn remove_worktree(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<WorktreeRemovalResult, String> {
     crate::features::work::remove_worktree(worktree_id, confirmed, destructive_confirmed, state)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn prepare_workspace_removal(
-    workspace_id: i64,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<WorkspaceRemovalReport, String> {
-    crate::features::work::prepare_workspace_removal(workspace_id, state)
-}
-
-#[tauri::command(rename_all = "camelCase")]
-pub fn remove_workspace(
-    workspace_id: i64,
-    confirmed_worktree_ids: Vec<i64>,
-    destructive_worktree_ids: Vec<i64>,
-    confirmed: bool,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<WorkspaceRemovalResult, String> {
-    crate::features::work::remove_workspace(
-        workspace_id,
-        confirmed_worktree_ids,
-        destructive_worktree_ids,
-        confirmed,
-        state,
-    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1256,7 +1221,7 @@ mod tests {
     use crate::persistence::SqliteStore;
 
     #[test]
-    fn creating_multiple_workspaces_through_the_application_persists_them_for_the_item() {
+    fn project_repositories_are_implicitly_available_to_items_and_persist() {
         let directory = tempdir().expect("temporary app directory should exist");
         let database = directory.path().join("mission-manager.sqlite");
         let mut runtime = Runtime::open(&database).expect("runtime should open");
@@ -1278,29 +1243,14 @@ mod tests {
             .create_item("Keep two lines of work reusable".into(), 1, 1)
             .expect("Item should be created");
 
-        let first = runtime
-            .create_workspace(
-                1,
-                vec![WorkspaceRepositoryInput {
-                    repository_id: 1,
-                    branch: "feature/api".into(),
-                    base_branch: "main".into(),
-                }],
-            )
-            .expect("first Workspace should be created");
-        let second = runtime
-            .create_workspace(
-                1,
-                vec![WorkspaceRepositoryInput {
-                    repository_id: 2,
-                    branch: "feature/web".into(),
-                    base_branch: "main".into(),
-                }],
-            )
-            .expect("second Workspace should be created");
-
-        assert_eq!((first.id, second.id), (1, 2));
-        assert_eq!(runtime.state.workspaces.len(), 2);
+        assert_eq!(runtime.state.workspaces.len(), 1);
+        let workspace = &runtime.state.workspaces[0];
+        assert_eq!(workspace.repositories.len(), 2);
+        assert_eq!(workspace.repositories[0].repository_id, 1);
+        assert_eq!(workspace.repositories[1].repository_id, 2);
+        assert!(workspace.repositories.iter().all(|repository| {
+            repository.branch == "mission-MC-1" && repository.base_branch == "main"
+        }));
         assert!(runtime
             .state
             .workspaces
@@ -1314,6 +1264,7 @@ mod tests {
             .next()
             .expect("the Item view should be searchable after reopening");
         assert_eq!(item_view.workspaces, reopened.state.workspaces);
+        assert_eq!(item_view.workspaces[0].repositories.len(), 2);
     }
 
     #[test]

@@ -56,12 +56,24 @@ impl Runtime {
         decision: crate::domain::Decision,
         additional_actions: &[AuditAction],
     ) -> Result<(), String> {
+        let ensure_project_workspaces = decision.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Effect::PersistItem { .. }
+                    | Effect::PersistRepository { .. }
+                    | Effect::UpdateRepository { .. }
+                    | Effect::RemoveRepository { .. }
+            )
+        });
         let mut audit_actions = audit_actions(&self.state, &decision.effects);
         audit_actions.extend_from_slice(additional_actions);
         self.store
             .apply_with_audit(&decision.effects, &audit_actions)
             .map_err(|error| error.to_string())?;
         self.state = decision.state;
+        if ensure_project_workspaces {
+            self.ensure_project_workspaces()?;
+        }
         Ok(())
     }
 }
@@ -140,37 +152,9 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
             Effect::PersistItemReminders { item, .. } => {
                 Some(AuditAction::ItemRemindersChanged { item_id: item.id })
             }
-            Effect::PersistWorkspace { workspace, .. } => Some(AuditAction::WorkspaceCreated {
-                workspace_id: workspace.id,
-            }),
-            Effect::PersistWorkspaceUpdate { workspace } => {
-                let previous = before
-                    .workspaces
-                    .iter()
-                    .find(|candidate| candidate.id == workspace.id);
-                match previous {
-                    Some(previous)
-                        if previous.item_id == workspace.item_id
-                            && previous.repositories == workspace.repositories
-                            && previous.preparation_state == workspace.preparation_state =>
-                    {
-                        None
-                    }
-                    _ => Some(AuditAction::WorkspaceUpdated {
-                        workspace_id: workspace.id,
-                    }),
-                }
-            }
-            Effect::RemoveWorkspace { workspace_id } => Some(AuditAction::WorkspaceRemoved {
-                workspace_id: *workspace_id,
-                repository_count: before
-                    .workspaces
-                    .iter()
-                    .find(|workspace| workspace.id == *workspace_id)
-                    .map(|workspace| workspace.repositories.len())
-                    .unwrap_or_default()
-                    .into(),
-            }),
+            Effect::PersistWorkspace { .. }
+            | Effect::PersistWorkspaceUpdate { .. }
+            | Effect::RemoveWorkspace { .. } => None,
             Effect::RemoveRepository { repository_id } => Some(AuditAction::RepositoryDeleted {
                 repository_id: *repository_id,
                 workspace_count: before

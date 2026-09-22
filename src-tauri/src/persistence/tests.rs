@@ -353,7 +353,7 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
 
     let configuration = GrillConfiguration {
         agent: AgentKind::Codex,
-        model: "codex-luna".into(),
+        model: "gpt-6-luna".into(),
         effort: "xhigh".into(),
     };
     state = apply_event(
@@ -452,13 +452,13 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
     );
     let reloaded = store.load_state().expect("persisted state should load");
     assert_eq!(reloaded, state);
-    assert_eq!(reloaded.contexts[0].grill_defaults.model, "codex-luna");
+    assert_eq!(reloaded.contexts[0].grill_defaults.model, "gpt-6-luna");
     assert_eq!(reloaded.contexts[0].grill_defaults.effort, "xhigh");
     assert_eq!(
         reloaded.runs[0].execution_profile,
         crate::domain::ExecutionProfile::Grill
     );
-    assert_eq!(reloaded.runs[0].model.as_deref(), Some("codex-luna"));
+    assert_eq!(reloaded.runs[0].model.as_deref(), Some("gpt-6-luna"));
     assert_eq!(reloaded.runs[0].effort.as_deref(), Some("xhigh"));
     assert_eq!(
         reloaded.runs[0].skill_snapshot.as_deref(),

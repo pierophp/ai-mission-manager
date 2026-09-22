@@ -11,7 +11,7 @@ A top-level boundary isolating one area of work, along with the providers, repos
 _Avoid_: workspace, tenant, account, area
 
 **Project**:
-A container for Items inside a Context, which also supplies the defaults Items created in it inherit.
+A container for Items inside a Context. It owns its configured Repositories and supplies the defaults Items created in it inherit. Every Item can use all Repositories configured for its Project.
 _Avoid_: folder, category, epic
 
 **Item**:
@@ -29,15 +29,11 @@ The pairing of one Item with one External Object, carrying the user's own state 
 _Avoid_: association, reference, join
 
 **Repository**:
-A Git repository's canonical identity, registered under a Project. Not any particular checkout of it.
+A Git repository's canonical identity, registered under a Project, making it available to every Item in that Project. Not any particular checkout of it.
 _Avoid_: checkout, clone, worktree
 
-**Workspace**:
-A persistent logical grouping of selected Repositories for one Item. It has no shared physical root directory; its physical isolation is represented by its Worktrees.
-_Avoid_: sandbox, checkout
-
 **Worktree**:
-One physical Git worktree for one Repository, associated with a Workspace, Machine, path, branch, and base branch.
+One physical Git worktree for one Repository and one Item, associated with a Machine, path, branch, and base branch.
 _Avoid_: workspace, checkout
 
 ### Execution
@@ -51,7 +47,7 @@ An execution target reachable through the Terminal Runtime, whether the local Ma
 _Avoid_: host, server, node
 
 **Run**:
-One attempt at doing work in a Workspace location by a single agent. A Run may use a registered Repository checkout directly or one physical Worktree. Runs are historical records while they are retained, but finished Runs may be explicitly deleted as part of local cleanup; an active Run blocks deletion of its Item, Workspace, Machine, Project, or Context.
+One attempt at doing work on an Item by a single agent, using a Repository checkout configured for the Item's Project, either directly or through one physical Worktree. Runs are historical records while they are retained, but finished Runs may be explicitly deleted as part of local cleanup; an active Run blocks deletion of its Item, Machine, Project, or Context.
 _Avoid_: session, job, execution, attempt
 
 **Pane**:

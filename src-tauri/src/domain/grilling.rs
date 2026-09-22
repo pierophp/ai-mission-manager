@@ -456,8 +456,8 @@ pub fn grill_model_catalog() -> Vec<GrillAgentCatalog> {
             agent: AgentKind::Claude,
             models: vec![
                 GrillModel {
-                    id: "claude-opus-4-1".into(),
-                    label: "Opus".into(),
+                    id: "claude-opus-5".into(),
+                    label: "Opus 5".into(),
                     efforts: efforts(&[("low", "Low"), ("medium", "Medium"), ("high", "High")]),
                 },
                 GrillModel {
@@ -476,8 +476,8 @@ pub fn grill_model_catalog() -> Vec<GrillAgentCatalog> {
             agent: AgentKind::Codex,
             models: vec![
                 GrillModel {
-                    id: "codex-sol".into(),
-                    label: "Sol".into(),
+                    id: "gpt-6-sol".into(),
+                    label: "GPT-6 Sol".into(),
                     efforts: efforts(&[
                         ("low", "Low"),
                         ("medium", "Medium"),
@@ -486,18 +486,8 @@ pub fn grill_model_catalog() -> Vec<GrillAgentCatalog> {
                     ]),
                 },
                 GrillModel {
-                    id: "codex-terra".into(),
-                    label: "Terra".into(),
-                    efforts: efforts(&[
-                        ("low", "Low"),
-                        ("medium", "Medium"),
-                        ("high", "High"),
-                        ("xhigh", "Extra high"),
-                    ]),
-                },
-                GrillModel {
-                    id: "codex-luna".into(),
-                    label: "Luna".into(),
+                    id: "gpt-6-luna".into(),
+                    label: "GPT-6 Luna".into(),
                     efforts: efforts(&[
                         ("low", "Low"),
                         ("medium", "Medium"),

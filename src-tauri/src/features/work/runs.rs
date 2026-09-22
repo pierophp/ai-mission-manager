@@ -34,32 +34,45 @@ impl Runtime {
         workspace_id: i64,
         machine_id: Option<i64>,
     ) -> Result<(Machine, Vec<DirectRunCheckoutPreview>), String> {
-        let workspace = self
+        if !self
             .state
             .workspaces
             .iter()
-            .find(|workspace| workspace.id == workspace_id && workspace.item_id == item_id)
-            .cloned()
-            .ok_or_else(|| format!("Workspace {workspace_id} does not belong to Item {item_id}"))?;
+            .any(|workspace| workspace.id == workspace_id && workspace.item_id == item_id)
+        {
+            return Err(format!(
+                "Project Repository execution setup does not belong to Item {item_id}"
+            ));
+        }
         let machine = self.machine_for_item(item_id, machine_id)?;
         let machine_home = machine_home_directory(&machine);
         let git = GitCli::system();
-        let mut previews = Vec::with_capacity(workspace.repositories.len());
+        let item = self
+            .state
+            .items
+            .iter()
+            .find(|item| item.id == item_id)
+            .cloned()
+            .ok_or_else(|| format!("Item {item_id} does not exist"))?;
+        let repositories = self
+            .state
+            .repositories
+            .iter()
+            .filter(|repository| repository.project_id == item.project_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if repositories.is_empty() {
+            return Err("Register a Repository under this Project before starting a Run".into());
+        }
+        let mut previews = Vec::with_capacity(repositories.len());
 
-        for selected in workspace.repositories {
-            let repository = self
-                .state
-                .repositories
-                .iter()
-                .find(|repository| repository.id == selected.repository_id)
-                .ok_or_else(|| format!("Repository {} does not exist", selected.repository_id))?;
+        for repository in repositories {
             let location = self
                 .state
                 .repository_locations
                 .iter()
                 .find(|location| {
-                    location.repository_id == selected.repository_id
-                        && location.machine_id == machine.id
+                    location.repository_id == repository.id && location.machine_id == machine.id
                 })
                 .ok_or_else(|| {
                     format!(
@@ -155,7 +168,7 @@ impl Runtime {
             working_directory: checkouts
                 .first()
                 .map(|checkout| checkout.path.clone())
-                .ok_or_else(|| "Workspace has no selected Repositories".to_owned())?,
+                .ok_or_else(|| "Project has no configured Repositories".to_owned())?,
             current_branches: checkouts
                 .iter()
                 .map(|checkout| checkout.branch.clone())
@@ -204,7 +217,7 @@ impl Runtime {
             .iter()
             .find(|checkout| checkout.repository_id == primary_repository_id)
             .map(|checkout| checkout.path.clone())
-            .ok_or_else(|| "Workspace has no selected Repositories".to_owned())?;
+            .ok_or_else(|| "Project has no configured Repositories".to_owned())?;
         let run_id = self.state.next_run_id;
         let session_name = format!("mission-item-{item_id}-run-{run_id}");
         let preflight = decide(
@@ -555,9 +568,7 @@ impl Runtime {
             .iter()
             .find(|worktree| worktree.id == worktree_id && worktree.workspace_id == workspace_id)
             .cloned()
-            .ok_or_else(|| {
-                format!("Worktree {worktree_id} does not belong to Workspace {workspace_id}")
-            })?;
+            .ok_or_else(|| format!("Worktree {worktree_id} is not registered for this Item"))?;
         let machine = self
             .state
             .machines
@@ -738,9 +749,9 @@ impl Runtime {
             "The suggested agent no longer matches its registered working location".to_owned()
         })?;
         let decision = if let Some(workspace_id) = canonical.workspace_id {
-            let repository_id = canonical
-                .repository_id
-                .ok_or_else(|| "The suggested Workspace location has no Repository".to_owned())?;
+            let repository_id = canonical.repository_id.ok_or_else(|| {
+                "The suggested Item execution location has no Repository".to_owned()
+            })?;
             decide(
                 self.state.clone(),
                 Event::AttachRun {
@@ -761,7 +772,9 @@ impl Runtime {
                 },
             )
         } else {
-            return Err("The suggested agent is not in a registered Workspace location".into());
+            return Err(
+                "The suggested agent is not in a registered Item execution location".into(),
+            );
         }
         .map_err(|error| error.to_string())?;
         let run = decision
@@ -1006,7 +1019,11 @@ impl Runtime {
         let captured_question_group =
             parse_grill_question_group_since(&run.transcript, &transcript);
         let question_group = match (run.grill_question_group.as_ref(), captured_question_group) {
-            (Some(previous), None) if run.state == RunState::Working => Some(previous.clone()),
+            (Some(previous), None)
+                if run.state == RunState::Working || run.grill_response.is_none() =>
+            {
+                Some(previous.clone())
+            }
             (Some(previous), Some(captured))
                 if previous.questions.len() == captured.questions.len()
                     && previous
@@ -1022,7 +1039,20 @@ impl Runtime {
             }
             (_, captured) => captured,
         };
-        if run.transcript == transcript && run.grill_question_group == question_group {
+        let question_group_is_pending = question_group.is_some()
+            && (run.grill_response.is_none() || run.grill_question_group != question_group);
+        let finished_phase_is_synchronized = run.state != RunState::Finished
+            || run.grill_phase == Some(GrillPhase::Finished)
+            || run.grill_phase
+                == Some(if question_group_is_pending {
+                    GrillPhase::WaitingForAnswers
+                } else {
+                    GrillPhase::AwaitingNextAction
+                });
+        if run.transcript == transcript
+            && run.grill_question_group == question_group
+            && finished_phase_is_synchronized
+        {
             self.capture_downstream_issues(run_id, &transcript)?;
             return Ok(false);
         }
@@ -1149,7 +1179,10 @@ impl Runtime {
         if run.execution_profile != ExecutionProfile::Grill {
             return Err(format!("Run {run_id} is not a Grill Run"));
         }
-        if run.state != RunState::Blocked {
+        let can_submit_answers = run.state == RunState::Blocked
+            || (run.state == RunState::Finished
+                && run.grill_phase == Some(GrillPhase::WaitingForAnswers));
+        if !can_submit_answers {
             return Err(format!("Run {run_id} is not waiting for Grill answers"));
         }
         let answers_decision = decide(
@@ -1178,6 +1211,16 @@ impl Runtime {
         let mut input = response.into_bytes();
         input.push(b'\n');
         send_input_to_pane(&machine, &answered_run.pane_id, &input)?;
+
+        let working = decide(
+            self.state.clone(),
+            Event::UpdateRunState {
+                run_id,
+                state: RunState::Working,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        self.commit(working)?;
 
         let response = String::from_utf8(input)
             .map_err(|_| "The grouped Grill response was not valid UTF-8".to_owned())?;

@@ -161,19 +161,6 @@ export type WorktreeRemovalReport = {
   requiresDestructiveConfirmation: boolean;
 };
 
-export type WorkspaceRemovalReport = {
-  workspaceId: number;
-  worktrees: WorktreeRemovalReport[];
-  safe: boolean;
-  blockers: string[];
-};
-
-export type WorkspaceRemovalResult = {
-  workspaceId: number;
-  worktreeCount: number;
-  branchesPreserved: boolean;
-};
-
 export type MachineTransport =
   | { kind: "local" }
   | {

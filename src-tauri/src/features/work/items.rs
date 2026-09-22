@@ -1,7 +1,7 @@
 use super::*;
 
 impl Runtime {
-    /// Shared lookup used by Workspace and Run workflows.
+    /// Shared lookup used by Worktree and Run workflows.
     pub(crate) fn item_context_id(&self, item_id: i64) -> Result<i64, String> {
         let item = self
             .state

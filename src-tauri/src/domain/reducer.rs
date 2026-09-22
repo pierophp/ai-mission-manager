@@ -1,4 +1,4 @@
-use super::deletion::{parent_selection_matches, workspace_preparation_state};
+use super::deletion::{parent_selection_matches, run_uses_repository, workspace_preparation_state};
 use super::projections::{
     clean_machine_transport, clean_name, clean_repository_name, ensure_context, item_context_id,
     item_project_id, link_external_object, normalize_workspace_repositories, path_is_within,
@@ -538,24 +538,17 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     provided_workspace_ids,
                 });
             }
-            if let Some(workspace_id) = plan.workspaces.iter().find_map(|workspace| {
-                state
-                    .runs
-                    .iter()
-                    .any(|run| run.workspace_id == Some(workspace.id))
-                    .then_some(workspace.id)
-            }) {
-                return Err(DomainError::WorkspaceHasRuns { workspace_id });
+            if let Some(run) = state
+                .runs
+                .iter()
+                .find(|run| run_uses_repository(&state, run, repository_id))
+            {
+                return Err(DomainError::RepositoryInUseByRun {
+                    repository_id,
+                    run_id: run.id,
+                });
             }
 
-            for workspace in &plan.workspaces {
-                state
-                    .worktrees
-                    .retain(|worktree| worktree.workspace_id != workspace.id);
-                state
-                    .workspaces
-                    .retain(|candidate| candidate.id != workspace.id);
-            }
             state
                 .repositories
                 .retain(|repository| repository.id != repository_id);
@@ -563,13 +556,46 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .repository_locations
                 .retain(|location| location.repository_id != repository_id);
 
-            let mut effects = plan
-                .workspaces
-                .iter()
-                .map(|workspace| Effect::RemoveWorkspace {
-                    workspace_id: workspace.id,
-                })
-                .collect::<Vec<_>>();
+            let mut effects = Vec::new();
+            for affected in &plan.workspaces {
+                let worktree_ids = state
+                    .worktrees
+                    .iter()
+                    .filter(|worktree| {
+                        worktree.workspace_id == affected.id
+                            && worktree.repository_id == repository_id
+                    })
+                    .map(|worktree| worktree.id)
+                    .collect::<Vec<_>>();
+                state.worktrees.retain(|worktree| {
+                    worktree.workspace_id != affected.id || worktree.repository_id != repository_id
+                });
+                effects.extend(
+                    worktree_ids
+                        .into_iter()
+                        .map(|worktree_id| Effect::RemoveWorktree { worktree_id }),
+                );
+
+                let mut workspace = state
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.id == affected.id)
+                    .cloned()
+                    .expect("the affected execution setup still exists");
+                workspace
+                    .repositories
+                    .retain(|repository| repository.repository_id != repository_id);
+                workspace.preparation_state =
+                    workspace_preparation_state(&state, workspace.id, workspace.preparation_state);
+                if let Some(stored) = state
+                    .workspaces
+                    .iter_mut()
+                    .find(|stored| stored.id == workspace.id)
+                {
+                    *stored = workspace.clone();
+                }
+                effects.push(Effect::PersistWorkspaceUpdate { workspace });
+            }
             effects.push(Effect::RemoveRepository { repository_id });
 
             Ok(Decision { state, effects })
@@ -943,6 +969,46 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 }],
             })
         }
+        Event::SetWorkspaceRepositories {
+            workspace_id,
+            repositories,
+        } => {
+            let item_id = state
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+                .map(|workspace| workspace.item_id)
+                .ok_or(DomainError::WorkspaceNotFound { workspace_id })?;
+            let project_id = item_project_id(&state, item_id)?;
+            let repositories = normalize_workspace_repositories(&state, project_id, repositories)?;
+            let mut workspace = state
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)
+                .cloned()
+                .expect("the Workspace was checked above");
+            if workspace.repositories == repositories {
+                return Ok(Decision {
+                    state,
+                    effects: Vec::new(),
+                });
+            }
+            workspace.repositories = repositories;
+            workspace.preparation_state =
+                workspace_preparation_state(&state, workspace_id, workspace.preparation_state);
+            if let Some(stored) = state
+                .workspaces
+                .iter_mut()
+                .find(|stored| stored.id == workspace_id)
+            {
+                *stored = workspace.clone();
+            }
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistWorkspaceUpdate { workspace }],
+            })
+        }
         Event::CreateWorktree {
             workspace_id,
             repository_id,
@@ -957,14 +1023,16 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .iter()
                 .find(|workspace| workspace.id == workspace_id)
                 .ok_or(DomainError::WorkspaceNotFound { workspace_id })?;
-            if !workspace
+            let project_id = item_project_id(&state, workspace.item_id)?;
+            let repository = state
                 .repositories
                 .iter()
-                .any(|repository| repository.repository_id == repository_id)
-            {
-                return Err(DomainError::WorktreeRepositoryNotSelected {
+                .find(|repository| repository.id == repository_id)
+                .ok_or(DomainError::RepositoryNotFound { repository_id })?;
+            if repository.project_id != project_id {
+                return Err(DomainError::RepositoryProjectMismatch {
                     repository_id,
-                    workspace_id,
+                    project_id,
                 });
             }
             if state.worktrees.iter().any(|worktree| {
@@ -1072,33 +1140,6 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     Effect::RemoveWorktree { worktree_id },
                     Effect::PersistWorkspaceUpdate { workspace },
                 ],
-            })
-        }
-        Event::RemoveWorkspace { workspace_id } => {
-            if !state
-                .workspaces
-                .iter()
-                .any(|workspace| workspace.id == workspace_id)
-            {
-                return Err(DomainError::WorkspaceNotFound { workspace_id });
-            }
-            if state
-                .runs
-                .iter()
-                .any(|run| run.workspace_id == Some(workspace_id))
-            {
-                return Err(DomainError::WorkspaceHasRuns { workspace_id });
-            }
-            state
-                .worktrees
-                .retain(|worktree| worktree.workspace_id != workspace_id);
-            state
-                .workspaces
-                .retain(|workspace| workspace.id != workspace_id);
-
-            Ok(Decision {
-                state,
-                effects: vec![Effect::RemoveWorkspace { workspace_id }],
             })
         }
         Event::RegisterMachine {
@@ -1356,21 +1397,19 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             if checkouts.is_empty() {
                 return Err(DomainError::EmptyDirectRunCheckouts);
             }
-            if !workspace
+            let project_id = item_project_id(&state, item_id)?;
+            let selected_repository_ids = state
                 .repositories
                 .iter()
-                .any(|selected| selected.repository_id == repository_id)
-            {
-                return Err(DomainError::RunRepositoryNotSelected {
+                .filter(|repository| repository.project_id == project_id)
+                .map(|repository| repository.id)
+                .collect::<Vec<_>>();
+            if !selected_repository_ids.contains(&repository_id) {
+                return Err(DomainError::RepositoryProjectMismatch {
                     repository_id,
-                    workspace_id,
+                    project_id,
                 });
             }
-            let selected_repository_ids = workspace
-                .repositories
-                .iter()
-                .map(|repository| repository.repository_id)
-                .collect::<Vec<_>>();
             let mut checkout_repository_ids = Vec::new();
             for checkout in &checkouts {
                 if checkout.path.trim().is_empty()
@@ -1563,14 +1602,18 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     context_id,
                 });
             }
-            if !workspace
+            let project_id = item_project_id(&state, item_id)?;
+            let repository = state
                 .repositories
                 .iter()
-                .any(|repository| repository.repository_id == worktree.repository_id)
-            {
-                return Err(DomainError::RunRepositoryNotSelected {
+                .find(|repository| repository.id == worktree.repository_id)
+                .ok_or(DomainError::RepositoryNotFound {
                     repository_id: worktree.repository_id,
-                    workspace_id,
+                })?;
+            if repository.project_id != project_id {
+                return Err(DomainError::RepositoryProjectMismatch {
+                    repository_id: worktree.repository_id,
+                    project_id,
                 });
             }
             for external_object_id in prompt_selection.external_object_ids {
@@ -1668,21 +1711,18 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     item_id,
                 });
             }
-            if !workspace
-                .repositories
-                .iter()
-                .any(|repository| repository.repository_id == repository_id)
-            {
-                return Err(DomainError::RunRepositoryNotSelected {
-                    repository_id,
-                    workspace_id,
-                });
-            }
             let repository = state
                 .repositories
                 .iter()
                 .find(|repository| repository.id == repository_id)
                 .ok_or(DomainError::RepositoryNotFound { repository_id })?;
+            let item_project_id = item_project_id(&state, item_id)?;
+            if repository.project_id != item_project_id {
+                return Err(DomainError::RepositoryProjectMismatch {
+                    repository_id,
+                    project_id: item_project_id,
+                });
+            }
             let project = state
                 .projects
                 .iter()
@@ -1831,14 +1871,16 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     item_id,
                 });
             }
-            if !workspace
+            let project_id = item_project_id(&state, item_id)?;
+            let repository = state
                 .repositories
                 .iter()
-                .any(|repository| repository.repository_id == repository_id)
-            {
-                return Err(DomainError::RunRepositoryNotSelected {
+                .find(|repository| repository.id == repository_id)
+                .ok_or(DomainError::RepositoryNotFound { repository_id })?;
+            if repository.project_id != project_id {
+                return Err(DomainError::RepositoryProjectMismatch {
                     repository_id,
-                    workspace_id,
+                    project_id,
                 });
             }
             if let Some(worktree_id) = worktree_id {
@@ -1949,7 +1991,13 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     RunState::Unknown => run.grill_phase.or(Some(GrillPhase::Starting)),
                     RunState::Working => Some(GrillPhase::Working),
                     RunState::Blocked => Some(GrillPhase::WaitingForAnswers),
-                    RunState::Finished => Some(GrillPhase::AwaitingNextAction),
+                    RunState::Finished => Some(if run.grill_question_group.is_some()
+                        && run.grill_response.is_none()
+                    {
+                        GrillPhase::WaitingForAnswers
+                    } else {
+                        GrillPhase::AwaitingNextAction
+                    }),
                 };
             }
             let run = run.clone();
@@ -2063,11 +2111,22 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             if run.execution_profile != ExecutionProfile::Grill {
                 return Err(DomainError::NotGrillRun { run_id });
             }
+            let has_questions = question_group.is_some()
+                && (run.grill_response.is_none() || run.grill_question_group != question_group);
             run.transcript = transcript;
             if run.grill_question_group != question_group {
                 run.grill_answers.clear();
                 run.grill_response = None;
                 run.grill_question_group = question_group;
+            }
+            if run.state == RunState::Finished
+                && run.grill_phase != Some(GrillPhase::Finished)
+            {
+                run.grill_phase = Some(if has_questions {
+                    GrillPhase::WaitingForAnswers
+                } else {
+                    GrillPhase::AwaitingNextAction
+                });
             }
             let run = run.clone();
 
@@ -2158,7 +2217,13 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                         RunState::Unknown => GrillPhase::Starting,
                         RunState::Working => GrillPhase::Working,
                         RunState::Blocked => GrillPhase::WaitingForAnswers,
-                        RunState::Finished => GrillPhase::AwaitingNextAction,
+                        RunState::Finished => {
+                            if run.grill_question_group.is_some() && run.grill_response.is_none() {
+                                GrillPhase::WaitingForAnswers
+                            } else {
+                                GrillPhase::AwaitingNextAction
+                            }
+                        }
                     });
                 }
             }

@@ -896,7 +896,7 @@ export function StructurePage({ section }: { section: SettingsSection }) {
       ]);
       const summary = result.summary;
       window.alert(
-        `Reset local data. Removed ${summary.contextCount} Context(s), ${summary.projectCount} Project(s), ${summary.repositoryCount} Repository record(s), ${summary.itemCount} Item(s), ${summary.workspaceCount} Workspace(s), ${summary.machineCount} Machine(s), ${summary.runCount} Run(s), ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.linkCount} Link(s), ${summary.externalObjectCount} External Object(s), ${summary.snapshotCount} snapshot(s), ${summary.activityCount} Activity record(s), ${summary.attentionDefaultCount} attention default(s), and ${result.auditEntryCount} prior audit entr${result.auditEntryCount === 1 ? "y" : "ies"}. A new Personal Context and Default Project are ready.`,
+        `Reset local data. Removed ${summary.contextCount} Context(s), ${summary.projectCount} Project(s), ${summary.repositoryCount} Repository record(s), ${summary.itemCount} Item(s), ${summary.machineCount} Machine(s), ${summary.runCount} Run(s), ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.linkCount} Link(s), ${summary.externalObjectCount} External Object(s), ${summary.snapshotCount} snapshot(s), ${summary.activityCount} Activity record(s), ${summary.attentionDefaultCount} attention default(s), and ${result.auditEntryCount} prior audit entr${result.auditEntryCount === 1 ? "y" : "ies"}. A new Personal Context and Default Project are ready.`,
       );
     } catch (resetError) {
       window.alert(errorMessage(resetError));
@@ -1026,7 +1026,7 @@ export function StructurePage({ section }: { section: SettingsSection }) {
               <CardContent className="p-4">
                 <EntityList>
                   {selectedProjects.length === 0 ? <EmptyDescription>No Projects remain in this Context.</EmptyDescription> : selectedProjects.map((project) => (
-                    <EntityRow key={project.id} title={project.name} detail={`${allItems.filter((item) => item.item.project_id === project.id).length} Items · starts ${project.defaults.item_status} · ${project.defaults.execution_mode === "worktree" ? "Worktree" : "Direct"} default`}>
+                    <EntityRow key={project.id} title={project.name} detail={`${allItems.filter((item) => item.item.project_id === project.id).length} Items · ${repositories.filter((repository) => repository.project_id === project.id).length} Repositories · starts ${project.defaults.item_status} · ${project.defaults.execution_mode === "worktree" ? "Worktree" : "Direct"} default`}>
                       <Button type="button" variant="ghost" size="sm" disabled={isSaving} onClick={() => openEditProject(project)}>Edit</Button>
                       <Button type="button" variant="outline" size="sm" disabled={isSaving} onClick={() => void handlePrepareProjectDeletion(project.id)}>Delete</Button>
                     </EntityRow>
@@ -1042,7 +1042,7 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                 <div className="flex flex-wrap items-end justify-between gap-4">
                   <div>
                     <CardTitle>Repositories</CardTitle>
-                    <CardDescription>Register a Repository identity and its checkout on a Machine.</CardDescription>
+                    <CardDescription>Repositories configured for a Project are available to every Item in that Project.</CardDescription>
                   </div>
                   <div className="flex flex-wrap items-end gap-3">
                     <ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} />
@@ -1262,7 +1262,6 @@ function ParentDeletionPreviewCard({ preview, kind, disabled, onConfirm, onCance
     [plan.items.length, "Items"],
     [plan.repositories.length, "Repositories"],
     [plan.machines.length, "Machines"],
-    [plan.workspaces.length, "Workspaces"],
     [plan.runs.length, "Runs"],
     [plan.linkIds.length, "Links"],
     [plan.attentionDefaults.length, "attention defaults"],
@@ -1273,7 +1272,6 @@ function ParentDeletionPreviewCard({ preview, kind, disabled, onConfirm, onCance
       <strong>{kind} deletion preview</strong>
       <p>Deleting <b>{plan.name}</b> removes the complete local dependency graph below. Provider-owned Issues and pull requests are never deleted.</p>
       <div className="grid gap-2 sm:grid-cols-3 lg:grid-cols-5">{counts.map(([count, label]) => <span key={label as string}><b>{count}</b> {label}</span>)}</div>
-      {plan.workspaces.length > 0 && <PreviewList label="Workspaces" items={plan.workspaces.map((workspace) => `Workspace #${workspace.id} · Item #${workspace.itemId}`)} />}
       {preview.blockers.length > 0 && <PreviewWarnings title="Deletion blocked" items={preview.blockers} />}
       <div className="flex flex-wrap gap-2">
         <Button type="button" variant="destructive" disabled={disabled || preview.blockers.length > 0} onClick={onConfirm}>Delete {kind}</Button>
@@ -1287,8 +1285,8 @@ function RepositoryDeletionPreviewCard({ preview, disabled, onConfirm, onCancel 
   return (
     <div className="w-full grid gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm" role="alert">
       <strong>Repository deletion preview</strong>
-      <p>Deleting <b>{preview.plan.name}</b> removes its local record. Referencing Workspaces are shown before confirmation.</p>
-      {preview.plan.workspaces.length > 0 ? <PreviewList label="Affected Workspaces" items={preview.plan.workspaces.map((workspace) => `Workspace #${workspace.id} · Item #${workspace.itemId}`)} /> : <p>No Workspaces reference this Repository.</p>}
+      <p>Deleting <b>{preview.plan.name}</b> removes its local record and makes it unavailable to Items in this Project.</p>
+      {preview.plan.workspaces.length > 0 ? <PreviewList label="Items using this Repository" items={[...new Set(preview.plan.workspaces.map((workspace) => `Item #${workspace.itemId}`))]} /> : <p>No Items currently use this Repository.</p>}
       {preview.blockers.length > 0 && <PreviewWarnings title="Deletion blocked" items={preview.blockers} />}
       <div className="flex flex-wrap gap-2">
         <Button type="button" variant="destructive" disabled={disabled || preview.blockers.length > 0} onClick={onConfirm}>Delete Repository</Button>
@@ -1317,14 +1315,13 @@ function MachineDeletionPreviewCard({ preview, disabled, onConfirm, onDeleteRun,
 function ResetLocalDataPreviewCard({ preview, disabled, onConfirm, onCancel }: { preview: ResetLocalDataPreview; disabled: boolean; onConfirm: () => void; onCancel: () => void }) {
   const { summary } = preview.plan;
   const counts: [number, string][] = [
-    [summary.contextCount, "Contexts"], [summary.projectCount, "Projects"], [summary.repositoryCount, "Repositories"], [summary.itemCount, "Items"], [summary.workspaceCount, "Workspaces"], [summary.machineCount, "Machines"], [summary.runCount, "Runs"], [summary.reminderCount, "reminders"], [summary.relationshipCount, "relationships"], [summary.linkCount, "Links"], [summary.externalObjectCount, "External Objects"], [summary.snapshotCount, "snapshots"], [summary.activityCount, "Activity records"], [summary.attentionDefaultCount, "attention defaults"], [preview.auditEntryCount, "prior audit entries"],
+    [summary.contextCount, "Contexts"], [summary.projectCount, "Projects"], [summary.repositoryCount, "Repositories"], [summary.itemCount, "Items"], [summary.machineCount, "Machines"], [summary.runCount, "Runs"], [summary.reminderCount, "reminders"], [summary.relationshipCount, "relationships"], [summary.linkCount, "Links"], [summary.externalObjectCount, "External Objects"], [summary.snapshotCount, "snapshots"], [summary.activityCount, "Activity records"], [summary.attentionDefaultCount, "attention defaults"], [preview.auditEntryCount, "prior audit entries"],
   ];
   return (
     <div className="grid gap-3 rounded-lg border border-destructive/30 bg-background p-4 text-sm" role="alert">
       <strong>Reset impact preview</strong>
       <p>This removes only Mission Manager&apos;s local working model. Git Worktrees are managed separately, and provider-owned data is never deleted.</p>
       <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">{counts.map(([count, label]) => <span key={label}><b>{count}</b> {label}</span>)}</div>
-      {preview.plan.workspaces.length > 0 ? <PreviewList label="Workspaces to remove" items={preview.plan.workspaces.map((workspace) => `Workspace #${workspace.id} · Item #${workspace.itemId}`)} /> : <p>No Workspaces are registered. Local records will still be reset.</p>}
       {preview.blockers.length > 0 && <PreviewWarnings title="Reset blocked" items={preview.blockers} />}
       <p>Confirmation requires typing <code>{preview.confirmationPhrase}</code> exactly.</p>
       <div className="flex flex-wrap gap-2">
@@ -1345,5 +1342,5 @@ function PreviewWarnings({ title, items }: { title: string; items: string[] }) {
 
 function showParentDeletionResult(kind: "Project" | "Context", result: ParentDeletionResult) {
   const { summary } = result;
-  window.alert(`Deleted ${kind}: ${summary.projectCount} Project(s), ${summary.itemCount} Item(s), ${summary.repositoryCount} Repository record(s), ${summary.machineCount} Machine(s), ${summary.workspaceCount} Workspace(s), ${summary.runCount} Run(s), ${summary.linkCount} Link(s), and ${summary.externalObjectCount} orphaned External Object(s).`);
+  window.alert(`Deleted ${kind}: ${summary.projectCount} Project(s), ${summary.itemCount} Item(s), ${summary.repositoryCount} Repository record(s), ${summary.machineCount} Machine(s), ${summary.runCount} Run(s), ${summary.linkCount} Link(s), and ${summary.externalObjectCount} orphaned External Object(s).`);
 }

@@ -1,6 +1,7 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
+import { Plus } from "lucide-react";
 
 import { Button } from "../../components/ui/button";
 import {
@@ -14,6 +15,15 @@ import { Empty, EmptyDescription } from "../../components/ui/empty";
 import { Input } from "../../components/ui/input";
 import { NativeSelect, NativeSelectOption } from "../../components/ui/native-select";
 import { Spinner } from "../../components/ui/spinner";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../../components/ui/dialog";
 import { useAppShell } from "../../components/app-shell";
 import { errorMessage } from "../../runtime/errors";
 import {
@@ -66,6 +76,7 @@ export function WorkPage() {
   const [captureContextId, setCaptureContextId] = useState<number>();
   const [captureProjectId, setCaptureProjectId] = useState<number>();
   const [title, setTitle] = useState("");
+  const [isCreateItemOpen, setIsCreateItemOpen] = useState(false);
   const isSaving = workCommand.isPending || structureCommand.isPending;
 
   const captureProjects = projects.filter(
@@ -150,6 +161,7 @@ export function WorkPage() {
         structureActions.createItem(title, captureContextId, captureProjectId),
       );
       setTitle("");
+      setIsCreateItemOpen(false);
     } catch (createError) {
       window.alert(errorMessage(createError));
     }
@@ -192,6 +204,10 @@ export function WorkPage() {
               placeholder="Search Items, notes, or identifiers"
             />
           </label>
+          <Button type="button" onClick={() => setIsCreateItemOpen(true)}>
+            <Plus />
+            Add Item
+          </Button>
           <Button
             type="button"
             variant="outline"
@@ -356,13 +372,13 @@ export function WorkPage() {
         )}
       </Card>
 
-      <Card>
-        <CardHeader className="border-b border-border/70">
-          <CardTitle>Give the next decision a place</CardTitle>
-          <CardDescription>New Item · Title + Context + Project</CardDescription>
-        </CardHeader>
-        <CardContent className="p-4">
-          <form className="grid gap-4 md:grid-cols-[2fr_1fr_1fr_auto] md:items-end" onSubmit={handleCreateItem}>
+      <Dialog open={isCreateItemOpen} onOpenChange={setIsCreateItemOpen}>
+        <DialogContent className="sm:max-w-xl">
+          <DialogHeader>
+            <DialogTitle>Give the next decision a place</DialogTitle>
+            <DialogDescription>Add an Item to a Context and Project.</DialogDescription>
+          </DialogHeader>
+          <form className="grid gap-4" onSubmit={handleCreateItem}>
             <label className="grid gap-1.5 text-sm font-medium">
               <span>Title</span>
               <Input
@@ -409,12 +425,22 @@ export function WorkPage() {
                 ))}
               </NativeSelect>
             </label>
-            <Button type="submit" disabled={isSaving || !title.trim() || !captureContextId || !captureProjectId}>
-              {isSaving ? "Saving…" : "Add Item"}
-            </Button>
+            <DialogFooter>
+              <DialogClose asChild>
+                <Button type="button" variant="outline" disabled={isSaving}>
+                  Cancel
+                </Button>
+              </DialogClose>
+              <Button
+                type="submit"
+                disabled={isSaving || !title.trim() || !captureContextId || !captureProjectId}
+              >
+                {isSaving ? "Saving…" : "Add Item"}
+              </Button>
+            </DialogFooter>
           </form>
-        </CardContent>
-      </Card>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

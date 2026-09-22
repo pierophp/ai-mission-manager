@@ -54,12 +54,14 @@ pub enum DomainError {
     RepositoryNotFound { repository_id: i64 },
     #[error("Repository {repository_id} belongs to another Project than {project_id}")]
     RepositoryProjectMismatch { repository_id: i64, project_id: i64 },
+    #[error("Repository {repository_id} is used by Run #{run_id} and cannot be removed")]
+    RepositoryInUseByRun { repository_id: i64, run_id: i64 },
     #[error("Repository {repository_id} has already been configured on Machine {machine_id}")]
     RepositoryLocationAlreadyExists { repository_id: i64, machine_id: i64 },
     #[error("Repository {repository_id} has no location on Machine {machine_id}")]
     RepositoryLocationNotFound { repository_id: i64, machine_id: i64 },
     #[error(
-        "Repository {repository_id} deletion must include Workspaces {expected_workspace_ids:?}; received {provided_workspace_ids:?}"
+        "Repository {repository_id} deletion must include its Item execution references {expected_workspace_ids:?}; received {provided_workspace_ids:?}"
     )]
     RepositoryWorkspacesMismatch {
         repository_id: i64,
@@ -76,37 +78,27 @@ pub enum DomainError {
     },
     #[error("a branch cannot be blank")]
     EmptyBranch,
-    #[error("a Workspace must include at least one Repository")]
+    #[error("Project Repository execution setup must include at least one Repository")]
     EmptyWorkspaceRepositories,
-    #[error("Workspace {workspace_id} does not exist")]
+    #[error("Project Repository execution setup {workspace_id} does not exist")]
     WorkspaceNotFound { workspace_id: i64 },
-    #[error("Workspace {workspace_id} has Run history and cannot be removed")]
-    WorkspaceHasRuns { workspace_id: i64 },
-    #[error("Workspace {workspace_id} belongs to another Item")]
+    #[error("Item execution setup {workspace_id} does not belong to Item {item_id}")]
     WorkspaceItemMismatch { workspace_id: i64, item_id: i64 },
-    #[error("Repository {repository_id} is not selected in Workspace {workspace_id}")]
-    RunRepositoryNotSelected {
-        repository_id: i64,
-        workspace_id: i64,
-    },
-    #[error("Worktree {worktree_id} does not belong to Workspace {workspace_id}")]
+    #[error("Worktree {worktree_id} does not belong to this Item's execution setup")]
     RunWorktreeWorkspaceMismatch { worktree_id: i64, workspace_id: i64 },
     #[error("Run working directory does not match Repository {repository_id}")]
     RunWorkingDirectoryRepositoryMismatch { repository_id: i64 },
-    #[error("Repository {repository_id} is already in Workspace {workspace_id}")]
+    #[error(
+        "Repository {repository_id} is already configured for Item execution setup {workspace_id}"
+    )]
     RepositoryAlreadyInWorkspace {
         repository_id: i64,
         workspace_id: i64,
     },
     #[error("Worktree {worktree_id} does not exist")]
     WorktreeNotFound { worktree_id: i64 },
-    #[error("Repository {repository_id} already has a Worktree in Workspace {workspace_id}")]
+    #[error("Repository {repository_id} already has a registered Worktree for this Item")]
     WorktreeAlreadyExists {
-        repository_id: i64,
-        workspace_id: i64,
-    },
-    #[error("Worktree Repository {repository_id} is not selected in Workspace {workspace_id}")]
-    WorktreeRepositoryNotSelected {
         repository_id: i64,
         workspace_id: i64,
     },

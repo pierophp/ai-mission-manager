@@ -20,10 +20,7 @@ import type {
   RunCheckout,
   RunPromptSelection,
   RunSuggestion,
-  Workspace,
-  WorkspaceRemovalReport,
-  WorkspaceRemovalResult,
-  WorkspaceRepositoryInput,
+  WorktreeRemovalReport,
   Worktree,
 } from "../types";
 import type { GrillContinuationAction } from "../execution-types";
@@ -56,8 +53,6 @@ export const workAdapter = {
     command<ItemRelation>("set_item_relation", { fromItemId, toItemId, kind }),
   linkExternalObject: (itemId: number, url: string) =>
     command<ExternalLinkAction>("link_external_object", { itemId, url }),
-  createWorkspace: (itemId: number, repositories: WorkspaceRepositoryInput[]) =>
-    command<Workspace>("create_workspace", { itemId, repositories }),
   prepareDirectRun: (
     itemId: number,
     workspaceId: number,
@@ -122,20 +117,17 @@ export const workAdapter = {
       path,
       confirmDirtyAttachment,
     }),
-  prepareWorkspaceRemoval: (workspaceId: number) =>
-    command<WorkspaceRemovalReport>("prepare_workspace_removal", {
-      workspaceId,
-    }),
-  removeWorkspace: (
-    workspaceId: number,
-    confirmedWorktreeIds: number[],
-    destructiveWorktreeIds: number[],
+  prepareWorktreeRemoval: (worktreeId: number) =>
+    command<WorktreeRemovalReport>("prepare_worktree_removal", { worktreeId }),
+  removeWorktree: (
+    worktreeId: number,
+    confirmed: boolean,
+    destructiveConfirmed: boolean,
   ) =>
-    command<WorkspaceRemovalResult>("remove_workspace", {
-      workspaceId,
-      confirmedWorktreeIds,
-      destructiveWorktreeIds,
-      confirmed: true,
+    command<{ worktreeId: number; branchPreserved: boolean }>("remove_worktree", {
+      worktreeId,
+      confirmed,
+      destructiveConfirmed,
     }),
   stopRun: (runId: number) => command<Run>("stop_run", { runId }),
   finishRun: (runId: number) => command<Run>("finish_run", { runId }),

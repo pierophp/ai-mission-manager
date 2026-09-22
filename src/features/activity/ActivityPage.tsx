@@ -213,14 +213,14 @@ function auditActionLabel(action: AuditAction): string {
     case "itemRelationChanged":
       return `Updated the relationship between Items #${action.from_item_id} and #${action.to_item_id}`;
     case "workspaceCreated":
-      return `Created Workspace #${action.workspace_id}`;
+      return "Configured Repository access for an Item";
     case "workspaceRemoved":
-      return `Removed Workspace #${action.workspace_id} · ${countLabel(
+      return `Removed Item Repository access · ${countLabel(
         action.repository_count,
         "Repository",
       )}`;
     case "workspaceUpdated":
-      return `Updated Workspace #${action.workspace_id}`;
+      return "Updated Item Repository access";
     case "runCreated":
       return `Created Run #${action.run_id}`;
     case "runStopped":
@@ -256,10 +256,7 @@ function auditActionLabel(action: AuditAction): string {
     case "repositoryRegistered":
       return `Registered Repository #${action.repository_id}`;
     case "repositoryDeleted":
-      return `Deleted Repository #${action.repository_id} · ${countLabel(
-        action.workspace_count,
-        "Workspace",
-      )}`;
+      return `Deleted Repository #${action.repository_id}`;
     case "machineRegistered":
       return `Registered Machine #${action.machine_id}`;
     case "machineObserved":
@@ -279,7 +276,6 @@ function itemDeletionSummary(summary: ItemDeletionResult["summary"]): string {
   return cascadeCounts([
     [summary.reminderCount, "reminder"],
     [summary.relationshipCount, "relationship"],
-    [summary.workspaceCount, "Workspace"],
     [summary.runCount, "Run"],
     [summary.linkCount, "Link"],
     [summary.externalObjectCount, "orphaned External Object"],
@@ -312,7 +308,6 @@ function parentDeletionSummary(summary: ParentDeletionResult["summary"]): string
     [summary.itemCount, "Item"],
     [summary.repositoryCount, "Repository"],
     [summary.machineCount, "Machine"],
-    [summary.workspaceCount, "Workspace"],
     [summary.runCount, "Run"],
     [summary.reminderCount, "reminder"],
     [summary.relationshipCount, "relationship"],

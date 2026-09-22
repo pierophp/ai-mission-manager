@@ -64,8 +64,7 @@ import type {
   RunState,
   RunSuggestion,
   Workspace,
-  WorkspaceRemovalReport,
-  WorkspaceRepositoryInput,
+  WorktreeRemovalReport,
 } from "../../runtime/types";
 import type { PaneTab } from "../../runtime/terminal-types";
 import type { GrillContinuationAction } from "../../runtime/execution-types";
@@ -188,22 +187,14 @@ export function ItemCard({
   const [relationKind, setRelationKind] = useState<ItemRelationKind>("Blocks");
   const [targetItemId, setTargetItemId] = useState<number>();
   const [externalUrl, setExternalUrl] = useState("");
-  const [isIssuePreviewOpen, setIsIssuePreviewOpen] = useState(false);
+  const [isExternalLinkDialogOpen, setIsExternalLinkDialogOpen] = useState(false);
+  const [isCreateIssueDialogOpen, setIsCreateIssueDialogOpen] = useState(false);
   const [isReminderDialogOpen, setIsReminderDialogOpen] = useState(false);
   const [isRenameDialogOpen, setIsRenameDialogOpen] = useState(false);
   const [titleDraft, setTitleDraft] = useState(view.item.title);
   const [issueRepository, setIssueRepository] = useState("");
   const [issueTitle, setIssueTitle] = useState(view.item.title);
   const [issueBody, setIssueBody] = useState(view.item.notes);
-  const [workspaceRepositoryIds, setWorkspaceRepositoryIds] = useState<
-    number[]
-  >([]);
-  const [workspaceBranches, setWorkspaceBranches] = useState<
-    Record<number, string>
-  >({});
-  const [workspaceBaseBranches, setWorkspaceBaseBranches] = useState<
-    Record<number, string>
-  >({});
   const [deletionPreview, setDeletionPreview] = useState<ItemDeletionPreview>();
   const [confirmation, setConfirmation] = useState<WorkConfirmation>();
   const [externalObjectDeletionPreview, setExternalObjectDeletionPreview] =
@@ -248,13 +239,10 @@ export function ItemCard({
   const [worktreeRunPrompt, setWorktreeRunPrompt] = useState("");
   const [worktreeRunPromptNeedsCompose, setWorktreeRunPromptNeedsCompose] =
     useState(false);
-  const [workspaceRemovalReport, setWorkspaceRemovalReport] =
-    useState<WorkspaceRemovalReport>();
-  const [workspaceRemovalSelection, setWorkspaceRemovalSelection] = useState<
-    Record<number, boolean>
-  >({});
-  const [workspaceRemovalDestructive, setWorkspaceRemovalDestructive] =
-    useState<Record<number, boolean>>({});
+  const [worktreeRemovalReport, setWorktreeRemovalReport] =
+    useState<WorktreeRemovalReport>();
+  const [worktreeRemovalDestructiveConfirmed, setWorktreeRemovalDestructiveConfirmed] =
+    useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const workCommand = useWorkCommand();
@@ -285,9 +273,10 @@ export function ItemCard({
   function openGrillStart() {
     const context = contexts.find((candidate) => candidate.id === view.context_id);
     const defaults = context?.grill_defaults;
+    const executionWorkspaceId = view.workspaces[0]?.id;
     setIsExpanded(true);
     setIsGrillRunOpen(true);
-    setGrillRunWorkspaceId(undefined);
+    setGrillRunWorkspaceId(executionWorkspaceId);
     setGrillRunMachineId(undefined);
     setGrillRunRepositoryId(undefined);
     setGrillRunPreview(undefined);
@@ -299,6 +288,9 @@ export function ItemCard({
     setGrillPromptPreview("");
     setGrillDirtyConfirmed(false);
     setGrillSharedConfirmed(false);
+    if (executionWorkspaceId) {
+      void refreshGrillRunPreview(executionWorkspaceId, undefined);
+    }
   }
 
   async function refreshGrillRunPreview(
@@ -438,6 +430,7 @@ export function ItemCard({
         workActions.linkExternalObject(view.item.id, externalUrl),
       );
       setExternalUrl("");
+      setIsExternalLinkDialogOpen(false);
       await onChanged();
       if (result.warning) {
         window.alert(result.warning);
@@ -447,31 +440,6 @@ export function ItemCard({
     } finally {
       setIsSaving(false);
     }
-  }
-
-  async function handleCreateWorkspace(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (workspaceRepositoryIds.length === 0) return;
-
-    const selected: WorkspaceRepositoryInput[] = workspaceRepositoryIds.map(
-      (repositoryId) => ({
-        repositoryId,
-        branch: workspaceBranches[repositoryId]?.trim() ?? "",
-        baseBranch: workspaceBaseBranches[repositoryId]?.trim() ?? "",
-      }),
-    );
-    if (
-      selected.some(
-        (repository) => !repository.branch || !repository.baseBranch,
-      )
-    ) {
-      return;
-    }
-
-    await saveItem(workActions.createWorkspace(view.item.id, selected));
-    setWorkspaceRepositoryIds([]);
-    setWorkspaceBranches({});
-    setWorkspaceBaseBranches({});
   }
 
   function handleStopRun(run: Run) {
@@ -560,7 +528,7 @@ export function ItemCard({
       await onChanged();
       const summary = result.summary;
       window.alert(
-        `Deleted ${displayItemIdentifier(deletionPreview.plan.humanIdentifier)}.\n\nRemoved ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.workspaceCount} Workspace(s), ${summary.runCount} Run(s), ${summary.linkCount} Link(s), and ${summary.externalObjectCount} orphaned External Object(s).`,
+        `Deleted ${displayItemIdentifier(deletionPreview.plan.humanIdentifier)}.\n\nRemoved ${summary.reminderCount} reminder(s), ${summary.relationshipCount} relationship(s), ${summary.runCount} Run(s), ${summary.linkCount} Link(s), and ${summary.externalObjectCount} orphaned External Object(s).`,
       );
     } catch (deleteError) {
       setDeletionPreview(undefined);
@@ -942,35 +910,27 @@ export function ItemCard({
     setWorktreePathDrafts((current) => ({ ...current, [draftKey]: "" }));
   }
 
-  async function reviewWorkspaceRemoval(workspaceId: number) {
+  async function reviewWorktreeRemoval(worktreeId: number) {
     const report = await saveItem(
-      workActions.prepareWorkspaceRemoval(workspaceId),
+      workActions.prepareWorktreeRemoval(worktreeId),
       false,
     );
     if (!report) return;
-    setWorkspaceRemovalReport(report);
-    setWorkspaceRemovalSelection(
-      Object.fromEntries(report.worktrees.map((worktree) => [worktree.worktreeId, false])),
-    );
-    setWorkspaceRemovalDestructive({});
+    setWorktreeRemovalReport(report);
+    setWorktreeRemovalDestructiveConfirmed(false);
   }
 
-  async function removeWorkspace() {
-    if (!workspaceRemovalReport) return;
-    const confirmedWorktreeIds = workspaceRemovalReport.worktrees
-      .filter((worktree) => workspaceRemovalSelection[worktree.worktreeId])
-      .map((worktree) => worktree.worktreeId);
-    const destructiveWorktreeIds = workspaceRemovalReport.worktrees
-      .filter((worktree) => workspaceRemovalDestructive[worktree.worktreeId])
-      .map((worktree) => worktree.worktreeId);
+  async function removeWorktree() {
+    if (!worktreeRemovalReport) return;
     await saveItem(
-      workActions.removeWorkspace(
-        workspaceRemovalReport.workspaceId,
-        confirmedWorktreeIds,
-        destructiveWorktreeIds,
+      workActions.removeWorktree(
+        worktreeRemovalReport.worktreeId,
+        worktreeRemovalReport.requiresDestructiveConfirmation &&
+          worktreeRemovalDestructiveConfirmed,
       ),
     );
-    setWorkspaceRemovalReport(undefined);
+    setWorktreeRemovalReport(undefined);
+    setWorktreeRemovalDestructiveConfirmed(false);
   }
 
   async function refreshExternalObject(externalObjectId: number) {
@@ -987,10 +947,10 @@ export function ItemCard({
     }
   }
 
-  function openIssuePreview() {
+  function openCreateIssueDialog() {
     setIssueTitle(view.item.title);
     setIssueBody(view.item.notes);
-    setIsIssuePreviewOpen(true);
+    setIsCreateIssueDialogOpen(true);
   }
 
   async function handleCreateIssue(event: FormEvent<HTMLFormElement>) {
@@ -1006,7 +966,7 @@ export function ItemCard({
           issueBody,
         ),
       );
-      setIsIssuePreviewOpen(false);
+      setIsCreateIssueDialogOpen(false);
       setIssueRepository("");
       await onChanged();
       if (result.warning) {
@@ -1029,17 +989,16 @@ export function ItemCard({
   );
 
   function renderWorkspaceCard(workspace: Workspace) {
-    const workspaceWorktrees = view.worktrees.filter(
-      (worktree) => worktree.workspace_id === workspace.id,
+    const workspaceWorktrees = view.worktrees.filter((worktree) =>
+      view.workspaces.some((candidate) => candidate.id === worktree.workspace_id),
     );
 
     return (
       <Card size="sm" key={workspace.id}>
         <CardHeader className="border-b border-border/70">
-          <CardTitle className="text-sm">Workspace #{workspace.id}</CardTitle>
+          <CardTitle className="text-sm">Project Repositories</CardTitle>
           <CardDescription>
-            Persistent logical grouping for later Runs. It has no shared root
-            directory.
+            Every Repository configured for this Project is available to this Item. Each Worktree stays isolated to this Item.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3 pt-4">
@@ -1173,118 +1132,78 @@ export function ItemCard({
                     size="sm"
                     variant="outline"
                     disabled={isSaving}
-                    onClick={() => void openWorktreeRun(workspace, worktree.id)}
+                    onClick={() =>
+                      void openWorktreeRun(
+                        view.workspaces.find((candidate) => candidate.id === worktree.workspace_id) ?? workspace,
+                        worktree.id,
+                      )
+                    }
                   >
                     Start Worktree Run
+                  </Button>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    disabled={isSaving}
+                    onClick={() => void reviewWorktreeRemoval(worktree.id)}
+                  >
+                    Remove Worktree
                   </Button>
                 </div>
               ))}
             </div>
           )}
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={isSaving}
-            onClick={() => void reviewWorkspaceRemoval(workspace.id)}
-          >
-            Review Worktree cleanup
-          </Button>
-          {workspaceRemovalReport?.workspaceId === workspace.id && (
+          {worktreeRemovalReport &&
+            view.workspaces.some((candidate) => candidate.id === worktreeRemovalReport.workspaceId) && (
             <div className="grid gap-3 rounded-lg border border-destructive/30 p-4">
               <div>
                 <h4 className="m-0 text-base font-medium">
-                  Confirm each Worktree to remove
+                  Confirm Worktree removal
                 </h4>
                 <p className="mt-1 text-sm text-muted-foreground">
-                  Physical cleanup is explicit. Git branches are preserved.
+                  The Worktree directory will be removed. Its Git branch will be preserved.
                 </p>
               </div>
-              {workspaceRemovalReport.blockers.length > 0 && (
-                <Alert variant="destructive">
-                  <AlertTitle>Workspace cleanup is blocked</AlertTitle>
-                  <AlertDescription>
-                    {workspaceRemovalReport.blockers.map((blocker) => (
-                      <div key={blocker}>{blocker}</div>
-                    ))}
-                  </AlertDescription>
-                </Alert>
-              )}
-              {workspaceRemovalReport.worktrees.map((worktree) => (
-                <label
-                  className="grid gap-2 rounded-md border p-3 text-sm"
-                  key={worktree.worktreeId}
-                >
-                  <span className="flex items-center gap-2 font-medium">
-                    <Checkbox
-                      checked={
-                        workspaceRemovalSelection[worktree.worktreeId] === true
-                      }
-                      onCheckedChange={(checked) =>
-                        setWorkspaceRemovalSelection((current) => ({
-                          ...current,
-                          [worktree.worktreeId]: checked === true,
-                        }))
-                      }
-                      disabled={isSaving || !workspaceRemovalReport.safe}
-                    />
-                    {worktree.repositoryName} · {worktree.branch}
-                  </span>
-                  <code className="break-all text-xs text-muted-foreground">
-                    {worktree.path}
-                  </code>
-                  {worktree.requiresDestructiveConfirmation && (
-                    <span className="flex items-center gap-2 font-normal text-destructive">
-                      <Checkbox
-                        checked={
-                          workspaceRemovalDestructive[worktree.worktreeId] ===
-                          true
-                        }
-                        onCheckedChange={(checked) =>
-                          setWorkspaceRemovalDestructive((current) => ({
-                            ...current,
-                            [worktree.worktreeId]: checked === true,
-                          }))
-                        }
-                        disabled={isSaving || !workspaceRemovalReport.safe}
-                      />
-                      Confirm destructive removal of dirty files.
-                    </span>
-                  )}
+              <div className="grid gap-1 text-sm">
+                <span>{worktreeRemovalReport.repositoryName} · {worktreeRemovalReport.branch}</span>
+                <code className="break-all text-xs text-muted-foreground">{worktreeRemovalReport.path}</code>
+              </div>
+              {worktreeRemovalReport.requiresDestructiveConfirmation && (
+                <label className="flex items-center gap-2 text-sm text-destructive">
+                  <Checkbox
+                    checked={worktreeRemovalDestructiveConfirmed}
+                    onCheckedChange={(checked) =>
+                      setWorktreeRemovalDestructiveConfirmed(checked === true)
+                    }
+                    disabled={isSaving}
+                  />
+                  Confirm destructive removal of dirty files.
                 </label>
-              ))}
+              )}
               <div className="flex flex-wrap gap-2">
                 <Button
                   type="button"
                   variant="destructive"
-                  disabled={
-                    isSaving ||
-                    !workspaceRemovalReport.safe ||
-                    workspaceRemovalReport.worktrees.length === 0 ||
-                    workspaceRemovalReport.worktrees.some(
-                      (worktree) =>
-                        !workspaceRemovalSelection[worktree.worktreeId] ||
-                        (worktree.requiresDestructiveConfirmation &&
-                          !workspaceRemovalDestructive[worktree.worktreeId]),
-                    )
-                  }
-                  onClick={() => void removeWorkspace()}
+                  disabled={isSaving || (worktreeRemovalReport.requiresDestructiveConfirmation && !worktreeRemovalDestructiveConfirmed)}
+                  onClick={() => void removeWorktree()}
                 >
-                  {isSaving ? "Removing…" : "Remove selected Worktrees"}
+                  {isSaving ? "Removing…" : "Remove Worktree"}
                 </Button>
                 <Button
                   type="button"
                   variant="ghost"
                   disabled={isSaving}
-                  onClick={() => setWorkspaceRemovalReport(undefined)}
+                  onClick={() => setWorktreeRemovalReport(undefined)}
                 >
                   Cancel
                 </Button>
               </div>
             </div>
           )}
-          {worktreeRunWorkspaceId === workspace.id &&
-            worktreeRunWorktreeId !== undefined && (
+          {worktreeRunWorkspaceId !== undefined &&
+            worktreeRunWorktreeId !== undefined &&
+            view.workspaces.some((candidate) => candidate.id === worktreeRunWorkspaceId) && (
               <form
                 className="grid gap-4 rounded-lg border border-primary/30 bg-primary/5 p-4"
                 onSubmit={handleStartWorktreeRun}
@@ -1698,6 +1617,19 @@ export function ItemCard({
                 >
                   Add reminder
                 </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  disabled={isSaving}
+                  onSelect={() => setIsExternalLinkDialogOpen(true)}
+                >
+                  Add external link
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={isSaving}
+                  onSelect={openCreateIssueDialog}
+                >
+                  Create GitHub Issue
+                </DropdownMenuItem>
                 <DropdownMenuSub>
                   <DropdownMenuSubTrigger>Change status</DropdownMenuSubTrigger>
                   <DropdownMenuSubContent>
@@ -1760,35 +1692,24 @@ export function ItemCard({
                 </div>
               </DialogHeader>
               <form className="grid gap-4" onSubmit={handleStartGrillRun}>
-            {view.workspaces.length === 0 && (
+            {itemRepositories.length === 0 && (
               <Alert variant="destructive">
-                <AlertTitle>Workspace required</AlertTitle>
+                <AlertTitle>Project Repository required</AlertTitle>
                 <AlertDescription>
-                  Create a Workspace with at least one Repository before starting a Grill Run.
+                  Register a Repository in this Project&apos;s settings before starting a Grill Run.
                 </AlertDescription>
               </Alert>
             )}
             <div className="grid gap-3 md:grid-cols-2">
-              <label className="grid gap-1.5 text-sm font-medium">
-                <span>Workspace</span>
-                <NativeSelect
-                  value={grillRunWorkspaceId ?? ""}
-                  onChange={(event) =>
-                    void refreshGrillRunPreview(
-                      Number(event.target.value) || undefined,
-                      undefined,
-                    )
-                  }
-                  disabled={isSaving || view.workspaces.length === 0}
-                >
-                  <NativeSelectOption value="">Choose a Workspace</NativeSelectOption>
-                  {view.workspaces.map((workspace) => (
-                    <NativeSelectOption value={workspace.id} key={workspace.id}>
-                      Workspace #{workspace.id} · {workspace.repositories.length} Repository(s)
-                    </NativeSelectOption>
+              <div className="grid gap-1.5 text-sm">
+                <span className="font-medium">Project Repositories</span>
+                <span className="text-muted-foreground">All configured Repositories are included.</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {itemRepositories.map((repository) => (
+                    <Badge variant="secondary" key={repository.id}>{repository.name}</Badge>
                   ))}
-                </NativeSelect>
-              </label>
+                </div>
+              </div>
               <label className="grid gap-1.5 text-sm font-medium">
                 <span>Machine</span>
                 <NativeSelect
@@ -1799,7 +1720,7 @@ export function ItemCard({
                       Number(event.target.value) || undefined,
                     )
                   }
-                  disabled={isSaving || !grillRunWorkspaceId}
+                  disabled={isSaving || !grillRunWorkspaceId || itemRepositories.length === 0}
                 >
                   <NativeSelectOption value="">Local Mac (default)</NativeSelectOption>
                   {itemMachines.map((machine) => (
@@ -2067,12 +1988,6 @@ export function ItemCard({
               Run history
             </span>
             {view.runs.map((run) => {
-              const runWorkspace =
-                run.workspace_id === null
-                  ? undefined
-                  : view.workspaces.find(
-                      (workspace) => workspace.id === run.workspace_id,
-                    );
               const runRepository =
                 run.repository_id === null
                   ? run.direct_checkouts.find(
@@ -2114,13 +2029,10 @@ export function ItemCard({
                       {run.working_directory}
                     </code>
                     <span className="text-xs text-muted-foreground">
-                      {runWorkspace
-                        ? `Workspace #${runWorkspace.id}`
-                        : "Unscoped"}
                       {runRepository !== undefined
-                        ? ` · Repository ${repositoryName(repositories, runRepository)}`
+                        ? `Repository ${repositoryName(repositories, runRepository)}`
                         : ""}
-                      {runWorktree ? " · Worktree" : runWorkspace ? " · Direct checkout" : ""}
+                      {runWorktree ? " · Worktree" : runRepository !== undefined ? " · Direct checkout" : "Unregistered working location"}
                     </span>
                     <span className="text-xs text-muted-foreground">
                       Session {run.session_name} · Pane {run.pane_id}
@@ -2270,129 +2182,15 @@ export function ItemCard({
         )}
         <div className="grid gap-3">
           <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            Workspaces
+            Project Repositories
           </span>
-          {view.workspaces.map(renderWorkspaceCard)}
-          <Card size="sm">
-            <CardHeader>
-              <CardTitle className="text-sm">Create a Workspace</CardTitle>
-              <CardDescription>
-                Save a reusable Repository subset and its branch
-                configuration. Workspaces do not create a shared
-                multi-Repository root.
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <form className="grid gap-3" onSubmit={handleCreateWorkspace}>
-                <span className="text-sm font-medium">
-                  Select repositories
-                </span>
-                {itemRepositories.length === 0 ? (
-                  <span className="text-sm text-muted-foreground">
-                    Register a Repository under this Project first.
-                  </span>
-                ) : (
-                  <div className="grid gap-2">
-                    {itemRepositories.map((repository) => {
-                      const selected = workspaceRepositoryIds.includes(
-                        repository.id,
-                      );
-                      return (
-                        <div
-                          className="grid gap-2 rounded-md border p-3"
-                          key={repository.id}
-                        >
-                          <label className="flex items-center gap-2 text-sm font-normal">
-                            <Checkbox
-                              checked={selected}
-                              onCheckedChange={(checked) => {
-                                setWorkspaceRepositoryIds((current) =>
-                                  checked === true
-                                    ? [...current, repository.id]
-                                    : current.filter(
-                                        (id) => id !== repository.id,
-                                      ),
-                                );
-                                if (checked === true) {
-                                  setWorkspaceBranches((current) => ({
-                                    ...current,
-                                    [repository.id]:
-                                      current[repository.id] ??
-                                      repository.base_branch,
-                                  }));
-                                  setWorkspaceBaseBranches((current) => ({
-                                    ...current,
-                                    [repository.id]:
-                                      current[repository.id] ??
-                                      repository.base_branch,
-                                  }));
-                                }
-                              }}
-                              disabled={isSaving}
-                            />
-                            {repository.name}
-                          </label>
-                          {selected && (
-                            <div className="grid gap-2 sm:grid-cols-2">
-                              <label className="grid gap-1.5 text-sm font-medium">
-                                <span>Workspace branch</span>
-                                <Input
-                                  aria-label={`${repository.name} workspace branch`}
-                                  value={
-                                    workspaceBranches[repository.id] ?? ""
-                                  }
-                                  onChange={(event) =>
-                                    setWorkspaceBranches((current) => ({
-                                      ...current,
-                                      [repository.id]: event.target.value,
-                                    }))
-                                  }
-                                  placeholder={repository.base_branch}
-                                  disabled={isSaving}
-                                />
-                              </label>
-                              <label className="grid gap-1.5 text-sm font-medium">
-                                <span>Base branch</span>
-                                <Input
-                                  aria-label={`${repository.name} workspace base branch`}
-                                  value={
-                                    workspaceBaseBranches[repository.id] ??
-                                    ""
-                                  }
-                                  onChange={(event) =>
-                                    setWorkspaceBaseBranches((current) => ({
-                                      ...current,
-                                      [repository.id]: event.target.value,
-                                    }))
-                                  }
-                                  placeholder={repository.base_branch}
-                                  disabled={isSaving}
-                                />
-                              </label>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                )}
-                <Button
-                  type="submit"
-                  disabled={
-                    isSaving ||
-                    workspaceRepositoryIds.length === 0 ||
-                    workspaceRepositoryIds.some(
-                      (repositoryId) =>
-                        !workspaceBranches[repositoryId]?.trim() ||
-                        !workspaceBaseBranches[repositoryId]?.trim(),
-                    )
-                  }
-                >
-                  {isSaving ? "Saving…" : "Create Workspace"}
-                </Button>
-              </form>
-            </CardContent>
-          </Card>
+          {itemRepositories.length === 0 ? (
+            <span className="text-sm text-muted-foreground">
+              Register a Repository in this Project&apos;s settings to make it available to the Item.
+            </span>
+          ) : (
+            view.workspaces[0] ? renderWorkspaceCard(view.workspaces[0]) : null
+          )}
         </div>
         <div className="grid gap-3">
           <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -2500,92 +2298,6 @@ export function ItemCard({
               </div>
             </Alert>
           )}
-          <form className="flex flex-wrap gap-2" onSubmit={handleExternalLink}>
-            <Input
-              className="min-w-0 flex-1"
-              aria-label={`External URL for ${displayIdentifier}`}
-              value={externalUrl}
-              onChange={(event) => setExternalUrl(event.target.value)}
-              placeholder="Paste a GitHub issue, pull request, or URL"
-              disabled={isSaving}
-            />
-            <Button
-              type="submit"
-              variant="outline"
-              disabled={isSaving || !externalUrl.trim()}
-            >
-              Add link
-            </Button>
-          </form>
-          {!isIssuePreviewOpen ? (
-            <Button
-              type="button"
-              variant="outline"
-              disabled={isSaving}
-              onClick={openIssuePreview}
-            >
-              Create GitHub Issue
-            </Button>
-          ) : (
-            <Card size="sm" className="border-primary/30 bg-primary/5">
-              <form className="grid gap-3 p-4" onSubmit={handleCreateIssue}>
-                <div>
-                  <strong className="block text-sm">
-                    Preview GitHub Issue
-                  </strong>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    Nothing is sent until you confirm. The existing Item will
-                    remain unchanged and the created Issue will be linked to it.
-                  </p>
-                </div>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Repository</span>
-                  <Input
-                    value={issueRepository}
-                    onChange={(event) => setIssueRepository(event.target.value)}
-                    placeholder="owner/repository"
-                    disabled={isSaving}
-                  />
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Public title</span>
-                  <Input
-                    value={issueTitle}
-                    onChange={(event) => setIssueTitle(event.target.value)}
-                    disabled={isSaving}
-                  />
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Public body</span>
-                  <Textarea
-                    value={issueBody}
-                    onChange={(event) => setIssueBody(event.target.value)}
-                    rows={4}
-                    placeholder="Optional public context"
-                    disabled={isSaving}
-                  />
-                </label>
-                <div className="flex flex-wrap gap-2">
-                  <Button
-                    type="submit"
-                    disabled={
-                      isSaving || !issueRepository.trim() || !issueTitle.trim()
-                    }
-                  >
-                    {isSaving ? "Creating…" : "Confirm and create Issue"}
-                  </Button>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    disabled={isSaving}
-                    onClick={() => setIsIssuePreviewOpen(false)}
-                  >
-                    Cancel
-                  </Button>
-                </div>
-              </form>
-            </Card>
-          )}
         </div>
         <div className="grid gap-2">
           <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
@@ -2664,6 +2376,112 @@ export function ItemCard({
           </CardContent>
         )}
       </Card>
+      {isExternalLinkDialogOpen && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open && !isSaving) setIsExternalLinkDialogOpen(false);
+          }}
+        >
+          <DialogContent>
+            <DialogHeader>
+              <DialogTitle>Add external link</DialogTitle>
+              <DialogDescription>
+                Link a GitHub Issue, pull request, or other external URL to {displayIdentifier}.
+              </DialogDescription>
+            </DialogHeader>
+            <form className="grid gap-4" onSubmit={handleExternalLink}>
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>External URL</span>
+                <Input
+                  autoFocus
+                  aria-label={`External URL for ${displayIdentifier}`}
+                  value={externalUrl}
+                  onChange={(event) => setExternalUrl(event.target.value)}
+                  placeholder="Paste a GitHub issue, pull request, or URL"
+                  disabled={isSaving}
+                />
+              </label>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={isSaving}
+                  onClick={() => setIsExternalLinkDialogOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button type="submit" disabled={isSaving || !externalUrl.trim()}>
+                  {isSaving ? "Adding…" : "Add link"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+      )}
+      {isCreateIssueDialogOpen && (
+        <Dialog
+          open
+          onOpenChange={(open) => {
+            if (!open && !isSaving) setIsCreateIssueDialogOpen(false);
+          }}
+        >
+          <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>Create GitHub Issue</DialogTitle>
+              <DialogDescription>
+                Nothing is sent until you confirm. The existing Item remains unchanged, and the created Issue will be linked to it.
+              </DialogDescription>
+            </DialogHeader>
+            <form className="grid gap-4" onSubmit={handleCreateIssue}>
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Repository</span>
+                <Input
+                  autoFocus
+                  value={issueRepository}
+                  onChange={(event) => setIssueRepository(event.target.value)}
+                  placeholder="owner/repository"
+                  disabled={isSaving}
+                />
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Public title</span>
+                <Input
+                  value={issueTitle}
+                  onChange={(event) => setIssueTitle(event.target.value)}
+                  disabled={isSaving}
+                />
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Public body</span>
+                <Textarea
+                  value={issueBody}
+                  onChange={(event) => setIssueBody(event.target.value)}
+                  rows={5}
+                  placeholder="Optional public context"
+                  disabled={isSaving}
+                />
+              </label>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={isSaving}
+                  onClick={() => setIsCreateIssueDialogOpen(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={isSaving || !issueRepository.trim() || !issueTitle.trim()}
+                >
+                  {isSaving ? "Creating…" : "Confirm and create Issue"}
+                </Button>
+              </DialogFooter>
+            </form>
+          </DialogContent>
+        </Dialog>
+      )}
       {isRenameDialogOpen && (
         <Dialog
           open
@@ -2816,7 +2634,6 @@ export function ItemCard({
                 <li>
                   {deletionPreview.plan.relationshipCount} Item relationship(s)
                 </li>
-                <li>{deletionPreview.plan.workspaces.length} Workspace(s)</li>
                 <li>{deletionPreview.plan.runIds.length} Run(s)</li>
                 <li>{deletionPreview.plan.linkIds.length} Link(s)</li>
                 <li>
@@ -3475,9 +3292,9 @@ export function RunSuggestionCard({
         <div className="grid gap-1 text-xs">
           <strong>
             {suggestion.workspaceId
-              ? `Workspace #${suggestion.workspaceId} · ${
-                  suggestion.worktreeId ? "Worktree" : "Direct checkout"
-                }`
+              ? suggestion.worktreeId
+                ? "Registered Worktree"
+                : "Registered direct checkout"
               : "Unregistered working location"}
           </strong>
           <span className="break-all text-muted-foreground">

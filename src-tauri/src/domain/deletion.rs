@@ -564,12 +564,22 @@ pub(crate) fn workspace_preparation_state(
     else {
         return previous;
     };
-    let complete = workspace.repositories.iter().all(|repository| {
-        state.worktrees.iter().any(|worktree| {
-            worktree.workspace_id == workspace_id
-                && worktree.repository_id == repository.repository_id
-        })
-    });
+    let item_project_id = state
+        .items
+        .iter()
+        .find(|item| item.id == workspace.item_id)
+        .map(|item| item.project_id);
+    let repositories = state
+        .repositories
+        .iter()
+        .filter(|repository| Some(repository.project_id) == item_project_id)
+        .collect::<Vec<_>>();
+    let complete = !repositories.is_empty()
+        && repositories.iter().all(|repository| {
+            state.worktrees.iter().any(|worktree| {
+                worktree.workspace_id == workspace_id && worktree.repository_id == repository.id
+            })
+        });
     if complete {
         WorkspacePreparationState::Ready
     } else if previous == WorkspacePreparationState::Resumable {
@@ -577,4 +587,17 @@ pub(crate) fn workspace_preparation_state(
     } else {
         WorkspacePreparationState::Pending
     }
+}
+
+pub(crate) fn run_uses_repository(state: &DomainState, run: &Run, repository_id: i64) -> bool {
+    run.repository_id == Some(repository_id)
+        || run
+            .direct_checkouts
+            .iter()
+            .any(|checkout| checkout.repository_id == repository_id)
+        || run.worktree_id.is_some_and(|worktree_id| {
+            state.worktrees.iter().any(|worktree| {
+                worktree.id == worktree_id && worktree.repository_id == repository_id
+            })
+        })
 }

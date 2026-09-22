@@ -79,6 +79,21 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
         )?;
     }
 
+    connection.execute(
+        "UPDATE contexts
+         SET grill_model = CASE grill_model
+             WHEN 'claude-opus-4-1' THEN 'claude-opus-5'
+             WHEN 'codex-sol' THEN 'gpt-6-sol'
+             WHEN 'codex-terra' THEN 'gpt-6-sol'
+             WHEN 'codex-luna' THEN 'gpt-6-luna'
+             ELSE grill_model
+         END
+         WHERE grill_model IN (
+             'claude-opus-4-1', 'codex-sol', 'codex-terra', 'codex-luna'
+         )",
+        [],
+    )?;
+
     if table_columns(connection, "items")?.is_empty() {
         create_items_table(connection)?;
     }

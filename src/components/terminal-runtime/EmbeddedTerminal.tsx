@@ -171,7 +171,7 @@ export function EmbeddedTerminal({
 
   return (
     <section
-      className="mt-7 grid gap-3.5 rounded-2xl border border-[var(--terminal-border)] bg-[var(--terminal-bg)] p-[18px] shadow-[0_18px_50px_rgb(var(--terminal-shadow-rgb)/0.16)]"
+      className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)_auto] gap-3.5 overflow-hidden rounded-2xl border border-[var(--terminal-border)] bg-[var(--terminal-bg)] p-3 shadow-[0_18px_50px_rgb(var(--terminal-shadow-rgb)/0.16)] sm:p-[18px]"
       aria-labelledby="embedded-terminal-heading"
     >
       <div className="flex items-start justify-between gap-4 max-[560px]:flex-col">
@@ -214,7 +214,7 @@ export function EmbeddedTerminal({
         ))}
       </div>
       <div
-        className="terminal-surface min-h-[420px] overflow-hidden rounded-[10px] border border-[var(--terminal-surface-border)] bg-[var(--terminal-bg)] p-3"
+        className="terminal-surface min-h-0 overflow-hidden rounded-[10px] border border-[var(--terminal-surface-border)] bg-[var(--terminal-bg)] p-3"
         ref={terminalContainerRef}
       />
       {terminalError && (

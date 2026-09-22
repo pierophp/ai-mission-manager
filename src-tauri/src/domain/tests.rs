@@ -334,7 +334,7 @@ mod grill_contract_tests {
     fn grill_catalog_rejects_an_effort_not_supported_by_the_selected_model() {
         let configuration = GrillConfiguration {
             agent: AgentKind::Codex,
-            model: "codex-luna".into(),
+            model: "gpt-6-luna".into(),
             effort: "not-supported".into(),
         };
 
@@ -343,7 +343,7 @@ mod grill_contract_tests {
             .iter()
             .any(|catalog| catalog.agent == AgentKind::Codex
                 && catalog.models.iter().any(|model| {
-                    model.id == "codex-luna"
+                    model.id == "gpt-6-luna"
                         && model.efforts.iter().any(|effort| effort.id == "xhigh")
                 })));
     }
@@ -352,7 +352,7 @@ mod grill_contract_tests {
     fn a_grill_run_persists_its_configuration_snapshot_and_primary_checkout() {
         let configuration = GrillConfiguration {
             agent: AgentKind::Codex,
-            model: "codex-luna".into(),
+            model: "gpt-6-luna".into(),
             effort: "xhigh".into(),
         };
 
@@ -363,7 +363,7 @@ mod grill_contract_tests {
         assert_eq!(run.execution_profile, ExecutionProfile::Grill);
         assert_eq!(run.repository_id, Some(1));
         assert_eq!(run.working_directory, "/tmp/mission-manager");
-        assert_eq!(run.model.as_deref(), Some("codex-luna"));
+        assert_eq!(run.model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(run.effort.as_deref(), Some("xhigh"));
         assert_eq!(run.skill_snapshot.as_deref(), Some(GRILL_SKILL_SNAPSHOT));
         assert!(run

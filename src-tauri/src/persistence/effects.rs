@@ -300,6 +300,7 @@ impl SqliteStore {
                             workspace.id,
                         ],
                     )?;
+                    persist_workspace_repositories(&transaction, workspace)?;
                 }
                 Effect::PersistWorktree {
                     worktree,
@@ -470,8 +471,8 @@ impl SqliteStore {
                         "UPDATE runs
                          SET transcript = ?1, grill_question_group_json = ?2,
                              grill_answers_json = ?3, grill_decisions_json = ?4,
-                             grill_response = ?5
-                         WHERE id = ?6",
+                             grill_response = ?5, grill_phase = ?6
+                         WHERE id = ?7",
                         params![
                             run.transcript,
                             run.grill_question_group
@@ -488,6 +489,7 @@ impl SqliteStore {
                                 rusqlite::Error::ToSqlConversionFailure(Box::new(error))
                             })?,
                             run.grill_response,
+                            run.grill_phase.map(grill_phase_as_str),
                             run.id,
                         ],
                     )?;

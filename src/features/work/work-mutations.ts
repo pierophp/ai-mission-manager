@@ -20,10 +20,6 @@ export const workActions = {
     () => workAdapter.setRelation(fromItemId, toItemId, kind),
   linkExternalObject: (itemId: number, url: string) =>
     () => workAdapter.linkExternalObject(itemId, url),
-  createWorkspace: (
-    itemId: number,
-    repositories: Parameters<typeof workAdapter.createWorkspace>[1],
-    ) => () => workAdapter.createWorkspace(itemId, repositories),
   prepareWorktree: (
     workspaceId: number,
     repositoryId: number,
@@ -54,19 +50,10 @@ export const workActions = {
         path,
         confirmDirtyAttachment,
       ),
-  prepareWorkspaceRemoval: (workspaceId: number) =>
-    () => workAdapter.prepareWorkspaceRemoval(workspaceId),
-  removeWorkspace: (
-    workspaceId: number,
-    confirmedWorktreeIds: number[],
-    destructiveWorktreeIds: number[],
-  ) =>
-    () =>
-      workAdapter.removeWorkspace(
-        workspaceId,
-        confirmedWorktreeIds,
-        destructiveWorktreeIds,
-      ),
+  prepareWorktreeRemoval: (worktreeId: number) =>
+    () => workAdapter.prepareWorktreeRemoval(worktreeId),
+  removeWorktree: (worktreeId: number, destructiveConfirmed: boolean) =>
+    () => workAdapter.removeWorktree(worktreeId, true, destructiveConfirmed),
   prepareDirectRun: (itemId: number, workspaceId: number, machineId: number | null) =>
     () => workAdapter.prepareDirectRun(itemId, workspaceId, machineId),
   prepareGrillRun: (itemId: number, workspaceId: number, machineId: number | null) =>

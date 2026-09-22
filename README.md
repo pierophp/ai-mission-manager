@@ -16,10 +16,11 @@ The project is in active v0 development and is intended for personal use on macO
 The central entity is an **Item**: something you have decided to do, delegate, or keep on your radar. An Item can remain a simple note, or grow into tracked external work and delegated execution:
 
 ~~~text
-Item
-├── Links to GitHub Issues, pull requests, or other URLs
-├── Workspaces grouping one or more repositories
-└── Runs of Claude Code or Codex inside a terminal Pane
+Project
+├── Repositories available to every Item
+└── Items
+    ├── Links to GitHub Issues, pull requests, or other URLs
+    └── Runs of Claude Code or Codex inside a terminal Pane
 ~~~
 
 The app also brings external changes, blocked Runs, due Reminders, and review dates into one **Needs Attention** view. An external signal is evidence for you to consider; it never silently completes work or changes your intent.
@@ -31,7 +32,7 @@ The first vertical slice covers:
 - **Capture and organisation** — Contexts, Projects, stable MC-* Item identifiers, Inbox/Active/Waiting/Done states, notes, relationships, and cross-Context search.
 - **GitHub tracking** — paste a GitHub Issue or pull request URL, keep a cached snapshot, deduplicate External Objects, create an Issue from an editable preview, add comments, and refresh manually. Unrecognised URLs remain generic Links.
 - **Attention management** — Activity history, per-Link review watermarks, Context and Link attention policies, Watch dates, Item Reminders, and grouped Attention Entries.
-- **Workspaces and Worktrees** — group repositories logically, run against registered checkouts directly, and prepare or attach real Git Worktrees with explicit dirty-state cleanup.
+- **Project Repositories and Worktrees** — configure Repositories in Settings for a Project; every Item in that Project can use all of them, directly or through an isolated Git Worktree.
 - **Agent Runs** — launch Claude Code or Codex with an explicit Execution Profile and reviewed prompt, keep Run history, attach a manually started agent only after approval, and report unknown, working, blocked, or finished state.
 - **Terminal access** — embed the real tmux Pane, send input and resize it, open the exact Pane in macOS Terminal, and recover Run associations after an app or connection restart.
 - **Remote execution** — run the same terminal flow on a remote Machine over SSH, without silently falling back to local execution.
@@ -43,13 +44,13 @@ The project uses a small, deliberate vocabulary:
 | Concept | Meaning |
 | --- | --- |
 | **Context** | A boundary that isolates an area of work, its providers, repositories, and Machines. |
-| **Project** | A container for Items inside a Context and the source of their defaults. |
+| **Project** | A container for Items and configured Repositories inside a Context, and the source of Item defaults. |
 | **Item** | The user's durable unit of intent. |
 | **External Object** | A provider-owned object such as a GitHub Issue or pull request. |
 | **Link** | One Item's relationship with one External Object, including its own watch and review state. |
-| **Workspace** | A persistent logical grouping of selected Repositories for one Item. |
-| **Worktree** | A physical Git worktree for one Repository, associated with a Workspace. |
-| **Run** | One historical attempt by one agent in a Workspace checkout or Worktree. |
+| **Repository** | A Git repository registered under a Project and available to every Item in it. |
+| **Worktree** | A physical Git worktree for one Repository and Item, associated with a Machine. |
+| **Run** | One historical attempt by one agent on an Item, using a Project Repository directly or through a Worktree. |
 | **Pane** | A terminal owned by the Terminal Runtime and associated with a Run when an agent is running there. |
 | **Needs Attention** | The unified view of changes and situations that currently require the user's involvement. |
 
@@ -110,7 +111,7 @@ npm install
 npm run tauri -- dev
 ~~~
 
-On first launch, the app creates a Personal Context with a Default Project. From there, capture an Item, add external work or a Workspace when needed, and start a Run explicitly.
+On first launch, the app creates a Personal Context with a Default Project. Configure its Repositories in Settings, then capture an Item and start a Run explicitly when ready.
 
 npm run dev starts only the Vite front end. Use the Tauri command above for the complete desktop application and its Rust backend.
 

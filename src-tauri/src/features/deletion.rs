@@ -13,10 +13,10 @@ use crate::{
     domain::{
         decide, plan_context_deletion, plan_external_object_deletion, plan_item_deletion,
         plan_machine_deletion, plan_project_deletion, plan_repository_deletion,
-        plan_reset_local_data, run_is_active, Event, ExternalObjectDeletionPlan,
-        ExternalObjectDeletionSummary, ItemDeletionPlan, ItemDeletionSummary, MachineDeletionPlan,
-        ParentDeletionPlan, ParentDeletionSummary, RepositoryDeletionPlan, ResetLocalDataPlan,
-        ResetLocalDataSummary,
+        plan_reset_local_data, run_is_active, run_uses_repository, Event,
+        ExternalObjectDeletionPlan, ExternalObjectDeletionSummary, ItemDeletionPlan,
+        ItemDeletionSummary, MachineDeletionPlan, ParentDeletionPlan, ParentDeletionSummary,
+        RepositoryDeletionPlan, ResetLocalDataPlan, ResetLocalDataSummary,
     },
     git::GitCli,
 };
@@ -54,26 +54,9 @@ pub(crate) struct WorktreeRemovalReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct WorkspaceRemovalReport {
-    pub workspace_id: i64,
-    pub worktrees: Vec<WorktreeRemovalReport>,
-    pub safe: bool,
-    pub blockers: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
 pub(crate) struct WorktreeRemovalResult {
     pub worktree_id: i64,
     pub branch_preserved: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct WorkspaceRemovalResult {
-    pub workspace_id: i64,
-    pub worktree_count: usize,
-    pub branches_preserved: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -453,111 +436,6 @@ impl Runtime {
             .map_err(|error| error.to_string())
     }
 
-    fn build_workspace_removal_report(
-        &self,
-        workspace_id: i64,
-    ) -> Result<WorkspaceRemovalReport, String> {
-        if !self
-            .state
-            .workspaces
-            .iter()
-            .any(|workspace| workspace.id == workspace_id)
-        {
-            return Err(format!("Workspace {workspace_id} does not exist"));
-        }
-        let worktrees = self
-            .state
-            .worktrees
-            .iter()
-            .filter(|worktree| worktree.workspace_id == workspace_id)
-            .map(|worktree| self.build_worktree_removal_report(worktree.id))
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut blockers = Vec::new();
-        if self
-            .state
-            .runs
-            .iter()
-            .any(|run| run.workspace_id == Some(workspace_id))
-        {
-            blockers.push("This Workspace has Run history and cannot be removed.".into());
-        }
-        Ok(WorkspaceRemovalReport {
-            workspace_id,
-            worktrees,
-            safe: blockers.is_empty(),
-            blockers,
-        })
-    }
-
-    pub(crate) fn prepare_workspace_removal(
-        &mut self,
-        workspace_id: i64,
-    ) -> Result<WorkspaceRemovalReport, String> {
-        let report = self.build_workspace_removal_report(workspace_id)?;
-        self.pending_workspace_removal = Some(report.clone());
-        Ok(report)
-    }
-
-    pub(crate) fn remove_workspace(
-        &mut self,
-        workspace_id: i64,
-        confirmed_worktree_ids: Vec<i64>,
-        destructive_worktree_ids: Vec<i64>,
-        confirmed: bool,
-    ) -> Result<WorkspaceRemovalResult, String> {
-        if !confirmed {
-            return Err(
-                "Workspace removal requires explicit confirmation for every Worktree".into(),
-            );
-        }
-        let pending = self
-            .pending_workspace_removal
-            .as_ref()
-            .filter(|report| report.workspace_id == workspace_id)
-            .cloned()
-            .ok_or_else(|| "Review the Workspace removal report before removing it".to_owned())?;
-        let current = self.build_workspace_removal_report(workspace_id)?;
-        if current != pending {
-            return Err("The Workspace changed after the safety report; review the updated report before removing it".into());
-        }
-        if !current.safe {
-            return Err(format!(
-                "Workspace removal is blocked:\n{}",
-                current.blockers.join("\n")
-            ));
-        }
-        let mut expected_ids = current
-            .worktrees
-            .iter()
-            .map(|worktree| worktree.worktree_id)
-            .collect::<Vec<_>>();
-        let mut confirmed_ids = confirmed_worktree_ids;
-        expected_ids.sort_unstable();
-        confirmed_ids.sort_unstable();
-        if expected_ids != confirmed_ids {
-            return Err("Confirm each listed Worktree before removing the Workspace".into());
-        }
-        if current.worktrees.iter().any(|worktree| {
-            worktree.requires_destructive_confirmation
-                && !destructive_worktree_ids.contains(&worktree.worktree_id)
-        }) {
-            return Err("Each dirty Worktree requires destructive confirmation".into());
-        }
-        for worktree in &current.worktrees {
-            self.remove_worktree_physical(worktree)?;
-        }
-        let worktree_count = current.worktrees.len();
-        let decision = decide(self.state.clone(), Event::RemoveWorkspace { workspace_id })
-            .map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        self.pending_workspace_removal = None;
-        Ok(WorkspaceRemovalResult {
-            workspace_id,
-            worktree_count,
-            branches_preserved: true,
-        })
-    }
-
     fn build_item_deletion_preview(&self, item_id: i64) -> Result<ItemDeletionPreview, String> {
         let plan = plan_item_deletion(&self.state, item_id).map_err(|error| error.to_string())?;
         let blockers = plan
@@ -876,20 +754,16 @@ impl Runtime {
     ) -> Result<RepositoryDeletionPreview, String> {
         let plan = plan_repository_deletion(&self.state, repository_id)
             .map_err(|error| error.to_string())?;
-        let blockers = plan
-            .workspaces
+        let blockers = self
+            .state
+            .runs
             .iter()
-            .filter_map(|workspace| {
-                self.state
-                    .runs
-                    .iter()
-                    .find(|run| run.workspace_id == Some(workspace.id))
-                    .map(|run| {
-                        format!(
-                            "Workspace #{} has Run #{} history and cannot be removed with the Repository.",
-                            workspace.id, run.id
-                        )
-                    })
+            .filter(|run| run_uses_repository(&self.state, run, repository_id))
+            .map(|run| {
+                format!(
+                    "Run #{} on Item #{} uses this Repository and must be deleted first.",
+                    run.id, run.item_id
+                )
             })
             .collect();
         Ok(RepositoryDeletionPreview { plan, blockers })
@@ -914,7 +788,7 @@ impl Runtime {
             })?;
         let current = self.build_repository_deletion_preview(repository_id)?;
         if current != pending {
-            return Err("The Repository or its Workspace relationships changed after the preview; review the updated deletion preview".into());
+            return Err("The Repository or its Item execution references changed after the preview; review the updated deletion preview".into());
         }
         if !current.blockers.is_empty() {
             return Err(format!(

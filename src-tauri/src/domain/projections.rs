@@ -44,30 +44,45 @@ pub fn suggest_untracked_runs(
                             worktree.path.clone(),
                         ));
                     }
-                    workspace.repositories.iter().find_map(|selected| {
-                        state
-                            .repository_locations
-                            .iter()
-                            .filter(|location| {
-                                location.repository_id == selected.repository_id
-                                    && location.machine_id == pane.machine_id
-                                    && path_is_within(
-                                        &location.checkout_path,
-                                        &pane.current_path,
-                                        &pane.machine_home,
+                    let project_id = state
+                        .items
+                        .iter()
+                        .find(|item| item.id == workspace.item_id)
+                        .map(|item| item.project_id)?;
+                    let project_items = state
+                        .items
+                        .iter()
+                        .filter(|item| item.project_id == project_id)
+                        .count();
+                    state
+                        .repositories
+                        .iter()
+                        .filter(|repository| repository.project_id == project_id)
+                        .find_map(|repository| {
+                            state
+                                .repository_locations
+                                .iter()
+                                .filter(|location| {
+                                    location.repository_id == repository.id
+                                        && location.machine_id == pane.machine_id
+                                        && project_items == 1
+                                        && path_is_within(
+                                            &location.checkout_path,
+                                            &pane.current_path,
+                                            &pane.machine_home,
+                                        )
+                                })
+                                .max_by_key(|location| location.checkout_path.len())
+                                .map(|location| {
+                                    (
+                                        location.checkout_path.len(),
+                                        workspace.id,
+                                        repository.id,
+                                        None,
+                                        location.checkout_path.clone(),
                                     )
-                            })
-                            .max_by_key(|location| location.checkout_path.len())
-                            .map(|location| {
-                                (
-                                    location.checkout_path.len(),
-                                    workspace.id,
-                                    selected.repository_id,
-                                    None,
-                                    location.checkout_path.clone(),
-                                )
-                            })
-                    })
+                                })
+                        })
                 })
                 .max_by_key(|candidate| candidate.0);
             let (_, workspace_id, repository_id, worktree_id, location_path) = workspace_location?;
@@ -395,11 +410,24 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 .filter(|link| link.item_id == item.id)
                 .filter_map(|link| external_link_view_at(state, link, now))
                 .collect();
+            let project_repositories = state
+                .repositories
+                .iter()
+                .filter(|repository| repository.project_id == item.project_id)
+                .map(|repository| WorkspaceRepository {
+                    repository_id: repository.id,
+                    branch: format!("mission-{}", item.human_identifier),
+                    base_branch: repository.base_branch.clone(),
+                })
+                .collect::<Vec<_>>();
             let workspaces = state
                 .workspaces
                 .iter()
                 .filter(|workspace| workspace.item_id == item.id)
-                .cloned()
+                .map(|workspace| Workspace {
+                    repositories: project_repositories.clone(),
+                    ..workspace.clone()
+                })
                 .collect();
             let runs = state
                 .runs
@@ -482,11 +510,11 @@ pub fn compose_run_prompt(
                 .to_owned()
         }
         ExecutionProfile::Implement => {
-            "Implement this work in the selected Workspace, run the relevant checks, and leave the changes ready for review."
+            "Implement this work using the Repositories configured for its Project or a registered Worktree, run the relevant checks, and leave the changes ready for review."
                 .to_owned()
         }
         ExecutionProfile::Review => {
-            "Review the current Workspace changes for correctness, regressions, and missing test coverage."
+            "Review the current changes for this Item for correctness, regressions, and missing test coverage."
                 .to_owned()
         }
         ExecutionProfile::CustomPrompt => clean_name(
@@ -597,7 +625,7 @@ pub fn compose_grill_continuation_prompt(
     };
 
     Ok(format!(
-        "Continue the existing Grill Run in the same Run and Pane.\n\nSelected downstream action: {}\n\nDownstream skill snapshot (inject this content explicitly; do not rely on the agent having the skill installed):\n{}\n\nRelevant Item context:\n{}\n\nGrill transcript:\n{}\n\nRecorded Grill decisions:\n{}\n\nContinuation instruction:\nApply the selected {} skill to the Item using the transcript and decisions above. Keep working in the same Workspace and working directory. Ask any confirmation questions using the same ❓ and ➡️ markers as one grouped frontier. Wait for an explicit user decision to finish or stop; never mark the Item Done automatically.\n\nWhen to-spec or to-tickets creates a GitHub Issue, emit one machine-readable line with the confirmed Issue URL: AI_MISSION_MANAGER_EVENT {{\"event\":\"github.issue.created\",\"url\":\"<canonical URL>\",\"run_id\":{},\"action\":\"{}\"}}",
+        "Continue the existing Grill Run in the same Run and Pane.\n\nSelected downstream action: {}\n\nDownstream skill snapshot (inject this content explicitly; do not rely on the agent having the skill installed):\n{}\n\nRelevant Item context:\n{}\n\nGrill transcript:\n{}\n\nRecorded Grill decisions:\n{}\n\nContinuation instruction:\nApply the selected {} skill to the Item using the transcript and decisions above. Keep working in the same working directory. Ask any confirmation questions using the same ❓ and ➡️ markers as one grouped frontier. Wait for an explicit user decision to finish or stop; never mark the Item Done automatically.\n\nWhen to-spec or to-tickets creates a GitHub Issue, emit one machine-readable line with the confirmed Issue URL: AI_MISSION_MANAGER_EVENT {{\"event\":\"github.issue.created\",\"url\":\"<canonical URL>\",\"run_id\":{},\"action\":\"{}\"}}",
         action.as_str(),
         action.skill_snapshot(),
         context.join("\n\n"),

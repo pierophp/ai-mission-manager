@@ -1,6 +1,6 @@
 //! Work feature command facade.
 //!
-//! This slice owns Item, External Object/Link, Workspace, Worktree, Run, grilling,
+//! This slice owns Item, External Object/Link, Project Repository execution, Run, grilling,
 //! and Needs Attention workflows.
 //! The reducer remains the pure `domain::state_transition` seam; this module
 //! supplies the Runtime and Tauri adapters that persist its decisions and
@@ -31,7 +31,7 @@ use crate::{
         suggest_untracked_runs, worktree_path, AgentKind, AgentPaneObservation, AuditAction,
         ConfirmedDownstreamIssue, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
         ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshot, GrillAnswer,
-        GrillConfiguration, GrillContinuationAction, HomeView, Item, ItemRelation,
+        GrillConfiguration, GrillContinuationAction, GrillPhase, HomeView, Item, ItemRelation,
         ItemRelationKind, ItemStatus, ItemView, Machine, MachineObservation, MachineTransport,
         Repository, RepositoryLocation, Run, RunCheckout, RunPaneStatus, RunPromptSelection,
         RunState, RunSuggestion, Workspace, WorkspaceRepository, WorkspaceRepositoryInput,
@@ -48,8 +48,7 @@ use crate::{
 
 use crate::features::deletion::{
     ExternalLinkDeletionResult, ExternalObjectDeletionPreview, ExternalObjectDeletionResult,
-    ItemDeletionPreview, ItemDeletionResult, WorkspaceRemovalReport, WorkspaceRemovalResult,
-    WorktreeRemovalReport, WorktreeRemovalResult,
+    ItemDeletionPreview, ItemDeletionResult, WorktreeRemovalReport, WorktreeRemovalResult,
 };
 use crate::features::structure::{machine_home_directory, resolve_machine_path};
 
@@ -381,16 +380,6 @@ pub(crate) fn poll_external_objects(
     locked(state, |runtime| Ok(runtime.poll_external_objects()))
 }
 
-pub(crate) fn create_workspace(
-    item_id: i64,
-    repositories: Vec<WorkspaceRepositoryInput>,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<Workspace, String> {
-    locked(state, |runtime| {
-        runtime.create_workspace(item_id, repositories)
-    })
-}
-
 pub(crate) fn create_worktree(
     workspace_id: i64,
     repository_id: i64,
@@ -448,32 +437,6 @@ pub(crate) fn remove_worktree(
 ) -> Result<WorktreeRemovalResult, String> {
     locked(state, |runtime| {
         runtime.remove_worktree(worktree_id, confirmed, destructive_confirmed)
-    })
-}
-
-pub(crate) fn prepare_workspace_removal(
-    workspace_id: i64,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<WorkspaceRemovalReport, String> {
-    locked(state, |runtime| {
-        runtime.prepare_workspace_removal(workspace_id)
-    })
-}
-
-pub(crate) fn remove_workspace(
-    workspace_id: i64,
-    confirmed_worktree_ids: Vec<i64>,
-    destructive_worktree_ids: Vec<i64>,
-    confirmed: bool,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<WorkspaceRemovalResult, String> {
-    locked(state, |runtime| {
-        runtime.remove_workspace(
-            workspace_id,
-            confirmed_worktree_ids,
-            destructive_worktree_ids,
-            confirmed,
-        )
     })
 }
 

@@ -1,6 +1,60 @@
 use super::*;
 
 impl Runtime {
+    pub(crate) fn ensure_project_workspaces(&mut self) -> Result<(), String> {
+        let items = self.state.items.clone();
+        for item in items {
+            let workspaces = self
+                .state
+                .workspaces
+                .iter()
+                .filter(|workspace| workspace.item_id == item.id)
+                .cloned()
+                .collect::<Vec<_>>();
+
+            let repositories = self
+                .state
+                .repositories
+                .iter()
+                .filter(|repository| repository.project_id == item.project_id)
+                .map(|repository| WorkspaceRepositoryInput {
+                    repository_id: repository.id,
+                    branch: format!("mission-{}", item.human_identifier),
+                    base_branch: repository.base_branch.clone(),
+                })
+                .collect::<Vec<_>>();
+            if workspaces.is_empty() {
+                if !repositories.is_empty() {
+                    self.create_workspace(item.id, repositories)?;
+                }
+                continue;
+            }
+            for workspace in workspaces {
+                if workspace.repositories
+                    != repositories
+                        .iter()
+                        .map(|repository| WorkspaceRepository {
+                            repository_id: repository.repository_id,
+                            branch: repository.branch.clone(),
+                            base_branch: repository.base_branch.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                {
+                    let decision = decide(
+                        self.state.clone(),
+                        Event::SetWorkspaceRepositories {
+                            workspace_id: workspace.id,
+                            repositories: repositories.clone(),
+                        },
+                    )
+                    .map_err(|error| error.to_string())?;
+                    self.commit(decision)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn create_workspace(
         &mut self,
         item_id: i64,
@@ -174,15 +228,14 @@ impl Runtime {
             .iter()
             .find(|workspace| workspace.id == workspace_id)
             .cloned()
-            .ok_or_else(|| format!("Workspace {workspace_id} does not exist"))?;
-        let selected = workspace
-            .repositories
+            .ok_or_else(|| format!("Project execution setup {workspace_id} does not exist"))?;
+        let item = self
+            .state
+            .items
             .iter()
-            .find(|repository| repository.repository_id == repository_id)
+            .find(|item| item.id == workspace.item_id)
             .cloned()
-            .ok_or_else(|| {
-                format!("Repository {repository_id} is not selected in Workspace {workspace_id}")
-            })?;
+            .ok_or_else(|| format!("Item {} does not exist", workspace.item_id))?;
         let repository = self
             .state
             .repositories
@@ -190,6 +243,16 @@ impl Runtime {
             .find(|repository| repository.id == repository_id)
             .cloned()
             .ok_or_else(|| format!("Repository {repository_id} does not exist"))?;
+        if repository.project_id != item.project_id {
+            return Err(format!(
+                "Repository {repository_id} does not belong to the Item's Project"
+            ));
+        }
+        let selected = WorkspaceRepository {
+            repository_id,
+            branch: format!("mission-{}", item.human_identifier),
+            base_branch: repository.base_branch.clone(),
+        };
         let machine = self.machine_for_item(workspace.item_id, Some(machine_id))?;
         let location = self
             .state
@@ -217,7 +280,7 @@ impl Runtime {
             worktree.workspace_id == workspace_id && worktree.repository_id == repository_id
         }) {
             return Err(format!(
-                "Workspace {workspace_id} already has a recorded Worktree for Repository {repository_id}"
+                "This Item already has a registered Worktree for Repository {repository_id}"
             ));
         }
         Ok(())

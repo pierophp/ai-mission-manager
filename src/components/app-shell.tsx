@@ -28,6 +28,12 @@ import { Alert, AlertDescription } from "./ui/alert";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Card } from "./ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from "./ui/dialog";
 import { Input } from "./ui/input";
 import { appShellLayoutClassName } from "./app-shell-layout";
 
@@ -231,14 +237,32 @@ export function AppShell() {
         <ErrorAlert message={error ?? errorMessage(queryError)} />
       )}
 
-      {terminalRequest && (
-        <EmbeddedTerminal
-          key={`${terminalRequest.runId}-${terminalRequest.pane.paneId}`}
-          runId={terminalRequest.runId}
-          initialPane={terminalRequest.pane}
-          onClose={() => setTerminalRequest(undefined)}
-        />
-      )}
+      <Dialog
+        open={Boolean(terminalRequest)}
+        onOpenChange={(open) => {
+          if (!open) setTerminalRequest(undefined);
+        }}
+      >
+        {terminalRequest && (
+          <DialogContent
+            className="h-[90vh] max-h-[900px] w-[calc(100%-1rem)] grid-cols-1 grid-rows-1 overflow-hidden p-3 sm:max-w-[1440px] sm:p-5"
+            showCloseButton={false}
+          >
+            <DialogTitle className="sr-only">
+              Embedded terminal · Run #{terminalRequest.runId}
+            </DialogTitle>
+            <DialogDescription className="sr-only">
+              Terminal session for this Run. Closing the view leaves the Run running.
+            </DialogDescription>
+            <EmbeddedTerminal
+              key={`${terminalRequest.runId}-${terminalRequest.pane.paneId}`}
+              runId={terminalRequest.runId}
+              initialPane={terminalRequest.pane}
+              onClose={() => setTerminalRequest(undefined)}
+            />
+          </DialogContent>
+        )}
+      </Dialog>
 
       <AppShellContext.Provider
         value={{

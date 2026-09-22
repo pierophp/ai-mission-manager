@@ -23,9 +23,10 @@ state-transition contract.
 
 The application layer mirrors the product vocabulary: setup, structure,
 activity, and work. Work is split internally for Items and Needs Attention,
-Workspace and Worktree, Run and grilling, External Object and Link, and
-deletion. `app` retains only the stable Tauri command facade and one shared
-`Runtime`; it does not duplicate feature implementations. `persistence` is
+Project Repository execution and Worktree management, Run and grilling,
+External Object and Link, and deletion. `app` retains only the stable Tauri
+command facade and one shared `Runtime`; it does not duplicate feature
+implementations. `persistence` is
 similarly a facade over schema/migration, loading, effects, audit, settings,
 and codec modules.
 
