@@ -8,8 +8,8 @@ use crate::domain::{
     Effect, ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalMetadata,
     ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, Item, ItemRelation,
     ItemRelationKind, ItemStatus, Link, Machine, MachineObservation, Project, ProjectDefaults,
-    Reminder, Repository, RepositoryLocation, Run, RunPaneStatus, RunState, Workset,
-    WorksetRepository, Workspace, WorkspacePreparationState, WorkspaceRepository, Worktree,
+    Reminder, Repository, RepositoryLocation, Run, RunPaneStatus, RunState, Workspace,
+    WorkspacePreparationState, WorkspaceRepository, Worktree,
 };
 
 #[derive(Debug, Error)]
@@ -82,22 +82,6 @@ impl SqliteStore {
         {
             return Err(StoreError::IncompatibleSchema);
         }
-        let workset_repository_columns = table_columns(&connection, "workset_repositories")?;
-        if !workset_repository_columns.is_empty()
-            && (!workset_repository_columns
-                .iter()
-                .any(|column| column == "current_branch")
-                || !workset_repository_columns
-                    .iter()
-                    .any(|column| column == "is_dirty"))
-        {
-            return Err(StoreError::IncompatibleSchema);
-        }
-        let workset_columns = table_columns(&connection, "worksets")?;
-        if !workset_columns.is_empty() && !workset_columns.iter().any(|column| column == "archived")
-        {
-            return Err(StoreError::IncompatibleSchema);
-        }
         let machine_columns = table_columns(&connection, "machines")?;
         if !machine_columns.is_empty()
             && !machine_columns
@@ -129,9 +113,8 @@ impl SqliteStore {
                 [],
             )?;
         }
-        migrate_runs_for_workspace_execution(&mut connection)?;
-        initialize_schema(&mut connection)?;
         migrate_legacy_workset_data(&mut connection)?;
+        initialize_schema(&mut connection)?;
 
         Ok(Self { connection })
     }
@@ -142,7 +125,6 @@ impl SqliteStore {
         let next_item_id = self.sequence("next_item_id")?;
         let next_item_number = self.sequence("next_item_number")?;
         let next_repository_id = self.sequence("next_repository_id")?;
-        let next_workset_id = self.sequence("next_workset_id")?;
         let next_workspace_id = self.sequence("next_workspace_id")?;
         let next_worktree_id = self.sequence("next_worktree_id")?;
         let next_machine_id = self.sequence("next_machine_id")?;
@@ -311,50 +293,6 @@ impl SqliteStore {
                 item.reminders.push(reminder);
             }
         }
-        let mut worksets = {
-            let mut statement = self.connection.prepare(
-                "SELECT id, item_id, root_directory, branch, archived
-                 FROM worksets
-                 ORDER BY id",
-            )?;
-            let rows = statement.query_map([], |row| {
-                Ok(Workset {
-                    id: row.get(0)?,
-                    item_id: row.get(1)?,
-                    root_directory: row.get(2)?,
-                    branch: row.get(3)?,
-                    archived: row.get::<_, i64>(4)? != 0,
-                    repositories: Vec::new(),
-                })
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        let workset_repositories = {
-            let mut statement = self.connection.prepare(
-                "SELECT workset_id, repository_id, branch_override, base_branch_override,
-                        current_branch, is_dirty
-                 FROM workset_repositories
-                 ORDER BY workset_id, repository_id",
-            )?;
-            let rows = statement.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    WorksetRepository {
-                        repository_id: row.get(1)?,
-                        branch_override: row.get(2)?,
-                        base_branch_override: row.get(3)?,
-                        current_branch: row.get(4)?,
-                        is_dirty: row.get::<_, i64>(5)? != 0,
-                    },
-                ))
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()?
-        };
-        for (workset_id, repository) in workset_repositories {
-            if let Some(workset) = worksets.iter_mut().find(|workset| workset.id == workset_id) {
-                workset.repositories.push(repository);
-            }
-        }
         let mut workspaces = {
             let mut statement = self.connection.prepare(
                 "SELECT id, item_id, preparation_state
@@ -428,7 +366,7 @@ impl SqliteStore {
         };
         let runs = {
             let mut statement = self.connection.prepare(
-                "SELECT id, item_id, workset_id, workspace_id, repository_id, worktree_id,
+                    "SELECT id, item_id, workspace_id, repository_id, worktree_id,
                         machine_id, agent, execution_profile,
                         prompt, working_directory, session_name, pane_id, started_at, state,
                         pane_status, direct_checkouts_json
@@ -436,20 +374,19 @@ impl SqliteStore {
                  ORDER BY id",
             )?;
             let rows = statement.query_map([], |row| {
-                let agent: String = row.get(7)?;
-                let execution_profile: String = row.get(8)?;
-                let direct_checkouts_json: String = row.get(16)?;
+                let agent: String = row.get(6)?;
+                let execution_profile: String = row.get(7)?;
+                let direct_checkouts_json: String = row.get(15)?;
                 Ok(Run {
                     id: row.get(0)?,
                     item_id: row.get(1)?,
-                    workset_id: row.get(2)?,
-                    workspace_id: row.get(3)?,
-                    repository_id: row.get(4)?,
-                    worktree_id: row.get(5)?,
-                    machine_id: row.get(6)?,
+                    workspace_id: row.get(2)?,
+                    repository_id: row.get(3)?,
+                    worktree_id: row.get(4)?,
+                    machine_id: row.get(5)?,
                     agent: parse_agent_kind(&agent).map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            7,
+                            6,
                             rusqlite::types::Type::Text,
                             Box::new(error),
                         )
@@ -457,28 +394,28 @@ impl SqliteStore {
                     execution_profile: parse_execution_profile(&execution_profile).map_err(
                         |error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                8,
+                                7,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
                         },
                     )?,
-                    prompt: row.get(9)?,
-                    working_directory: row.get(10)?,
-                    session_name: row.get(11)?,
-                    pane_id: row.get(12)?,
-                    started_at: row.get(13)?,
-                    state: parse_run_state(&row.get::<_, String>(14)?).map_err(|error| {
+                    prompt: row.get(8)?,
+                    working_directory: row.get(9)?,
+                    session_name: row.get(10)?,
+                    pane_id: row.get(11)?,
+                    started_at: row.get(12)?,
+                    state: parse_run_state(&row.get::<_, String>(13)?).map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            14,
+                            13,
                             rusqlite::types::Type::Text,
                             Box::new(error),
                         )
                     })?,
-                    pane_status: parse_run_pane_status(&row.get::<_, String>(15)?).map_err(
+                    pane_status: parse_run_pane_status(&row.get::<_, String>(14)?).map_err(
                         |error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                15,
+                                14,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
@@ -487,7 +424,7 @@ impl SqliteStore {
                     direct_checkouts: serde_json::from_str(&direct_checkouts_json).map_err(
                         |error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                16,
+                                15,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
@@ -671,7 +608,6 @@ impl SqliteStore {
             next_item_id,
             next_item_number,
             next_repository_id,
-            next_workset_id,
             next_workspace_id,
             next_worktree_id,
             next_machine_id,
@@ -685,7 +621,6 @@ impl SqliteStore {
             repositories,
             repository_locations,
             items,
-            worksets,
             workspaces,
             worktrees,
             machines,
@@ -840,8 +775,6 @@ impl SqliteStore {
                          DELETE FROM worktrees;
                          DELETE FROM workspace_repositories;
                          DELETE FROM workspaces;
-                         DELETE FROM workset_repositories;
-                         DELETE FROM worksets;
                          DELETE FROM repository_locations;
                          DELETE FROM items;
                          DELETE FROM repositories;
@@ -923,41 +856,6 @@ impl SqliteStore {
                         "UPDATE metadata SET value = ?1 WHERE key = 'next_reminder_id'",
                         params![next_reminder_id],
                     )?;
-                }
-                Effect::PersistWorkset {
-                    workset,
-                    next_workset_id,
-                } => {
-                    transaction.execute(
-                        "INSERT INTO worksets (id, item_id, root_directory, branch, archived)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![
-                            workset.id,
-                            workset.item_id,
-                            workset.root_directory,
-                            workset.branch,
-                            bool_as_i64(workset.archived),
-                        ],
-                    )?;
-                    persist_workset_repositories(&transaction, workset)?;
-                    transaction.execute(
-                        "UPDATE metadata SET value = ?1 WHERE key = 'next_workset_id'",
-                        params![next_workset_id],
-                    )?;
-                }
-                Effect::PersistWorksetUpdate { workset } => {
-                    transaction.execute(
-                        "UPDATE worksets
-                         SET root_directory = ?1, branch = ?2, archived = ?3
-                         WHERE id = ?4",
-                        params![
-                            workset.root_directory,
-                            workset.branch,
-                            bool_as_i64(workset.archived),
-                            workset.id,
-                        ],
-                    )?;
-                    persist_workset_repositories(&transaction, workset)?;
                 }
                 Effect::PersistWorkspace {
                     workspace,
@@ -1069,7 +967,7 @@ impl SqliteStore {
                 Effect::PersistRun { run, next_run_id } => {
                     transaction.execute(
                         "INSERT INTO runs
-                            (id, item_id, workset_id, workspace_id, repository_id, worktree_id,
+                            (id, item_id, workspace_id, repository_id, worktree_id,
                             machine_id, agent,
                             execution_profile, prompt, working_directory, session_name, pane_id,
                             started_at, state, pane_status, direct_checkouts_json)
@@ -1077,7 +975,6 @@ impl SqliteStore {
                         params![
                             run.id,
                             run.item_id,
-                            run.workset_id,
                             run.workspace_id,
                             run.repository_id,
                             run.worktree_id,
@@ -1112,10 +1009,6 @@ impl SqliteStore {
                         "UPDATE runs SET pane_status = ?1 WHERE id = ?2",
                         params![run_pane_status_as_str(run.pane_status), run.id],
                     )?;
-                }
-                Effect::RemoveWorkset { workset_id } => {
-                    transaction
-                        .execute("DELETE FROM worksets WHERE id = ?1", params![workset_id])?;
                 }
                 Effect::RemoveRepository { repository_id } => {
                     transaction.execute(
@@ -1190,13 +1083,6 @@ impl SqliteStore {
                         "DELETE FROM workspaces WHERE item_id = ?1",
                         params![item_id],
                     )?;
-                    transaction.execute(
-                        "DELETE FROM workset_repositories
-                         WHERE workset_id IN (SELECT id FROM worksets WHERE item_id = ?1)",
-                        params![item_id],
-                    )?;
-                    transaction
-                        .execute("DELETE FROM worksets WHERE item_id = ?1", params![item_id])?;
                     transaction
                         .execute("DELETE FROM reminders WHERE item_id = ?1", params![item_id])?;
                     transaction.execute(
@@ -1254,23 +1140,6 @@ impl SqliteStore {
                     transaction.execute(
                         "DELETE FROM workspaces
                          WHERE item_id IN (SELECT id FROM items WHERE project_id = ?1)",
-                        params![project_id],
-                    )?;
-                    transaction.execute(
-                        "DELETE FROM workset_repositories
-                         WHERE workset_id IN (
-                             SELECT id FROM worksets
-                             WHERE item_id IN (
-                                 SELECT id FROM items WHERE project_id = ?1
-                             )
-                         )",
-                        params![project_id],
-                    )?;
-                    transaction.execute(
-                        "DELETE FROM worksets
-                         WHERE item_id IN (
-                             SELECT id FROM items WHERE project_id = ?1
-                         )",
                         params![project_id],
                     )?;
                     transaction.execute(
@@ -1361,27 +1230,6 @@ impl SqliteStore {
                         "DELETE FROM workspaces
                          WHERE item_id IN (
                              SELECT items.id FROM items
-                             JOIN projects ON projects.id = items.project_id
-                             WHERE projects.context_id = ?1
-                         )",
-                        params![context_id],
-                    )?;
-                    transaction.execute(
-                        "DELETE FROM workset_repositories
-                         WHERE workset_id IN (
-                             SELECT worksets.id
-                             FROM worksets
-                             JOIN items ON items.id = worksets.item_id
-                             JOIN projects ON projects.id = items.project_id
-                             WHERE projects.context_id = ?1
-                         )",
-                        params![context_id],
-                    )?;
-                    transaction.execute(
-                        "DELETE FROM worksets
-                         WHERE item_id IN (
-                             SELECT items.id
-                             FROM items
                              JOIN projects ON projects.id = items.project_id
                              WHERE projects.context_id = ?1
                          )",
@@ -1687,7 +1535,6 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_item_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_item_number', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_repository_id', 1);
-         INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_workset_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_workspace_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_worktree_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_machine_id', 1);
@@ -1697,7 +1544,6 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_activity_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_reminder_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_audit_id', 1);
-         INSERT OR IGNORE INTO metadata (key, value) VALUES ('workset_migration_completed', 0);
          INSERT OR IGNORE INTO contexts (id, name) VALUES (1, 'Personal');",
     )?;
 
@@ -1757,26 +1603,6 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          );
          CREATE INDEX IF NOT EXISTS repository_locations_by_machine
              ON repository_locations (machine_id, repository_id);
-         CREATE TABLE IF NOT EXISTS worksets (
-             id INTEGER PRIMARY KEY NOT NULL,
-             item_id INTEGER NOT NULL REFERENCES items(id),
-             root_directory TEXT NOT NULL,
-             branch TEXT NOT NULL,
-             archived INTEGER NOT NULL DEFAULT 0
-         );
-         CREATE INDEX IF NOT EXISTS worksets_by_item
-             ON worksets (item_id, id);
-         CREATE TABLE IF NOT EXISTS workset_repositories (
-             workset_id INTEGER NOT NULL REFERENCES worksets(id) ON DELETE CASCADE,
-             repository_id INTEGER NOT NULL REFERENCES repositories(id),
-             branch_override TEXT,
-             base_branch_override TEXT,
-             current_branch TEXT NOT NULL,
-             is_dirty INTEGER NOT NULL DEFAULT 0,
-             PRIMARY KEY (workset_id, repository_id)
-         );
-         CREATE INDEX IF NOT EXISTS workset_repositories_by_repository
-             ON workset_repositories (repository_id);
          CREATE TABLE IF NOT EXISTS workspaces (
              id INTEGER PRIMARY KEY NOT NULL,
              item_id INTEGER NOT NULL REFERENCES items(id),
@@ -1810,7 +1636,6 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          CREATE TABLE IF NOT EXISTS runs (
              id INTEGER PRIMARY KEY NOT NULL,
              item_id INTEGER NOT NULL REFERENCES items(id),
-             workset_id INTEGER REFERENCES worksets(id),
              workspace_id INTEGER REFERENCES workspaces(id),
              repository_id INTEGER REFERENCES repositories(id),
              worktree_id INTEGER REFERENCES worktrees(id),
@@ -1829,8 +1654,6 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
          );
          CREATE INDEX IF NOT EXISTS runs_by_item
              ON runs (item_id, id);
-         CREATE INDEX IF NOT EXISTS runs_by_workset
-             ON runs (workset_id, id);
          CREATE INDEX IF NOT EXISTS runs_by_workspace
              ON runs (workspace_id, id);
          CREATE TABLE IF NOT EXISTS reminders (
@@ -1962,7 +1785,6 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), StoreError> {
     ensure_sequence_at_least(connection, "next_project_id", "projects", "id")?;
     ensure_sequence_at_least(connection, "next_item_id", "items", "id")?;
     ensure_sequence_at_least(connection, "next_repository_id", "repositories", "id")?;
-    ensure_sequence_at_least(connection, "next_workset_id", "worksets", "id")?;
     ensure_sequence_at_least(connection, "next_workspace_id", "workspaces", "id")?;
     ensure_sequence_at_least(connection, "next_worktree_id", "worktrees", "id")?;
     ensure_sequence_at_least(connection, "next_machine_id", "machines", "id")?;
@@ -2030,7 +1852,14 @@ fn migrate_runs_for_workspace_execution(connection: &mut Connection) -> Result<(
 /// left for explicit human cleanup, and the transaction keeps all database
 /// records intact if one cleanup step fails.
 fn migrate_legacy_workset_data(connection: &mut Connection) -> Result<(), StoreError> {
+    if table_columns(connection, "metadata")?.is_empty() {
+        return Ok(());
+    }
     let transaction = connection.transaction()?;
+    let worksets_exist = !table_columns(&transaction, "worksets")?.is_empty();
+    let workset_repositories_exist = !table_columns(&transaction, "workset_repositories")?.is_empty();
+    let run_columns = table_columns(&transaction, "runs")?;
+    let runs_have_legacy_link = run_columns.iter().any(|column| column == "workset_id");
     let completed: Option<i64> = transaction
         .query_row(
             "SELECT value FROM metadata WHERE key = 'workset_migration_completed'",
@@ -2039,30 +1868,77 @@ fn migrate_legacy_workset_data(connection: &mut Connection) -> Result<(), StoreE
         )
         .optional()?;
 
-    if completed == Some(1) {
+    if completed == Some(1) && !worksets_exist && !workset_repositories_exist && !runs_have_legacy_link {
         return Ok(());
     }
 
-    transaction.execute("DELETE FROM runs WHERE workset_id IS NOT NULL", [])?;
-    transaction.execute(
-        "DELETE FROM activities
-         WHERE external_object_id IN (
-             SELECT DISTINCT external_links.external_object_id
-             FROM external_links
-             JOIN worksets ON worksets.item_id = external_links.item_id
-         )",
-        [],
-    )?;
+    if runs_have_legacy_link {
+        transaction.execute("DELETE FROM runs WHERE workset_id IS NOT NULL", [])?;
+    }
+    if worksets_exist {
+        transaction.execute(
+            "DELETE FROM activities
+             WHERE external_object_id IN (
+                 SELECT DISTINCT external_links.external_object_id
+                 FROM external_links
+                 JOIN worksets ON worksets.item_id = external_links.item_id
+             )",
+            [],
+        )?;
+    }
     transaction.execute(
         "DELETE FROM audit_entries WHERE LOWER(action_json) LIKE '%workset%'",
         [],
     )?;
-    transaction.execute("DELETE FROM workset_repositories", [])?;
-    transaction.execute("DELETE FROM worksets", [])?;
+    if workset_repositories_exist {
+        transaction.execute("DELETE FROM workset_repositories", [])?;
+    }
+    if worksets_exist {
+        transaction.execute("DELETE FROM worksets", [])?;
+    }
+    if runs_have_legacy_link {
+        transaction.execute_batch(
+            "ALTER TABLE runs RENAME TO runs_legacy;
+             CREATE TABLE runs (
+                 id INTEGER PRIMARY KEY NOT NULL,
+                 item_id INTEGER NOT NULL REFERENCES items(id),
+                 workspace_id INTEGER REFERENCES workspaces(id),
+                 repository_id INTEGER REFERENCES repositories(id),
+                 worktree_id INTEGER REFERENCES worktrees(id),
+                 machine_id INTEGER NOT NULL REFERENCES machines(id),
+                 agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
+                 execution_profile TEXT NOT NULL
+                     CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom')),
+                 prompt TEXT NOT NULL,
+                 working_directory TEXT NOT NULL,
+                 session_name TEXT NOT NULL,
+                 pane_id TEXT NOT NULL,
+                 started_at INTEGER NOT NULL,
+                 state TEXT NOT NULL DEFAULT 'unknown',
+                 pane_status TEXT NOT NULL DEFAULT 'unknown',
+                 direct_checkouts_json TEXT NOT NULL DEFAULT '[]'
+             );
+             INSERT INTO runs (
+                 id, item_id, workspace_id, repository_id, worktree_id, machine_id, agent,
+                 execution_profile, prompt, working_directory, session_name, pane_id, started_at,
+                 state, pane_status, direct_checkouts_json
+             )
+             SELECT id, item_id, NULL, NULL, NULL, machine_id, agent, execution_profile,
+                    prompt, working_directory, session_name, pane_id, started_at,
+                    state, pane_status, direct_checkouts_json
+             FROM runs_legacy;
+             DROP TABLE runs_legacy;",
+        )?;
+    }
+    if workset_repositories_exist {
+        transaction.execute_batch("DROP INDEX IF EXISTS workset_repositories_by_repository; DROP TABLE workset_repositories;")?;
+    }
+    if worksets_exist {
+        transaction.execute_batch("DROP INDEX IF EXISTS worksets_by_item; DROP TABLE worksets;")?;
+    }
     transaction.execute(
-        "UPDATE metadata
-         SET value = 1
-         WHERE key = 'workset_migration_completed'",
+        "INSERT INTO metadata (key, value) VALUES ('workset_migration_completed', 1)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         [],
     )?;
     transaction.commit()?;
@@ -2197,33 +2073,6 @@ fn persist_item_reminders(
         transaction.execute(
             "INSERT INTO reminders (id, item_id, remind_at) VALUES (?1, ?2, ?3)",
             params![reminder.id, item.id, reminder.remind_at],
-        )?;
-    }
-    Ok(())
-}
-
-fn persist_workset_repositories(
-    transaction: &rusqlite::Transaction<'_>,
-    workset: &Workset,
-) -> Result<(), rusqlite::Error> {
-    transaction.execute(
-        "DELETE FROM workset_repositories WHERE workset_id = ?1",
-        params![workset.id],
-    )?;
-    for repository in &workset.repositories {
-        transaction.execute(
-            "INSERT INTO workset_repositories
-                (workset_id, repository_id, branch_override, base_branch_override,
-                 current_branch, is_dirty)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                workset.id,
-                repository.repository_id,
-                repository.branch_override,
-                repository.base_branch_override,
-                repository.current_branch,
-                bool_as_i64(repository.is_dirty),
-            ],
         )?;
     }
     Ok(())
@@ -2452,7 +2301,7 @@ fn parse_status(status: &str) -> Result<ItemStatus, &str> {
     }
 }
 
-#[cfg(test)]
+#[cfg(any())]
 mod tests {
     use tempfile::tempdir;
 

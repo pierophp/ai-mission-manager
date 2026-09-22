@@ -58,42 +58,6 @@ pub struct RepositoryLocation {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct WorksetRepositoryInput {
-    pub repository_id: i64,
-    pub branch_override: Option<String>,
-    pub base_branch_override: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AttachedRepositoryInput {
-    pub name: String,
-    pub remote_url: String,
-    pub current_branch: String,
-    pub is_dirty: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WorksetRepository {
-    pub repository_id: i64,
-    pub branch_override: Option<String>,
-    pub base_branch_override: Option<String>,
-    pub current_branch: String,
-    pub is_dirty: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Workset {
-    pub id: i64,
-    pub item_id: i64,
-    pub root_directory: String,
-    pub branch: String,
-    pub archived: bool,
-    pub repositories: Vec<WorksetRepository>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
 pub struct WorkspaceRepositoryInput {
     pub repository_id: i64,
     pub branch: String,
@@ -270,7 +234,6 @@ pub struct RunPromptSelection {
 pub struct Run {
     pub id: i64,
     pub item_id: i64,
-    pub workset_id: Option<i64>,
     pub workspace_id: Option<i64>,
     pub repository_id: Option<i64>,
     pub worktree_id: Option<i64>,
@@ -305,9 +268,6 @@ pub struct RunSuggestion {
     pub session_name: String,
     pub pane_id: String,
     pub current_path: String,
-    pub workset_id: i64,
-    pub workset_root_directory: String,
-    pub workset_branch: String,
     pub item_id: i64,
     pub item_identifier: String,
     pub item_title: String,
@@ -531,8 +491,6 @@ pub struct ItemView {
     pub context_name: String,
     pub project_name: String,
     pub relationships: Vec<ItemRelation>,
-    pub worksets: Vec<Workset>,
-    pub archived_worksets: Vec<Workset>,
     pub workspaces: Vec<Workspace>,
     pub worktrees: Vec<Worktree>,
     pub runs: Vec<Run>,
@@ -541,12 +499,9 @@ pub struct ItemView {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ItemDeletionWorkset {
+pub struct ItemDeletionWorkspace {
     pub id: i64,
     pub item_id: i64,
-    pub root_directory: String,
-    pub branch: String,
-    pub archived: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -557,7 +512,7 @@ pub struct ItemDeletionPlan {
     pub title: String,
     pub reminder_count: usize,
     pub relationship_count: usize,
-    pub worksets: Vec<ItemDeletionWorkset>,
+    pub workspaces: Vec<ItemDeletionWorkspace>,
     pub run_ids: Vec<i64>,
     pub active_run_ids: Vec<i64>,
     pub link_ids: Vec<i64>,
@@ -574,7 +529,7 @@ impl ItemDeletionPlan {
             item_id: self.item_id,
             reminder_count: self.reminder_count,
             relationship_count: self.relationship_count,
-            workset_count: self.worksets.len(),
+            workspace_count: self.workspaces.len(),
             run_count: self.run_ids.len(),
             link_count: self.link_ids.len(),
             external_object_count: self.orphaned_external_object_ids.len(),
@@ -590,7 +545,7 @@ pub struct ItemDeletionSummary {
     pub item_id: i64,
     pub reminder_count: usize,
     pub relationship_count: usize,
-    pub workset_count: usize,
+    pub workspace_count: usize,
     pub run_count: usize,
     pub link_count: usize,
     pub external_object_count: usize,
@@ -635,11 +590,9 @@ pub struct ExternalObjectDeletionSummary {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct RepositoryDeletionWorkset {
+pub struct RepositoryDeletionWorkspace {
     pub id: i64,
-    pub root_directory: String,
-    pub branch: String,
-    pub archived: bool,
+    pub item_id: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -648,7 +601,7 @@ pub struct RepositoryDeletionPlan {
     pub repository_id: i64,
     pub name: String,
     pub remote_url: String,
-    pub worksets: Vec<RepositoryDeletionWorkset>,
+    pub workspaces: Vec<RepositoryDeletionWorkspace>,
     #[serde(skip)]
     pub state_fingerprint: String,
 }
@@ -660,7 +613,8 @@ pub struct MachineDeletionRun {
     pub item_id: i64,
     pub item_identifier: String,
     pub item_title: String,
-    pub workset_id: i64,
+    pub workspace_id: Option<i64>,
+    pub worktree_id: Option<i64>,
     pub state: RunState,
     pub pane_status: RunPaneStatus,
 }
@@ -715,7 +669,8 @@ pub struct ParentDeletionRun {
     pub item_id: i64,
     pub item_identifier: String,
     pub item_title: String,
-    pub workset_id: i64,
+    pub workspace_id: Option<i64>,
+    pub worktree_id: Option<i64>,
     pub machine_id: i64,
     pub state: RunState,
     pub pane_status: RunPaneStatus,
@@ -730,7 +685,7 @@ pub struct ParentDeletionSummary {
     pub item_count: usize,
     pub repository_count: usize,
     pub machine_count: usize,
-    pub workset_count: usize,
+    pub workspace_count: usize,
     pub run_count: usize,
     pub reminder_count: usize,
     pub relationship_count: usize,
@@ -748,7 +703,7 @@ pub struct ResetLocalDataSummary {
     pub project_count: usize,
     pub repository_count: usize,
     pub item_count: usize,
-    pub workset_count: usize,
+    pub workspace_count: usize,
     pub machine_count: usize,
     pub run_count: usize,
     pub reminder_count: usize,
@@ -773,7 +728,7 @@ pub struct ResetLocalDataRecord {
 pub struct ResetLocalDataPlan {
     pub summary: ResetLocalDataSummary,
     pub affected_records: Vec<ResetLocalDataRecord>,
-    pub worksets: Vec<ItemDeletionWorkset>,
+    pub workspaces: Vec<ItemDeletionWorkspace>,
     #[serde(skip)]
     pub state_fingerprint: String,
 }
@@ -788,7 +743,7 @@ pub struct ParentDeletionPlan {
     pub items: Vec<ParentDeletionItem>,
     pub repositories: Vec<ParentDeletionRepository>,
     pub machines: Vec<ParentDeletionMachine>,
-    pub worksets: Vec<ItemDeletionWorkset>,
+    pub workspaces: Vec<ItemDeletionWorkspace>,
     pub runs: Vec<ParentDeletionRun>,
     pub active_run_ids: Vec<i64>,
     pub reminder_count: usize,
@@ -811,7 +766,7 @@ impl ParentDeletionPlan {
             item_count: self.items.len(),
             repository_count: self.repositories.len(),
             machine_count: self.machines.len(),
-            workset_count: self.worksets.len(),
+            workspace_count: self.workspaces.len(),
             run_count: self.runs.len(),
             reminder_count: self.reminder_count,
             relationship_count: self.relationship_count,
@@ -868,18 +823,14 @@ pub enum AuditAction {
         to_item_id: i64,
         kind: ItemRelationKind,
     },
-    WorksetCreated {
-        workset_id: i64,
+    WorkspaceCreated {
+        workspace_id: i64,
     },
-    WorksetUpdated {
-        workset_id: i64,
+    WorkspaceUpdated {
+        workspace_id: i64,
     },
-    WorksetArchived {
-        workset_id: i64,
-        archived: bool,
-    },
-    WorksetRemoved {
-        workset_id: i64,
+    WorkspaceRemoved {
+        workspace_id: i64,
         #[serde(default)]
         repository_count: Option<usize>,
     },
@@ -952,7 +903,7 @@ pub enum AuditAction {
     RepositoryDeleted {
         repository_id: i64,
         #[serde(default)]
-        workset_count: Option<usize>,
+        workspace_count: Option<usize>,
     },
     ProjectDeleted {
         summary: ParentDeletionSummary,
@@ -992,7 +943,6 @@ pub struct DomainState {
     pub next_item_id: i64,
     pub next_item_number: i64,
     pub next_repository_id: i64,
-    pub next_workset_id: i64,
     pub next_workspace_id: i64,
     pub next_worktree_id: i64,
     pub next_machine_id: i64,
@@ -1006,7 +956,6 @@ pub struct DomainState {
     pub repositories: Vec<Repository>,
     pub repository_locations: Vec<RepositoryLocation>,
     pub items: Vec<Item>,
-    pub worksets: Vec<Workset>,
     pub workspaces: Vec<Workspace>,
     pub worktrees: Vec<Worktree>,
     pub machines: Vec<Machine>,
@@ -1069,10 +1018,10 @@ pub fn plan_reset_local_data(state: &DomainState) -> ResetLocalDataPlan {
         id: item.id,
         label: format!("{} · {}", item.human_identifier, item.title),
     }));
-    affected_records.extend(state.worksets.iter().map(|workset| ResetLocalDataRecord {
-        kind: "Workset".into(),
-        id: workset.id,
-        label: workset.branch.clone(),
+    affected_records.extend(state.workspaces.iter().map(|workspace| ResetLocalDataRecord {
+        kind: "Workspace".into(),
+        id: workspace.id,
+        label: format!("Item {}", workspace.item_id),
     }));
     affected_records.extend(state.machines.iter().map(|machine| ResetLocalDataRecord {
         kind: "Machine".into(),
@@ -1132,7 +1081,7 @@ pub fn plan_reset_local_data(state: &DomainState) -> ResetLocalDataPlan {
             project_count: state.projects.len(),
             repository_count: state.repositories.len(),
             item_count: state.items.len(),
-            workset_count: state.worksets.len(),
+            workspace_count: state.workspaces.len(),
             machine_count: state.machines.len(),
             run_count: state.runs.len(),
             reminder_count: state.items.iter().map(|item| item.reminders.len()).sum(),
@@ -1144,15 +1093,12 @@ pub fn plan_reset_local_data(state: &DomainState) -> ResetLocalDataPlan {
             attention_default_count: state.attention_defaults.len(),
         },
         affected_records,
-        worksets: state
-            .worksets
+        workspaces: state
+            .workspaces
             .iter()
-            .map(|workset| ItemDeletionWorkset {
-                id: workset.id,
-                item_id: workset.item_id,
-                root_directory: workset.root_directory.clone(),
-                branch: workset.branch.clone(),
-                archived: workset.archived,
+            .map(|workspace| ItemDeletionWorkspace {
+                id: workspace.id,
+                item_id: workspace.item_id,
             })
             .collect(),
         state_fingerprint: serde_json::to_string(state)
@@ -1193,20 +1139,20 @@ pub enum Event {
     ResetLocalData,
     DeleteRepository {
         repository_id: i64,
-        workset_ids: Vec<i64>,
+        workspace_ids: Vec<i64>,
     },
     DeleteProject {
         project_id: i64,
         item_ids: Vec<i64>,
         repository_ids: Vec<i64>,
-        workset_ids: Vec<i64>,
+        workspace_ids: Vec<i64>,
     },
     DeleteContext {
         context_id: i64,
         project_ids: Vec<i64>,
         item_ids: Vec<i64>,
         repository_ids: Vec<i64>,
-        workset_ids: Vec<i64>,
+        workspace_ids: Vec<i64>,
         machine_ids: Vec<i64>,
     },
     DeleteMachine {
@@ -1217,12 +1163,6 @@ pub enum Event {
         title: String,
         context_id: i64,
         project_id: i64,
-    },
-    CreateWorkset {
-        item_id: i64,
-        root_directory: String,
-        branch: String,
-        repositories: Vec<WorksetRepositoryInput>,
     },
     CreateWorkspace {
         item_id: i64,
@@ -1246,11 +1186,6 @@ pub enum Event {
     RemoveWorkspace {
         workspace_id: i64,
     },
-    AttachWorkset {
-        item_id: i64,
-        root_directory: String,
-        repositories: Vec<AttachedRepositoryInput>,
-    },
     RegisterMachine {
         context_id: i64,
         name: String,
@@ -1261,19 +1196,6 @@ pub enum Event {
         machine_id: i64,
         observation: MachineObservation,
         observed_at: i64,
-    },
-    AddRepositoryToWorkset {
-        workset_id: i64,
-        repository_id: i64,
-        branch_override: Option<String>,
-        base_branch_override: Option<String>,
-    },
-    SetWorksetArchived {
-        workset_id: i64,
-        archived: bool,
-    },
-    RemoveWorkset {
-        workset_id: i64,
     },
     DeleteItem {
         item_id: i64,
@@ -1286,19 +1208,6 @@ pub enum Event {
     },
     DeleteRun {
         run_id: i64,
-    },
-    StartRun {
-        item_id: i64,
-        workset_id: i64,
-        machine_id: i64,
-        agent: AgentKind,
-        execution_profile: ExecutionProfile,
-        prompt: String,
-        working_directory: String,
-        session_name: String,
-        pane_id: String,
-        started_at: i64,
-        prompt_selection: RunPromptSelection,
     },
     StartDirectRun {
         item_id: i64,
@@ -1332,16 +1241,6 @@ pub enum Event {
         prompt_selection: RunPromptSelection,
     },
     AttachRun {
-        item_id: i64,
-        workset_id: i64,
-        machine_id: i64,
-        agent: AgentKind,
-        working_directory: String,
-        session_name: String,
-        pane_id: String,
-        attached_at: i64,
-    },
-    AttachWorkspaceRun {
         item_id: i64,
         workspace_id: i64,
         worktree_id: Option<i64>,
@@ -1451,13 +1350,6 @@ pub enum Effect {
         next_item_number: i64,
         next_item_id: i64,
     },
-    PersistWorkset {
-        workset: Workset,
-        next_workset_id: i64,
-    },
-    PersistWorksetUpdate {
-        workset: Workset,
-    },
     PersistWorkspace {
         workspace: Workspace,
         next_workspace_id: i64,
@@ -1474,9 +1366,6 @@ pub enum Effect {
     },
     RemoveWorkspace {
         workspace_id: i64,
-    },
-    RemoveWorkset {
-        workset_id: i64,
     },
     RemoveRepository {
         repository_id: i64,
@@ -1544,7 +1433,7 @@ pub enum Effect {
         project_id: i64,
         item_ids: Vec<i64>,
         repository_ids: Vec<i64>,
-        workset_ids: Vec<i64>,
+        workspace_ids: Vec<i64>,
         orphaned_external_object_ids: Vec<i64>,
         summary: ParentDeletionSummary,
     },
@@ -1553,7 +1442,7 @@ pub enum Effect {
         project_ids: Vec<i64>,
         item_ids: Vec<i64>,
         repository_ids: Vec<i64>,
-        workset_ids: Vec<i64>,
+        workspace_ids: Vec<i64>,
         machine_ids: Vec<i64>,
         orphaned_external_object_ids: Vec<i64>,
         summary: ParentDeletionSummary,
@@ -1582,16 +1471,13 @@ pub fn plan_item_deletion(
         .iter()
         .find(|item| item.id == item_id)
         .ok_or(DomainError::ItemNotFound { item_id })?;
-    let worksets = state
-        .worksets
+    let workspaces = state
+        .workspaces
         .iter()
-        .filter(|workset| workset.item_id == item_id)
-        .map(|workset| ItemDeletionWorkset {
-            id: workset.id,
-            item_id: workset.item_id,
-            root_directory: workset.root_directory.clone(),
-            branch: workset.branch.clone(),
-            archived: workset.archived,
+        .filter(|workspace| workspace.item_id == item_id)
+        .map(|workspace| ItemDeletionWorkspace {
+            id: workspace.id,
+            item_id: workspace.item_id,
         })
         .collect::<Vec<_>>();
     let run_ids = state
@@ -1638,7 +1524,7 @@ pub fn plan_item_deletion(
             .iter()
             .filter(|relation| relation.from_item_id == item_id || relation.to_item_id == item_id)
             .count(),
-        worksets,
+        workspaces,
         run_ids,
         active_run_ids,
         link_ids,
@@ -1705,20 +1591,18 @@ pub fn plan_repository_deletion(
         .iter()
         .find(|repository| repository.id == repository_id)
         .ok_or(DomainError::RepositoryNotFound { repository_id })?;
-    let worksets = state
-        .worksets
+    let workspaces = state
+        .workspaces
         .iter()
-        .filter(|workset| {
-            workset
+        .filter(|workspace| {
+            workspace
                 .repositories
                 .iter()
                 .any(|selected| selected.repository_id == repository_id)
         })
-        .map(|workset| RepositoryDeletionWorkset {
-            id: workset.id,
-            root_directory: workset.root_directory.clone(),
-            branch: workset.branch.clone(),
-            archived: workset.archived,
+        .map(|workspace| RepositoryDeletionWorkspace {
+            id: workspace.id,
+            item_id: workspace.item_id,
         })
         .collect::<Vec<_>>();
 
@@ -1726,7 +1610,7 @@ pub fn plan_repository_deletion(
         repository_id,
         name: repository.name.clone(),
         remote_url: repository.remote_url.clone(),
-        worksets,
+        workspaces,
         state_fingerprint: serde_json::to_string(state)
             .expect("DomainState should always be serializable"),
     })
@@ -1758,7 +1642,8 @@ pub fn plan_machine_deletion(
                 item_id: run.item_id,
                 item_identifier: item.human_identifier.clone(),
                 item_title: item.title.clone(),
-                workset_id: run.workset_id.unwrap_or_default(),
+                workspace_id: run.workspace_id,
+                worktree_id: run.worktree_id,
                 state: run.state,
                 pane_status: run.pane_status,
             })
@@ -1861,16 +1746,13 @@ fn plan_parent_deletion(
             project_id: repository.project_id,
         })
         .collect::<Vec<_>>();
-    let worksets = state
-        .worksets
+    let workspaces = state
+        .workspaces
         .iter()
-        .filter(|workset| item_ids.contains(&workset.item_id))
-        .map(|workset| ItemDeletionWorkset {
-            id: workset.id,
-            item_id: workset.item_id,
-            root_directory: workset.root_directory.clone(),
-            branch: workset.branch.clone(),
-            archived: workset.archived,
+        .filter(|workspace| item_ids.contains(&workspace.item_id))
+        .map(|workspace| ItemDeletionWorkspace {
+            id: workspace.id,
+            item_id: workspace.item_id,
         })
         .collect::<Vec<_>>();
     let machines = context_id
@@ -1907,7 +1789,8 @@ fn plan_parent_deletion(
                 item_id: run.item_id,
                 item_identifier: item.human_identifier.clone(),
                 item_title: item.title.clone(),
-                workset_id: run.workset_id.unwrap_or_default(),
+                workspace_id: run.workspace_id,
+                worktree_id: run.worktree_id,
                 machine_id: run.machine_id,
                 state: run.state,
                 pane_status: run.pane_status,
@@ -1964,7 +1847,7 @@ fn plan_parent_deletion(
         items: items.clone(),
         repositories,
         machines,
-        worksets,
+        workspaces,
         runs,
         active_run_ids,
         reminder_count: items
@@ -2088,12 +1971,12 @@ pub enum DomainError {
     #[error("Repository {repository_id} has already been configured on Machine {machine_id}")]
     RepositoryLocationAlreadyExists { repository_id: i64, machine_id: i64 },
     #[error(
-        "Repository {repository_id} deletion must include Worksets {expected_workset_ids:?}; received {provided_workset_ids:?}"
+        "Repository {repository_id} deletion must include Workspaces {expected_workspace_ids:?}; received {provided_workspace_ids:?}"
     )]
-    RepositoryWorksetsMismatch {
+    RepositoryWorkspacesMismatch {
         repository_id: i64,
-        expected_workset_ids: Vec<i64>,
-        provided_workset_ids: Vec<i64>,
+        expected_workspace_ids: Vec<i64>,
+        provided_workspace_ids: Vec<i64>,
     },
     #[error(
         "Machine {machine_id} deletion must include Runs {expected_run_ids:?}; received {provided_run_ids:?}"
@@ -2103,16 +1986,8 @@ pub enum DomainError {
         expected_run_ids: Vec<i64>,
         provided_run_ids: Vec<i64>,
     },
-    #[error("a Workset root directory cannot be blank")]
-    EmptyWorksetRoot,
-    #[error("a Workset branch cannot be blank")]
-    EmptyWorksetBranch,
-    #[error("a Workset must include at least one Repository")]
-    EmptyWorksetRepositories,
-    #[error("Workset {workset_id} does not exist")]
-    WorksetNotFound { workset_id: i64 },
-    #[error("Workset {workset_id} has Run history and cannot be removed")]
-    WorksetHasRuns { workset_id: i64 },
+    #[error("a branch cannot be blank")]
+    EmptyBranch,
     #[error("a Workspace must include at least one Repository")]
     EmptyWorkspaceRepositories,
     #[error("Workspace {workspace_id} does not exist")]
@@ -2177,8 +2052,6 @@ pub enum DomainError {
     EmptyRunPrompt,
     #[error("a Run working directory cannot be blank")]
     EmptyRunWorkingDirectory,
-    #[error("Run working directory does not match Workset {workset_id}")]
-    RunWorkingDirectoryMismatch { workset_id: i64 },
     #[error("Direct Run must include at least one Repository")]
     EmptyDirectRunCheckouts,
     #[error("Direct Run checkout for Repository {repository_id} is invalid")]
@@ -2208,15 +2081,11 @@ pub enum DomainError {
         session_name: String,
         pane_id: String,
     },
-    #[error("Workset {workset_id} belongs to another Item")]
-    WorksetItemMismatch { workset_id: i64, item_id: i64 },
     #[error("External Object {external_object_id} is not linked to Item {item_id}")]
     RunPromptSourceNotLinked {
         external_object_id: i64,
         item_id: i64,
     },
-    #[error("Repository {repository_id} is already in Workset {workset_id}")]
-    RepositoryAlreadyInWorkset { repository_id: i64, workset_id: i64 },
     #[error("Repository {repository_id} was selected more than once")]
     DuplicateRepositorySelection { repository_id: i64 },
     #[error("Item {item_id} does not exist")]
@@ -2577,7 +2446,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             state.repositories.clear();
             state.repository_locations.clear();
             state.items.clear();
-            state.worksets.clear();
+            state.workspaces.clear();
+            state.worktrees.clear();
             state.machines.clear();
             state.runs.clear();
             state.relationships.clear();
@@ -2599,38 +2469,35 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
         }
         Event::DeleteRepository {
             repository_id,
-            workset_ids,
+            workspace_ids,
         } => {
             let plan = plan_repository_deletion(&state, repository_id)?;
-            let mut expected_workset_ids = plan
-                .worksets
+            let mut expected_workspace_ids = plan
+                .workspaces
                 .iter()
-                .map(|workset| workset.id)
+                .map(|workspace| workspace.id)
                 .collect::<Vec<_>>();
-            let mut provided_workset_ids = workset_ids;
-            expected_workset_ids.sort_unstable();
-            provided_workset_ids.sort_unstable();
-            if expected_workset_ids != provided_workset_ids {
-                return Err(DomainError::RepositoryWorksetsMismatch {
+            let mut provided_workspace_ids = workspace_ids;
+            expected_workspace_ids.sort_unstable();
+            provided_workspace_ids.sort_unstable();
+            if expected_workspace_ids != provided_workspace_ids {
+                return Err(DomainError::RepositoryWorkspacesMismatch {
                     repository_id,
-                    expected_workset_ids,
-                    provided_workset_ids,
+                    expected_workspace_ids,
+                    provided_workspace_ids,
                 });
             }
-            if let Some(workset_id) = plan.worksets.iter().find_map(|workset| {
-                state
-                    .runs
-                    .iter()
-                    .any(|run| run.workset_id == Some(workset.id))
-                    .then_some(workset.id)
+            if let Some(workspace_id) = plan.workspaces.iter().find_map(|workspace| {
+                state.runs.iter().any(|run| {
+                    run.workspace_id == Some(workspace.id)
+                }).then_some(workspace.id)
             }) {
-                return Err(DomainError::WorksetHasRuns { workset_id });
+                return Err(DomainError::WorkspaceHasRuns { workspace_id });
             }
 
-            for workset in &plan.worksets {
-                state
-                    .worksets
-                    .retain(|candidate| candidate.id != workset.id);
+            for workspace in &plan.workspaces {
+                state.worktrees.retain(|worktree| worktree.workspace_id != workspace.id);
+                state.workspaces.retain(|candidate| candidate.id != workspace.id);
             }
             state
                 .repositories
@@ -2640,10 +2507,10 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .retain(|location| location.repository_id != repository_id);
 
             let mut effects = plan
-                .worksets
+                .workspaces
                 .iter()
-                .map(|workset| Effect::RemoveWorkset {
-                    workset_id: workset.id,
+                .map(|workspace| Effect::RemoveWorkspace {
+                    workspace_id: workspace.id,
                 })
                 .collect::<Vec<_>>();
             effects.push(Effect::RemoveRepository { repository_id });
@@ -2654,7 +2521,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             project_id,
             item_ids,
             repository_ids,
-            workset_ids,
+            workspace_ids,
         } => {
             let plan = plan_project_deletion(&state, project_id)?;
             if !parent_selection_matches(
@@ -2669,11 +2536,11 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 repository_ids,
             ) || !parent_selection_matches(
                 &plan
-                    .worksets
+                    .workspaces
                     .iter()
-                    .map(|workset| workset.id)
+                    .map(|workspace| workspace.id)
                     .collect::<Vec<_>>(),
-                workset_ids,
+                workspace_ids,
             ) {
                 return Err(DomainError::ProjectDeletionPlanMismatch { project_id });
             }
@@ -2688,11 +2555,11 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let orphaned_external_object_ids = plan.orphaned_external_object_ids.clone();
             let item_ids = plan.items.iter().map(|item| item.id).collect::<Vec<_>>();
             state.items.retain(|item| !item_ids.contains(&item.id));
-            state.worksets.retain(|workset| {
-                !plan
-                    .worksets
-                    .iter()
-                    .any(|candidate| candidate.id == workset.id)
+            state.worktrees.retain(|worktree| {
+                !plan.workspaces.iter().any(|workspace| workspace.id == worktree.workspace_id)
+            });
+            state.workspaces.retain(|workspace| {
+                !plan.workspaces.iter().any(|candidate| candidate.id == workspace.id)
             });
             state
                 .runs
@@ -2741,7 +2608,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                         .iter()
                         .map(|repository| repository.id)
                         .collect(),
-                    workset_ids: plan.worksets.iter().map(|workset| workset.id).collect(),
+                    workspace_ids: plan.workspaces.iter().map(|workspace| workspace.id).collect(),
                     orphaned_external_object_ids,
                     summary,
                 }],
@@ -2752,7 +2619,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             project_ids,
             item_ids,
             repository_ids,
-            workset_ids,
+            workspace_ids,
             machine_ids,
         } => {
             let plan = plan_context_deletion(&state, context_id)?;
@@ -2778,11 +2645,11 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 repository_ids,
             ) || !parent_selection_matches(
                 &plan
-                    .worksets
+                    .workspaces
                     .iter()
-                    .map(|workset| workset.id)
+                    .map(|workspace| workspace.id)
                     .collect::<Vec<_>>(),
-                workset_ids,
+                workspace_ids,
             ) || !parent_selection_matches(
                 &plan
                     .machines
@@ -2832,11 +2699,11 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             state
                 .repository_locations
                 .retain(|location| !repository_ids.contains(&location.repository_id));
-            state.worksets.retain(|workset| {
-                !plan
-                    .worksets
-                    .iter()
-                    .any(|candidate| candidate.id == workset.id)
+            state.worktrees.retain(|worktree| {
+                !plan.workspaces.iter().any(|workspace| workspace.id == worktree.workspace_id)
+            });
+            state.workspaces.retain(|workspace| {
+                !plan.workspaces.iter().any(|candidate| candidate.id == workspace.id)
             });
             state
                 .runs
@@ -2877,7 +2744,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                         .iter()
                         .map(|repository| repository.id)
                         .collect(),
-                    workset_ids: plan.worksets.iter().map(|workset| workset.id).collect(),
+                    workspace_ids: plan.workspaces.iter().map(|workspace| workspace.id).collect(),
                     machine_ids,
                     orphaned_external_object_ids,
                     summary,
@@ -2971,41 +2838,6 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 }],
             })
         }
-        Event::CreateWorkset {
-            item_id,
-            root_directory,
-            branch,
-            repositories,
-        } => {
-            let root_directory = clean_name(root_directory, DomainError::EmptyWorksetRoot)?;
-            let branch = clean_name(branch, DomainError::EmptyWorksetBranch)?;
-            let project_id = item_project_id(&state, item_id)?;
-            if repositories.is_empty() {
-                return Err(DomainError::EmptyWorksetRepositories);
-            }
-            let repositories =
-                normalize_workset_repositories(&state, project_id, &branch, repositories)?;
-            let id = state.next_workset_id;
-            let next_workset_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
-            let workset = Workset {
-                id,
-                item_id,
-                root_directory,
-                branch,
-                archived: false,
-                repositories,
-            };
-            state.next_workset_id = next_workset_id;
-            state.worksets.push(workset.clone());
-
-            Ok(Decision {
-                state,
-                effects: vec![Effect::PersistWorkset {
-                    workset,
-                    next_workset_id,
-                }],
-            })
-        }
         Event::CreateWorkspace {
             item_id,
             repositories,
@@ -3079,8 +2911,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 });
             }
             let path = clean_name(path, DomainError::EmptyWorktreePath)?;
-            let branch = clean_name(branch, DomainError::EmptyWorksetBranch)?;
-            let base_branch = clean_name(base_branch, DomainError::EmptyWorksetBranch)?;
+            let branch = clean_name(branch, DomainError::EmptyBranch)?;
+            let base_branch = clean_name(base_branch, DomainError::EmptyBranch)?;
             let id = state.next_worktree_id;
             let next_worktree_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
             let worktree = Worktree {
@@ -3192,117 +3024,6 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::RemoveWorkspace { workspace_id }],
             })
         }
-        Event::AttachWorkset {
-            item_id,
-            root_directory,
-            repositories,
-        } => {
-            let root_directory = clean_name(root_directory, DomainError::EmptyWorksetRoot)?;
-            let project_id = item_project_id(&state, item_id)?;
-            if repositories.is_empty() {
-                return Err(DomainError::EmptyWorksetRepositories);
-            }
-
-            let mut attached_repositories = Vec::with_capacity(repositories.len());
-            let mut new_repositories = Vec::new();
-            let mut next_repository_id = state.next_repository_id;
-            let mut branch = None;
-            for input in repositories {
-                let name = clean_name(input.name, DomainError::EmptyRepositoryName)?;
-                if name == "." || name == ".." || name.contains('/') || name.contains('\\') {
-                    return Err(DomainError::InvalidRepositoryName);
-                }
-                if attached_repositories
-                    .iter()
-                    .any(|repository: &WorksetRepository| {
-                        state
-                            .repositories
-                            .iter()
-                            .find(|candidate| candidate.id == repository.repository_id)
-                            .is_some_and(|candidate| candidate.name == name)
-                    })
-                {
-                    return Err(DomainError::RepositoryNameTaken { project_id, name });
-                }
-                let remote_url =
-                    clean_name(input.remote_url, DomainError::EmptyRepositoryRemoteUrl)?;
-                let current_branch =
-                    clean_name(input.current_branch, DomainError::EmptyWorksetBranch)?;
-                let repository = state
-                    .repositories
-                    .iter()
-                    .find(|repository| {
-                        repository.project_id == project_id && repository.name == name
-                    })
-                    .cloned();
-                let repository = match repository {
-                    Some(repository) if repository.remote_url != remote_url => {
-                        return Err(DomainError::RepositoryRemoteMismatch { project_id, name });
-                    }
-                    Some(repository) => repository,
-                    None => {
-                        let id = next_repository_id;
-                        next_repository_id =
-                            id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
-                        let repository = Repository {
-                            id,
-                            project_id,
-                            name,
-                            remote_url,
-                            base_branch: "main".into(),
-                        };
-                        state.repositories.push(repository.clone());
-                        new_repositories.push((repository.clone(), next_repository_id));
-                        repository
-                    }
-                };
-                branch.get_or_insert_with(|| current_branch.clone());
-                attached_repositories.push(WorksetRepository {
-                    repository_id: repository.id,
-                    branch_override: None,
-                    base_branch_override: None,
-                    current_branch,
-                    is_dirty: input.is_dirty,
-                });
-            }
-
-            let id = state.next_workset_id;
-            let next_workset_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
-            let branch = branch.expect("a non-empty attachment has a branch");
-            for repository in &mut attached_repositories {
-                if repository.current_branch != branch
-                    && !repository.current_branch.starts_with("HEAD (detached at ")
-                {
-                    repository.branch_override = Some(repository.current_branch.clone());
-                }
-            }
-            let workset = Workset {
-                id,
-                item_id,
-                root_directory,
-                branch,
-                archived: false,
-                repositories: attached_repositories,
-            };
-            state.next_repository_id = next_repository_id;
-            state.next_workset_id = next_workset_id;
-            state.worksets.push(workset.clone());
-
-            let mut effects = new_repositories
-                .into_iter()
-                .map(
-                    |(repository, next_repository_id)| Effect::PersistRepository {
-                        repository,
-                        next_repository_id,
-                    },
-                )
-                .collect::<Vec<_>>();
-            effects.push(Effect::PersistWorkset {
-                workset,
-                next_workset_id,
-            });
-            Ok(Decision { state, effects })
-        }
         Event::RegisterMachine {
             context_id,
             name,
@@ -3359,102 +3080,6 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::PersistMachineObservation { machine }],
             })
         }
-        Event::AddRepositoryToWorkset {
-            workset_id,
-            repository_id,
-            branch_override,
-            base_branch_override,
-        } => {
-            let workset = state
-                .worksets
-                .iter()
-                .find(|workset| workset.id == workset_id)
-                .cloned()
-                .ok_or(DomainError::WorksetNotFound { workset_id })?;
-            let project_id = item_project_id(&state, workset.item_id)?;
-            let repository = state
-                .repositories
-                .iter()
-                .find(|repository| repository.id == repository_id)
-                .ok_or(DomainError::RepositoryNotFound { repository_id })?;
-            if repository.project_id != project_id {
-                return Err(DomainError::RepositoryProjectMismatch {
-                    repository_id,
-                    project_id,
-                });
-            }
-            if workset
-                .repositories
-                .iter()
-                .any(|selected| selected.repository_id == repository_id)
-            {
-                return Err(DomainError::RepositoryAlreadyInWorkset {
-                    repository_id,
-                    workset_id,
-                });
-            }
-            let branch_override = clean_optional_branch(branch_override)?;
-            let current_branch = branch_override
-                .as_deref()
-                .unwrap_or(&workset.branch)
-                .to_owned();
-            let selected = WorksetRepository {
-                repository_id,
-                branch_override,
-                base_branch_override: clean_optional_branch(base_branch_override)?,
-                current_branch,
-                is_dirty: false,
-            };
-            let workset = state
-                .worksets
-                .iter_mut()
-                .find(|candidate| candidate.id == workset_id)
-                .expect("the Workset was checked above");
-            workset.repositories.push(selected);
-            let workset = workset.clone();
-
-            Ok(Decision {
-                state,
-                effects: vec![Effect::PersistWorksetUpdate { workset }],
-            })
-        }
-        Event::SetWorksetArchived {
-            workset_id,
-            archived,
-        } => {
-            let workset = state
-                .worksets
-                .iter_mut()
-                .find(|workset| workset.id == workset_id)
-                .ok_or(DomainError::WorksetNotFound { workset_id })?;
-            workset.archived = archived;
-            let workset = workset.clone();
-
-            Ok(Decision {
-                state,
-                effects: vec![Effect::PersistWorksetUpdate { workset }],
-            })
-        }
-        Event::RemoveWorkset { workset_id } => {
-            let position = state
-                .worksets
-                .iter()
-                .position(|workset| workset.id == workset_id)
-                .ok_or(DomainError::WorksetNotFound { workset_id })?;
-            if state
-                .runs
-                .iter()
-                .any(|run| run.workset_id == Some(workset_id))
-            {
-                return Err(DomainError::WorksetHasRuns { workset_id });
-            }
-            state.worksets.remove(position);
-
-            Ok(Decision {
-                state,
-                effects: vec![Effect::RemoveWorkset { workset_id }],
-            })
-        }
         Event::DeleteItem { item_id } => {
             let plan = plan_item_deletion(&state, item_id)?;
             if !plan.active_run_ids.is_empty() {
@@ -3466,7 +3091,12 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let summary = plan.summary();
             let orphaned_external_object_ids = plan.orphaned_external_object_ids.clone();
             state.items.retain(|item| item.id != item_id);
-            state.worksets.retain(|workset| workset.item_id != item_id);
+            state.worktrees.retain(|worktree| {
+                !state.workspaces.iter().any(|workspace| {
+                    workspace.id == worktree.workspace_id && workspace.item_id == item_id
+                })
+            });
+            state.workspaces.retain(|workspace| workspace.item_id != item_id);
             state.runs.retain(|run| run.item_id != item_id);
             state.relationships.retain(|relation| {
                 relation.from_item_id != item_id && relation.to_item_id != item_id
@@ -3563,88 +3193,6 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             Ok(Decision {
                 state,
                 effects: vec![Effect::RemoveRun { run_id }],
-            })
-        }
-        Event::StartRun {
-            item_id,
-            workset_id,
-            machine_id,
-            agent,
-            execution_profile,
-            prompt,
-            working_directory,
-            session_name,
-            pane_id,
-            started_at,
-            prompt_selection,
-        } => {
-            let context_id = item_context_id(&state, item_id)?;
-            let workset = state
-                .worksets
-                .iter()
-                .find(|workset| workset.id == workset_id)
-                .ok_or(DomainError::WorksetNotFound { workset_id })?;
-            if workset.item_id != item_id {
-                return Err(DomainError::WorksetItemMismatch {
-                    workset_id,
-                    item_id,
-                });
-            }
-            let machine = state
-                .machines
-                .iter()
-                .find(|machine| machine.id == machine_id)
-                .ok_or(DomainError::MachineNotFound { machine_id })?;
-            if machine.context_id != context_id {
-                return Err(DomainError::MachineContextMismatch {
-                    machine_id,
-                    context_id,
-                });
-            }
-            for external_object_id in prompt_selection.external_object_ids {
-                if !state.links.iter().any(|link| {
-                    link.item_id == item_id && link.external_object_id == external_object_id
-                }) {
-                    return Err(DomainError::RunPromptSourceNotLinked {
-                        external_object_id,
-                        item_id,
-                    });
-                }
-            }
-            let prompt = clean_name(prompt, DomainError::EmptyRunPrompt)?;
-            let working_directory =
-                clean_name(working_directory, DomainError::EmptyRunWorkingDirectory)?;
-            if working_directory != workset.root_directory {
-                return Err(DomainError::RunWorkingDirectoryMismatch { workset_id });
-            }
-            let session_name = clean_name(session_name, DomainError::EmptyRunSessionName)?;
-            let pane_id = clean_name(pane_id, DomainError::EmptyRunPaneId)?;
-            let id = state.next_run_id;
-            let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
-            let run = Run {
-                id,
-                item_id,
-                workset_id: Some(workset_id),
-                workspace_id: None,
-                repository_id: None,
-                worktree_id: None,
-                machine_id,
-                agent,
-                execution_profile,
-                prompt,
-                working_directory,
-                session_name,
-                pane_id,
-                started_at,
-                state: RunState::Unknown,
-                pane_status: RunPaneStatus::Available,
-                direct_checkouts: Vec::new(),
-            };
-            state.next_run_id = next_run_id;
-            state.runs.push(run.clone());
-            Ok(Decision {
-                state,
-                effects: vec![Effect::PersistRun { run, next_run_id }],
             })
         }
         Event::StartDirectRun {
@@ -3811,7 +3359,6 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let run = Run {
                 id,
                 item_id,
-                workset_id: None,
                 workspace_id: Some(workspace_id),
                 repository_id: Some(repository_id),
                 worktree_id: None,
@@ -3934,7 +3481,6 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let run = Run {
                 id,
                 item_id,
-                workset_id: None,
                 workspace_id: Some(workspace_id),
                 repository_id: Some(worktree.repository_id),
                 worktree_id: Some(worktree_id),
@@ -3958,85 +3504,6 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             })
         }
         Event::AttachRun {
-            item_id,
-            workset_id,
-            machine_id,
-            agent,
-            working_directory,
-            session_name,
-            pane_id,
-            attached_at,
-        } => {
-            let context_id = item_context_id(&state, item_id)?;
-            let workset = state
-                .worksets
-                .iter()
-                .find(|workset| workset.id == workset_id)
-                .ok_or(DomainError::WorksetNotFound { workset_id })?;
-            if workset.item_id != item_id {
-                return Err(DomainError::WorksetItemMismatch {
-                    workset_id,
-                    item_id,
-                });
-            }
-            let machine = state
-                .machines
-                .iter()
-                .find(|machine| machine.id == machine_id)
-                .ok_or(DomainError::MachineNotFound { machine_id })?;
-            if machine.context_id != context_id {
-                return Err(DomainError::MachineContextMismatch {
-                    machine_id,
-                    context_id,
-                });
-            }
-            let working_directory =
-                clean_name(working_directory, DomainError::EmptyRunWorkingDirectory)?;
-            if working_directory != workset.root_directory {
-                return Err(DomainError::RunWorkingDirectoryMismatch { workset_id });
-            }
-            let session_name = clean_name(session_name, DomainError::EmptyRunSessionName)?;
-            let pane_id = clean_name(pane_id, DomainError::EmptyRunPaneId)?;
-            if state.runs.iter().any(|run| {
-                run.machine_id == machine_id
-                    && run.session_name == session_name
-                    && run.pane_id == pane_id
-            }) {
-                return Err(DomainError::RunAlreadyAttached {
-                    machine_id,
-                    session_name,
-                    pane_id,
-                });
-            }
-            let id = state.next_run_id;
-            let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
-            let run = Run {
-                id,
-                item_id,
-                workset_id: Some(workset_id),
-                workspace_id: None,
-                repository_id: None,
-                worktree_id: None,
-                machine_id,
-                agent,
-                execution_profile: ExecutionProfile::CustomPrompt,
-                prompt: "Attached existing agent".into(),
-                working_directory,
-                session_name,
-                pane_id,
-                started_at: attached_at,
-                state: RunState::Unknown,
-                pane_status: RunPaneStatus::Available,
-                direct_checkouts: Vec::new(),
-            };
-            state.next_run_id = next_run_id;
-            state.runs.push(run.clone());
-            Ok(Decision {
-                state,
-                effects: vec![Effect::PersistRun { run, next_run_id }],
-            })
-        }
-        Event::AttachWorkspaceRun {
             item_id,
             workspace_id,
             worktree_id,
@@ -4088,7 +3555,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 let location_matches = state.repository_locations.iter().any(|location| {
                     location.repository_id == repository_id
                         && location.machine_id == machine_id
-                        && path_is_within_workset(&location.checkout_path, &working_directory)
+                        && path_is_within(&location.checkout_path, &working_directory)
                 });
                 if !location_matches {
                     return Err(DomainError::RunWorkingDirectoryRepositoryMismatch {
@@ -4127,7 +3594,6 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let run = Run {
                 id,
                 item_id,
-                workset_id: None,
                 workspace_id: Some(workspace_id),
                 repository_id: Some(repository_id),
                 worktree_id,
@@ -4580,93 +4046,57 @@ pub fn suggest_untracked_runs(
                 .machines
                 .iter()
                 .find(|machine| machine.id == pane.machine_id)?;
-            let workset = state
-                .worksets
-                .iter()
-                .filter(|workset| {
-                    !workset.archived
-                        && path_is_within_workset(&workset.root_directory, &pane.current_path)
-                })
-                .max_by_key(|workset| workset.root_directory.len());
             let workspace_location = state
                 .workspaces
                 .iter()
                 .filter_map(|workspace| {
-                    let repository_id = workspace.repositories.iter().find_map(|selected| {
-                        state
-                            .repository_locations
-                            .iter()
-                            .any(|location| {
-                                location.repository_id == selected.repository_id
-                                    && location.machine_id == pane.machine_id
-                                    && path_is_within_workset(
-                                        &location.checkout_path,
-                                        &pane.current_path,
-                                    )
-                            })
-                            .then_some(selected.repository_id)
-                    });
                     let worktree = state
                         .worktrees
                         .iter()
                         .filter(|worktree| {
                             worktree.workspace_id == workspace.id
                                 && worktree.machine_id == pane.machine_id
-                                && path_is_within_workset(&worktree.path, &pane.current_path)
+                                && path_is_within(&worktree.path, &pane.current_path)
                         })
                         .max_by_key(|worktree| worktree.path.len());
-                    let (repository_id, worktree_id, root) = if let Some(worktree) = worktree {
-                        (
-                            Some(worktree.repository_id),
+                    if let Some(worktree) = worktree {
+                        return Some((
+                            worktree.path.len(),
+                            workspace.id,
+                            worktree.repository_id,
                             Some(worktree.id),
                             worktree.path.clone(),
-                        )
-                    } else if let Some(repository_id) = repository_id {
-                        let location = state.repository_locations.iter().find(|location| {
-                            location.repository_id == repository_id
-                                && location.machine_id == pane.machine_id
-                                && path_is_within_workset(
-                                    &location.checkout_path,
-                                    &pane.current_path,
+                        ));
+                    }
+                    workspace.repositories.iter().find_map(|selected| {
+                        state
+                            .repository_locations
+                            .iter()
+                            .filter(|location| {
+                                location.repository_id == selected.repository_id
+                                    && location.machine_id == pane.machine_id
+                                    && path_is_within(&location.checkout_path, &pane.current_path)
+                            })
+                            .max_by_key(|location| location.checkout_path.len())
+                            .map(|location| {
+                                (
+                                    location.checkout_path.len(),
+                                    workspace.id,
+                                    selected.repository_id,
+                                    None,
+                                    location.checkout_path.clone(),
                                 )
-                        })?;
-                        (Some(repository_id), None, location.checkout_path.clone())
-                    } else {
-                        return None;
-                    };
-                    Some((root.len(), workspace.id, repository_id?, worktree_id, root))
+                            })
+                    })
                 })
                 .max_by_key(|candidate| candidate.0);
-            let (item_id, workspace_id, repository_id, worktree_id, worktree_root, workset) =
-                match (workset, workspace_location) {
-                    (
-                        Some(workset),
-                        Some((location_length, workspace_id, repository_id, worktree_id, root)),
-                    ) if location_length > workset.root_directory.len() => (
-                        workset.item_id,
-                        Some(workspace_id),
-                        Some(repository_id),
-                        worktree_id,
-                        Some(root),
-                        Some(workset),
-                    ),
-                    (Some(workset), _) => (workset.item_id, None, None, None, None, Some(workset)),
-                    (None, Some((_, workspace_id, repository_id, worktree_id, root))) => {
-                        let workspace = state
-                            .workspaces
-                            .iter()
-                            .find(|workspace| workspace.id == workspace_id)?;
-                        (
-                            workspace.item_id,
-                            Some(workspace_id),
-                            Some(repository_id),
-                            worktree_id,
-                            Some(root),
-                            None,
-                        )
-                    }
-                    (None, None) => return None,
-                };
+            let (_, workspace_id, repository_id, worktree_id, location_path) =
+                workspace_location?;
+            let workspace = state
+                .workspaces
+                .iter()
+                .find(|workspace| workspace.id == workspace_id)?;
+            let item_id = workspace.item_id;
             let item = state.items.iter().find(|item| item.id == item_id)?;
             let project = state
                 .projects
@@ -4684,32 +4114,15 @@ pub fn suggest_untracked_runs(
                 session_name: pane.session_name.clone(),
                 pane_id: pane.pane_id.clone(),
                 current_path: pane.current_path.clone(),
-                workset_id: workset
-                    .as_ref()
-                    .map(|workset| workset.id)
-                    .unwrap_or_default(),
-                workset_root_directory: workset
-                    .as_ref()
-                    .map(|workset| workset.root_directory.clone())
-                    .or(worktree_root.clone())
-                    .unwrap_or_default(),
-                workset_branch: workset
-                    .as_ref()
-                    .map(|workset| workset.branch.clone())
-                    .unwrap_or_default(),
                 item_id: item.id,
                 item_identifier: item.human_identifier.clone(),
                 item_title: item.title.clone(),
                 context_id: context.id,
                 context_name: context.name.clone(),
-                workspace_id,
-                repository_id,
+                workspace_id: Some(workspace_id),
+                repository_id: Some(repository_id),
                 worktree_id,
-                location_path: worktree_root.or_else(|| {
-                    workset
-                        .as_ref()
-                        .map(|workset| workset.root_directory.clone())
-                }),
+                location_path: Some(location_path),
             })
         })
         .collect::<Vec<_>>();
@@ -4722,7 +4135,7 @@ pub fn suggest_untracked_runs(
     suggestions
 }
 
-fn path_is_within_workset(root: &str, path: &str) -> bool {
+fn path_is_within(root: &str, path: &str) -> bool {
     let root = without_macos_private_prefix(root).trim_end_matches('/');
     let path = without_macos_private_prefix(path);
     if let Some(home_relative_root) = root.strip_prefix("~/") {
@@ -4979,12 +4392,6 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 .filter(|link| link.item_id == item.id)
                 .filter_map(|link| external_link_view_at(state, link, now))
                 .collect();
-            let (worksets, archived_worksets): (Vec<_>, Vec<_>) = state
-                .worksets
-                .iter()
-                .filter(|workset| workset.item_id == item.id)
-                .cloned()
-                .partition(|workset| !workset.archived);
             let workspaces = state
                 .workspaces
                 .iter()
@@ -5013,8 +4420,6 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 context_name: context.name.clone(),
                 project_name: project.name.clone(),
                 relationships,
-                worksets,
-                archived_worksets,
                 workspaces,
                 worktrees,
                 runs,
@@ -5074,11 +4479,11 @@ pub fn compose_run_prompt(
                 .to_owned()
         }
         ExecutionProfile::Implement => {
-            "Implement this work in the Workset, run the relevant checks, and leave the changes ready for review."
+            "Implement this work in the selected Workspace, run the relevant checks, and leave the changes ready for review."
                 .to_owned()
         }
         ExecutionProfile::Review => {
-            "Review the current Workset changes for correctness, regressions, and missing test coverage."
+            "Review the current Workspace changes for correctness, regressions, and missing test coverage."
                 .to_owned()
         }
         ExecutionProfile::CustomPrompt => clean_name(
@@ -5180,50 +4585,6 @@ fn item_project_id(state: &DomainState, item_id: i64) -> Result<i64, DomainError
         })
 }
 
-fn normalize_workset_repositories(
-    state: &DomainState,
-    project_id: i64,
-    branch: &str,
-    repositories: Vec<WorksetRepositoryInput>,
-) -> Result<Vec<WorksetRepository>, DomainError> {
-    let mut normalized = Vec::with_capacity(repositories.len());
-    for input in repositories {
-        let repository = state
-            .repositories
-            .iter()
-            .find(|repository| repository.id == input.repository_id)
-            .ok_or(DomainError::RepositoryNotFound {
-                repository_id: input.repository_id,
-            })?;
-        if repository.project_id != project_id {
-            return Err(DomainError::RepositoryProjectMismatch {
-                repository_id: input.repository_id,
-                project_id,
-            });
-        }
-        if normalized
-            .iter()
-            .any(|selected: &WorksetRepository| selected.repository_id == input.repository_id)
-        {
-            return Err(DomainError::DuplicateRepositorySelection {
-                repository_id: input.repository_id,
-            });
-        }
-        normalized.push(WorksetRepository {
-            repository_id: input.repository_id,
-            current_branch: input
-                .branch_override
-                .as_deref()
-                .unwrap_or(branch)
-                .to_owned(),
-            branch_override: clean_optional_branch(input.branch_override)?,
-            base_branch_override: clean_optional_branch(input.base_branch_override)?,
-            is_dirty: false,
-        });
-    }
-    Ok(normalized)
-}
-
 fn normalize_workspace_repositories(
     state: &DomainState,
     project_id: i64,
@@ -5254,8 +4615,8 @@ fn normalize_workspace_repositories(
         }
         normalized.push(WorkspaceRepository {
             repository_id: input.repository_id,
-            branch: clean_name(input.branch, DomainError::EmptyWorksetBranch)?,
-            base_branch: clean_name(input.base_branch, DomainError::EmptyWorksetBranch)?,
+            branch: clean_name(input.branch, DomainError::EmptyBranch)?,
+            base_branch: clean_name(input.base_branch, DomainError::EmptyBranch)?,
         });
     }
     Ok(normalized)
@@ -5263,7 +4624,7 @@ fn normalize_workspace_repositories(
 
 fn clean_optional_branch(branch: Option<String>) -> Result<Option<String>, DomainError> {
     branch
-        .map(|branch| clean_name(branch, DomainError::EmptyWorksetBranch))
+        .map(|branch| clean_name(branch, DomainError::EmptyBranch))
         .transpose()
 }
 
@@ -5467,6 +4828,194 @@ fn format_change(change: &ExternalChange) -> String {
 }
 
 #[cfg(test)]
+mod workspace_contract_tests {
+    use super::*;
+
+    #[test]
+    fn a_workspace_selects_repositories_and_worktree_execution_keeps_context() {
+        let mut state = DomainState {
+            next_context_id: 2,
+            next_project_id: 2,
+            next_item_id: 2,
+            next_item_number: 2,
+            next_repository_id: 2,
+            next_workspace_id: 1,
+            next_worktree_id: 1,
+            next_machine_id: 2,
+            next_run_id: 1,
+            next_external_object_id: 1,
+            next_link_id: 1,
+            next_activity_id: 1,
+            next_reminder_id: 1,
+            contexts: vec![Context { id: 1, name: "Personal".into() }],
+            projects: vec![Project {
+                id: 1,
+                context_id: 1,
+                name: "Default".into(),
+                defaults: ProjectDefaults::default(),
+            }],
+            repositories: vec![Repository {
+                id: 1,
+                project_id: 1,
+                name: "mission-manager".into(),
+                remote_url: "https://example.test/repo".into(),
+                base_branch: "main".into(),
+            }],
+            repository_locations: Vec::new(),
+            items: vec![Item {
+                id: 1,
+                human_identifier: "MC-1".into(),
+                title: "Use Workspace vocabulary".into(),
+                project_id: 1,
+                status: ItemStatus::Active,
+                notes: String::new(),
+                reminders: Vec::new(),
+            }],
+            workspaces: Vec::new(),
+            worktrees: Vec::new(),
+            machines: vec![Machine {
+                id: 1,
+                context_id: 1,
+                name: "Local".into(),
+                socket_name: "mission".into(),
+                transport: MachineTransport::Local,
+                last_observed: MachineObservation::Available,
+                last_observed_at: None,
+            }],
+            runs: Vec::new(),
+            relationships: Vec::new(),
+            external_objects: Vec::new(),
+            links: Vec::new(),
+            snapshots: Vec::new(),
+            activities: Vec::new(),
+            attention_defaults: Vec::new(),
+        };
+
+        let workspace = decide(
+            state.clone(),
+            Event::CreateWorkspace {
+                item_id: 1,
+                repositories: vec![WorkspaceRepositoryInput {
+                    repository_id: 1,
+                    branch: "feature/contract".into(),
+                    base_branch: "main".into(),
+                }],
+            },
+        )
+        .expect("Workspace creation should succeed");
+        state = workspace.state;
+        assert_eq!(state.workspaces[0].item_id, 1);
+        assert_eq!(state.workspaces[0].repositories[0].repository_id, 1);
+
+        let worktree = decide(
+            state,
+            Event::CreateWorktree {
+                workspace_id: 1,
+                repository_id: 1,
+                machine_id: 1,
+                path: "/tmp/worktrees/mission-manager".into(),
+                branch: "feature/contract".into(),
+                base_branch: "main".into(),
+                is_dirty: false,
+            },
+        )
+        .expect("Worktree creation should succeed");
+        assert_eq!(worktree.state.worktrees[0].workspace_id, 1);
+        assert_eq!(worktree.state.workspaces[0].preparation_state, WorkspacePreparationState::Ready);
+    }
+
+    #[test]
+    fn run_suggestions_only_attach_to_registered_workspace_locations() {
+        let state = DomainState {
+            next_context_id: 2,
+            next_project_id: 2,
+            next_item_id: 2,
+            next_item_number: 2,
+            next_repository_id: 2,
+            next_workspace_id: 2,
+            next_worktree_id: 1,
+            next_machine_id: 2,
+            next_run_id: 1,
+            next_external_object_id: 1,
+            next_link_id: 1,
+            next_activity_id: 1,
+            next_reminder_id: 1,
+            contexts: vec![Context { id: 1, name: "Personal".into() }],
+            projects: vec![Project {
+                id: 1,
+                context_id: 1,
+                name: "Default".into(),
+                defaults: ProjectDefaults::default(),
+            }],
+            repositories: vec![Repository {
+                id: 1,
+                project_id: 1,
+                name: "repo".into(),
+                remote_url: "https://example.test/repo".into(),
+                base_branch: "main".into(),
+            }],
+            repository_locations: vec![RepositoryLocation {
+                repository_id: 1,
+                machine_id: 1,
+                checkout_path: "/tmp/checkouts/repo".into(),
+                worktree_root: "/tmp/worktrees".into(),
+            }],
+            items: vec![Item {
+                id: 1,
+                human_identifier: "MC-1".into(),
+                title: "Attach".into(),
+                project_id: 1,
+                status: ItemStatus::Active,
+                notes: String::new(),
+                reminders: Vec::new(),
+            }],
+            workspaces: vec![Workspace {
+                id: 1,
+                item_id: 1,
+                repositories: vec![WorkspaceRepository {
+                    repository_id: 1,
+                    branch: "main".into(),
+                    base_branch: "main".into(),
+                }],
+                preparation_state: WorkspacePreparationState::Pending,
+            }],
+            worktrees: Vec::new(),
+            machines: vec![Machine {
+                id: 1,
+                context_id: 1,
+                name: "Local".into(),
+                socket_name: "mission".into(),
+                transport: MachineTransport::Local,
+                last_observed: MachineObservation::Available,
+                last_observed_at: None,
+            }],
+            runs: Vec::new(),
+            relationships: Vec::new(),
+            external_objects: Vec::new(),
+            links: Vec::new(),
+            snapshots: Vec::new(),
+            activities: Vec::new(),
+            attention_defaults: Vec::new(),
+        };
+
+        let suggestions = suggest_untracked_runs(
+            &state,
+            &[AgentPaneObservation {
+                machine_id: 1,
+                agent: AgentKind::Codex,
+                session_name: "mission".into(),
+                pane_id: "%1".into(),
+                current_path: "/tmp/checkouts/repo/src".into(),
+            }],
+        );
+        assert_eq!(suggestions.len(), 1);
+        assert_eq!(suggestions[0].workspace_id, Some(1));
+        assert_eq!(suggestions[0].repository_id, Some(1));
+        assert_eq!(suggestions[0].location_path.as_deref(), Some("/tmp/checkouts/repo"));
+    }
+}
+
+#[cfg(any())]
 mod tests {
     use super::*;
 

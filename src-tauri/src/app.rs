@@ -16,7 +16,7 @@ use crate::{
         home_view, normalize_machine_path, plan_context_deletion, plan_external_object_deletion,
         plan_item_deletion, plan_machine_deletion, plan_project_deletion, plan_repository_deletion,
         plan_reset_local_data, search_items, suggest_untracked_runs, worktree_path,
-        ActivityTabView, AgentKind, AgentPaneObservation, AttachedRepositoryInput, AuditAction,
+        ActivityTabView, AgentKind, AgentPaneObservation, AuditAction,
         AuditEntry, Context, ContextAttentionDefault, DomainState, Effect, Event, ExecutionMode,
         ExecutionProfile, ExternalChangePolicy, ExternalLinkView, ExternalObjectDeletionPlan,
         ExternalObjectDeletionSummary, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
@@ -24,15 +24,15 @@ use crate::{
         ItemRelationKind, ItemStatus, ItemView, Machine, MachineDeletionPlan, MachineObservation,
         MachineTransport, ParentDeletionPlan, Project, ProjectDefaults, Repository,
         RepositoryDeletionPlan, ResetLocalDataPlan, ResetLocalDataSummary, Run, RunCheckout,
-        RunPaneStatus, RunPromptSelection, RunState, RunSuggestion, Workset,
-        WorksetRepositoryInput, Workspace, WorkspaceRepositoryInput, Worktree,
+        RunPaneStatus, RunPromptSelection, RunState, RunSuggestion, Workspace,
+        WorkspaceRepositoryInput, Worktree,
     },
     git::GitCli,
     persistence::SqliteStore,
     provider::{classify_url, resolve_gh_executable, GithubCli},
     terminal::{
         capture_pane, find_agent_executable, list_agent_panes, list_panes, open_pane_in_terminal,
-        probe_local_runtime, probe_machine, terminal_transport, workset_root_exists,
+        probe_local_runtime, probe_machine, terminal_transport,
         AgentLaunchContext, ExternalPaneIdentity, PaneSummary, TerminalRuntime, TmuxControlPane,
         TmuxRuntime,
     },
@@ -66,7 +66,6 @@ pub struct Runtime {
     store: SqliteStore,
     state: DomainState,
     gh_executable_path: Option<PathBuf>,
-    pending_workset_removal: Option<WorksetRemovalReport>,
     pending_worktree_removals: HashMap<i64, WorktreeRemovalReport>,
     pending_workspace_removal: Option<WorkspaceRemovalReport>,
     pending_item_deletion: Option<ItemDeletionPreview>,
@@ -159,7 +158,6 @@ impl Runtime {
             store,
             state,
             gh_executable_path,
-            pending_workset_removal: None,
             pending_worktree_removals: HashMap::new(),
             pending_workspace_removal: None,
             pending_item_deletion: None,
@@ -621,6 +619,7 @@ impl Runtime {
         Ok(repository)
     }
 
+    #[cfg(any())]
     fn create_workset(
         &mut self,
         item_id: i64,
@@ -1154,6 +1153,7 @@ impl Runtime {
         })
     }
 
+    #[cfg(any())]
     fn attach_workset(&mut self, item_id: i64, root_directory: String) -> Result<Workset, String> {
         let root = Path::new(&root_directory);
         let repositories = GitCli::system()
@@ -1326,6 +1326,7 @@ impl Runtime {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(any())]
     fn start_run(
         &mut self,
         item_id: i64,
@@ -1724,6 +1725,7 @@ impl Runtime {
         Ok(run)
     }
 
+    #[cfg(any())]
     fn list_workset_panes(&mut self, workset_id: i64) -> Result<Vec<PaneTab>, String> {
         self.recover_run_states()?;
         if !self
@@ -1784,10 +1786,9 @@ impl Runtime {
         self.recover_run_states()?;
         let local_machine_item_ids = self
             .state
-            .worksets
+            .workspaces
             .iter()
-            .filter(|workset| !workset.archived)
-            .map(|workset| workset.item_id)
+            .map(|workspace| workspace.item_id)
             .collect::<Vec<_>>();
         for item_id in local_machine_item_ids {
             self.local_machine_for_item(item_id)?;
@@ -1854,7 +1855,7 @@ impl Runtime {
                 && candidate.workspace_id == suggestion.workspace_id
                 && candidate.repository_id == suggestion.repository_id
                 && candidate.worktree_id == suggestion.worktree_id
-                && candidate.workset_id == suggestion.workset_id
+                && candidate.location_path == suggestion.location_path
         })
         .ok_or_else(|| {
             "The suggested agent no longer matches its registered working location".to_owned()
@@ -1865,7 +1866,7 @@ impl Runtime {
                 .ok_or_else(|| "The suggested Workspace location has no Repository".to_owned())?;
             decide(
                 self.state.clone(),
-                Event::AttachWorkspaceRun {
+                Event::AttachRun {
                     item_id: canonical.item_id,
                     workspace_id,
                     worktree_id: canonical.worktree_id,
@@ -1882,22 +1883,7 @@ impl Runtime {
                 },
             )
         } else {
-            decide(
-                self.state.clone(),
-                Event::AttachRun {
-                    item_id: canonical.item_id,
-                    workset_id: canonical.workset_id,
-                    machine_id: canonical.machine_id,
-                    agent: canonical.agent,
-                    working_directory: canonical
-                        .location_path
-                        .clone()
-                        .unwrap_or(canonical.current_path.clone()),
-                    session_name: canonical.session_name,
-                    pane_id: canonical.pane_id,
-                    attached_at: current_unix_seconds(),
-                },
-            )
+            return Err("The suggested agent is not in a registered Workspace location".into())
         }
         .map_err(|error| error.to_string())?;
         let run = decision
@@ -2261,6 +2247,7 @@ impl Runtime {
             .ok_or_else(|| format!("Project {} does not exist", item.project_id))
     }
 
+    #[cfg(any())]
     fn add_repository_to_workset(
         &mut self,
         workset_id: i64,
@@ -2328,6 +2315,7 @@ impl Runtime {
         Ok(workset)
     }
 
+    #[cfg(any())]
     fn set_workset_archived(&mut self, workset_id: i64, archived: bool) -> Result<Workset, String> {
         let decision = decide(
             self.state.clone(),
@@ -2348,6 +2336,7 @@ impl Runtime {
         Ok(workset)
     }
 
+    #[cfg(any())]
     fn build_workset_removal_report(
         &self,
         workset_id: i64,
@@ -2408,12 +2397,14 @@ impl Runtime {
         Ok(report)
     }
 
+    #[cfg(any())]
     fn prepare_workset_removal(&mut self, workset_id: i64) -> Result<WorksetRemovalReport, String> {
         let report = self.build_standalone_workset_removal_report(workset_id)?;
         self.pending_workset_removal = Some(report.clone());
         Ok(report)
     }
 
+    #[cfg(any())]
     fn build_standalone_workset_removal_report(
         &self,
         workset_id: i64,
@@ -2435,36 +2426,12 @@ impl Runtime {
 
     fn build_item_deletion_preview(&self, item_id: i64) -> Result<ItemDeletionPreview, String> {
         let plan = plan_item_deletion(&self.state, item_id).map_err(|error| error.to_string())?;
-        let mut blockers = plan
+        let blockers = plan
             .active_run_ids
             .iter()
             .map(|run_id| format!("Run #{run_id} is active; stop it before deleting this Item."))
             .collect::<Vec<_>>();
-        let worksets = plan
-            .worksets
-            .iter()
-            .map(|workset| {
-                let preview = self.build_workset_deletion_preview(
-                    workset.id,
-                    &workset.root_directory,
-                    &workset.branch,
-                    workset.archived,
-                );
-                blockers.extend(
-                    preview
-                        .blockers
-                        .iter()
-                        .map(|blocker| format!("Workset #{}: {blocker}", workset.id)),
-                );
-                preview
-            })
-            .collect();
-
-        Ok(ItemDeletionPreview {
-            plan,
-            worksets,
-            blockers,
-        })
+        Ok(ItemDeletionPreview { plan, blockers })
     }
 
     fn build_parent_deletion_preview(
@@ -2495,25 +2462,7 @@ impl Runtime {
                 "This is the last Context; create another Context before deleting it.".into(),
             );
         }
-        let worksets = plan
-            .worksets
-            .iter()
-            .map(|workset| {
-                let preview = self.build_workset_deletion_preview(
-                    workset.id,
-                    &workset.root_directory,
-                    &workset.branch,
-                    workset.archived,
-                );
-                preview
-            })
-            .collect();
-
-        Ok(ParentDeletionPreview {
-            plan,
-            worksets,
-            blockers,
-        })
+        Ok(ParentDeletionPreview { plan, blockers })
     }
 
     fn prepare_project_deletion(
@@ -2550,33 +2499,12 @@ impl Runtime {
                 )
             })
             .collect::<Vec<_>>();
-        let worksets = plan
-            .worksets
-            .iter()
-            .map(|workset| {
-                let preview = self.build_workset_deletion_preview(
-                    workset.id,
-                    &workset.root_directory,
-                    &workset.branch,
-                    workset.archived,
-                );
-                blockers.extend(
-                    preview
-                        .blockers
-                        .iter()
-                        .map(|blocker| format!("Workset #{}: {blocker}", workset.id)),
-                );
-                preview
-            })
-            .collect();
-
         Ok(ResetLocalDataPreview {
             plan,
             audit_entry_count: self
                 .store
                 .audit_entry_count()
                 .map_err(|error| error.to_string())?,
-            worksets,
             blockers,
             confirmation_phrase: RESET_CONFIRMATION_PHRASE.into(),
         })
@@ -2588,11 +2516,7 @@ impl Runtime {
         Ok(preview)
     }
 
-    fn reset_all_local_data(
-        &mut self,
-        confirmation: String,
-        delete_workset_directories: bool,
-    ) -> Result<ResetLocalDataResult, String> {
+    fn reset_all_local_data(&mut self, confirmation: String) -> Result<ResetLocalDataResult, String> {
         if confirmation != RESET_CONFIRMATION_PHRASE {
             return Err(format!(
                 "Reset requires the exact confirmation phrase: {RESET_CONFIRMATION_PHRASE}"
@@ -2606,7 +2530,7 @@ impl Runtime {
         let current = self.build_reset_local_data_preview()?;
         if current != pending {
             return Err(
-                "The local model or a Workset safety report changed after the reset preview; review the updated preview before resetting local data"
+                "The local model changed after the reset preview; review the updated preview before resetting local data"
                     .into(),
             );
         }
@@ -2617,41 +2541,10 @@ impl Runtime {
             ));
         }
 
-        let mut staged = Vec::new();
-        if delete_workset_directories {
-            for workset in &current.plan.worksets {
-                let root = Path::new(&workset.root_directory);
-                let staging = match workset_removal_staging_path(root, workset.id) {
-                    Ok(staging) => staging,
-                    Err(error) => {
-                        let restore_error = restore_staged_directories(&staged);
-                        return Err(format_commit_error(error, restore_error));
-                    }
-                };
-                if let Err(error) = fs::rename(root, &staging) {
-                    let restore_error = restore_staged_directories(&staged);
-                    return Err(format_commit_error(
-                        format!("Could not stage Workset directory for local-data reset: {error}"),
-                        restore_error,
-                    ));
-                }
-                staged.push((root.to_owned(), staging));
-            }
-        }
-
-        let decision = match decide(self.state.clone(), Event::ResetLocalData) {
-            Ok(decision) => decision,
-            Err(error) => {
-                let restore_error = restore_staged_directories(&staged);
-                return Err(format_commit_error(error.to_string(), restore_error));
-            }
-        };
-        if let Err(error) = self.commit(decision) {
-            let restore_error = restore_staged_directories(&staged);
-            return Err(format_commit_error(error, restore_error));
-        }
+        let decision = decide(self.state.clone(), Event::ResetLocalData)
+            .map_err(|error| error.to_string())?;
+        self.commit(decision)?;
         self.pending_reset_local_data = None;
-        self.pending_workset_removal = None;
         self.pending_item_deletion = None;
         self.pending_external_object_deletion = None;
         self.pending_repository_deletion = None;
@@ -2659,43 +2552,17 @@ impl Runtime {
         self.pending_parent_deletion = None;
         self.terminal_connections.clear();
 
-        let mut cleanup_errors = Vec::new();
-        let workset_cleanup_failed = if delete_workset_directories {
-            let mut failed = false;
-            for (_, staging) in staged {
-                if let Err(error) = fs::remove_dir_all(&staging) {
-                    failed = true;
-                    cleanup_errors.push(format!("{}: {error}", staging.display()));
-                }
-            }
-            failed
-        } else {
-            false
-        };
         if self.agent_state_directory.exists() {
-            if let Err(error) = fs::remove_dir_all(&self.agent_state_directory) {
-                cleanup_errors.push(format!("{}: {error}", self.agent_state_directory.display()));
-            }
+            let _ = fs::remove_dir_all(&self.agent_state_directory);
         }
-        let physical_cleanup_warning = if !cleanup_errors.is_empty() {
-            Some(format!(
-                "Local data was reset, but some local physical data could not be removed: {}",
-                cleanup_errors.join(", ")
-            ))
-        } else if !delete_workset_directories && !current.plan.worksets.is_empty() {
-            Some("Local data was reset; Workset directories were left on disk by choice.".into())
-        } else {
-            None
-        };
 
         Ok(ResetLocalDataResult {
             summary: current.plan.summary,
             audit_entry_count: current.audit_entry_count,
-            workset_directories_deleted: delete_workset_directories && !workset_cleanup_failed,
-            physical_cleanup_warning,
         })
     }
 
+    #[cfg(any())]
     fn delete_parent(
         &mut self,
         target: ParentDeletionTarget,
@@ -2828,6 +2695,46 @@ impl Runtime {
         })
     }
 
+    fn delete_parent(
+        &mut self,
+        target: ParentDeletionTarget,
+        event: Event,
+        confirmed: bool,
+    ) -> Result<ParentDeletionResult, String> {
+        if !confirmed {
+            return Err(format!(
+                "{} deletion requires explicit confirmation after reviewing its deletion preview",
+                target.label()
+            ));
+        }
+        let pending = self
+            .pending_parent_deletion
+            .as_ref()
+            .filter(|preview| target.matches(&preview.plan))
+            .cloned()
+            .ok_or_else(|| format!("Review the {} deletion preview before deleting it", target.label()))?;
+        let current = self.build_parent_deletion_preview(target)?;
+        if current != pending {
+            return Err(format!(
+                "The {} changed after the preview; review the updated deletion preview",
+                target.label()
+            ));
+        }
+        if !current.blockers.is_empty() {
+            return Err(format!(
+                "{} deletion is blocked:\n{}",
+                target.label(),
+                current.blockers.join("\n")
+            ));
+        }
+        let summary = current.plan.summary();
+        let decision = decide(self.state.clone(), event).map_err(|error| error.to_string())?;
+        self.commit(decision)?;
+        self.pending_parent_deletion = None;
+        Ok(ParentDeletionResult { summary })
+    }
+
+    #[cfg(any())]
     fn delete_project(
         &mut self,
         project_id: i64,
@@ -2851,6 +2758,7 @@ impl Runtime {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg(any())]
     fn delete_context(
         &mut self,
         context_id: i64,
@@ -2877,6 +2785,52 @@ impl Runtime {
         )
     }
 
+    fn delete_project(
+        &mut self,
+        project_id: i64,
+        item_ids: Vec<i64>,
+        repository_ids: Vec<i64>,
+        workspace_ids: Vec<i64>,
+        confirmed: bool,
+    ) -> Result<ParentDeletionResult, String> {
+        self.delete_parent(
+            ParentDeletionTarget::Project(project_id),
+            Event::DeleteProject {
+                project_id,
+                item_ids,
+                repository_ids,
+                workspace_ids,
+            },
+            confirmed,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn delete_context(
+        &mut self,
+        context_id: i64,
+        project_ids: Vec<i64>,
+        item_ids: Vec<i64>,
+        repository_ids: Vec<i64>,
+        workspace_ids: Vec<i64>,
+        machine_ids: Vec<i64>,
+        confirmed: bool,
+    ) -> Result<ParentDeletionResult, String> {
+        self.delete_parent(
+            ParentDeletionTarget::Context(context_id),
+            Event::DeleteContext {
+                context_id,
+                project_ids,
+                item_ids,
+                repository_ids,
+                workspace_ids,
+                machine_ids,
+            },
+            confirmed,
+        )
+    }
+
+    #[cfg(any())]
     fn build_workset_deletion_preview(
         &self,
         workset_id: i64,
@@ -2906,6 +2860,7 @@ impl Runtime {
         }
     }
 
+    #[cfg(any())]
     fn build_repository_deletion_preview(
         &self,
         repository_id: i64,
@@ -3110,6 +3065,7 @@ impl Runtime {
         })
     }
 
+    #[cfg(any())]
     fn delete_item(
         &mut self,
         item_id: i64,
@@ -3207,6 +3163,7 @@ impl Runtime {
         })
     }
 
+    #[cfg(any())]
     fn delete_repository(
         &mut self,
         repository_id: i64,
@@ -3315,6 +3272,99 @@ impl Runtime {
         })
     }
 
+    fn build_repository_deletion_preview(
+        &self,
+        repository_id: i64,
+    ) -> Result<RepositoryDeletionPreview, String> {
+        let plan = plan_repository_deletion(&self.state, repository_id)
+            .map_err(|error| error.to_string())?;
+        let blockers = plan
+            .workspaces
+            .iter()
+            .filter_map(|workspace| {
+                self.state
+                    .runs
+                    .iter()
+                    .find(|run| run.workspace_id == Some(workspace.id))
+                    .map(|run| {
+                        format!(
+                            "Workspace #{} has Run #{} history and cannot be removed with the Repository.",
+                            workspace.id, run.id
+                        )
+                    })
+            })
+            .collect();
+        Ok(RepositoryDeletionPreview { plan, blockers })
+    }
+
+    fn delete_item(
+        &mut self,
+        item_id: i64,
+        confirmed: bool,
+    ) -> Result<ItemDeletionResult, String> {
+        if !confirmed {
+            return Err("Item deletion requires explicit confirmation after reviewing its deletion preview".into());
+        }
+        let pending = self
+            .pending_item_deletion
+            .as_ref()
+            .filter(|preview| preview.plan.item_id == item_id)
+            .cloned()
+            .ok_or_else(|| "Review the Item deletion preview before deleting it".to_owned())?;
+        let current = self.build_item_deletion_preview(item_id)?;
+        if current != pending {
+            return Err("The Item changed after the preview; review the updated deletion preview".into());
+        }
+        if !current.blockers.is_empty() {
+            return Err(format!("Item deletion is blocked:\n{}", current.blockers.join("\n")));
+        }
+        let summary = current.plan.summary();
+        let decision = decide(self.state.clone(), Event::DeleteItem { item_id })
+            .map_err(|error| error.to_string())?;
+        self.commit(decision)?;
+        self.pending_item_deletion = None;
+        Ok(ItemDeletionResult { summary })
+    }
+
+    fn delete_repository(
+        &mut self,
+        repository_id: i64,
+        _workspace_ids: Vec<i64>,
+        confirmed: bool,
+    ) -> Result<RepositoryDeletionResult, String> {
+        if !confirmed {
+            return Err("Repository deletion requires explicit confirmation after reviewing its deletion preview".into());
+        }
+        let pending = self
+            .pending_repository_deletion
+            .as_ref()
+            .filter(|preview| preview.plan.repository_id == repository_id)
+            .cloned()
+            .ok_or_else(|| "Review the Repository deletion preview before deleting it".to_owned())?;
+        let current = self.build_repository_deletion_preview(repository_id)?;
+        if current != pending {
+            return Err("The Repository or its Workspace relationships changed after the preview; review the updated deletion preview".into());
+        }
+        if !current.blockers.is_empty() {
+            return Err(format!("Repository deletion is blocked:\n{}", current.blockers.join("\n")));
+        }
+        let workspace_count = current.plan.workspaces.len();
+        let decision = decide(
+            self.state.clone(),
+            Event::DeleteRepository {
+                repository_id,
+                workspace_ids: current.plan.workspaces.iter().map(|workspace| workspace.id).collect(),
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        self.commit(decision)?;
+        self.pending_repository_deletion = None;
+        Ok(RepositoryDeletionResult {
+            repository_id,
+            workspace_count,
+        })
+    }
+
     fn delete_machine(
         &mut self,
         machine_id: i64,
@@ -3375,6 +3425,7 @@ impl Runtime {
         Ok(RunDeletionResult { run_id })
     }
 
+    #[cfg(any())]
     fn remove_workset(
         &mut self,
         workset_id: i64,
@@ -3436,6 +3487,7 @@ impl Runtime {
         })
     }
 
+    #[cfg(any())]
     fn checkout_new_workset(&self, workset: &Workset) -> Result<CheckoutReceipt, String> {
         let root = Path::new(&workset.root_directory);
         let root_was_created = if root.exists() {
@@ -3507,6 +3559,7 @@ impl Runtime {
         })
     }
 
+    #[cfg(any())]
     fn checkout_repository(
         &self,
         workset: &Workset,
@@ -4010,50 +4063,44 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
             Effect::PersistItemReminders { item, .. } => {
                 Some(AuditAction::ItemRemindersChanged { item_id: item.id })
             }
-            Effect::PersistWorkset { workset, .. } => Some(AuditAction::WorksetCreated {
-                workset_id: workset.id,
+            Effect::PersistWorkspace { workspace, .. } => Some(AuditAction::WorkspaceCreated {
+                workspace_id: workspace.id,
             }),
-            Effect::PersistWorksetUpdate { workset } => {
+            Effect::PersistWorkspaceUpdate { workspace } => {
                 let previous = before
-                    .worksets
+                    .workspaces
                     .iter()
-                    .find(|candidate| candidate.id == workset.id);
+                    .find(|candidate| candidate.id == workspace.id);
                 match previous {
-                    Some(previous) if previous.archived != workset.archived => {
-                        Some(AuditAction::WorksetArchived {
-                            workset_id: workset.id,
-                            archived: workset.archived,
-                        })
-                    }
                     Some(previous)
-                        if previous.root_directory == workset.root_directory
-                            && previous.branch == workset.branch
-                            && previous.repositories == workset.repositories =>
+                        if previous.item_id == workspace.item_id
+                            && previous.repositories == workspace.repositories
+                            && previous.preparation_state == workspace.preparation_state =>
                     {
                         None
                     }
-                    _ => Some(AuditAction::WorksetUpdated {
-                        workset_id: workset.id,
+                    _ => Some(AuditAction::WorkspaceUpdated {
+                        workspace_id: workspace.id,
                     }),
                 }
             }
-            Effect::RemoveWorkset { workset_id } => Some(AuditAction::WorksetRemoved {
-                workset_id: *workset_id,
+            Effect::RemoveWorkspace { workspace_id } => Some(AuditAction::WorkspaceRemoved {
+                workspace_id: *workspace_id,
                 repository_count: before
-                    .worksets
+                    .workspaces
                     .iter()
-                    .find(|workset| workset.id == *workset_id)
-                    .map(|workset| workset.repositories.len())
+                    .find(|workspace| workspace.id == *workspace_id)
+                    .map(|workspace| workspace.repositories.len())
                     .unwrap_or_default()
                     .into(),
             }),
             Effect::RemoveRepository { repository_id } => Some(AuditAction::RepositoryDeleted {
                 repository_id: *repository_id,
-                workset_count: before
-                    .worksets
+                workspace_count: before
+                    .workspaces
                     .iter()
-                    .filter(|workset| {
-                        workset
+                    .filter(|workspace| {
+                        workspace
                             .repositories
                             .iter()
                             .any(|repository| repository.repository_id == *repository_id)
@@ -4160,11 +4207,8 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
                         to: run.pane_status,
                     })
             }
-            Effect::PersistWorkspace { .. }
-            | Effect::PersistWorkspaceUpdate { .. }
-            | Effect::PersistWorktree { .. }
+            Effect::PersistWorktree { .. }
             | Effect::RemoveWorktree { .. }
-            | Effect::RemoveWorkspace { .. }
             | Effect::UpdateRepository { .. }
             | Effect::PersistRepositoryLocation { .. } => None,
             Effect::PersistItemRelation { relation } => Some(AuditAction::ItemRelationChanged {
@@ -4244,6 +4288,7 @@ fn format_commit_error(error: String, cleanup_error: Option<String>) -> String {
     }
 }
 
+#[cfg(any())]
 fn workset_removal_staging_path(root: &Path, workset_id: i64) -> Result<PathBuf, String> {
     let parent = root.parent().unwrap_or_else(|| Path::new("."));
     let name = root
@@ -4265,6 +4310,7 @@ fn workset_removal_staging_path(root: &Path, workset_id: i64) -> Result<PathBuf,
     Ok(staging)
 }
 
+#[cfg(any())]
 fn workset_safety_blockers(report: &WorksetRemovalReport) -> Vec<String> {
     report
         .repositories
@@ -4343,6 +4389,7 @@ pub struct RepositoryRemovalReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[cfg(any())]
 pub struct WorksetRemovalReport {
     pub workset_id: i64,
     pub root_directory: String,
@@ -4376,6 +4423,7 @@ pub struct WorkspaceRemovalReport {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(any())]
 pub struct WorksetDeletionPreview {
     pub workset_id: i64,
     pub root_directory: String,
@@ -4390,7 +4438,6 @@ pub struct WorksetDeletionPreview {
 #[serde(rename_all = "camelCase")]
 pub struct ItemDeletionPreview {
     pub plan: ItemDeletionPlan,
-    pub worksets: Vec<WorksetDeletionPreview>,
     pub blockers: Vec<String>,
 }
 
@@ -4398,8 +4445,6 @@ pub struct ItemDeletionPreview {
 #[serde(rename_all = "camelCase")]
 pub struct ItemDeletionResult {
     pub summary: ItemDeletionSummary,
-    pub workset_directories_deleted: bool,
-    pub physical_cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -4437,7 +4482,6 @@ pub struct ExternalLinkDeletionResult {
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryDeletionPreview {
     pub plan: RepositoryDeletionPlan,
-    pub worksets: Vec<WorksetDeletionPreview>,
     pub blockers: Vec<String>,
 }
 
@@ -4452,7 +4496,6 @@ pub struct MachineDeletionPreview {
 #[serde(rename_all = "camelCase")]
 pub struct ParentDeletionPreview {
     pub plan: ParentDeletionPlan,
-    pub worksets: Vec<WorksetDeletionPreview>,
     pub blockers: Vec<String>,
 }
 
@@ -4461,7 +4504,6 @@ pub struct ParentDeletionPreview {
 pub struct ResetLocalDataPreview {
     pub plan: ResetLocalDataPlan,
     pub audit_entry_count: usize,
-    pub worksets: Vec<WorksetDeletionPreview>,
     pub blockers: Vec<String>,
     pub confirmation_phrase: String,
 }
@@ -4471,16 +4513,12 @@ pub struct ResetLocalDataPreview {
 pub struct ResetLocalDataResult {
     pub summary: ResetLocalDataSummary,
     pub audit_entry_count: usize,
-    pub workset_directories_deleted: bool,
-    pub physical_cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParentDeletionResult {
     pub summary: crate::domain::ParentDeletionSummary,
-    pub workset_directories_deleted: bool,
-    pub physical_cleanup_warning: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -4500,13 +4538,12 @@ pub struct RunDeletionResult {
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryDeletionResult {
     pub repository_id: i64,
-    pub workset_count: usize,
-    pub workset_directories_deleted: bool,
-    pub physical_cleanup_warning: Option<String>,
+    pub workspace_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(any())]
 pub struct WorksetRemovalResult {
     pub workset_id: i64,
     pub workset_directories_deleted: bool,
@@ -4730,6 +4767,7 @@ pub fn compose_run_prompt(
 
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
+#[cfg(any())]
 pub fn start_run(
     item_id: i64,
     workset_id: i64,
@@ -4845,6 +4883,7 @@ pub fn check_machine(machine_id: i64, state: State<'_, Mutex<Runtime>>) -> Resul
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[cfg(any())]
 pub fn list_workset_panes(
     workset_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -5065,9 +5104,8 @@ pub fn delete_project(
     project_id: i64,
     item_ids: Vec<i64>,
     repository_ids: Vec<i64>,
-    workset_ids: Vec<i64>,
+    workspace_ids: Vec<i64>,
     confirmed: bool,
-    delete_workset_directories: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ParentDeletionResult, String> {
     state
@@ -5077,9 +5115,8 @@ pub fn delete_project(
             project_id,
             item_ids,
             repository_ids,
-            workset_ids,
+            workspace_ids,
             confirmed,
-            delete_workset_directories,
         )
 }
 
@@ -5101,10 +5138,9 @@ pub fn delete_context(
     project_ids: Vec<i64>,
     item_ids: Vec<i64>,
     repository_ids: Vec<i64>,
-    workset_ids: Vec<i64>,
+    workspace_ids: Vec<i64>,
     machine_ids: Vec<i64>,
     confirmed: bool,
-    delete_workset_directories: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ParentDeletionResult, String> {
     state
@@ -5115,10 +5151,9 @@ pub fn delete_context(
             project_ids,
             item_ids,
             repository_ids,
-            workset_ids,
+            workspace_ids,
             machine_ids,
             confirmed,
-            delete_workset_directories,
         )
 }
 
@@ -5135,16 +5170,16 @@ pub fn prepare_reset_local_data(
 #[tauri::command(rename_all = "camelCase")]
 pub fn reset_all_local_data(
     confirmation: String,
-    delete_workset_directories: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ResetLocalDataResult, String> {
     state
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .reset_all_local_data(confirmation, delete_workset_directories)
+        .reset_all_local_data(confirmation)
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[cfg(any())]
 pub fn create_workset(
     item_id: i64,
     root_directory: String,
@@ -5290,6 +5325,7 @@ pub fn attach_worktree(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[cfg(any())]
 pub fn attach_workset(
     item_id: i64,
     root_directory: String,
@@ -5302,6 +5338,7 @@ pub fn attach_workset(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[cfg(any())]
 pub fn add_repository_to_workset(
     workset_id: i64,
     repository_id: i64,
@@ -5321,6 +5358,7 @@ pub fn add_repository_to_workset(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[cfg(any())]
 pub fn set_workset_archived(
     workset_id: i64,
     archived: bool,
@@ -5346,9 +5384,8 @@ pub fn prepare_repository_deletion(
 #[tauri::command(rename_all = "camelCase")]
 pub fn delete_repository(
     repository_id: i64,
-    workset_ids: Vec<i64>,
+    workspace_ids: Vec<i64>,
     confirmed: bool,
-    delete_workset_directories: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<RepositoryDeletionResult, String> {
     state
@@ -5356,9 +5393,8 @@ pub fn delete_repository(
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
         .delete_repository(
             repository_id,
-            workset_ids,
+            workspace_ids,
             confirmed,
-            delete_workset_directories,
         )
 }
 
@@ -5387,6 +5423,7 @@ pub fn delete_machine(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[cfg(any())]
 pub fn prepare_workset_removal(
     workset_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -5398,6 +5435,7 @@ pub fn prepare_workset_removal(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[cfg(any())]
 pub fn remove_workset(
     workset_id: i64,
     confirmed: bool,
@@ -5424,13 +5462,12 @@ pub fn prepare_item_deletion(
 pub fn delete_item(
     item_id: i64,
     confirmed: bool,
-    delete_workset_directories: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ItemDeletionResult, String> {
     state
         .lock()
         .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .delete_item(item_id, confirmed, delete_workset_directories)
+        .delete_item(item_id, confirmed)
 }
 
 #[tauri::command(rename_all = "camelCase")]
