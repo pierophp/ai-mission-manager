@@ -88,6 +88,8 @@ export const workActions = {
   ) => () => workAdapter.composeRunPrompt(itemId, executionProfile, selection, customPrompt),
   startDirectRun: (input: Parameters<typeof workAdapter.startDirectRun>[0]) =>
     () => workAdapter.startDirectRun(input),
+  startWorktreeRun: (input: Parameters<typeof workAdapter.startWorktreeRun>[0]) =>
+    () => workAdapter.startWorktreeRun(input),
   refreshExternalObject: (externalObjectId: number) =>
     () => workAdapter.refreshExternalObject(externalObjectId),
   createGithubIssue: (itemId: number, repository: string, title: string, body: string) =>

@@ -195,6 +195,32 @@ export const workAdapter = {
       allowDirty,
       allowSharedCheckouts,
     }),
+  startWorktreeRun: ({
+    itemId,
+    workspaceId,
+    worktreeId,
+    agent,
+    executionProfile,
+    prompt,
+    promptSelection,
+  }: {
+    itemId: number;
+    workspaceId: number;
+    worktreeId: number;
+    agent: Run["agent"];
+    executionProfile: Run["execution_profile"];
+    prompt: string;
+    promptSelection: RunPromptSelection;
+  }) =>
+    command<Run>("start_worktree_run", {
+      itemId,
+      workspaceId,
+      worktreeId,
+      agent,
+      executionProfile,
+      prompt,
+      promptSelection,
+    }),
   refreshExternalObject: (externalObjectId: number) =>
     command<ExternalSnapshot>("refresh_external_object", { externalObjectId }),
   createGithubIssue: (itemId: number, repository: string, title: string, body: string) =>

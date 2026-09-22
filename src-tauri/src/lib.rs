@@ -73,6 +73,7 @@ pub fn run() {
             app::compose_run_prompt,
             app::prepare_direct_run,
             app::start_direct_run,
+            app::start_worktree_run,
             app::list_run_suggestions,
             app::attach_run,
             app::open_terminal,

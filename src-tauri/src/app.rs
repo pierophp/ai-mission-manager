@@ -77,6 +77,37 @@ pub struct Runtime {
     agent_state_directory: PathBuf,
 }
 
+#[allow(clippy::too_many_arguments)]
+fn worktree_run_event(
+    item_id: i64,
+    workspace_id: i64,
+    worktree_id: i64,
+    machine_id: i64,
+    agent: AgentKind,
+    execution_profile: ExecutionProfile,
+    prompt: String,
+    working_directory: String,
+    session_name: String,
+    pane_id: String,
+    started_at: i64,
+    prompt_selection: RunPromptSelection,
+) -> Event {
+    Event::StartWorktreeRun {
+        item_id,
+        workspace_id,
+        worktree_id,
+        machine_id,
+        agent,
+        execution_profile,
+        prompt,
+        working_directory,
+        session_name,
+        pane_id,
+        started_at,
+        prompt_selection,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProviderChoice {
@@ -1563,6 +1594,125 @@ impl Runtime {
             .last()
             .cloned()
             .ok_or_else(|| "Direct Run creation produced no Run".to_owned())?;
+        if let Err(error) = self.commit(decision) {
+            let cleanup = terminal.kill_session(&machine, &run.session_name);
+            return Err(format_commit_error(error, cleanup.err()));
+        }
+        let _ = preflight;
+        Ok(run)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_worktree_run(
+        &mut self,
+        item_id: i64,
+        workspace_id: i64,
+        worktree_id: i64,
+        agent: AgentKind,
+        execution_profile: ExecutionProfile,
+        prompt: String,
+        prompt_selection: RunPromptSelection,
+    ) -> Result<Run, String> {
+        let worktree = self
+            .state
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.id == worktree_id && worktree.workspace_id == workspace_id)
+            .cloned()
+            .ok_or_else(|| {
+                format!("Worktree {worktree_id} does not belong to Workspace {workspace_id}")
+            })?;
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == worktree.machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", worktree.machine_id))?;
+        let working_directory = worktree.path.clone();
+        let run_id = self.state.next_run_id;
+        let session_name = format!("mission-item-{item_id}-run-{run_id}");
+        let preflight = decide(
+            self.state.clone(),
+            worktree_run_event(
+                item_id,
+                workspace_id,
+                worktree_id,
+                machine.id,
+                agent,
+                execution_profile,
+                prompt.clone(),
+                working_directory.clone(),
+                format!("{session_name}-preflight"),
+                "%preflight".into(),
+                current_unix_seconds(),
+                prompt_selection.clone(),
+            ),
+        )
+        .map_err(|error| error.to_string())?;
+
+        if let Err(error) = probe_machine(&machine) {
+            return Err(format!(
+                "Could not reach Machine {}. The Run was not started locally: {error}",
+                machine.name
+            ));
+        }
+        self.observe_machine(machine.id, MachineObservation::Available)?;
+        if matches!(machine.transport, MachineTransport::Local) {
+            self.provision_agent_hooks()?;
+        }
+        let state_file = if matches!(machine.transport, MachineTransport::Local) {
+            state_file_path(&self.agent_state_directory, run_id)
+        } else {
+            PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
+        };
+        let executable = self
+            .agent_executable(&machine, agent)
+            .map_err(|error| format!("{}: {error}", agent_display_name(agent)))?;
+        let terminal = TmuxRuntime;
+        let pane_id = match terminal.launch_agent(
+            &machine,
+            &session_name,
+            Path::new(&working_directory),
+            &executable,
+            &prompt,
+            AgentLaunchContext {
+                run_id,
+                state_file: &state_file,
+            },
+        ) {
+            Ok(pane_id) => pane_id,
+            Err(error) => return Err(error),
+        };
+        let decision = match decide(
+            self.state.clone(),
+            worktree_run_event(
+                item_id,
+                workspace_id,
+                worktree_id,
+                machine.id,
+                agent,
+                execution_profile,
+                prompt,
+                working_directory,
+                session_name.clone(),
+                pane_id,
+                current_unix_seconds(),
+                prompt_selection,
+            ),
+        ) {
+            Ok(decision) => decision,
+            Err(error) => {
+                let cleanup = terminal.kill_session(&machine, &session_name);
+                return Err(format_commit_error(error.to_string(), cleanup.err()));
+            }
+        };
+        let run = decision
+            .state
+            .runs
+            .last()
+            .cloned()
+            .ok_or_else(|| "Worktree Run creation produced no Run".to_owned())?;
         if let Err(error) = self.commit(decision) {
             let cleanup = terminal.kill_session(&machine, &run.session_name);
             return Err(format_commit_error(error, cleanup.err()));
@@ -3743,6 +3893,32 @@ pub fn start_direct_run(
         )
 }
 
+#[tauri::command(rename_all = "camelCase")]
+#[allow(clippy::too_many_arguments)]
+pub fn start_worktree_run(
+    item_id: i64,
+    workspace_id: i64,
+    worktree_id: i64,
+    agent: AgentKind,
+    execution_profile: ExecutionProfile,
+    prompt: String,
+    prompt_selection: RunPromptSelection,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Run, String> {
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .start_worktree_run(
+            item_id,
+            workspace_id,
+            worktree_id,
+            agent,
+            execution_profile,
+            prompt,
+            prompt_selection,
+        )
+}
+
 #[tauri::command]
 pub fn list_run_suggestions(
     state: State<'_, Mutex<Runtime>>,
@@ -5380,6 +5556,45 @@ fi
             .expect("clone destination should be prepared");
         assert_eq!(cloned.remote_url, origin_url);
         assert!(clone_destination.join(".git").is_dir());
+    }
+
+    #[test]
+    fn worktree_run_event_targets_the_registered_worktree_location() {
+        let event = worktree_run_event(
+            7,
+            11,
+            13,
+            17,
+            AgentKind::Codex,
+            ExecutionProfile::Implement,
+            "Implement the change".into(),
+            "~/worktrees/item-13/repository".into(),
+            "mission-item-7-run-1".into(),
+            "%42".into(),
+            123,
+            RunPromptSelection {
+                include_objective: true,
+                include_notes: false,
+                external_object_ids: vec![19],
+            },
+        );
+
+        assert!(matches!(
+            event,
+            Event::StartWorktreeRun {
+                item_id: 7,
+                workspace_id: 11,
+                worktree_id: 13,
+                machine_id: 17,
+                working_directory,
+                session_name,
+                pane_id,
+                started_at: 123,
+                ..
+            } if working_directory == "~/worktrees/item-13/repository"
+                && session_name == "mission-item-7-run-1"
+                && pane_id == "%42"
+        ));
     }
 
     fn run_git(directory: &Path, args: &[&str]) {
