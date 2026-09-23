@@ -352,7 +352,7 @@ pub fn format_grill_response(answers: &[GrillAnswer]) -> Result<String, DomainEr
         .map(|answer| {
             let mut lines = answer.answer.trim().lines();
             let first = format!(
-                "{}. {}",
+                "Q{} {}",
                 answer.question_number,
                 lines.next().unwrap_or_default().trim()
             );

@@ -2815,9 +2815,7 @@ function GrillQuestionFlow({
   return (
     <section className="grid gap-3">
       {questionGroup.questions.map((question) => {
-        const recommendationAnswer = question.recommendation
-          ? `Recommendation: ${question.recommendation}`
-          : undefined;
+        const recommendationAnswer = question.recommendation ? "ok" : undefined;
         return (
           <div className="grid gap-2 rounded-md border bg-background/60 p-3" key={question.number}>
             <div className="text-sm">

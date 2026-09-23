@@ -779,9 +779,27 @@ pub fn send_input_to_pane(machine: &Machine, pane_id: &str, input: &[u8]) -> Res
     if input.is_empty() {
         return Ok(());
     }
-    let mut args = vec!["send-keys".into(), "-t".into(), pane_id.into(), "-H".into()];
-    args.extend(input.iter().map(|byte| format!("0x{byte:02x}")));
-    run_tmux(machine, &args).map(|_| ())
+    let (text, should_submit) = match input.strip_suffix(b"\n") {
+        Some(text) => (text, true),
+        None => (input, false),
+    };
+    if !text.is_empty() {
+        let mut args = vec!["send-keys".into(), "-t".into(), pane_id.into(), "-H".into()];
+        args.extend(text.iter().map(|byte| format!("0x{byte:02x}")));
+        run_tmux(machine, &args)?;
+    }
+    if should_submit {
+        run_tmux(
+            machine,
+            &[
+                "send-keys".into(),
+                "-t".into(),
+                pane_id.into(),
+                "Enter".into(),
+            ],
+        )?;
+    }
+    Ok(())
 }
 
 fn parse_pane_summary(line: &str) -> Result<PaneSummary, String> {
