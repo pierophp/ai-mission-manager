@@ -218,6 +218,11 @@ export function ItemCard({
   const [directRunSharedConfirmed, setDirectRunSharedConfirmed] =
     useState(false);
   const [isGrillRunOpen, setIsGrillRunOpen] = useState(false);
+  const [isGrillQuestionDialogOpen, setIsGrillQuestionDialogOpen] =
+    useState(false);
+  const [grillAnswerDrafts, setGrillAnswerDrafts] = useState<
+    Record<string, Record<number, string>>
+  >({});
   const [grillRunWorkspaceId, setGrillRunWorkspaceId] = useState<number>();
   const [grillRunMachineId, setGrillRunMachineId] = useState<number>();
   const [grillRunRepositoryId, setGrillRunRepositoryId] = useState<number>();
@@ -255,6 +260,26 @@ export function ItemCard({
   const activeGrillRun = view.runs.find(
     (run) => run.execution_profile === "grill" && !isRunFinished(run),
   );
+  const pendingGrillQuestionRun = view.runs.find(
+    (run) =>
+      run.execution_profile === "grill" &&
+      run.grill_phase === "waitingForAnswers" &&
+      !run.grill_response,
+  );
+  const grillQuestionDraftKey = pendingGrillQuestionRun
+    ? `${pendingGrillQuestionRun.id}:${JSON.stringify(pendingGrillQuestionRun.grill_question_group)}`
+    : undefined;
+  const persistedGrillAnswers = pendingGrillQuestionRun
+    ? Object.fromEntries(
+        pendingGrillQuestionRun.grill_answers.map((answer) => [
+          answer.questionNumber,
+          answer.answer,
+        ]),
+      )
+    : {};
+  const grillQuestionAnswers = grillQuestionDraftKey
+    ? (grillAnswerDrafts[grillQuestionDraftKey] ?? persistedGrillAnswers)
+    : {};
   const selectedGrillCatalog = grillModelCatalog.find(
     (catalog) => catalog.agent === grillAgent,
   );
@@ -269,6 +294,10 @@ export function ItemCard({
   useEffect(() => {
     setTitleDraft(view.item.title);
   }, [view.item.title]);
+
+  useEffect(() => {
+    setIsGrillQuestionDialogOpen(grillQuestionDraftKey !== undefined);
+  }, [grillQuestionDraftKey]);
 
   function openGrillStart() {
     const context = contexts.find((candidate) => candidate.id === view.context_id);
@@ -2063,13 +2092,14 @@ export function ItemCard({
                     {run.execution_profile === "grill" &&
                       run.grill_phase === "waitingForAnswers" &&
                       !run.grill_response && (
-                        <GrillQuestionFlow
-                          run={run}
+                        <Button
+                          type="button"
+                          variant="outline"
                           disabled={isSaving}
-                          onSubmit={(answers) =>
-                            saveItem(workActions.submitGrillAnswers(run.id, answers))
-                          }
-                        />
+                          onClick={() => setIsGrillQuestionDialogOpen(true)}
+                        >
+                          Open Grill questions
+                        </Button>
                       )}
                     {run.execution_profile === "grill" &&
                       run.grill_phase === "awaitingNextAction" && (
@@ -2676,34 +2706,79 @@ export function ItemCard({
           </DialogContent>
         </Dialog>
       )}
+      {pendingGrillQuestionRun && (
+        <Dialog
+          open={isGrillQuestionDialogOpen}
+          onOpenChange={(open) => {
+            if (!open && !isSaving) setIsGrillQuestionDialogOpen(false);
+          }}
+        >
+          <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-3xl">
+            <DialogHeader>
+              <DialogTitle>
+                Grill questions · Run #{pendingGrillQuestionRun.id}
+              </DialogTitle>
+              <DialogDescription>
+                Answer the complete group once. Mission Manager will send one
+                numbered response to the same Pane.
+              </DialogDescription>
+            </DialogHeader>
+            <GrillQuestionFlow
+              key={grillQuestionDraftKey}
+              run={pendingGrillQuestionRun}
+              answers={grillQuestionAnswers}
+              disabled={isSaving}
+              onAnswerChange={(questionNumber, answer) => {
+                if (!grillQuestionDraftKey) return;
+                setGrillAnswerDrafts((current) => ({
+                  ...current,
+                  [grillQuestionDraftKey]: {
+                    ...(current[grillQuestionDraftKey] ?? persistedGrillAnswers),
+                    [questionNumber]: answer,
+                  },
+                }));
+              }}
+              onSubmit={async (answers) => {
+                const submitted = await saveItem(
+                  workActions.submitGrillAnswers(
+                    pendingGrillQuestionRun.id,
+                    answers,
+                  ),
+                );
+                if (submitted) {
+                  if (grillQuestionDraftKey) {
+                    setGrillAnswerDrafts((current) => {
+                      const next = { ...current };
+                      delete next[grillQuestionDraftKey];
+                      return next;
+                    });
+                  }
+                  setIsGrillQuestionDialogOpen(false);
+                }
+              }}
+            />
+          </DialogContent>
+        </Dialog>
+      )}
     </>
   );
 }
 
 function GrillQuestionFlow({
   run,
+  answers,
   disabled,
+  onAnswerChange,
   onSubmit,
 }: {
   run: Run;
+  answers: Record<number, string>;
   disabled: boolean;
+  onAnswerChange: (questionNumber: number, answer: string) => void;
   onSubmit: (answers: GrillAnswer[]) => Promise<unknown>;
 }) {
   const group = run.grill_question_group;
-  const [answers, setAnswers] = useState<Record<number, string>>(() =>
-    Object.fromEntries(
-      run.grill_answers.map((answer) => [answer.questionNumber, answer.answer]),
-    ),
-  );
   const [isSubmitting, setIsSubmitting] = useState(false);
-
-  useEffect(() => {
-    setAnswers(
-      Object.fromEntries(
-        run.grill_answers.map((answer) => [answer.questionNumber, answer.answer]),
-      ),
-    );
-  }, [run.id, run.grill_answers]);
 
   if (!group || group.questions.length === 0) {
     return (
@@ -2738,13 +2813,7 @@ function GrillQuestionFlow({
   }
 
   return (
-    <section className="grid gap-3 rounded-lg border border-primary/30 bg-primary/5 p-4">
-      <div>
-        <h4 className="m-0 text-base font-medium">Grill questions</h4>
-        <p className="mt-1 text-sm text-muted-foreground">
-          Answer this complete group once. Mission Manager will send one numbered response.
-        </p>
-      </div>
+    <section className="grid gap-3">
       {questionGroup.questions.map((question) => {
         const recommendationAnswer = question.recommendation
           ? `Recommendation: ${question.recommendation}`
@@ -2766,12 +2835,7 @@ function GrillQuestionFlow({
                 variant={answers[question.number] === recommendationAnswer ? "default" : "outline"}
                 className="justify-start whitespace-normal text-left"
                 disabled={disabled || isSubmitting}
-                onClick={() =>
-                  setAnswers((current) => ({
-                    ...current,
-                    [question.number]: recommendationAnswer,
-                  }))
-                }
+                onClick={() => onAnswerChange(question.number, recommendationAnswer)}
               >
                 Accept recommendation: {question.recommendation}
               </Button>
@@ -2788,10 +2852,7 @@ function GrillQuestionFlow({
                       : ""
                   }
                   onChange={(event) =>
-                    setAnswers((current) => ({
-                      ...current,
-                      [question.number]: event.target.value,
-                    }))
+                    onAnswerChange(question.number, event.target.value)
                   }
                   disabled={disabled || isSubmitting}
                 >
@@ -2812,10 +2873,7 @@ function GrillQuestionFlow({
                 <Textarea
                   value={answers[question.number] ?? ""}
                   onChange={(event) =>
-                    setAnswers((current) => ({
-                      ...current,
-                      [question.number]: event.target.value,
-                    }))
+                    onAnswerChange(question.number, event.target.value)
                   }
                   rows={3}
                   placeholder="Write a free-form answer"

@@ -208,10 +208,20 @@ pub struct GrillAnswer {
 /// application to a terminal, agent, or filesystem.
 pub fn parse_grill_question_group(transcript: &str) -> Option<GrillQuestionGroup> {
     let transcript = strip_terminal_escape_sequences(transcript);
+    parse_grill_question_group_with_fence_state(&transcript, None)
+}
+
+fn parse_grill_question_group_with_fence_state(
+    transcript: &str,
+    mut code_fence: Option<(char, usize)>,
+) -> Option<GrillQuestionGroup> {
     let mut questions = Vec::new();
     let mut current: Option<GrillQuestion> = None;
 
     for line in transcript.lines() {
+        if skip_markdown_code_fence_line(line, &mut code_fence) {
+            continue;
+        }
         let line = line.trim_end();
         if let Some(header) = line.trim_start().strip_prefix("❓") {
             if let Some(question) = current.take() {
@@ -275,10 +285,51 @@ pub fn parse_grill_question_group_since(
 ) -> Option<GrillQuestionGroup> {
     let previous_transcript = strip_terminal_escape_sequences(previous_transcript);
     let transcript = strip_terminal_escape_sequences(transcript);
-    let response = transcript
-        .strip_prefix(previous_transcript.as_str())
-        .unwrap_or(transcript.as_str());
-    parse_grill_question_group(response)
+    if let Some(response) = transcript.strip_prefix(previous_transcript.as_str()) {
+        let code_fence = markdown_code_fence_state(&previous_transcript);
+        parse_grill_question_group_with_fence_state(response, code_fence)
+    } else {
+        parse_grill_question_group_with_fence_state(&transcript, None)
+    }
+}
+
+fn markdown_code_fence_state(transcript: &str) -> Option<(char, usize)> {
+    let mut code_fence = None;
+    for line in transcript.lines() {
+        skip_markdown_code_fence_line(line, &mut code_fence);
+    }
+    code_fence
+}
+
+fn skip_markdown_code_fence_line(
+    line: &str,
+    code_fence: &mut Option<(char, usize)>,
+) -> bool {
+    let trimmed = line.trim_start();
+    let mut characters = trimmed.chars();
+    let Some(marker @ ('`' | '~')) = characters.next() else {
+        return code_fence.is_some();
+    };
+    let marker_length = 1 + characters
+        .take_while(|character| *character == marker)
+        .count();
+    if marker_length < 3 {
+        return code_fence.is_some();
+    }
+
+    let fence_tail = &trimmed[marker_length..];
+    match *code_fence {
+        Some((open_marker, open_length))
+            if marker == open_marker
+                && marker_length >= open_length
+                && fence_tail.trim().is_empty() =>
+        {
+            *code_fence = None;
+        }
+        Some(_) => {}
+        None => *code_fence = Some((marker, marker_length)),
+    }
+    true
 }
 
 pub fn format_grill_response(answers: &[GrillAnswer]) -> Result<String, DomainError> {

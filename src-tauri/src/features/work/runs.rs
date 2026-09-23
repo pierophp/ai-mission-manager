@@ -1016,13 +1016,30 @@ impl Runtime {
                 return Err(error);
             }
         };
-        let captured_question_group =
-            parse_grill_question_group_since(&run.transcript, &transcript);
+        let captured_question_group = if run.grill_decisions.is_empty()
+            && run.grill_response.is_none()
+        {
+            parse_grill_question_group(&transcript)
+        } else {
+            parse_grill_question_group_since(&run.transcript, &transcript)
+        };
         let question_group = match (run.grill_question_group.as_ref(), captured_question_group) {
             (Some(previous), None)
                 if run.state == RunState::Working || run.grill_response.is_none() =>
             {
                 Some(previous.clone())
+            }
+            (Some(previous), Some(captured))
+                if run.grill_response.is_none()
+                    && previous
+                        .questions
+                        .last()
+                        .zip(captured.questions.first())
+                        .is_some_and(|(previous, next)| next.number > previous.number) =>
+            {
+                let mut combined = previous.clone();
+                combined.questions.extend(captured.questions);
+                Some(combined)
             }
             (Some(previous), Some(captured))
                 if previous.questions.len() == captured.questions.len()
