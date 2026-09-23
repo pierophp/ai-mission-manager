@@ -1,5 +1,331 @@
 use super::*;
 
+mod context_execution_machine_tests {
+    use super::*;
+
+    fn state() -> DomainState {
+        DomainState {
+            next_context_id: 3,
+            next_project_id: 1,
+            next_item_id: 1,
+            next_item_number: 1,
+            next_repository_id: 1,
+            next_workspace_id: 1,
+            next_worktree_id: 1,
+            next_machine_id: 3,
+            next_run_id: 1,
+            next_external_object_id: 1,
+            next_link_id: 1,
+            next_activity_id: 1,
+            next_reminder_id: 1,
+            contexts: vec![
+                Context {
+                    id: 1,
+                    name: "Unconfigured".into(),
+                    execution_machine_id: None,
+                    grill_defaults: GrillConfiguration::default(),
+                },
+                Context {
+                    id: 2,
+                    name: "Other".into(),
+                    execution_machine_id: None,
+                    grill_defaults: GrillConfiguration::default(),
+                },
+            ],
+            projects: Vec::new(),
+            repositories: Vec::new(),
+            repository_locations: Vec::new(),
+            items: Vec::new(),
+            workspaces: Vec::new(),
+            worktrees: Vec::new(),
+            machines: vec![
+                Machine {
+                    id: 1,
+                    context_id: 1,
+                    name: "Build Mac".into(),
+                    socket_name: "mission".into(),
+                    transport: MachineTransport::Local,
+                    last_observed: MachineObservation::Unknown,
+                    last_observed_at: None,
+                },
+                Machine {
+                    id: 2,
+                    context_id: 2,
+                    name: "Remote".into(),
+                    socket_name: "mission".into(),
+                    transport: MachineTransport::Local,
+                    last_observed: MachineObservation::Unknown,
+                    last_observed_at: None,
+                },
+            ],
+            runs: Vec::new(),
+            relationships: Vec::new(),
+            external_objects: Vec::new(),
+            links: Vec::new(),
+            snapshots: Vec::new(),
+            activities: Vec::new(),
+            attention_defaults: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_context_can_be_configured_with_one_execution_machine_or_left_unconfigured() {
+        let configured = decide(
+            state(),
+            Event::SetContextExecutionMachine {
+                context_id: 1,
+                machine_id: Some(1),
+            },
+        )
+        .expect("a Context should be able to select one of its Machines");
+
+        assert_eq!(configured.state.contexts[0].execution_machine_id, Some(1));
+
+        let unconfigured = decide(
+            configured.state,
+            Event::SetContextExecutionMachine {
+                context_id: 1,
+                machine_id: None,
+            },
+        )
+        .expect("a Context should be allowed to remain unconfigured");
+
+        assert_eq!(unconfigured.state.contexts[0].execution_machine_id, None);
+    }
+
+    #[test]
+    fn a_context_cannot_select_a_machine_owned_by_another_context() {
+        let error = decide(
+            state(),
+            Event::SetContextExecutionMachine {
+                context_id: 1,
+                machine_id: Some(2),
+            },
+        )
+        .expect_err("execution Machines must belong to their Context");
+
+        assert!(matches!(error, DomainError::MachineContextMismatch { .. }));
+    }
+}
+
+mod machine_deletion_tests {
+    use super::*;
+
+    fn state() -> DomainState {
+        DomainState {
+            next_context_id: 2,
+            next_project_id: 2,
+            next_item_id: 2,
+            next_item_number: 2,
+            next_repository_id: 2,
+            next_workspace_id: 2,
+            next_worktree_id: 2,
+            next_machine_id: 2,
+            next_run_id: 2,
+            next_external_object_id: 1,
+            next_link_id: 1,
+            next_activity_id: 1,
+            next_reminder_id: 1,
+            contexts: vec![Context {
+                id: 1,
+                name: "Personal".into(),
+                execution_machine_id: Some(1),
+                grill_defaults: GrillConfiguration::default(),
+            }],
+            projects: vec![Project {
+                id: 1,
+                context_id: 1,
+                name: "Default".into(),
+                defaults: ProjectDefaults::default(),
+            }],
+            repositories: vec![Repository {
+                id: 1,
+                project_id: 1,
+                name: "mission-manager".into(),
+                remote_url: "https://example.test/repo".into(),
+                base_branch: "main".into(),
+            }],
+            repository_locations: vec![RepositoryLocation {
+                repository_id: 1,
+                machine_id: 1,
+                checkout_path: "/tmp/checkout".into(),
+                worktree_root: "/tmp/worktrees".into(),
+            }],
+            items: vec![Item {
+                id: 1,
+                human_identifier: "MC-1".into(),
+                title: "Use the Context Machine".into(),
+                project_id: 1,
+                status: ItemStatus::Active,
+                notes: String::new(),
+                reminders: Vec::new(),
+            }],
+            workspaces: vec![Workspace {
+                id: 1,
+                item_id: 1,
+                repositories: vec![WorkspaceRepository {
+                    repository_id: 1,
+                    branch: "mission-MC-1".into(),
+                    base_branch: "main".into(),
+                }],
+                preparation_state: WorkspacePreparationState::Ready,
+            }],
+            worktrees: vec![Worktree {
+                id: 1,
+                workspace_id: 1,
+                repository_id: 1,
+                machine_id: 1,
+                path: "/tmp/worktrees/mission-MC-1".into(),
+                branch: "mission-MC-1".into(),
+                base_branch: "main".into(),
+                is_dirty: true,
+            }],
+            machines: vec![Machine {
+                id: 1,
+                context_id: 1,
+                name: "Build Mac".into(),
+                socket_name: "mission".into(),
+                transport: MachineTransport::Local,
+                last_observed: MachineObservation::Available,
+                last_observed_at: None,
+            }],
+            runs: vec![Run {
+                id: 1,
+                item_id: 1,
+                workspace_id: Some(1),
+                repository_id: Some(1),
+                worktree_id: Some(1),
+                machine_id: 1,
+                agent: AgentKind::Claude,
+                execution_profile: ExecutionProfile::Implement,
+                model: None,
+                effort: None,
+                skill_snapshot: None,
+                prompt: "Implement this".into(),
+                working_directory: "/tmp/worktrees/mission-MC-1".into(),
+                session_name: "mission-item-1-run-1".into(),
+                pane_id: "%1".into(),
+                started_at: 1,
+                state: RunState::Working,
+                pane_status: RunPaneStatus::Available,
+                direct_checkouts: Vec::new(),
+                transcript: String::new(),
+                grill_question_group: None,
+                grill_answers: Vec::new(),
+                grill_decisions: Vec::new(),
+                grill_response: None,
+                grill_phase: None,
+                grill_action: None,
+            }],
+            relationships: Vec::new(),
+            external_objects: Vec::new(),
+            links: Vec::new(),
+            snapshots: Vec::new(),
+            activities: Vec::new(),
+            attention_defaults: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn deleting_a_machine_clears_its_context_and_all_app_owned_records_even_with_active_runs() {
+        let state = state();
+        let plan = plan_machine_deletion(&state, 1).expect("the Machine should be planned");
+        assert_eq!(plan.active_run_ids, vec![1]);
+        assert_eq!(plan.worktree_ids, vec![1]);
+        assert_eq!(plan.repository_location_repository_ids, vec![1]);
+
+        let decision = decide(
+            state,
+            Event::DeleteMachine {
+                machine_id: 1,
+                run_ids: vec![1],
+                worktree_ids: vec![1],
+                repository_location_repository_ids: vec![1],
+            },
+        )
+        .expect("Machine deletion should proceed while best-effort stopping its Runs");
+
+        assert!(decision.state.machines.is_empty());
+        assert!(decision.state.runs.is_empty());
+        assert!(decision.state.worktrees.is_empty());
+        assert!(decision.state.repository_locations.is_empty());
+        assert_eq!(decision.state.contexts[0].execution_machine_id, None);
+        assert_eq!(
+            decision.state.workspaces[0].preparation_state,
+            WorkspacePreparationState::Pending
+        );
+        assert!(decision
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::RemoveRun { run_id: 1 })));
+        assert!(decision
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::RemoveWorktree { worktree_id: 1 })));
+    }
+
+    #[test]
+    fn machine_deletion_requires_the_previewed_worktree_records() {
+        let error = decide(
+            state(),
+            Event::DeleteMachine {
+                machine_id: 1,
+                run_ids: vec![1],
+                worktree_ids: Vec::new(),
+                repository_location_repository_ids: vec![1],
+            },
+        )
+        .expect_err("unreviewed Worktree records must not be deleted");
+
+        assert!(matches!(
+            error,
+            DomainError::MachineWorktreesMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn changing_a_context_machine_is_blocked_while_its_run_is_active() {
+        let error = decide(
+            state(),
+            Event::SetContextExecutionMachine {
+                context_id: 1,
+                machine_id: None,
+            },
+        )
+        .expect_err("active Runs must finish before changing their Context Machine");
+
+        assert!(matches!(error, DomainError::ContextHasActiveRuns { .. }));
+    }
+
+    #[test]
+    fn changing_a_context_machine_keeps_old_worktrees_on_their_machine() {
+        let mut state = state();
+        state.runs.clear();
+        state.machines.push(Machine {
+            id: 2,
+            context_id: 1,
+            name: "New Build Mac".into(),
+            socket_name: "mission-new".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Available,
+            last_observed_at: None,
+        });
+
+        let decision = decide(
+            state,
+            Event::SetContextExecutionMachine {
+                context_id: 1,
+                machine_id: Some(2),
+            },
+        )
+        .expect("Machine changes should not move existing Worktrees");
+
+        assert_eq!(decision.state.contexts[0].execution_machine_id, Some(2));
+        assert_eq!(decision.state.worktrees[0].machine_id, 1);
+        assert_eq!(decision.state.machines[0].id, 1);
+    }
+}
+
 mod workspace_contract_tests {
     use super::*;
 
@@ -22,6 +348,7 @@ mod workspace_contract_tests {
             contexts: vec![Context {
                 id: 1,
                 name: "Personal".into(),
+                execution_machine_id: Some(1),
                 grill_defaults: GrillConfiguration::default(),
             }],
             projects: vec![Project {
@@ -83,6 +410,54 @@ mod workspace_contract_tests {
         assert_eq!(state.workspaces[0].item_id, 1);
         assert_eq!(state.workspaces[0].repositories[0].repository_id, 1);
 
+        let mut unconfigured = state.clone();
+        unconfigured.contexts[0].execution_machine_id = None;
+        let error = decide(
+            unconfigured,
+            Event::CreateWorktree {
+                workspace_id: 1,
+                repository_id: 1,
+                machine_id: 1,
+                path: "/tmp/worktrees/mission-manager".into(),
+                branch: "feature/contract".into(),
+                base_branch: "main".into(),
+                is_dirty: false,
+            },
+        )
+        .expect_err("Worktree creation must be blocked until Context Machine setup");
+        assert!(matches!(
+            error,
+            DomainError::ContextHasNoExecutionMachine { .. }
+        ));
+
+        let mut alternate_machine = state.clone();
+        alternate_machine.machines.push(Machine {
+            id: 2,
+            context_id: 1,
+            name: "Alternate".into(),
+            socket_name: "alternate".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+        let error = decide(
+            alternate_machine,
+            Event::CreateWorktree {
+                workspace_id: 1,
+                repository_id: 1,
+                machine_id: 2,
+                path: "/tmp/worktrees/mission-manager".into(),
+                branch: "feature/contract".into(),
+                base_branch: "main".into(),
+                is_dirty: false,
+            },
+        )
+        .expect_err("Worktree creation cannot override the Context Machine");
+        assert!(matches!(
+            error,
+            DomainError::ContextExecutionMachineMismatch { .. }
+        ));
+
         let worktree = decide(
             state,
             Event::CreateWorktree {
@@ -113,7 +488,7 @@ mod workspace_contract_tests {
             next_repository_id: 2,
             next_workspace_id: 2,
             next_worktree_id: 1,
-            next_machine_id: 2,
+            next_machine_id: 3,
             next_run_id: 1,
             next_external_object_id: 1,
             next_link_id: 1,
@@ -122,6 +497,7 @@ mod workspace_contract_tests {
             contexts: vec![Context {
                 id: 1,
                 name: "Personal".into(),
+                execution_machine_id: Some(1),
                 grill_defaults: GrillConfiguration::default(),
             }],
             projects: vec![Project {
@@ -137,12 +513,20 @@ mod workspace_contract_tests {
                 remote_url: "https://example.test/repo".into(),
                 base_branch: "main".into(),
             }],
-            repository_locations: vec![RepositoryLocation {
-                repository_id: 1,
-                machine_id: 1,
-                checkout_path: "/tmp/checkouts/repo".into(),
-                worktree_root: "/tmp/worktrees".into(),
-            }],
+            repository_locations: vec![
+                RepositoryLocation {
+                    repository_id: 1,
+                    machine_id: 1,
+                    checkout_path: "/tmp/checkouts/repo".into(),
+                    worktree_root: "/tmp/worktrees".into(),
+                },
+                RepositoryLocation {
+                    repository_id: 1,
+                    machine_id: 2,
+                    checkout_path: "/tmp/checkouts/repo".into(),
+                    worktree_root: "/tmp/worktrees".into(),
+                },
+            ],
             items: vec![Item {
                 id: 1,
                 human_identifier: "MC-1".into(),
@@ -163,15 +547,26 @@ mod workspace_contract_tests {
                 preparation_state: WorkspacePreparationState::Pending,
             }],
             worktrees: Vec::new(),
-            machines: vec![Machine {
-                id: 1,
-                context_id: 1,
-                name: "Local".into(),
-                socket_name: "mission".into(),
-                transport: MachineTransport::Local,
-                last_observed: MachineObservation::Available,
-                last_observed_at: None,
-            }],
+            machines: vec![
+                Machine {
+                    id: 1,
+                    context_id: 1,
+                    name: "Local".into(),
+                    socket_name: "mission".into(),
+                    transport: MachineTransport::Local,
+                    last_observed: MachineObservation::Available,
+                    last_observed_at: None,
+                },
+                Machine {
+                    id: 2,
+                    context_id: 1,
+                    name: "Other".into(),
+                    socket_name: "other".into(),
+                    transport: MachineTransport::Local,
+                    last_observed: MachineObservation::Available,
+                    last_observed_at: None,
+                },
+            ],
             runs: Vec::new(),
             relationships: Vec::new(),
             external_objects: Vec::new(),
@@ -183,14 +578,24 @@ mod workspace_contract_tests {
 
         let suggestions = suggest_untracked_runs(
             &state,
-            &[AgentPaneObservation {
-                machine_id: 1,
-                agent: AgentKind::Codex,
-                session_name: "mission".into(),
-                pane_id: "%1".into(),
-                current_path: "/tmp/checkouts/repo/src".into(),
-                machine_home: "/Users/tester".into(),
-            }],
+            &[
+                AgentPaneObservation {
+                    machine_id: 1,
+                    agent: AgentKind::Codex,
+                    session_name: "mission".into(),
+                    pane_id: "%1".into(),
+                    current_path: "/tmp/checkouts/repo/src".into(),
+                    machine_home: "/Users/tester".into(),
+                },
+                AgentPaneObservation {
+                    machine_id: 2,
+                    agent: AgentKind::Codex,
+                    session_name: "other".into(),
+                    pane_id: "%2".into(),
+                    current_path: "/tmp/checkouts/repo/src".into(),
+                    machine_home: "/Users/tester".into(),
+                },
+            ],
         );
         assert_eq!(suggestions.len(), 1);
         assert_eq!(suggestions[0].workspace_id, Some(1));
@@ -241,6 +646,7 @@ mod grill_contract_tests {
             contexts: vec![Context {
                 id: 1,
                 name: "Personal".into(),
+                execution_machine_id: Some(1),
                 grill_defaults: GrillConfiguration::default(),
             }],
             projects: vec![Project {

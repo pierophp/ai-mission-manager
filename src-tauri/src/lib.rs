@@ -95,6 +95,7 @@ pub fn run() {
             app::search_items_command,
             app::create_context,
             app::update_context,
+            app::set_context_execution_machine,
             app::create_project,
             app::update_project,
             app::register_repository,

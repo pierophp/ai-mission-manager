@@ -8,6 +8,10 @@ pub enum Event {
         context_id: i64,
         name: String,
     },
+    SetContextExecutionMachine {
+        context_id: i64,
+        machine_id: Option<i64>,
+    },
     SetContextGrillDefaults {
         context_id: i64,
         defaults: GrillConfiguration,
@@ -77,6 +81,8 @@ pub enum Event {
     DeleteMachine {
         machine_id: i64,
         run_ids: Vec<i64>,
+        worktree_ids: Vec<i64>,
+        repository_location_repository_ids: Vec<i64>,
     },
     CreateItem {
         title: String,

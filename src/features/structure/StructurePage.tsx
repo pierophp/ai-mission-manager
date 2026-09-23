@@ -194,6 +194,12 @@ export function StructurePage({ section }: { section: SettingsSection }) {
   const selectedMachines = machines.filter(
     (machine) => machine.context_id === selectedContextId,
   );
+  const selectedContext = contexts.find(
+    (context) => context.id === selectedContextId,
+  );
+  const selectedExecutionMachine = machines.find(
+    (machine) => machine.id === selectedContext?.execution_machine_id,
+  );
 
   useEffect(() => {
     const nextContextId =
@@ -209,8 +215,12 @@ export function StructurePage({ section }: { section: SettingsSection }) {
     if (nextContextId !== selectedContextId) setSelectedContextId(nextContextId);
     if (nextProjectId !== selectedProjectId) setSelectedProjectId(nextProjectId);
     if (!selectedMachines.some((machine) => machine.id === repositoryMachineId)) {
+      const configuredMachineId = contexts.find(
+        (context) => context.id === nextContextId,
+      )?.execution_machine_id;
       setRepositoryMachineId(
-        machines.find((machine) => machine.context_id === nextContextId)?.id,
+        machines.find((machine) => machine.id === configuredMachineId)?.id ??
+          machines.find((machine) => machine.context_id === nextContextId)?.id,
       );
     }
   }, [contexts, machines, projects, repositoryMachineId, selectedContextId, selectedProjectId, selectedMachines]);
@@ -725,6 +735,22 @@ export function StructurePage({ section }: { section: SettingsSection }) {
     }
   }
 
+  async function handleSetContextExecutionMachine(machineId: number | null) {
+    if (!selectedContextId) return;
+    setIsSaving(true);
+    try {
+      await structureCommand.execute(
+        structureActions.setContextExecutionMachine(selectedContextId, machineId),
+      );
+      await refreshAfterEdit();
+      setError(undefined);
+    } catch (saveError) {
+      setError(errorMessage(saveError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   async function handlePrepareMachineDeletion(machineId: number) {
     setIsSaving(true);
     try {
@@ -745,8 +771,7 @@ export function StructurePage({ section }: { section: SettingsSection }) {
   async function handleDeleteMachine(machineId: number) {
     if (
       !machineDeletionPreview ||
-      machineDeletionPreview.plan.machineId !== machineId ||
-      machineDeletionPreview.blockers.length > 0
+      machineDeletionPreview.plan.machineId !== machineId
     ) {
       return;
     }
@@ -758,27 +783,19 @@ export function StructurePage({ section }: { section: SettingsSection }) {
         structureActions.deleteMachine(
           machineId,
           plan.runs.map((run) => run.id),
+          plan.worktreeIds,
+          plan.repositoryLocationRepositoryIds,
         ),
       );
       setMachineDeletionPreview(undefined);
       await refreshAfterEdit();
+      const stopped = result.stopAttemptCount - result.stopFailureCount;
+      const stopMessage = result.stopFailureCount
+        ? ` Could not stop ${result.stopFailureCount} Run pane${result.stopFailureCount === 1 ? "" : "s"}; an agent may still be running without a Mission Manager record.`
+        : ` Stopped ${stopped} Run pane${stopped === 1 ? "" : "s"}.`;
       window.alert(
-        `Deleted Machine ${plan.name} and ${result.runCount} finished Run record${result.runCount === 1 ? "" : "s"}.`,
+        `Deleted Machine ${plan.name}, ${result.runCount} Run record${result.runCount === 1 ? "" : "s"}, ${result.worktreeCount} Worktree record${result.worktreeCount === 1 ? "" : "s"}, and ${result.repositoryLocationCount} Repository location record${result.repositoryLocationCount === 1 ? "" : "s"}.${stopMessage} Checkout and Worktree files remain on the Machine.`,
       );
-    } catch (deleteError) {
-      setMachineDeletionPreview(undefined);
-      window.alert(errorMessage(deleteError));
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function handleDeleteFinishedRun(runId: number) {
-    setIsSaving(true);
-    try {
-      await structureCommand.execute(structureActions.deleteRun(runId));
-      setMachineDeletionPreview(undefined);
-      await refreshAfterEdit();
     } catch (deleteError) {
       setMachineDeletionPreview(undefined);
       window.alert(errorMessage(deleteError));
@@ -1111,6 +1128,29 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                 </div>
               </CardHeader>
               <CardContent className="p-4">
+                <div className="mb-4 grid gap-2 rounded-md border p-3">
+                  <Field label="Context execution Machine">
+                    <NativeSelect
+                      value={selectedExecutionMachine?.id ?? ""}
+                      onChange={(event) =>
+                        void handleSetContextExecutionMachine(
+                          Number(event.target.value) || null,
+                        )
+                      }
+                      disabled={isSaving || !selectedContextId}
+                    >
+                      <NativeSelectOption value="">No Machine configured</NativeSelectOption>
+                      {selectedMachines.map((machine) => (
+                        <NativeSelectOption value={machine.id} key={machine.id}>
+                          {machine.name} · {machine.last_observed}
+                        </NativeSelectOption>
+                      ))}
+                    </NativeSelect>
+                  </Field>
+                  <p className="m-0 text-xs text-muted-foreground">
+                    Every Run and Worktree for this Context uses this Machine. Configure a checkout for each Repository there before starting work.
+                  </p>
+                </div>
                 <EntityList>
                   {selectedMachines.length === 0 ? <EmptyDescription>No Machines are registered in this Context.</EmptyDescription> : selectedMachines.map((machine) => (
                     <EntityRow key={machine.id} title={`${machine.name} · ${machine.transport.kind === "ssh" ? "SSH" : "Local"}`} detail={`Last observed: ${machine.last_observed}${machine.last_observed_at ? ` · ${new Date(machine.last_observed_at * 1000).toLocaleString()}` : ""}`}>
@@ -1176,7 +1216,6 @@ export function StructurePage({ section }: { section: SettingsSection }) {
               preview={machineDeletionPreview}
               disabled={isSaving}
               onConfirm={() => void handleDeleteMachine(machineDeletionPreview.plan.machineId)}
-              onDeleteRun={(runId) => void handleDeleteFinishedRun(runId)}
               onCancel={() => setMachineDeletionPreview(undefined)}
             />
           )}
@@ -1296,16 +1335,22 @@ function RepositoryDeletionPreviewCard({ preview, disabled, onConfirm, onCancel 
   );
 }
 
-function MachineDeletionPreviewCard({ preview, disabled, onConfirm, onDeleteRun, onCancel }: { preview: MachineDeletionPreview; disabled: boolean; onConfirm: () => void; onDeleteRun: (runId: number) => void; onCancel: () => void }) {
+function MachineDeletionPreviewCard({ preview, disabled, onConfirm, onCancel }: { preview: MachineDeletionPreview; disabled: boolean; onConfirm: () => void; onCancel: () => void }) {
   return (
     <div className="w-full grid gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4 text-sm" role="alert">
       <strong>Machine deletion preview</strong>
-      <p>Deleting <b>{preview.plan.name}</b> removes the Machine record and every finished Run that points to it. Panes remain owned by the Terminal Runtime.</p>
-      {preview.plan.runs.length > 0 ? <PreviewList label="Runs to remove" items={preview.plan.runs.map((run) => `Run #${run.id} · ${run.itemIdentifier} · ${run.itemTitle} · ${run.state} · Pane ${run.paneStatus}`)} /> : <p>No Runs reference this Machine.</p>}
-      {preview.plan.runs.filter((run) => run.state === "finished").map((run) => <Button key={run.id} type="button" variant="ghost" size="sm" className="w-fit" disabled={disabled} onClick={() => onDeleteRun(run.id)}>Delete finished Run #{run.id}</Button>)}
+      <p>Deleting <b>{preview.plan.name}</b> removes this Machine&apos;s app records, Run history, Worktree records, and Repository location records. Mission Manager will try to stop each Run pane first.</p>
+      <p>The checkout and Worktree files stay on the Machine. If a pane cannot be reached, its agent may keep running without a Mission Manager record.</p>
+      <p>If this Machine is configured for a Context, that Context becomes unconfigured and must select a Machine before running work again.</p>
+      {preview.plan.runs.length > 0 ? <PreviewList label="Run records to remove" items={preview.plan.runs.map((run) => `Run #${run.id} · ${run.itemIdentifier} · ${run.itemTitle} · ${run.state} · Pane ${run.paneStatus}`)} /> : <p>No Runs reference this Machine.</p>}
+      <div className="grid gap-1 text-muted-foreground">
+        <span>{preview.plan.activeRunIds.length} active Run record(s) are included in deletion.</span>
+        <span>{preview.plan.worktreeIds.length} Worktree record(s) will be removed; files stay on disk.</span>
+        <span>{preview.plan.repositoryLocationRepositoryIds.length} Repository location record(s) will be removed; checkout files stay on disk.</span>
+      </div>
       {preview.blockers.length > 0 && <PreviewWarnings title="Deletion blocked" items={preview.blockers} />}
       <div className="flex flex-wrap gap-2">
-        <Button type="button" variant="destructive" disabled={disabled || preview.blockers.length > 0} onClick={onConfirm}>Delete Machine</Button>
+        <Button type="button" variant="destructive" disabled={disabled || preview.blockers.length > 0} onClick={onConfirm}>Delete Machine and its records</Button>
         <Button type="button" variant="ghost" disabled={disabled} onClick={onCancel}>Cancel</Button>
       </div>
     </div>

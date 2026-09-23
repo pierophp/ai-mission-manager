@@ -569,13 +569,7 @@ impl Runtime {
             .find(|worktree| worktree.id == worktree_id && worktree.workspace_id == workspace_id)
             .cloned()
             .ok_or_else(|| format!("Worktree {worktree_id} is not registered for this Item"))?;
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == worktree.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", worktree.machine_id))?;
+        let machine = self.machine_for_item(item_id, Some(worktree.machine_id))?;
         let working_directory = worktree.path.clone();
         let run_id = self.state.next_run_id;
         let session_name = format!("mission-item-{item_id}-run-{run_id}");
@@ -670,19 +664,16 @@ impl Runtime {
 
     pub(crate) fn list_run_suggestions(&mut self) -> Result<Vec<RunSuggestion>, String> {
         self.recover_run_states()?;
-        let local_machine_item_ids = self
-            .state
-            .workspaces
-            .iter()
-            .map(|workspace| workspace.item_id)
-            .collect::<Vec<_>>();
-        for item_id in local_machine_item_ids {
-            self.local_machine_for_item(item_id)?;
-        }
         let observations = self
             .state
             .machines
             .iter()
+            .filter(|machine| {
+                self.state
+                    .contexts
+                    .iter()
+                    .any(|context| context.execution_machine_id == Some(machine.id))
+            })
             .flat_map(|machine| match list_agent_panes(machine) {
                 Ok(panes) => panes
                     .into_iter()

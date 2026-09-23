@@ -209,7 +209,6 @@ export function ItemCard({
   const [runPrompt, setRunPrompt] = useState("");
   const [runPromptNeedsCompose, setRunPromptNeedsCompose] = useState(false);
   const [directRunWorkspaceId, setDirectRunWorkspaceId] = useState<number>();
-  const [directRunMachineId, setDirectRunMachineId] = useState<number>();
   const [directRunRepositoryId, setDirectRunRepositoryId] = useState<number>();
   const [directRunPreview, setDirectRunPreview] =
     useState<DirectRunPreview>();
@@ -224,7 +223,6 @@ export function ItemCard({
     Record<string, Record<number, string>>
   >({});
   const [grillRunWorkspaceId, setGrillRunWorkspaceId] = useState<number>();
-  const [grillRunMachineId, setGrillRunMachineId] = useState<number>();
   const [grillRunRepositoryId, setGrillRunRepositoryId] = useState<number>();
   const [grillRunPreview, setGrillRunPreview] = useState<DirectRunPreview>();
   const [grillRunPreviewError, setGrillRunPreviewError] = useState<string>();
@@ -235,7 +233,6 @@ export function ItemCard({
   const [grillPromptPreview, setGrillPromptPreview] = useState("");
   const [grillDirtyConfirmed, setGrillDirtyConfirmed] = useState(false);
   const [grillSharedConfirmed, setGrillSharedConfirmed] = useState(false);
-  const [worktreeMachineId, setWorktreeMachineId] = useState<number>();
   const [worktreePathDrafts, setWorktreePathDrafts] = useState<
     Record<string, string>
   >({});
@@ -256,6 +253,11 @@ export function ItemCard({
 
   const itemRepositories = repositories.filter(
     (repository) => repository.project_id === view.item.project_id,
+  );
+  const itemContext = contexts.find((context) => context.id === view.context_id);
+  const executionMachineId = itemContext?.execution_machine_id ?? undefined;
+  const executionMachine = machines.find(
+    (machine) => machine.id === executionMachineId,
   );
   const activeGrillRun = view.runs.find(
     (run) => run.execution_profile === "grill" && !isRunFinished(run),
@@ -306,7 +308,6 @@ export function ItemCard({
     setIsExpanded(true);
     setIsGrillRunOpen(true);
     setGrillRunWorkspaceId(executionWorkspaceId);
-    setGrillRunMachineId(undefined);
     setGrillRunRepositoryId(undefined);
     setGrillRunPreview(undefined);
     setGrillRunPreviewError(undefined);
@@ -318,16 +319,12 @@ export function ItemCard({
     setGrillDirtyConfirmed(false);
     setGrillSharedConfirmed(false);
     if (executionWorkspaceId) {
-      void refreshGrillRunPreview(executionWorkspaceId, undefined);
+      void refreshGrillRunPreview(executionWorkspaceId);
     }
   }
 
-  async function refreshGrillRunPreview(
-    workspaceId: number | undefined,
-    machineId: number | undefined,
-  ) {
+  async function refreshGrillRunPreview(workspaceId: number | undefined) {
     setGrillRunWorkspaceId(workspaceId);
-    setGrillRunMachineId(machineId);
     setGrillRunRepositoryId(undefined);
     setGrillRunPreview(undefined);
     setGrillRunPreviewError(undefined);
@@ -338,7 +335,7 @@ export function ItemCard({
     setIsSaving(true);
     try {
       const preview = await workCommand.execute(
-        workActions.prepareGrillRun(view.item.id, workspaceId, machineId ?? null),
+        workActions.prepareGrillRun(view.item.id, workspaceId, null),
         false,
       );
       setGrillRunPreview(preview);
@@ -398,7 +395,7 @@ export function ItemCard({
         itemId: view.item.id,
         workspaceId: grillRunWorkspaceId,
         primaryRepositoryId: grillRunRepositoryId,
-        machineId: grillRunMachineId ?? null,
+        machineId: null,
         configuration: {
           agent: grillAgent,
           model: grillModel,
@@ -693,7 +690,6 @@ export function ItemCard({
 
   async function openDirectRunPreview(workspace: Workspace) {
     setDirectRunWorkspaceId(workspace.id);
-    setDirectRunMachineId(undefined);
     setDirectRunRepositoryId(undefined);
     setDirectRunPreview(undefined);
     setDirectRunDirtyConfirmed(false);
@@ -844,7 +840,7 @@ export function ItemCard({
         itemId: view.item.id,
         workspaceId: directRunWorkspaceId,
         primaryRepositoryId: directRunRepositoryId,
-        machineId: directRunMachineId ?? null,
+        machineId: null,
         agent: runAgent,
         executionProfile: runProfile,
         prompt: runPrompt,
@@ -859,37 +855,14 @@ export function ItemCard({
     setRunPrompt("");
   }
 
-  async function refreshDirectRunPreview(machineId: number | undefined) {
-    if (!directRunWorkspaceId) return;
-    setDirectRunMachineId(machineId);
-    setDirectRunDirtyConfirmed(false);
-    setDirectRunSharedConfirmed(false);
-    setIsSaving(true);
-    try {
-      const preview = await workCommand.execute(
-        workActions.prepareDirectRun(
-          view.item.id,
-          directRunWorkspaceId,
-          machineId ?? null,
-        ),
-        false,
-      );
-      setDirectRunPreview(preview);
-    } catch (previewError) {
-      window.alert(errorMessage(previewError));
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
   async function prepareWorkspaceWorktree(
     workspace: Workspace,
     repositoryId: number,
     reuseExistingBranch: boolean,
   ) {
-    const machineId = worktreeMachineId ?? itemMachines[0]?.id;
+    const machineId = executionMachineId;
     if (!machineId) {
-      window.alert("Configure a Machine-specific Repository checkout first.");
+      window.alert("Configure an execution Machine for this Context in Settings → Machines first.");
       return;
     }
     const confirmDirtyAttachment = reuseExistingBranch
@@ -912,9 +885,9 @@ export function ItemCard({
     workspace: Workspace,
     repositoryId: number,
   ) {
-    const machineId = worktreeMachineId ?? itemMachines[0]?.id;
+    const machineId = executionMachineId;
     if (!machineId) {
-      window.alert("Configure a Machine-specific Repository checkout first.");
+      window.alert("Configure an execution Machine for this Context in Settings → Machines first.");
       return;
     }
     const draftKey = `${workspace.id}:${repositoryId}`;
@@ -1013,9 +986,6 @@ export function ItemCard({
       candidate.item.id !== view.item.id &&
       candidate.context_name === view.context_name,
   );
-  const itemMachines = machines.filter(
-    (machine) => machine.context_id === view.context_id,
-  );
 
   function renderWorkspaceCard(workspace: Workspace) {
     const workspaceWorktrees = view.worktrees.filter((worktree) =>
@@ -1056,25 +1026,20 @@ export function ItemCard({
             Start Direct Run
           </Button>
           <div className="grid gap-2 rounded-md border p-3">
-            <label className="grid gap-1.5 text-sm font-medium md:max-w-sm">
-              <span>Worktree Machine</span>
-              <NativeSelect
-                value={worktreeMachineId ?? ""}
-                onChange={(event) =>
-                  setWorktreeMachineId(Number(event.target.value) || undefined)
-                }
-                disabled={isSaving}
-              >
-                <NativeSelectOption value="">
-                  First configured Machine
-                </NativeSelectOption>
-                {itemMachines.map((machine) => (
-                  <NativeSelectOption value={machine.id} key={machine.id}>
-                    {machine.name} · {machine.last_observed}
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
-            </label>
+            <p className="m-0 text-sm">
+              <span className="font-medium">Context execution Machine: </span>
+              {executionMachine
+                ? `${executionMachine.name} · ${executionMachine.last_observed}`
+                : "Not configured"}
+            </p>
+            {!executionMachine && (
+              <Alert variant="destructive">
+                <AlertTitle>Execution Machine required</AlertTitle>
+                <AlertDescription>
+                  Choose a Machine in Settings → Machines before creating Worktrees or starting Runs.
+                </AlertDescription>
+              </Alert>
+            )}
             {workspace.repositories.map((selected) => {
               const draftKey = `${workspace.id}:${selected.repository_id}`;
               const existingWorktree = workspaceWorktrees.find(
@@ -1091,7 +1056,7 @@ export function ItemCard({
                       type="button"
                       size="sm"
                       variant="outline"
-                      disabled={isSaving || Boolean(existingWorktree)}
+                      disabled={isSaving || !executionMachineId || Boolean(existingWorktree)}
                       onClick={() =>
                         void prepareWorkspaceWorktree(
                           workspace,
@@ -1123,7 +1088,7 @@ export function ItemCard({
                         type="button"
                         size="sm"
                         variant="ghost"
-                        disabled={isSaving || !worktreePathDrafts[draftKey]?.trim()}
+                        disabled={isSaving || !executionMachineId || !worktreePathDrafts[draftKey]?.trim()}
                         onClick={() =>
                           void attachExistingWorkspaceWorktree(
                             workspace,
@@ -1147,6 +1112,14 @@ export function ItemCard({
                   className="flex flex-wrap items-center justify-between gap-2 text-sm"
                   key={worktree.id}
                 >
+                  {worktree.machine_id !== executionMachineId && (
+                    <Alert variant="destructive" className="basis-full">
+                      <AlertTitle>Worktree is on a previous Machine</AlertTitle>
+                      <AlertDescription>
+                        It belongs to {machines.find((machine) => machine.id === worktree.machine_id)?.name ?? `Machine ${worktree.machine_id}`}; this Context now uses {executionMachine?.name ?? "no execution Machine"}. Remove and recreate it explicitly to run here. Its files remain on the previous Machine.
+                      </AlertDescription>
+                    </Alert>
+                  )}
                   <div className="grid gap-1">
                     <span>
                       {repositoryName(repositories, worktree.repository_id)} ·{" "}
@@ -1160,7 +1133,7 @@ export function ItemCard({
                     type="button"
                     size="sm"
                     variant="outline"
-                    disabled={isSaving}
+                    disabled={isSaving || worktree.machine_id !== executionMachineId}
                     onClick={() =>
                       void openWorktreeRun(
                         view.workspaces.find((candidate) => candidate.id === worktree.workspace_id) ?? workspace,
@@ -1168,7 +1141,9 @@ export function ItemCard({
                       )
                     }
                   >
-                    Start Worktree Run
+                    {worktree.machine_id === executionMachineId
+                      ? "Start Worktree Run"
+                      : "Worktree on previous Machine"}
                   </Button>
                   <Button
                     type="button"
@@ -1361,27 +1336,12 @@ export function ItemCard({
                   Machine: {directRunPreview.machineName}
                 </Badge>
               </div>
-              <label className="grid gap-1.5 text-sm font-medium">
-                <span>Machine</span>
-                <NativeSelect
-                  value={directRunMachineId ?? ""}
-                  onChange={(event) =>
-                    void refreshDirectRunPreview(
-                      Number(event.target.value) || undefined,
-                    )
-                  }
-                  disabled={isSaving}
-                >
-                  <NativeSelectOption value="">
-                    Local Mac (default)
-                  </NativeSelectOption>
-                  {itemMachines.map((machine) => (
-                    <NativeSelectOption value={machine.id} key={machine.id}>
-                      {machine.name} · {machine.last_observed}
-                    </NativeSelectOption>
-                  ))}
-                </NativeSelect>
-              </label>
+              <p className="m-0 text-sm">
+                <span className="font-medium">Context execution Machine: </span>
+                {executionMachine
+                  ? `${executionMachine.name} · ${executionMachine.last_observed}`
+                  : "Not configured"}
+              </p>
               <div className="grid gap-2 rounded-md border p-3 text-sm">
                 <p className="m-0 font-medium">Registered checkouts</p>
                 {directRunPreview.checkoutDetails.map((checkout) => (
@@ -1739,26 +1699,14 @@ export function ItemCard({
                   ))}
                 </div>
               </div>
-              <label className="grid gap-1.5 text-sm font-medium">
-                <span>Machine</span>
-                <NativeSelect
-                  value={grillRunMachineId ?? ""}
-                  onChange={(event) =>
-                    void refreshGrillRunPreview(
-                      grillRunWorkspaceId,
-                      Number(event.target.value) || undefined,
-                    )
-                  }
-                  disabled={isSaving || !grillRunWorkspaceId || itemRepositories.length === 0}
-                >
-                  <NativeSelectOption value="">Local Mac (default)</NativeSelectOption>
-                  {itemMachines.map((machine) => (
-                    <NativeSelectOption value={machine.id} key={machine.id}>
-                      {machine.name} · {machine.last_observed}
-                    </NativeSelectOption>
-                  ))}
-                </NativeSelect>
-              </label>
+              <div className="grid gap-1.5 text-sm">
+                <span className="font-medium">Context execution Machine</span>
+                <span className="text-muted-foreground">
+                  {executionMachine
+                    ? `${executionMachine.name} · ${executionMachine.last_observed}`
+                    : "Not configured"}
+                </span>
+              </div>
             </div>
             {grillRunPreviewError && (
               <Alert variant="destructive">
@@ -1766,7 +1714,7 @@ export function ItemCard({
                 <AlertDescription>
                   <p>{grillRunPreviewError}</p>
                   <p>
-                    Register this Repository&apos;s checkout for the selected Machine
+                    Register this Repository&apos;s checkout for the Context execution Machine
                     under Settings, then reopen the Grill Run.
                   </p>
                 </AlertDescription>

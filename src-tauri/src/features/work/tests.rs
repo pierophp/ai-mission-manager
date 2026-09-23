@@ -174,6 +174,9 @@ fn workspace_interface_keeps_repository_selection_and_worktree_identity() {
         )
         .expect("Machine should be created");
     runtime
+        .set_context_execution_machine(1, Some(1))
+        .expect("the Context should use its registered Machine");
+    runtime
         .register_repository(
             1,
             "service".into(),

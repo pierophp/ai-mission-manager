@@ -10,6 +10,7 @@ import type { RunCheckout } from "./execution-types";
 export type Context = {
   id: number;
   name: string;
+  execution_machine_id: number | null;
   grill_defaults: GrillConfiguration;
 };
 
@@ -415,6 +416,8 @@ export type MachineDeletionPreview = {
     name: string;
     runs: MachineDeletionRun[];
     activeRunIds: number[];
+    worktreeIds: number[];
+    repositoryLocationRepositoryIds: number[];
   };
   blockers: string[];
 };
@@ -422,6 +425,10 @@ export type MachineDeletionPreview = {
 export type MachineDeletionResult = {
   machineId: number;
   runCount: number;
+  worktreeCount: number;
+  repositoryLocationCount: number;
+  stopAttemptCount: number;
+  stopFailureCount: number;
 };
 
 export type ParentDeletionPlan = {

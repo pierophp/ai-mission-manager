@@ -111,6 +111,16 @@ pub(crate) fn update_context(
     locked(state, |runtime| runtime.update_context(context_id, name))
 }
 
+pub(crate) fn set_context_execution_machine(
+    context_id: i64,
+    machine_id: Option<i64>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    locked(state, |runtime| {
+        runtime.set_context_execution_machine(context_id, machine_id)
+    })
+}
+
 pub(crate) fn set_context_grill_defaults(
     context_id: i64,
     defaults: crate::domain::GrillConfiguration,
@@ -364,11 +374,19 @@ pub(crate) fn prepare_machine_deletion(
 pub(crate) fn delete_machine(
     machine_id: i64,
     run_ids: Vec<i64>,
+    worktree_ids: Vec<i64>,
+    repository_location_repository_ids: Vec<i64>,
     confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<MachineDeletionResult, String> {
     locked(state, |runtime| {
-        runtime.delete_machine(machine_id, run_ids, confirmed)
+        runtime.delete_machine(
+            machine_id,
+            run_ids,
+            worktree_ids,
+            repository_location_repository_ids,
+            confirmed,
+        )
     })
 }
 
@@ -405,6 +423,30 @@ impl Runtime {
         let decision = decide(
             self.state.clone(),
             Event::UpdateContext { context_id, name },
+        )
+        .map_err(|error| error.to_string())?;
+        let context = decision
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .cloned()
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+        self.commit(decision)?;
+        Ok(context)
+    }
+
+    pub(crate) fn set_context_execution_machine(
+        &mut self,
+        context_id: i64,
+        machine_id: Option<i64>,
+    ) -> Result<Context, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::SetContextExecutionMachine {
+                context_id,
+                machine_id,
+            },
         )
         .map_err(|error| error.to_string())?;
         let context = decision

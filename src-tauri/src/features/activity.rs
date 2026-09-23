@@ -177,6 +177,12 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
                     .filter(|run| run.machine_id == *machine_id)
                     .count()
                     .into(),
+                worktree_count: before
+                    .worktrees
+                    .iter()
+                    .filter(|worktree| worktree.machine_id == *machine_id)
+                    .count()
+                    .into(),
             }),
             Effect::RemoveRun { run_id } => Some(AuditAction::RunDeleted { run_id: *run_id }),
             Effect::RemoveLink {

@@ -76,6 +76,22 @@ pub enum DomainError {
         expected_run_ids: Vec<i64>,
         provided_run_ids: Vec<i64>,
     },
+    #[error(
+        "Machine {machine_id} deletion must include Worktrees {expected_worktree_ids:?}; received {provided_worktree_ids:?}"
+    )]
+    MachineWorktreesMismatch {
+        machine_id: i64,
+        expected_worktree_ids: Vec<i64>,
+        provided_worktree_ids: Vec<i64>,
+    },
+    #[error(
+        "Machine {machine_id} deletion must include Repository locations {expected_repository_ids:?}; received {provided_repository_ids:?}"
+    )]
+    MachineRepositoryLocationsMismatch {
+        machine_id: i64,
+        expected_repository_ids: Vec<i64>,
+        provided_repository_ids: Vec<i64>,
+    },
     #[error("a branch cannot be blank")]
     EmptyBranch,
     #[error("Project Repository execution setup must include at least one Repository")]
@@ -114,6 +130,12 @@ pub enum DomainError {
     MachineNotFound { machine_id: i64 },
     #[error("Machine {machine_id} belongs to another Context")]
     MachineContextMismatch { machine_id: i64, context_id: i64 },
+    #[error("Context {context_id} has no execution Machine configured")]
+    ContextHasNoExecutionMachine { context_id: i64 },
+    #[error(
+        "Machine {machine_id} is not the execution Machine configured for Context {context_id}"
+    )]
+    ContextExecutionMachineMismatch { context_id: i64, machine_id: i64 },
     #[error("Machine {machine_id} has active Runs: {run_ids:?}")]
     MachineHasActiveRuns { machine_id: i64, run_ids: Vec<i64> },
     #[error("a remote Machine host cannot be blank")]

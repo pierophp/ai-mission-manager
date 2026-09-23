@@ -6,7 +6,7 @@
 //! Worktree checks, and local-only cleanup before committing the reducer's
 //! decision through the shared `Runtime`.
 
-use std::fs;
+use std::{fs, time::Duration};
 
 use crate::{
     app::{RunDeletionResult, Runtime},
@@ -19,6 +19,7 @@ use crate::{
         RepositoryDeletionPlan, ResetLocalDataPlan, ResetLocalDataSummary,
     },
     git::GitCli,
+    terminal::kill_pane_with_timeout,
 };
 
 use crate::features::structure::{machine_home_directory, resolve_machine_path};
@@ -138,6 +139,10 @@ pub struct ParentDeletionResult {
 pub struct MachineDeletionResult {
     pub machine_id: i64,
     pub run_count: usize,
+    pub worktree_count: usize,
+    pub repository_location_count: usize,
+    pub stop_attempt_count: usize,
+    pub stop_failure_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -726,17 +731,10 @@ impl Runtime {
     ) -> Result<MachineDeletionPreview, String> {
         let plan =
             plan_machine_deletion(&self.state, machine_id).map_err(|error| error.to_string())?;
-        let blockers = plan
-            .active_run_ids
-            .iter()
-            .map(|run_id| {
-                format!(
-                    "Run #{run_id} is active on Machine {}; stop it before deleting the Machine.",
-                    plan.name
-                )
-            })
-            .collect();
-        Ok(MachineDeletionPreview { plan, blockers })
+        Ok(MachineDeletionPreview {
+            plan,
+            blockers: Vec::new(),
+        })
     }
 
     pub(crate) fn prepare_machine_deletion(
@@ -822,6 +820,8 @@ impl Runtime {
         &mut self,
         machine_id: i64,
         run_ids: Vec<i64>,
+        worktree_ids: Vec<i64>,
+        repository_location_repository_ids: Vec<i64>,
         confirmed: bool,
     ) -> Result<MachineDeletionResult, String> {
         if !confirmed {
@@ -838,22 +838,64 @@ impl Runtime {
         let current = self.build_machine_deletion_preview(machine_id)?;
         if current != pending {
             return Err(
-                "The Machine or one of its Run states changed after the preview; review the updated deletion preview before deleting it".into(),
+                "The Machine or its associated records changed after the preview; review the updated deletion preview before deleting it".into(),
             );
         }
-        if !current.blockers.is_empty() {
-            return Err(format!(
-                "Machine deletion is blocked:\n{}",
-                current.blockers.join("\n")
-            ));
+        let mut expected_run_ids = current
+            .plan
+            .runs
+            .iter()
+            .map(|run| run.id)
+            .collect::<Vec<_>>();
+        let mut provided_run_ids = run_ids.clone();
+        let mut expected_worktree_ids = current.plan.worktree_ids.clone();
+        let mut provided_worktree_ids = worktree_ids.clone();
+        let mut expected_repository_location_ids =
+            current.plan.repository_location_repository_ids.clone();
+        let mut provided_repository_location_ids = repository_location_repository_ids.clone();
+        expected_run_ids.sort_unstable();
+        provided_run_ids.sort_unstable();
+        expected_worktree_ids.sort_unstable();
+        provided_worktree_ids.sort_unstable();
+        expected_repository_location_ids.sort_unstable();
+        provided_repository_location_ids.sort_unstable();
+        if expected_run_ids != provided_run_ids
+            || expected_worktree_ids != provided_worktree_ids
+            || expected_repository_location_ids != provided_repository_location_ids
+        {
+            return Err(
+                "The reviewed Machine deletion contents do not match the confirmation; review the preview again".into(),
+            );
+        }
+
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
+        let mut stop_attempt_count = 0;
+        let mut stop_failure_count = 0;
+        for run in self.state.runs.iter().filter(|run| {
+            run.machine_id == machine_id && run.pane_status != crate::domain::RunPaneStatus::Missing
+        }) {
+            stop_attempt_count += 1;
+            if kill_pane_with_timeout(&machine, &run.pane_id, Duration::from_secs(5)).is_err() {
+                stop_failure_count += 1;
+            }
         }
 
         let run_count = current.plan.runs.len();
+        let worktree_count = current.plan.worktree_ids.len();
+        let repository_location_count = current.plan.repository_location_repository_ids.len();
         let decision = decide(
             self.state.clone(),
             Event::DeleteMachine {
                 machine_id,
                 run_ids,
+                worktree_ids,
+                repository_location_repository_ids,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -863,6 +905,10 @@ impl Runtime {
         Ok(MachineDeletionResult {
             machine_id,
             run_count,
+            worktree_count,
+            repository_location_count,
+            stop_attempt_count,
+            stop_failure_count,
         })
     }
 

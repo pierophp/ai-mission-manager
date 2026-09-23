@@ -21,11 +21,12 @@ impl SqliteStore {
                 } => {
                     transaction.execute(
                         "INSERT INTO contexts
-                            (id, name, grill_agent, grill_model, grill_effort)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                            (id, name, execution_machine_id, grill_agent, grill_model, grill_effort)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         params![
                             context.id,
                             context.name,
+                            context.execution_machine_id,
                             agent_kind_as_str(context.grill_defaults.agent),
                             context.grill_defaults.model,
                             context.grill_defaults.effort,
@@ -38,8 +39,10 @@ impl SqliteStore {
                 }
                 Effect::UpdateContext { context } => {
                     transaction.execute(
-                        "UPDATE contexts SET name = ?1 WHERE id = ?2",
-                        params![context.name, context.id],
+                        "UPDATE contexts
+                         SET name = ?1, execution_machine_id = ?2
+                         WHERE id = ?3",
+                        params![context.name, context.execution_machine_id, context.id],
                     )?;
                 }
                 Effect::PersistContextGrillDefaults { context } => {
@@ -192,11 +195,12 @@ impl SqliteStore {
                     )?;
                     transaction.execute(
                         "INSERT INTO contexts
-                            (id, name, grill_agent, grill_model, grill_effort)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                            (id, name, execution_machine_id, grill_agent, grill_model, grill_effort)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                         params![
                             context.id,
                             context.name,
+                            context.execution_machine_id,
                             agent_kind_as_str(context.grill_defaults.agent),
                             context.grill_defaults.model,
                             context.grill_defaults.effort,
@@ -563,6 +567,15 @@ impl SqliteStore {
                     )?;
                 }
                 Effect::RemoveMachine { machine_id } => {
+                    transaction.execute(
+                        "DELETE FROM worktrees WHERE machine_id = ?1",
+                        params![machine_id],
+                    )?;
+                    transaction.execute(
+                        "UPDATE contexts SET execution_machine_id = NULL
+                         WHERE execution_machine_id = ?1",
+                        params![machine_id],
+                    )?;
                     transaction
                         .execute("DELETE FROM machines WHERE id = ?1", params![machine_id])?;
                 }

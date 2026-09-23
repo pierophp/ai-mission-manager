@@ -1,8 +1,8 @@
 use super::deletion::{parent_selection_matches, run_uses_repository, workspace_preparation_state};
 use super::projections::{
-    clean_machine_transport, clean_name, clean_repository_name, ensure_context, item_context_id,
-    item_project_id, link_external_object, normalize_workspace_repositories, path_is_within,
-    snapshot_changes, upsert_snapshot,
+    clean_machine_transport, clean_name, clean_repository_name, ensure_context,
+    ensure_context_execution_machine, item_context_id, item_project_id, link_external_object,
+    normalize_workspace_repositories, path_is_within, snapshot_changes, upsert_snapshot,
 };
 use super::*;
 
@@ -23,6 +23,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let context = Context {
                 id,
                 name,
+                execution_machine_id: None,
                 grill_defaults: GrillConfiguration::default(),
             };
             let project = Project {
@@ -66,6 +67,58 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .find(|context| context.id == context_id)
                 .ok_or(DomainError::ContextNotFound { context_id })?;
             context.name = name;
+            let context = context.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::UpdateContext { context }],
+            })
+        }
+        Event::SetContextExecutionMachine {
+            context_id,
+            machine_id,
+        } => {
+            let context = state
+                .contexts
+                .iter()
+                .find(|context| context.id == context_id)
+                .ok_or(DomainError::ContextNotFound { context_id })?;
+            if context.execution_machine_id != machine_id {
+                let active_run_ids = state
+                    .runs
+                    .iter()
+                    .filter(|run| {
+                        run_is_active(run)
+                            && item_context_id(&state, run.item_id)
+                                .is_ok_and(|run_context_id| run_context_id == context_id)
+                    })
+                    .map(|run| run.id)
+                    .collect::<Vec<_>>();
+                if !active_run_ids.is_empty() {
+                    return Err(DomainError::ContextHasActiveRuns {
+                        context_id,
+                        run_ids: active_run_ids,
+                    });
+                }
+            }
+            if let Some(machine_id) = machine_id {
+                let machine = state
+                    .machines
+                    .iter()
+                    .find(|machine| machine.id == machine_id)
+                    .ok_or(DomainError::MachineNotFound { machine_id })?;
+                if machine.context_id != context_id {
+                    return Err(DomainError::MachineContextMismatch {
+                        machine_id,
+                        context_id,
+                    });
+                }
+            }
+            let context = state
+                .contexts
+                .iter_mut()
+                .find(|context| context.id == context_id)
+                .expect("the Context was checked above");
+            context.execution_machine_id = machine_id;
             let context = context.clone();
             Ok(Decision {
                 state,
@@ -481,6 +534,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             let context = Context {
                 id: context_id,
                 name: "Personal".into(),
+                execution_machine_id: None,
                 grill_defaults: GrillConfiguration::default(),
             };
             let project = Project {
@@ -857,6 +911,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
         Event::DeleteMachine {
             machine_id,
             run_ids,
+            worktree_ids,
+            repository_location_repository_ids,
         } => {
             let plan = plan_machine_deletion(&state, machine_id)?;
             let mut expected_run_ids = plan.runs.iter().map(|run| run.id).collect::<Vec<_>>();
@@ -870,23 +926,92 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     provided_run_ids,
                 });
             }
-            if !plan.active_run_ids.is_empty() {
-                return Err(DomainError::MachineHasActiveRuns {
+            let mut expected_worktree_ids = plan.worktree_ids.clone();
+            let mut provided_worktree_ids = worktree_ids;
+            expected_worktree_ids.sort_unstable();
+            provided_worktree_ids.sort_unstable();
+            if expected_worktree_ids != provided_worktree_ids {
+                return Err(DomainError::MachineWorktreesMismatch {
                     machine_id,
-                    run_ids: plan.active_run_ids,
+                    expected_worktree_ids,
+                    provided_worktree_ids,
+                });
+            }
+            let mut expected_repository_ids = plan.repository_location_repository_ids.clone();
+            let mut provided_repository_ids = repository_location_repository_ids;
+            expected_repository_ids.sort_unstable();
+            provided_repository_ids.sort_unstable();
+            if expected_repository_ids != provided_repository_ids {
+                return Err(DomainError::MachineRepositoryLocationsMismatch {
+                    machine_id,
+                    expected_repository_ids,
+                    provided_repository_ids,
                 });
             }
 
+            let mut effects = Vec::new();
+            for context in &mut state.contexts {
+                if context.execution_machine_id == Some(machine_id) {
+                    context.execution_machine_id = None;
+                    effects.push(Effect::UpdateContext {
+                        context: context.clone(),
+                    });
+                }
+            }
+
             state.runs.retain(|run| run.machine_id != machine_id);
+            effects.extend(
+                plan.runs
+                    .iter()
+                    .map(|run| Effect::RemoveRun { run_id: run.id }),
+            );
+
+            let removed_worktrees = state
+                .worktrees
+                .iter()
+                .filter(|worktree| worktree.machine_id == machine_id)
+                .cloned()
+                .collect::<Vec<_>>();
+            state
+                .worktrees
+                .retain(|worktree| worktree.machine_id != machine_id);
+            let affected_workspace_ids = removed_worktrees
+                .iter()
+                .map(|worktree| worktree.workspace_id)
+                .collect::<std::collections::BTreeSet<_>>();
+            effects.extend(
+                removed_worktrees
+                    .iter()
+                    .map(|worktree| Effect::RemoveWorktree {
+                        worktree_id: worktree.id,
+                    }),
+            );
+            for workspace_id in affected_workspace_ids {
+                let Some(previous) = state
+                    .workspaces
+                    .iter()
+                    .find(|workspace| workspace.id == workspace_id)
+                    .cloned()
+                else {
+                    continue;
+                };
+                let preparation_state =
+                    workspace_preparation_state(&state, workspace_id, previous.preparation_state);
+                let workspace = state
+                    .workspaces
+                    .iter_mut()
+                    .find(|workspace| workspace.id == workspace_id)
+                    .expect("the affected Workspace was checked above");
+                workspace.preparation_state = preparation_state;
+                effects.push(Effect::PersistWorkspaceUpdate {
+                    workspace: workspace.clone(),
+                });
+            }
+
             state.machines.retain(|machine| machine.id != machine_id);
             state
                 .repository_locations
                 .retain(|location| location.machine_id != machine_id);
-            let mut effects = plan
-                .runs
-                .iter()
-                .map(|run| Effect::RemoveRun { run_id: run.id })
-                .collect::<Vec<_>>();
             effects.push(Effect::RemoveMachine { machine_id });
 
             Ok(Decision { state, effects })
@@ -1055,6 +1180,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     context_id: item_context_id,
                 });
             }
+            ensure_context_execution_machine(&state, item_context_id, machine_id)?;
             let path = clean_name(path, DomainError::EmptyWorktreePath)?;
             let branch = clean_name(branch, DomainError::EmptyBranch)?;
             let base_branch = clean_name(base_branch, DomainError::EmptyBranch)?;
@@ -1394,6 +1520,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     context_id,
                 });
             }
+            ensure_context_execution_machine(&state, context_id, machine_id)?;
             if checkouts.is_empty() {
                 return Err(DomainError::EmptyDirectRunCheckouts);
             }
@@ -1602,6 +1729,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     context_id,
                 });
             }
+            ensure_context_execution_machine(&state, context_id, machine_id)?;
             let project_id = item_project_id(&state, item_id)?;
             let repository = state
                 .repositories
@@ -1747,6 +1875,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     context_id,
                 });
             }
+            ensure_context_execution_machine(&state, context_id, machine_id)?;
             if let Some(run) = state.runs.iter().find(|run| {
                 run.item_id == item_id
                     && run.execution_profile == ExecutionProfile::Grill
@@ -1924,6 +2053,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     context_id,
                 });
             }
+            ensure_context_execution_machine(&state, context_id, machine_id)?;
             let working_directory =
                 clean_name(working_directory, DomainError::EmptyRunWorkingDirectory)?;
             let session_name = clean_name(session_name, DomainError::EmptyRunSessionName)?;

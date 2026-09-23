@@ -313,12 +313,26 @@ pub fn plan_machine_deletion(
         .filter(|run| run.machine_id == machine_id && run_is_active(run))
         .map(|run| run.id)
         .collect();
+    let worktree_ids = state
+        .worktrees
+        .iter()
+        .filter(|worktree| worktree.machine_id == machine_id)
+        .map(|worktree| worktree.id)
+        .collect();
+    let repository_location_repository_ids = state
+        .repository_locations
+        .iter()
+        .filter(|location| location.machine_id == machine_id)
+        .map(|location| location.repository_id)
+        .collect();
 
     Ok(MachineDeletionPlan {
         machine_id,
         name: machine.name.clone(),
         runs,
         active_run_ids,
+        worktree_ids,
+        repository_location_repository_ids,
         state_fingerprint: serde_json::to_string(state)
             .expect("DomainState should always be serializable"),
     })

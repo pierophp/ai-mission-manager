@@ -13,11 +13,14 @@ use std::{
 
 use tauri::{AppHandle, State};
 
+#[cfg(test)]
+use crate::domain::Event;
+
 use crate::{
     dependencies::resolve_executable,
     domain::{
-        decide, ActivityTabView, AgentKind, AuditEntry, Context, ContextAttentionDefault,
-        DomainState, Event, ExecutionMode, ExecutionProfile, ExternalChangePolicy,
+        ActivityTabView, AgentKind, AuditEntry, Context, ContextAttentionDefault,
+        DomainState, ExecutionMode, ExecutionProfile, ExternalChangePolicy,
         ExternalLinkView, ExternalObjectKind, ExternalSnapshot, GrillAnswer, GrillConfiguration,
         GrillContinuationAction, HomeView, Item, ItemRelation, ItemRelationKind, ItemStatus,
         ItemView, Machine, MachineTransport, Project, Repository, Run, RunCheckout,
@@ -175,58 +178,46 @@ impl Runtime {
         Ok(executable)
     }
 
-    pub(crate) fn local_machine_for_item(&mut self, item_id: i64) -> Result<Machine, String> {
-        let context_id = self.item_context_id(item_id)?;
-        if let Some(machine) = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.context_id == context_id && machine.name == "Local Mac")
-            .cloned()
-        {
-            return Ok(machine);
-        }
-
-        let decision = decide(
-            self.state.clone(),
-            Event::RegisterMachine {
-                context_id,
-                name: "Local Mac".into(),
-                socket_name: "ai-mission-manager".into(),
-                transport: MachineTransport::Local,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        let machine = decision
-            .state
-            .machines
-            .last()
-            .cloned()
-            .ok_or_else(|| "Machine registration produced no Machine".to_owned())?;
-        self.commit(decision)?;
-        Ok(machine)
-    }
-
     pub(crate) fn machine_for_item(
         &mut self,
         item_id: i64,
         machine_id: Option<i64>,
     ) -> Result<Machine, String> {
-        let Some(machine_id) = machine_id else {
-            return self.local_machine_for_item(item_id);
-        };
         let context_id = self.item_context_id(item_id)?;
+        let context = self
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+        let configured_machine_id = context.execution_machine_id.ok_or_else(|| {
+            format!(
+                "Context {} has no execution Machine configured. Choose one in Settings → Machines before running this Item.",
+                context.name
+            )
+        })?;
+        if machine_id.is_some_and(|machine_id| machine_id != configured_machine_id) {
+            return Err(format!(
+                "Runs in Context {} must use its configured execution Machine",
+                context.name
+            ));
+        }
         let machine = self
             .state
             .machines
             .iter()
-            .find(|machine| machine.id == machine_id)
+            .find(|machine| machine.id == configured_machine_id)
             .cloned()
-            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
+            .ok_or_else(|| {
+                format!(
+                    "The execution Machine configured for Context {} no longer exists",
+                    context.name
+                )
+            })?;
         if machine.context_id != context_id {
             return Err(format!(
-                "Machine {} is not available in this Item's Context",
-                machine.name
+                "The execution Machine configured for Context {} is not owned by that Context",
+                context.name,
             ));
         }
         Ok(machine)
@@ -692,6 +683,15 @@ pub fn update_context(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn set_context_execution_machine(
+    context_id: i64,
+    machine_id: Option<i64>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    crate::features::structure::set_context_execution_machine(context_id, machine_id, state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn create_project(
     name: String,
     context_id: i64,
@@ -978,10 +978,19 @@ pub fn prepare_machine_deletion(
 pub fn delete_machine(
     machine_id: i64,
     run_ids: Vec<i64>,
+    worktree_ids: Vec<i64>,
+    repository_location_repository_ids: Vec<i64>,
     confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<MachineDeletionResult, String> {
-    crate::features::structure::delete_machine(machine_id, run_ids, confirmed, state)
+    crate::features::structure::delete_machine(
+        machine_id,
+        run_ids,
+        worktree_ids,
+        repository_location_repository_ids,
+        confirmed,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]

@@ -18,20 +18,21 @@ impl SqliteStore {
         let next_reminder_id = self.sequence("next_reminder_id")?;
         let contexts = {
             let mut statement = self.connection.prepare(
-                "SELECT id, name, grill_agent, grill_model, grill_effort
+                "SELECT id, name, execution_machine_id, grill_agent, grill_model, grill_effort
                      FROM contexts ORDER BY id",
             )?;
             let rows = statement.query_map([], |row| {
-                let agent: String = row.get(2)?;
-                let model: String = row.get(3)?;
-                let effort: String = row.get(4)?;
+                let agent: String = row.get(3)?;
+                let model: String = row.get(4)?;
+                let effort: String = row.get(5)?;
                 Ok(Context {
                     id: row.get(0)?,
                     name: row.get(1)?,
+                    execution_machine_id: row.get(2)?,
                     grill_defaults: GrillConfiguration {
                         agent: parse_agent_kind(&agent).map_err(|error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                2,
+                                3,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )

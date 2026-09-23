@@ -78,6 +78,172 @@ fn deleted_personal_context_stays_deleted_after_reopen() {
         .any(|context| context.name == "Personal"));
 }
 
+#[test]
+fn context_execution_machine_round_trips() {
+    let directory = tempdir().expect("temporary directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let mut store = SqliteStore::open(&database).expect("database should open");
+    let state = store.load_state().expect("initial state should load");
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::RegisterMachine {
+            context_id: 1,
+            name: "Build Mac".into(),
+            socket_name: "mission".into(),
+            transport: MachineTransport::Local,
+        },
+    );
+    let _state = apply_event(
+        &mut store,
+        state,
+        Event::SetContextExecutionMachine {
+            context_id: 1,
+            machine_id: Some(1),
+        },
+    );
+
+    let reloaded = store.load_state().expect("updated state should load");
+    assert_eq!(reloaded.contexts[0].execution_machine_id, Some(1));
+    let _state = apply_event(
+        &mut store,
+        reloaded,
+        Event::SetContextExecutionMachine {
+            context_id: 1,
+            machine_id: None,
+        },
+    );
+    assert_eq!(
+        store
+            .load_state()
+            .expect("unconfigured Context should load")
+            .contexts[0]
+            .execution_machine_id,
+        None
+    );
+    drop(store);
+
+    let reopened = SqliteStore::open(&database).expect("database should reopen");
+    assert_eq!(
+        reopened
+            .load_state()
+            .expect("unconfigured Context should remain unconfigured")
+            .contexts[0]
+            .execution_machine_id,
+        None
+    );
+}
+
+#[test]
+fn machine_deletion_removes_metadata_but_leaves_checkout_and_worktree_files() {
+    let directory = tempdir().expect("temporary directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let machine_files = directory.path().join("machine-files");
+    let checkout = machine_files.join("checkout");
+    let worktree = machine_files.join("worktree");
+    fs::create_dir_all(&checkout).expect("checkout directory should exist");
+    fs::create_dir_all(&worktree).expect("worktree directory should exist");
+    fs::write(checkout.join("local-change.txt"), "keep").expect("checkout file should exist");
+    fs::write(worktree.join("local-change.txt"), "keep").expect("worktree file should exist");
+
+    let mut store = SqliteStore::open(&database).expect("database should open");
+    let state = store.load_state().expect("initial state should load");
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::RegisterMachine {
+            context_id: 1,
+            name: "Build Mac".into(),
+            socket_name: "mission".into(),
+            transport: MachineTransport::Local,
+        },
+    );
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::SetContextExecutionMachine {
+            context_id: 1,
+            machine_id: Some(1),
+        },
+    );
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::RegisterRepositoryAtLocation {
+            project_id: 1,
+            name: "mission-manager".into(),
+            remote_url: "https://example.test/repo".into(),
+            base_branch: "main".into(),
+            machine_id: 1,
+            checkout_path: checkout.to_string_lossy().into_owned(),
+            worktree_root: machine_files.to_string_lossy().into_owned(),
+        },
+    );
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::CreateItem {
+            title: "Preserve files when deleting a Machine".into(),
+            context_id: 1,
+            project_id: 1,
+        },
+    );
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::CreateWorkspace {
+            item_id: 1,
+            repositories: vec![WorkspaceRepositoryInput {
+                repository_id: 1,
+                branch: "mission-MC-1".into(),
+                base_branch: "main".into(),
+            }],
+        },
+    );
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::CreateWorktree {
+            workspace_id: 1,
+            repository_id: 1,
+            machine_id: 1,
+            path: worktree.to_string_lossy().into_owned(),
+            branch: "mission-MC-1".into(),
+            base_branch: "main".into(),
+            is_dirty: false,
+        },
+    );
+    let decision = decide(
+        state,
+        Event::DeleteMachine {
+            machine_id: 1,
+            run_ids: Vec::new(),
+            worktree_ids: vec![1],
+            repository_location_repository_ids: vec![1],
+        },
+    )
+    .expect("Machine metadata should be deletable");
+    store
+        .apply(&decision.effects)
+        .expect("Machine metadata should be removed");
+
+    let reloaded = store
+        .load_state()
+        .expect("state after deletion should load");
+    assert!(reloaded.machines.is_empty());
+    assert_eq!(reloaded.contexts[0].execution_machine_id, None);
+    assert!(reloaded.repository_locations.is_empty());
+    assert!(reloaded.worktrees.is_empty());
+    assert_eq!(
+        fs::read_to_string(checkout.join("local-change.txt")).unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        fs::read_to_string(worktree.join("local-change.txt")).unwrap(),
+        "keep"
+    );
+}
+
 fn create_legacy_schema(connection: &Connection) {
     connection
         .execute_batch(
@@ -314,6 +480,14 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
             name: "Local".into(),
             socket_name: "mission".into(),
             transport: MachineTransport::Local,
+        },
+    );
+    state = apply_event(
+        &mut store,
+        state,
+        Event::SetContextExecutionMachine {
+            context_id: 1,
+            machine_id: Some(1),
         },
     );
     state = apply_event(

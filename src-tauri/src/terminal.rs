@@ -5,7 +5,7 @@ use std::{
     process::{Child, ChildStdin, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use serde::Serialize;
@@ -478,6 +478,67 @@ fn run_tmux_output(machine: &Machine, args: &[String]) -> Result<std::process::O
         })
     } else {
         Ok(output)
+    }
+}
+
+pub(crate) fn kill_pane_with_timeout(
+    machine: &Machine,
+    pane_id: &str,
+    timeout: Duration,
+) -> Result<(), String> {
+    let args = vec!["kill-pane".into(), "-t".into(), pane_id.into()];
+    let mut tmux_args = vec!["-f", "/dev/null", "-L", machine.socket_name.as_str()];
+    tmux_args.extend(args.iter().map(String::as_str));
+    let (program, arguments) =
+        build_tmux_process_command(&terminal_transport(machine), false, &tmux_args, "tmux")?;
+    let mut child = Command::new(program)
+        .args(arguments)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Could not connect to Machine {}: {error}", machine.name))?;
+    let started_at = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started_at.elapsed() < timeout => thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "Timed out after {} seconds stopping a Run pane on Machine {}",
+                    timeout.as_secs(),
+                    machine.name
+                ));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "Could not stop a Run pane on Machine {}: {error}",
+                    machine.name
+                ));
+            }
+        }
+    }
+    let output = child.wait_with_output().map_err(|error| {
+        format!(
+            "Could not read the Run pane stop result from Machine {}: {error}",
+            machine.name
+        )
+    })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if detail.is_empty() {
+            format!(
+                "Machine {} tmux exited with {}",
+                machine.name, output.status
+            )
+        } else {
+            format!("Machine {}: {detail}", machine.name)
+        })
     }
 }
 

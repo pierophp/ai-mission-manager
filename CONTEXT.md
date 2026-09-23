@@ -7,7 +7,7 @@ A personal control plane for work that is done by the user, delegated to AI codi
 ### Organising work
 
 **Context**:
-A top-level boundary isolating one area of work, along with the providers, repositories and machines that belong to it. An Item belongs to exactly one Context.
+A top-level boundary isolating one area of work, along with its providers, repositories and Machines. A Context may have no execution Machine while being configured; once one is assigned, every Run and Worktree in that Context uses it. An Item belongs to exactly one Context.
 _Avoid_: workspace, tenant, account, area
 
 **Project**:

@@ -7,11 +7,24 @@ pub fn suggest_untracked_runs(
     let mut suggestions = panes
         .iter()
         .filter(|pane| {
-            !state.runs.iter().any(|run| {
-                run.machine_id == pane.machine_id
-                    && run.session_name == pane.session_name
-                    && run.pane_id == pane.pane_id
-            })
+            let selected_for_context = state
+                .machines
+                .iter()
+                .find(|machine| machine.id == pane.machine_id)
+                .and_then(|machine| {
+                    state
+                        .contexts
+                        .iter()
+                        .find(|context| context.id == machine.context_id)
+                        .map(|context| context.execution_machine_id == Some(machine.id))
+                })
+                .unwrap_or(false);
+            selected_for_context
+                && !state.runs.iter().any(|run| {
+                    run.machine_id == pane.machine_id
+                        && run.session_name == pane.session_name
+                        && run.pane_id == pane.pane_id
+                })
         })
         .filter_map(|pane| {
             let machine = state
@@ -802,6 +815,26 @@ pub(crate) fn item_context_id(state: &DomainState, item_id: i64) -> Result<i64, 
         .ok_or(DomainError::ProjectNotFound {
             project_id: item.project_id,
         })
+}
+
+pub(crate) fn ensure_context_execution_machine(
+    state: &DomainState,
+    context_id: i64,
+    machine_id: i64,
+) -> Result<(), DomainError> {
+    let context = state
+        .contexts
+        .iter()
+        .find(|context| context.id == context_id)
+        .ok_or(DomainError::ContextNotFound { context_id })?;
+    match context.execution_machine_id {
+        Some(execution_machine_id) if execution_machine_id == machine_id => Ok(()),
+        Some(_) => Err(DomainError::ContextExecutionMachineMismatch {
+            context_id,
+            machine_id,
+        }),
+        None => Err(DomainError::ContextHasNoExecutionMachine { context_id }),
+    }
 }
 
 pub(crate) fn ensure_item(state: &DomainState, item_id: i64) -> Result<(), DomainError> {

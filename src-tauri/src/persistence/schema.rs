@@ -15,6 +15,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
          CREATE TABLE IF NOT EXISTS contexts (
              id INTEGER PRIMARY KEY NOT NULL,
              name TEXT NOT NULL UNIQUE,
+             execution_machine_id INTEGER,
              grill_agent TEXT NOT NULL DEFAULT 'claude',
              grill_model TEXT NOT NULL DEFAULT 'claude-sonnet-4-5',
              grill_effort TEXT NOT NULL DEFAULT 'high'
@@ -283,6 +284,26 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
          CREATE INDEX IF NOT EXISTS audit_entries_by_recorded_at
              ON audit_entries (recorded_at, id);",
     )?;
+
+    let context_columns = table_columns(connection, "contexts")?;
+    if !context_columns
+        .iter()
+        .any(|column| column == "execution_machine_id")
+    {
+        connection.execute(
+            "ALTER TABLE contexts ADD COLUMN execution_machine_id INTEGER",
+            [],
+        )?;
+        connection.execute(
+            "UPDATE contexts
+             SET execution_machine_id = (
+                 SELECT MIN(id) FROM machines WHERE machines.context_id = contexts.id
+             )
+             WHERE execution_machine_id IS NULL
+               AND (SELECT COUNT(*) FROM machines WHERE machines.context_id = contexts.id) = 1",
+            [],
+        )?;
+    }
 
     let repository_columns = table_columns(connection, "repositories")?;
     if !repository_columns.is_empty()

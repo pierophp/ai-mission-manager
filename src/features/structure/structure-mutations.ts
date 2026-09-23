@@ -9,6 +9,8 @@ export const structureActions = {
   createContext: (name: string) => () => structureAdapter.createContext(name),
   updateContext: (contextId: number, name: string) =>
     () => structureAdapter.updateContext(contextId, name),
+  setContextExecutionMachine: (contextId: number, machineId: number | null) =>
+    () => structureAdapter.setContextExecutionMachine(contextId, machineId),
   createProject: (
     name: string,
     contextId: number,
@@ -78,8 +80,19 @@ export const structureActions = {
   checkMachine: (machineId: number) => () => structureAdapter.checkMachine(machineId),
   prepareMachineDeletion: (machineId: number) =>
     () => structureAdapter.prepareMachineDeletion(machineId),
-  deleteMachine: (machineId: number, runIds: number[]) =>
-    () => structureAdapter.deleteMachine(machineId, runIds),
+  deleteMachine: (
+    machineId: number,
+    runIds: number[],
+    worktreeIds: number[],
+    repositoryLocationRepositoryIds: number[],
+  ) =>
+    () =>
+      structureAdapter.deleteMachine(
+        machineId,
+        runIds,
+        worktreeIds,
+        repositoryLocationRepositoryIds,
+      ),
   deleteRun: (runId: number) => () => structureAdapter.deleteRun(runId),
   setAttentionDefault: (
     contextId: number,

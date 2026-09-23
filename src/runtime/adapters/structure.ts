@@ -37,6 +37,8 @@ export const structureAdapter = {
   createContext: (name: string) => command<Context>("create_context", { name }),
   updateContext: (contextId: number, name: string) =>
     command<Context>("update_context", { contextId, name }),
+  setContextExecutionMachine: (contextId: number, machineId: number | null) =>
+    command<Context>("set_context_execution_machine", { contextId, machineId }),
   createProject: (
     name: string,
     contextId: number,
@@ -151,10 +153,17 @@ export const structureAdapter = {
     }),
   prepareMachineDeletion: (machineId: number) =>
     command<MachineDeletionPreview>("prepare_machine_deletion", { machineId }),
-  deleteMachine: (machineId: number, runIds: number[]) =>
+  deleteMachine: (
+    machineId: number,
+    runIds: number[],
+    worktreeIds: number[],
+    repositoryLocationRepositoryIds: number[],
+  ) =>
     command<MachineDeletionResult>("delete_machine", {
       machineId,
       runIds,
+      worktreeIds,
+      repositoryLocationRepositoryIds,
       confirmed: true,
     }),
   deleteRun: (runId: number) =>

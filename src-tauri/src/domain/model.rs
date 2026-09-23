@@ -8,6 +8,8 @@ use super::*;
 pub struct Context {
     pub id: i64,
     pub name: String,
+    #[serde(default)]
+    pub execution_machine_id: Option<i64>,
     pub grill_defaults: GrillConfiguration,
 }
 
@@ -678,6 +680,8 @@ pub struct MachineDeletionPlan {
     pub name: String,
     pub runs: Vec<MachineDeletionRun>,
     pub active_run_ids: Vec<i64>,
+    pub worktree_ids: Vec<i64>,
+    pub repository_location_repository_ids: Vec<i64>,
     #[serde(skip)]
     pub state_fingerprint: String,
 }
@@ -897,6 +901,8 @@ pub enum AuditAction {
         machine_id: i64,
         #[serde(default)]
         run_count: Option<usize>,
+        #[serde(default)]
+        worktree_count: Option<usize>,
     },
     RunCreated {
         run_id: i64,
