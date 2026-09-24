@@ -1500,9 +1500,16 @@ impl Runtime {
         Ok(())
     }
 
-    pub(crate) fn reconcile_runs(&mut self) -> Result<(), String> {
+    pub(crate) fn reconcile_runs(&mut self) -> Result<RunReconciliationResult, String> {
         self.recover_run_states()?;
-        for run in self.state.runs.clone() {
+        let runs = self.state.runs.clone();
+        let mut observations = HashMap::new();
+        let mut failures = Vec::new();
+        let mut observed_machine_ids = HashSet::new();
+        for run in &runs {
+            if !observed_machine_ids.insert(run.machine_id) {
+                continue;
+            }
             let Some(machine) = self
                 .state
                 .machines
@@ -1511,19 +1518,42 @@ impl Runtime {
             else {
                 continue;
             };
-            let pane_status = if self.terminal_runtime.probe_machine(machine).is_err() {
-                RunPaneStatus::Unknown
-            } else {
-                match self.terminal_runtime.list_panes(machine, &run.session_name) {
-                    Ok(panes) if panes.iter().any(|pane| pane.pane_id == run.pane_id) => {
-                        RunPaneStatus::Available
-                    }
-                    Ok(_) | Err(_) => RunPaneStatus::Missing,
+            match self.terminal_runtime.observe_machine(machine) {
+                Ok(panes) => {
+                    observations.insert(machine.id, Ok(panes));
                 }
+                Err(error) => {
+                    failures.push(MachineObservationFailure {
+                        machine_id: machine.id,
+                        machine_name: machine.name.clone(),
+                        kind: error.kind,
+                        message: error.message,
+                    });
+                    observations.insert(machine.id, Err(()));
+                }
+            }
+        }
+
+        for run in runs {
+            let Some(observation) = observations.get(&run.machine_id) else {
+                continue;
+            };
+            let pane_status = match observation {
+                Err(()) => RunPaneStatus::Unknown,
+                Ok(panes)
+                    if panes.iter().any(|pane| {
+                        pane.session_name == run.session_name && pane.pane_id == run.pane_id
+                    }) =>
+                {
+                    RunPaneStatus::Available
+                }
+                Ok(_) => RunPaneStatus::Missing,
             };
             let phase_needs_recovery =
                 run.execution_profile == ExecutionProfile::Grill && run.grill_phase.is_none();
-            if pane_status == run.pane_status && !phase_needs_recovery {
+            if pane_status == run.pane_status
+                && (!phase_needs_recovery || pane_status == RunPaneStatus::Unknown)
+            {
                 if pane_status == RunPaneStatus::Available
                     && run.execution_profile == ExecutionProfile::Grill
                 {
@@ -1556,7 +1586,7 @@ impl Runtime {
                 }
             }
         }
-        Ok(())
+        Ok(RunReconciliationResult { failures })
     }
 
     pub(crate) fn apply_agent_state_record(

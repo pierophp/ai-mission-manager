@@ -680,7 +680,9 @@ pub fn get_home(
 }
 
 #[tauri::command]
-pub fn reconcile_runs(state: State<'_, Mutex<Runtime>>) -> Result<(), String> {
+pub fn reconcile_runs(
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<crate::terminal::RunReconciliationResult, String> {
     crate::features::work::reconcile_runs(state)
 }
 
@@ -1253,7 +1255,9 @@ mod tests {
     };
     use crate::features::deletion::RESET_CONFIRMATION_PHRASE;
     use crate::persistence::SqliteStore;
-    use crate::terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime};
+    use crate::terminal::{
+        FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime, MachineObservationFailureKind,
+    };
 
     #[test]
     fn project_repositories_are_implicitly_available_to_items_and_persist() {
@@ -1757,10 +1761,10 @@ mod tests {
             last_observed: MachineObservation::Unknown,
             last_observed_at: None,
         }));
-        runtime.state.runs.extend((1..=3).map(|id| Run {
+        let make_run = |id, machine_id, pane_id: &str| Run {
             id,
             item_id: 1,
-            machine_id: id,
+            machine_id,
             agent: AgentKind::Claude,
             execution_profile: ExecutionProfile::Implement,
             model: None,
@@ -1768,8 +1772,8 @@ mod tests {
             skill_snapshot: None,
             prompt: format!("Run {id}"),
             working_directory: directory.path().to_string_lossy().into_owned(),
-            session_name: format!("session-{id}"),
-            pane_id: "%1".into(),
+            session_name: format!("session-{machine_id}"),
+            pane_id: pane_id.into(),
             started_at: id,
             state: RunState::Working,
             pane_status: RunPaneStatus::Unknown,
@@ -1784,15 +1788,38 @@ mod tests {
             grill_response: None,
             grill_phase: None,
             grill_action: None,
-        }));
+        };
+        runtime.state.runs.extend([
+            make_run(1, 1, "%1"),
+            make_run(2, 1, "%missing"),
+            make_run(3, 2, "%1"),
+            make_run(4, 3, "%1"),
+        ]);
 
-        runtime
+        let result = runtime
             .reconcile_runs()
             .expect("Run reconciliation should complete through the fake");
 
         assert_eq!(runtime.state.runs[0].pane_status, RunPaneStatus::Available);
-        assert_eq!(runtime.state.runs[1].pane_status, RunPaneStatus::Unknown);
-        assert_eq!(runtime.state.runs[2].pane_status, RunPaneStatus::Missing);
+        assert_eq!(runtime.state.runs[1].pane_status, RunPaneStatus::Missing);
+        assert_eq!(runtime.state.runs[2].pane_status, RunPaneStatus::Unknown);
+        assert_eq!(runtime.state.runs[3].pane_status, RunPaneStatus::Unknown);
+        assert!(runtime
+            .state
+            .runs
+            .iter()
+            .all(|run| run.state == RunState::Working));
+        assert_eq!(result.failures.len(), 2);
+        assert_eq!(result.failures[0].machine_id, 2);
+        assert_eq!(
+            result.failures[0].kind,
+            MachineObservationFailureKind::Unreachable
+        );
+        assert_eq!(result.failures[1].machine_id, 3);
+        assert_eq!(
+            result.failures[1].kind,
+            MachineObservationFailureKind::TmuxQueryFailed
+        );
         let recorded_commands = commands
             .lock()
             .expect("fake terminal command log should remain available")
@@ -1800,17 +1827,9 @@ mod tests {
         assert_eq!(
             recorded_commands,
             vec![
-                FakeTerminalCommand::ProbeMachine { machine_id: 1 },
-                FakeTerminalCommand::ListPanes {
-                    machine_id: 1,
-                    session_name: "session-1".into(),
-                },
-                FakeTerminalCommand::ProbeMachine { machine_id: 2 },
-                FakeTerminalCommand::ProbeMachine { machine_id: 3 },
-                FakeTerminalCommand::ListPanes {
-                    machine_id: 3,
-                    session_name: "session-3".into(),
-                },
+                FakeTerminalCommand::ObserveMachine { machine_id: 1 },
+                FakeTerminalCommand::ObserveMachine { machine_id: 2 },
+                FakeTerminalCommand::ObserveMachine { machine_id: 3 },
             ]
         );
     }
@@ -1930,6 +1949,22 @@ mod tests {
             "-t",
             &session,
         ]);
+        let survivor_session = format!("grill-reconcile-survivor-{}", std::process::id());
+        run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "new-session",
+            "-d",
+            "-s",
+            &survivor_session,
+            "-c",
+            directory
+                .path()
+                .to_str()
+                .expect("temporary path should be valid"),
+        ]);
         runtime
             .reconcile_runs()
             .expect("Pane loss should remain recoverable");
@@ -1938,6 +1973,15 @@ mod tests {
         assert_eq!(missing.grill_phase, Some(GrillPhase::RecoverablePaneLoss));
         assert_eq!(missing.grill_answers.len(), 1);
         assert!(missing.transcript.contains("Keep this decision?"));
+        run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "kill-session",
+            "-t",
+            &survivor_session,
+        ]);
     }
 
     #[cfg(unix)]

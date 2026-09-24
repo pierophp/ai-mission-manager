@@ -18,6 +18,11 @@ use crate::{
 pub trait TerminalRuntime: Send + Sync {
     fn probe_machine(&self, machine: &Machine) -> Result<(), String>;
 
+    fn observe_machine(
+        &self,
+        machine: &Machine,
+    ) -> Result<Vec<ObservedPane>, MachineObservationError>;
+
     fn list_panes(&self, machine: &Machine, session_name: &str)
         -> Result<Vec<PaneSummary>, String>;
 
@@ -73,6 +78,40 @@ pub struct AgentPaneSummary {
     pub session_name: String,
     pub pane_id: String,
     pub current_path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedPane {
+    pub session_name: String,
+    pub pane_id: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum MachineObservationFailureKind {
+    Unreachable,
+    TmuxQueryFailed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MachineObservationError {
+    pub kind: MachineObservationFailureKind,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineObservationFailure {
+    pub machine_id: i64,
+    pub machine_name: String,
+    pub kind: MachineObservationFailureKind,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunReconciliationResult {
+    pub failures: Vec<MachineObservationFailure>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -440,6 +479,13 @@ impl TerminalRuntime for TmuxRuntime {
         crate::terminal::probe_machine(machine)
     }
 
+    fn observe_machine(
+        &self,
+        machine: &Machine,
+    ) -> Result<Vec<ObservedPane>, MachineObservationError> {
+        crate::terminal::observe_machine(machine)
+    }
+
     fn list_panes(
         &self,
         machine: &Machine,
@@ -499,6 +545,9 @@ pub(crate) enum FakeMachineOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FakeTerminalCommand {
     ProbeMachine {
+        machine_id: i64,
+    },
+    ObserveMachine {
         machine_id: i64,
     },
     ListPanes {
@@ -587,6 +636,29 @@ impl TerminalRuntime for FakeTerminalRuntime {
             FakeMachineOutcome::Unreachable => {
                 Err(format!("fake Machine {} is unreachable", machine.name))
             }
+        }
+    }
+
+    fn observe_machine(
+        &self,
+        machine: &Machine,
+    ) -> Result<Vec<ObservedPane>, MachineObservationError> {
+        self.record(FakeTerminalCommand::ObserveMachine {
+            machine_id: machine.id,
+        });
+        match self.outcome(machine) {
+            FakeMachineOutcome::Available => Ok(vec![ObservedPane {
+                session_name: format!("session-{}", machine.id),
+                pane_id: "%1".into(),
+            }]),
+            FakeMachineOutcome::Unreachable => Err(MachineObservationError {
+                kind: MachineObservationFailureKind::Unreachable,
+                message: format!("fake Machine {} is unreachable", machine.name),
+            }),
+            FakeMachineOutcome::TmuxQueryFailed => Err(MachineObservationError {
+                kind: MachineObservationFailureKind::TmuxQueryFailed,
+                message: format!("fake tmux query failed on Machine {}", machine.name),
+            }),
         }
     }
 
@@ -1019,6 +1091,96 @@ pub fn list_panes(machine: &Machine, session_name: &str) -> Result<Vec<PaneSumma
         .lines()
         .map(parse_pane_summary)
         .collect::<Result<Vec<_>, _>>()
+}
+
+pub fn observe_machine(machine: &Machine) -> Result<Vec<ObservedPane>, MachineObservationError> {
+    let mut tmux_args = vec!["-f", "/dev/null", "-L", machine.socket_name.as_str()];
+    tmux_args.extend(["list-panes", "-a", "-F", "#{session_name}\t#{pane_id}"]);
+    let (program, arguments) =
+        build_tmux_process_command(&terminal_transport(machine), false, &tmux_args, "tmux")
+            .map_err(|message| MachineObservationError {
+                kind: MachineObservationFailureKind::TmuxQueryFailed,
+                message,
+            })?;
+    let output = Command::new(program)
+        .args(arguments)
+        .output()
+        .map_err(|error| MachineObservationError {
+            kind: if matches!(machine.transport, MachineTransport::Ssh { .. }) {
+                MachineObservationFailureKind::Unreachable
+            } else {
+                MachineObservationFailureKind::TmuxQueryFailed
+            },
+            message: format!("Could not observe Machine {}: {error}", machine.name),
+        })?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let message = if detail.is_empty() {
+            format!(
+                "Machine {} tmux exited with {}",
+                machine.name, output.status
+            )
+        } else {
+            format!("Machine {}: {detail}", machine.name)
+        };
+        let unreachable = matches!(machine.transport, MachineTransport::Ssh { .. })
+            && is_ssh_connection_failure(&detail);
+        return Err(MachineObservationError {
+            kind: if unreachable {
+                MachineObservationFailureKind::Unreachable
+            } else {
+                MachineObservationFailureKind::TmuxQueryFailed
+            },
+            message,
+        });
+    }
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| {
+            let Some((session_name, pane_id)) = line.split_once('\t') else {
+                return Err(MachineObservationError {
+                    kind: MachineObservationFailureKind::TmuxQueryFailed,
+                    message: format!(
+                        "Could not parse Machine {} tmux Pane observation",
+                        machine.name
+                    ),
+                });
+            };
+            if session_name.is_empty() || pane_id.is_empty() {
+                return Err(MachineObservationError {
+                    kind: MachineObservationFailureKind::TmuxQueryFailed,
+                    message: format!(
+                        "Could not parse Machine {} tmux Pane observation",
+                        machine.name
+                    ),
+                });
+            }
+            Ok(ObservedPane {
+                session_name: session_name.to_owned(),
+                pane_id: pane_id.to_owned(),
+            })
+        })
+        .collect()
+}
+
+fn is_ssh_connection_failure(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    [
+        "could not resolve hostname",
+        "connection refused",
+        "connection timed out",
+        "operation timed out",
+        "no route to host",
+        "network is unreachable",
+        "connection reset by peer",
+        "connection closed by",
+        "ssh: connect to host",
+        "permission denied (publickey",
+        "host key verification failed",
+    ]
+    .iter()
+    .any(|pattern| detail.contains(pattern))
 }
 
 pub fn list_agent_panes(machine: &Machine) -> Result<Vec<AgentPaneSummary>, String> {

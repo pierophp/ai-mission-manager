@@ -19,6 +19,7 @@ import type {
   Run,
   RunCheckout,
   RunPromptSelection,
+  RunReconciliationResult,
   RunSuggestion,
   WorktreeRemovalReport,
   Worktree,
@@ -34,7 +35,7 @@ export const workAdapter = {
       query,
       contextId: contextId ?? null,
     }),
-  reconcileRuns: () => command<void>("reconcile_runs"),
+  reconcileRuns: () => command<RunReconciliationResult>("reconcile_runs"),
   listRunSuggestions: () => command<RunSuggestion[]>("list_run_suggestions"),
   attachRun: (suggestion: RunSuggestion) =>
     command<Run>("attach_run", { suggestion }),

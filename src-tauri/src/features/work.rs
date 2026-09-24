@@ -9,6 +9,7 @@
 //! command registration local without becoming a replacement monolith.
 
 use std::{
+    collections::{HashMap, HashSet},
     env,
     path::{Path, PathBuf},
     sync::Mutex,
@@ -43,7 +44,8 @@ use crate::{
     provider::{classify_url, github_repository_name, resolve_gh_executable, GithubCli},
     terminal::{
         capture_pane, capture_pane_transcript, open_pane_in_terminal, send_input_to_pane,
-        terminal_transport, AgentLaunchContext, ExternalPaneIdentity, TmuxControlPane,
+        terminal_transport, AgentLaunchContext, ExternalPaneIdentity, MachineObservationFailure,
+        RunReconciliationResult, TmuxControlPane,
     },
 };
 
@@ -694,7 +696,9 @@ pub(crate) fn finish_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Resul
     locked(state, |runtime| runtime.finish_run(run_id))
 }
 
-pub(crate) fn reconcile_runs(state: State<'_, Mutex<Runtime>>) -> Result<(), String> {
+pub(crate) fn reconcile_runs(
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<RunReconciliationResult, String> {
     locked(state, |runtime| runtime.reconcile_runs())
 }
 

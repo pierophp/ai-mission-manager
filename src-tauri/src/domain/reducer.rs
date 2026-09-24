@@ -2337,7 +2337,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .ok_or(DomainError::RunNotFound { run_id })?;
             run.pane_status = status;
             if run.execution_profile == ExecutionProfile::Grill {
-                if status != RunPaneStatus::Available && run_is_active(run) {
+                if status == RunPaneStatus::Missing && run_is_active(run) {
                     run.grill_phase = Some(GrillPhase::RecoverablePaneLoss);
                 } else if status == RunPaneStatus::Available
                     && (run.grill_phase.is_none()

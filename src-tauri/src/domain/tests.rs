@@ -1091,6 +1091,34 @@ mod grill_contract_tests {
     }
 
     #[test]
+    fn unknown_pane_observation_does_not_trigger_grill_pane_loss() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let working = decide(
+            started.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Working,
+            },
+        )
+        .expect("the hook should report the active Run");
+        let previous_state = working.state.runs[0].state;
+
+        let unknown = decide(
+            working.state,
+            Event::SetRunPaneStatus {
+                run_id: 1,
+                status: RunPaneStatus::Unknown,
+            },
+        )
+        .expect("an inconclusive observation should be recorded");
+
+        assert_eq!(unknown.state.runs[0].state, previous_state);
+        assert_eq!(unknown.state.runs[0].pane_status, RunPaneStatus::Unknown);
+        assert_eq!(unknown.state.runs[0].grill_phase, Some(GrillPhase::Working));
+    }
+
+    #[test]
     fn finishing_a_grill_run_is_explicit_and_keeps_the_item_status_unchanged() {
         let started = decide(state(), start_event(GrillConfiguration::default()))
             .expect("the Grill should start");

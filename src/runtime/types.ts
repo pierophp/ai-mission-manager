@@ -561,6 +561,19 @@ export type PollResult = {
   failures: { external_object_id: number; error: string }[];
 };
 
+export type MachineObservationFailureKind = "unreachable" | "tmuxQueryFailed";
+
+export type MachineObservationFailure = {
+  machineId: number;
+  machineName: string;
+  kind: MachineObservationFailureKind;
+  message: string;
+};
+
+export type RunReconciliationResult = {
+  failures: MachineObservationFailure[];
+};
+
 export type AuditAction = {
   action: string;
   context_id?: number;
