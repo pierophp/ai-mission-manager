@@ -31,6 +31,10 @@ export function EmbeddedTerminal({
   const activePaneRef = useRef(initialPane);
   const attachRequestRef = useRef(0);
   const attachedRef = useRef(false);
+  const activeGenerationRef = useRef<number | undefined>(undefined);
+  const snapshotInstallingRef = useRef(false);
+  const pendingOutputRef = useRef(new Map<number, TerminalOutputEvent[]>());
+  const pendingExitRef = useRef(new Map<number, TerminalExitEvent[]>());
   const terminalId = `run-${runId}`;
   const [activePane, setActivePane] = useState(initialPane);
   const [panes, setPanes] = useState<PaneTab[]>([initialPane]);
@@ -85,6 +89,7 @@ export function EmbeddedTerminal({
       activePaneRef.current = pane;
       setActivePane(pane);
       attachedRef.current = false;
+      snapshotInstallingRef.current = true;
       setStatus(`Attaching ${pane.label}…`);
       setTerminalError(undefined);
 
@@ -96,6 +101,13 @@ export function EmbeddedTerminal({
           pane.paneId,
         );
         if (disposed || requestId !== attachRequestRef.current) return;
+        if (
+          activeGenerationRef.current !== undefined &&
+          attachment.generation < activeGenerationRef.current
+        ) {
+          snapshotInstallingRef.current = false;
+          return;
+        }
 
         setPanes(attachment.panes);
         const attachedPane =
@@ -106,14 +118,60 @@ export function EmbeddedTerminal({
         setActivePane(attachedPane);
         terminal.reset();
         terminal.write(Uint8Array.from(attachment.snapshot));
+        activeGenerationRef.current = attachment.generation;
+        snapshotInstallingRef.current = false;
         attachedRef.current = true;
-        setStatus("Connected · closing this view leaves the Run running");
+        let paneExited = false;
+        for (const generation of pendingOutputRef.current.keys()) {
+          if (generation < attachment.generation) {
+            pendingOutputRef.current.delete(generation);
+          }
+        }
+        for (const generation of pendingExitRef.current.keys()) {
+          if (generation < attachment.generation) {
+            pendingExitRef.current.delete(generation);
+          }
+        }
+        for (const event of pendingOutputRef.current.get(attachment.generation) ?? []) {
+          if (event.paneId === attachment.paneId) {
+            terminal.write(Uint8Array.from(event.data));
+          }
+        }
+        pendingOutputRef.current.delete(attachment.generation);
+        for (const event of pendingExitRef.current.get(attachment.generation) ?? []) {
+          if (event.paneId === attachment.paneId) {
+            attachedRef.current = false;
+            paneExited = true;
+          }
+        }
+        pendingExitRef.current.delete(attachment.generation);
+        setStatus(
+          paneExited
+            ? "Pane connection closed; the Run was left untouched"
+            : "Connected · closing this view leaves the Run running",
+        );
         resizeTerminal();
       } catch (attachError) {
         if (disposed || requestId !== attachRequestRef.current) return;
         attachedRef.current = false;
+        snapshotInstallingRef.current = false;
         setStatus("Could not attach");
         setTerminalError(errorMessage(attachError));
+        const activeGeneration = activeGenerationRef.current;
+        if (activeGeneration !== undefined) {
+          for (const event of pendingOutputRef.current.get(activeGeneration) ?? []) {
+            if (event.paneId === activePaneRef.current.paneId) {
+              terminal.write(Uint8Array.from(event.data));
+            }
+          }
+          pendingOutputRef.current.delete(activeGeneration);
+          for (const event of pendingExitRef.current.get(activeGeneration) ?? []) {
+            if (event.paneId === activePaneRef.current.paneId) {
+              setStatus("Pane connection closed; the Run was left untouched");
+            }
+          }
+          pendingExitRef.current.delete(activeGeneration);
+        }
       }
     };
     attachPaneRef.current = attachPane;
@@ -124,24 +182,44 @@ export function EmbeddedTerminal({
           "terminal-output",
           (event) => {
             const payload = event.payload;
+            if (payload.terminalId !== terminalId) return;
+            const activeGeneration = activeGenerationRef.current;
+            if (activeGeneration !== undefined && payload.generation < activeGeneration) {
+              return;
+            }
             if (
-              payload.terminalId === terminalId &&
+              payload.generation === activeGeneration &&
+              !snapshotInstallingRef.current &&
               payload.paneId === activePaneRef.current.paneId
             ) {
               terminal.write(Uint8Array.from(payload.data));
+            } else if (snapshotInstallingRef.current || activeGeneration === undefined) {
+              const pending = pendingOutputRef.current.get(payload.generation) ?? [];
+              pending.push(payload);
+              pendingOutputRef.current.set(payload.generation, pending);
             }
           },
         ),
         await terminalRuntimeAdapter.listen<TerminalExitEvent>(
           "terminal-exit",
           (event) => {
+            const payload = event.payload;
+            if (disposed || payload.terminalId !== terminalId) return;
+            const activeGeneration = activeGenerationRef.current;
+            if (activeGeneration !== undefined && payload.generation < activeGeneration) {
+              return;
+            }
             if (
-              event.payload.terminalId === terminalId &&
-              event.payload.paneId === activePaneRef.current.paneId &&
-              !disposed
+              payload.generation === activeGeneration &&
+              !snapshotInstallingRef.current &&
+              payload.paneId === activePaneRef.current.paneId
             ) {
               attachedRef.current = false;
               setStatus("Pane connection closed; the Run was left untouched");
+            } else if (snapshotInstallingRef.current || activeGeneration === undefined) {
+              const pending = pendingExitRef.current.get(payload.generation) ?? [];
+              pending.push(payload);
+              pendingExitRef.current.set(payload.generation, pending);
             }
           },
         ),

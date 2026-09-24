@@ -6,7 +6,7 @@
 //! Worktree checks, and local-only cleanup before committing the reducer's
 //! decision through the shared `Runtime`.
 
-use std::time::Duration;
+use std::{path::PathBuf, sync::Mutex, time::Duration};
 
 use crate::{
     app::{RunDeletionResult, Runtime},
@@ -15,8 +15,9 @@ use crate::{
         plan_machine_deletion, plan_project_deletion, plan_repository_deletion,
         plan_reset_local_data, run_is_active, run_uses_repository, Event,
         ExternalObjectDeletionPlan, ExternalObjectDeletionSummary, ItemDeletionPlan,
-        ItemDeletionSummary, MachineDeletionPlan, ParentDeletionPlan, ParentDeletionSummary,
-        RepositoryDeletionPlan, ResetLocalDataPlan, ResetLocalDataSummary,
+        ItemDeletionSummary, Machine, MachineDeletionPlan, ParentDeletionPlan,
+        ParentDeletionSummary, Repository, RepositoryDeletionPlan, RepositoryLocation,
+        ResetLocalDataPlan, ResetLocalDataSummary, Worktree,
     },
     git::GitCli,
     terminal::kill_pane_with_timeout,
@@ -51,6 +52,75 @@ pub(crate) struct WorktreeRemovalReport {
     pub branch: String,
     pub is_dirty: bool,
     pub requires_destructive_confirmation: bool,
+}
+
+struct WorktreeRemovalSnapshot {
+    worktree: Worktree,
+    repository: Repository,
+    machine: Machine,
+    location: RepositoryLocation,
+    checkout_path: PathBuf,
+    worktree_path: PathBuf,
+}
+
+impl WorktreeRemovalSnapshot {
+    fn observe(self) -> Result<WorktreeRemovalObservation, String> {
+        let inspection = GitCli::system()
+            .validate_worktree_attachment_on_machine(
+                &self.machine,
+                &self.repository,
+                &self.checkout_path,
+                &self.worktree_path,
+                &self.worktree.branch,
+                true,
+            )
+            .map_err(|error| error.to_string())?;
+        let report = WorktreeRemovalReport {
+            worktree_id: self.worktree.id,
+            workspace_id: self.worktree.workspace_id,
+            repository_id: self.worktree.repository_id,
+            repository_name: self.repository.name.clone(),
+            machine_id: self.worktree.machine_id,
+            path: self.worktree.path.clone(),
+            branch: self.worktree.branch.clone(),
+            is_dirty: inspection.is_dirty,
+            requires_destructive_confirmation: inspection.is_dirty,
+        };
+        Ok(WorktreeRemovalObservation {
+            snapshot: self,
+            report,
+        })
+    }
+}
+
+struct WorktreeRemovalObservation {
+    snapshot: WorktreeRemovalSnapshot,
+    report: WorktreeRemovalReport,
+}
+
+pub(crate) async fn prepare_worktree_removal_with_state(
+    worktree_id: i64,
+    state: &Mutex<Runtime>,
+) -> Result<WorktreeRemovalReport, String> {
+    let snapshot = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        runtime.worktree_removal_snapshot(worktree_id)?
+    };
+    let observation = tauri::async_runtime::spawn_blocking(move || snapshot.observe())
+        .await
+        .map_err(|error| format!("Worktree state worker failed: {error}"))??;
+    let mut runtime = state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+    if !runtime.worktree_removal_snapshot_is_current(&observation.snapshot) {
+        return Err("The Worktree or its Repository location changed while its state was inspected; review it again".into());
+    }
+    runtime
+        .pending_worktree_removals
+        .insert(worktree_id, observation.report.clone());
+    Ok(observation.report)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -299,10 +369,10 @@ impl Runtime {
             .ok_or_else(|| format!("Repository {repository_id} does not exist"))
     }
 
-    fn build_worktree_removal_report(
+    fn worktree_removal_snapshot(
         &self,
         worktree_id: i64,
-    ) -> Result<WorktreeRemovalReport, String> {
+    ) -> Result<WorktreeRemovalSnapshot, String> {
         let worktree = self
             .state
             .worktrees
@@ -334,39 +404,49 @@ impl Runtime {
                 )
             })?;
         let machine_home = machine_home_directory(&machine);
-        let canonical_checkout = resolve_machine_path(&location.checkout_path, &machine_home);
-        let path = resolve_machine_path(&worktree.path, &machine_home);
-        let inspection = GitCli::system()
-            .validate_worktree_attachment_on_machine(
-                &machine,
-                &repository,
-                &canonical_checkout,
-                &path,
-                &worktree.branch,
-                true,
-            )
-            .map_err(|error| error.to_string())?;
-        Ok(WorktreeRemovalReport {
-            worktree_id,
-            workspace_id: worktree.workspace_id,
-            repository_id: worktree.repository_id,
-            repository_name: repository.name,
-            machine_id: worktree.machine_id,
-            path: worktree.path,
-            branch: worktree.branch,
-            is_dirty: inspection.is_dirty,
-            requires_destructive_confirmation: inspection.is_dirty,
+        let checkout_path = resolve_machine_path(&location.checkout_path, &machine_home);
+        let worktree_path = resolve_machine_path(&worktree.path, &machine_home);
+        Ok(WorktreeRemovalSnapshot {
+            worktree,
+            repository,
+            machine,
+            location,
+            checkout_path,
+            worktree_path,
         })
     }
 
-    pub(crate) fn prepare_worktree_removal(
-        &mut self,
+    fn worktree_removal_snapshot_is_current(&self, snapshot: &WorktreeRemovalSnapshot) -> bool {
+        self.state
+            .worktrees
+            .iter()
+            .any(|current| current == &snapshot.worktree)
+            && self
+                .state
+                .repositories
+                .iter()
+                .any(|current| current == &snapshot.repository)
+            && self.state.machines.iter().any(|current| {
+                current.id == snapshot.machine.id
+                    && current.context_id == snapshot.machine.context_id
+                    && current.name == snapshot.machine.name
+                    && current.socket_name == snapshot.machine.socket_name
+                    && current.transport == snapshot.machine.transport
+            })
+            && self
+                .state
+                .repository_locations
+                .iter()
+                .any(|current| current == &snapshot.location)
+    }
+
+    fn build_worktree_removal_report(
+        &self,
         worktree_id: i64,
     ) -> Result<WorktreeRemovalReport, String> {
-        let report = self.build_worktree_removal_report(worktree_id)?;
-        self.pending_worktree_removals
-            .insert(worktree_id, report.clone());
-        Ok(report)
+        self.worktree_removal_snapshot(worktree_id)?
+            .observe()
+            .map(|observation| observation.report)
     }
 
     pub(crate) fn remove_worktree(
@@ -388,6 +468,9 @@ impl Runtime {
             .ok_or_else(|| {
                 "Review the Worktree removal safety report before removing it".to_owned()
             })?;
+        // Confirmation depends on the latest Git dirty state. Keep its final
+        // check adjacent to physical removal under the Runtime lock so no
+        // app-side Worktree identity change can slip between approval and delete.
         let current = self.build_worktree_removal_report(worktree_id)?;
         if current != pending {
             return Err("The Worktree changed after the safety report; review the updated report before removing it".into());

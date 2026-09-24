@@ -15,6 +15,7 @@ export type PaneTab = {
 
 export type TerminalAttachment = {
   terminalId: string;
+  generation: number;
   sessionName: string;
   paneId: string;
   snapshot: number[];
@@ -23,12 +24,14 @@ export type TerminalAttachment = {
 
 export type TerminalOutputEvent = {
   terminalId: string;
+  generation: number;
   paneId: string;
   data: number[];
 };
 
 export type TerminalExitEvent = {
   terminalId: string;
+  generation: number;
   paneId: string;
   code: number | null;
 };

@@ -1,5 +1,7 @@
 use super::*;
 
+use std::{process::Command, sync::Mutex};
+
 use tempfile::tempdir;
 
 use crate::domain::{
@@ -370,6 +372,95 @@ fn workspace_interface_keeps_repository_selection_and_worktree_identity() {
     assert_eq!(reopened.state.worktrees, runtime.state.worktrees);
 }
 
+#[cfg(unix)]
+#[test]
+fn direct_run_preview_inspects_checkouts_before_returning_the_existing_contract() {
+    use crate::domain::{MachineTransport, RepositoryLocation};
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let checkout = directory.path().join("service");
+    std::fs::create_dir_all(&checkout).expect("checkout directory should exist");
+    let run_git = |arguments: &[&str]| {
+        let output = Command::new("git")
+            .args(arguments)
+            .current_dir(&checkout)
+            .output()
+            .expect("Git should run");
+        assert!(
+            output.status.success(),
+            "Git command should succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    run_git(&["init", "--quiet", "-b", "main"]);
+    run_git(&["config", "user.name", "Mission Manager Test"]);
+    run_git(&["config", "user.email", "mission-manager@example.test"]);
+    std::fs::write(checkout.join("README.md"), "service\n")
+        .expect("checkout file should be written");
+    run_git(&["add", "README.md"]);
+    run_git(&["commit", "--quiet", "-m", "initial"]);
+
+    let database = directory.path().join("mission-manager.sqlite");
+    let mut runtime = Runtime::open(&database).expect("runtime should open");
+    runtime
+        .register_machine(
+            1,
+            "Local Mac".into(),
+            "mission".into(),
+            MachineTransport::Local,
+        )
+        .expect("Machine should be registered");
+    runtime
+        .set_context_execution_machine(1, Some(1))
+        .expect("Context should use its Machine");
+    runtime
+        .register_repository(
+            1,
+            "service".into(),
+            "https://github.com/acme/service.git".into(),
+        )
+        .expect("Repository should be registered");
+    runtime
+        .create_item("Inspect service".into(), 1, 1)
+        .expect("Item should be created");
+    let workspace = runtime
+        .create_workspace(
+            1,
+            vec![WorkspaceRepositoryInput {
+                repository_id: 1,
+                branch: "mission-1".into(),
+                base_branch: "main".into(),
+            }],
+        )
+        .expect("Workspace should be created");
+    runtime.state.repository_locations.push(RepositoryLocation {
+        repository_id: 1,
+        machine_id: 1,
+        checkout_path: checkout.to_string_lossy().into_owned(),
+        worktree_root: directory
+            .path()
+            .join("worktrees")
+            .to_string_lossy()
+            .into_owned(),
+    });
+    let state = Mutex::new(runtime);
+
+    let preview = tauri::async_runtime::block_on(runs::prepare_direct_run_with_state(
+        1,
+        workspace.id,
+        None,
+        &state,
+    ))
+    .expect("Direct Run preview should inspect the checkout");
+
+    assert_eq!(preview.workspace_id, workspace.id);
+    assert_eq!(preview.machine_id, 1);
+    assert_eq!(preview.current_branches, vec!["main"]);
+    assert_eq!(preview.checkout_details[0].repository_id, 1);
+    assert_eq!(preview.checkout_details[0].path, checkout.to_string_lossy());
+    assert!(!preview.checkout_details[0].is_dirty);
+}
+
 #[test]
 fn a_failed_run_preflight_never_calls_the_agent_launcher() {
     use crate::{
@@ -502,9 +593,11 @@ fn machine_check_returns_per_agent_hook_failures_for_settings() {
         )
         .expect("Machine should be registered");
 
-    let checked = runtime
-        .check_machine(1)
-        .expect("hook provisioning failures should be represented in the readiness result");
+    let runtime = std::sync::Mutex::new(runtime);
+    let checked = tauri::async_runtime::block_on(
+        crate::features::structure::check_machine_with_state(1, &runtime),
+    )
+    .expect("hook provisioning failures should be represented in the readiness result");
     let readiness = checked
         .readiness
         .expect("Settings should receive Machine readiness");
@@ -546,9 +639,11 @@ fn settings_check_reports_hooks_even_when_tmux_is_unavailable() {
         )
         .expect("Machine should be registered");
 
-    let checked = runtime
-        .check_machine(1)
-        .expect("Machine checks should return readiness even when tmux is missing");
+    let runtime = std::sync::Mutex::new(runtime);
+    let checked = tauri::async_runtime::block_on(
+        crate::features::structure::check_machine_with_state(1, &runtime),
+    )
+    .expect("Machine checks should return readiness even when tmux is missing");
     let readiness = checked.readiness.expect("readiness should be returned");
     assert_eq!(readiness.tmux_available, Some(false));
     assert_eq!(readiness.claude_hooks.provisioned, Some(true));

@@ -40,9 +40,8 @@ use crate::{
     git::GitCli,
     provider::{classify_url, github_repository_name, resolve_gh_executable, GithubCli},
     terminal::{
-        capture_pane, open_pane_in_terminal, send_input_to_pane, terminal_transport,
-        AgentLaunchContext, ExternalPaneIdentity, MachineObservationFailure,
-        RunReconciliationResult, TmuxControlPane,
+        open_pane_in_terminal, send_input_to_pane, terminal_transport, AgentLaunchContext,
+        ExternalPaneIdentity, MachineObservationFailure, RunReconciliationResult, TmuxControlPane,
     },
 };
 
@@ -337,47 +336,44 @@ pub(crate) fn unlink_external_link(
     })
 }
 
-pub(crate) fn link_external_object(
+pub(crate) async fn link_external_object(
     item_id: i64,
     url: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkAction, String> {
-    locked(state, |runtime| runtime.link_external_object(item_id, url))
+    external::link_external_object_with_state(item_id, url, state.inner()).await
 }
 
-pub(crate) fn create_github_issue(
+pub(crate) async fn create_github_issue(
     item_id: i64,
     repository_id: i64,
     title: String,
     body: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkAction, String> {
-    locked(state, |runtime| {
-        runtime.create_github_issue(item_id, repository_id, title, body)
-    })
+    external::create_github_issue_with_state(item_id, repository_id, title, body, state.inner())
+        .await
 }
 
-pub(crate) fn add_external_comment(
+pub(crate) async fn add_external_comment(
     link_id: i64,
     body: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkView, String> {
-    locked(state, |runtime| runtime.add_external_comment(link_id, body))
+    external::add_external_comment_with_state(link_id, body, state.inner()).await
 }
 
-pub(crate) fn refresh_external_object(
+pub(crate) async fn refresh_external_object(
     external_object_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalSnapshot, String> {
-    locked(state, |runtime| {
-        runtime.refresh_external_object(external_object_id)
-    })
+    external::refresh_external_object_with_state(external_object_id, state.inner()).await
 }
 
-pub(crate) fn poll_external_objects(
+pub(crate) async fn poll_external_objects(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<PollResult, String> {
-    locked(state, |runtime| Ok(runtime.poll_external_objects()))
+    external::poll_external_objects_with_state(state.inner()).await
 }
 
 pub(crate) fn create_worktree(
@@ -420,13 +416,11 @@ pub(crate) fn prepare_worktree(
     })
 }
 
-pub(crate) fn prepare_worktree_removal(
+pub(crate) async fn prepare_worktree_removal(
     worktree_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<WorktreeRemovalReport, String> {
-    locked(state, |runtime| {
-        runtime.prepare_worktree_removal(worktree_id)
-    })
+    crate::features::deletion::prepare_worktree_removal_with_state(worktree_id, state.inner()).await
 }
 
 pub(crate) fn remove_worktree(
@@ -490,24 +484,22 @@ pub(crate) fn compose_grill_prompt(
     })
 }
 
-pub(crate) fn prepare_direct_run(
+pub(crate) async fn prepare_direct_run(
     item_id: i64,
     workspace_id: i64,
     machine_id: Option<i64>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<DirectRunPreview, String> {
-    locked(state, |runtime| {
-        runtime.prepare_direct_run(item_id, workspace_id, machine_id)
-    })
+    runs::prepare_direct_run_with_state(item_id, workspace_id, machine_id, state.inner()).await
 }
 
-pub(crate) fn prepare_grill_run(
+pub(crate) async fn prepare_grill_run(
     item_id: i64,
     workspace_id: i64,
     machine_id: Option<i64>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<DirectRunPreview, String> {
-    prepare_direct_run(item_id, workspace_id, machine_id, state)
+    prepare_direct_run(item_id, workspace_id, machine_id, state).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -621,7 +613,7 @@ pub(crate) fn delete_untracked_agent(
     locked(state, |runtime| runtime.delete_untracked_agent(suggestion))
 }
 
-pub(crate) fn open_terminal(
+pub(crate) async fn open_terminal(
     app: &AppHandle,
     run_id: i64,
     terminal_id: String,
@@ -629,9 +621,15 @@ pub(crate) fn open_terminal(
     pane_id: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<TerminalAttachment, String> {
-    locked(state, |runtime| {
-        runtime.open_terminal(app, run_id, terminal_id, session_name, pane_id)
-    })
+    runs::open_terminal_with_state(
+        app,
+        run_id,
+        terminal_id,
+        session_name,
+        pane_id,
+        state.inner(),
+    )
+    .await
 }
 
 pub(crate) fn terminal_input(
@@ -639,6 +637,8 @@ pub(crate) fn terminal_input(
     input: Vec<u8>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
+    // A control-mode client is already open; this only serializes one short
+    // write to its input pipe while holding the connection map stable.
     locked(state, |runtime| runtime.terminal_input(&terminal_id, input))
 }
 
@@ -666,6 +666,8 @@ pub(crate) fn terminal_resize(
     rows: u16,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
+    // As with terminal input, resizing is one command sent to an existing
+    // control-mode connection; no process or SSH session is started here.
     locked(state, |runtime| {
         runtime.terminal_resize(&terminal_id, columns, rows)
     })
@@ -675,14 +677,26 @@ pub(crate) fn close_terminal(
     terminal_id: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
-    locked(state, |runtime| runtime.close_terminal(&terminal_id))
+    let connection = {
+        let mut runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        // Closing also invalidates any attach worker that has not finished yet.
+        runtime.invalidate_terminal_open_request(&terminal_id);
+        runtime.terminal_connection_generations.remove(&terminal_id);
+        runtime.terminal_connections.remove(&terminal_id)
+    };
+    if let Some(connection) = connection {
+        connection.close()?;
+    }
+    Ok(())
 }
 
-pub(crate) fn open_external_terminal(
+pub(crate) async fn open_external_terminal(
     run_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
-    locked(state, |runtime| runtime.open_external_terminal(run_id))
+    runs::open_external_terminal_with_state(run_id, state.inner()).await
 }
 
 pub(crate) fn stop_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {

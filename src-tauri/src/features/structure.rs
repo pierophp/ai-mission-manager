@@ -8,7 +8,7 @@
 use std::{
     env,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 use tauri::State;
@@ -21,6 +21,7 @@ use crate::{
         Project, ProjectDefaults, Repository,
     },
     git::GitCli,
+    terminal::{MachineReadiness, TerminalRuntime},
 };
 
 use crate::features::deletion::{
@@ -269,11 +270,102 @@ pub(crate) fn update_machine(
     })
 }
 
-pub(crate) fn check_machine(
+pub(crate) async fn check_machine(
     machine_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<MachineSettingsView, String> {
-    locked(state, |runtime| runtime.check_machine(machine_id))
+    // The Machine check may provision hooks and run remote tmux commands. Keep
+    // that work off the shared Runtime lock and off Tauri's command thread.
+    check_machine_with_state(machine_id, state.inner()).await
+}
+
+pub(crate) async fn check_machine_with_state(
+    machine_id: i64,
+    state: &Mutex<Runtime>,
+) -> Result<MachineSettingsView, String> {
+    let snapshot = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        runtime.machine_check_snapshot(machine_id)?
+    };
+    let observation = tauri::async_runtime::spawn_blocking(move || snapshot.observe())
+        .await
+        .map_err(|error| format!("Machine check worker failed: {error}"))?;
+    let mut runtime = state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+    runtime.apply_machine_check(observation)
+}
+
+struct MachineCheckSnapshot {
+    machine: Machine,
+    terminal_runtime: Arc<dyn TerminalRuntime>,
+}
+
+struct MachineCheckObservation {
+    machine: Machine,
+    readiness: MachineReadiness,
+}
+
+impl MachineCheckSnapshot {
+    fn observe(self) -> MachineCheckObservation {
+        let readiness = self.terminal_runtime.check_machine(&self.machine);
+        MachineCheckObservation {
+            machine: self.machine,
+            readiness,
+        }
+    }
+}
+
+impl Runtime {
+    fn machine_check_snapshot(&self, machine_id: i64) -> Result<MachineCheckSnapshot, String> {
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
+        Ok(MachineCheckSnapshot {
+            machine,
+            terminal_runtime: Arc::clone(&self.terminal_runtime),
+        })
+    }
+
+    fn apply_machine_check(
+        &mut self,
+        observation: MachineCheckObservation,
+    ) -> Result<MachineSettingsView, String> {
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == observation.machine.id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} no longer exists", observation.machine.id))?;
+        if machine.context_id != observation.machine.context_id
+            || machine.name != observation.machine.name
+            || machine.socket_name != observation.machine.socket_name
+            || machine.transport != observation.machine.transport
+        {
+            return Err(format!(
+                "Machine {} changed while it was being checked; check it again",
+                observation.machine.id
+            ));
+        }
+        let availability = if observation.readiness.reachable == Some(true)
+            && observation.readiness.tmux_available == Some(true)
+        {
+            MachineObservation::Available
+        } else {
+            MachineObservation::Offline
+        };
+        self.machine_readiness
+            .insert(machine.id, observation.readiness);
+        let machine = self.observe_machine(machine.id, availability)?;
+        Ok(self.machine_settings_view(&machine))
+    }
 }
 
 pub(crate) fn prepare_project_deletion(
@@ -802,26 +894,6 @@ impl Runtime {
             .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
         self.commit(decision)?;
         Ok(machine)
-    }
-
-    pub(crate) fn check_machine(&mut self, machine_id: i64) -> Result<MachineSettingsView, String> {
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
-        let readiness = self.terminal_runtime.check_machine(&machine);
-        let observation =
-            if readiness.reachable == Some(true) && readiness.tmux_available == Some(true) {
-                MachineObservation::Available
-            } else {
-                MachineObservation::Offline
-            };
-        self.machine_readiness.insert(machine.id, readiness);
-        let machine = self.observe_machine(machine_id, observation)?;
-        Ok(self.machine_settings_view(&machine))
     }
 
     pub(crate) fn set_context_attention_default(

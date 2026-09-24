@@ -1,9 +1,13 @@
 use std::{
+    collections::VecDeque,
     env,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
-    sync::{Arc, Mutex},
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread,
     time::{Duration, Instant},
 };
@@ -358,7 +362,147 @@ fn apple_script_string(value: &str) -> String {
 pub struct TmuxControlPane {
     input: Arc<Mutex<ChildStdin>>,
     child: Arc<Mutex<Child>>,
+    pending_responses: Arc<Mutex<VecDeque<PendingControlCommand>>>,
+    next_response_id: AtomicU64,
     pane_id: String,
+}
+
+struct PendingControlCommand {
+    id: u64,
+    response_sender: Option<mpsc::SyncSender<Result<Vec<u8>, String>>>,
+    after_end: Option<Box<dyn FnOnce() + Send>>,
+}
+
+struct TmuxControlReader<Output, AgentState> {
+    expected_pane_id: String,
+    pending_responses: Arc<Mutex<VecDeque<PendingControlCommand>>>,
+    current_response: Option<PendingControlCommand>,
+    current_response_header: Vec<u8>,
+    response_body: Vec<u8>,
+    ready_sender: mpsc::SyncSender<()>,
+    on_output: Output,
+    on_agent_state: AgentState,
+}
+
+impl<Output, AgentState> TmuxControlReader<Output, AgentState>
+where
+    Output: Fn(Vec<u8>),
+    AgentState: Fn(AgentStateRecord),
+{
+    fn new(
+        expected_pane_id: String,
+        pending_responses: Arc<Mutex<VecDeque<PendingControlCommand>>>,
+        ready_sender: mpsc::SyncSender<()>,
+        on_output: Output,
+        on_agent_state: AgentState,
+    ) -> Self {
+        Self {
+            expected_pane_id,
+            pending_responses,
+            current_response: None,
+            current_response_header: Vec::new(),
+            response_body: Vec::new(),
+            ready_sender,
+            on_output,
+            on_agent_state,
+        }
+    }
+
+    fn handle_line(&mut self, line: &[u8]) {
+        let without_newline = line.strip_suffix(b"\n").unwrap_or(line);
+        let trimmed = without_newline
+            .strip_suffix(b"\r")
+            .unwrap_or(without_newline);
+
+        if self.current_response.is_none() {
+            if let Some(header) = trimmed.strip_prefix(b"%begin ") {
+                self.current_response_header = header.to_vec();
+                self.current_response = Some(
+                    self.pending_responses
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .pop_front()
+                        .unwrap_or(PendingControlCommand {
+                            id: 0,
+                            response_sender: None,
+                            after_end: None,
+                        }),
+                );
+                self.response_body.clear();
+                return;
+            }
+            handle_control_line(
+                line,
+                &self.expected_pane_id,
+                &self.on_output,
+                &self.on_agent_state,
+            );
+            return;
+        }
+
+        if let Some(header) = trimmed.strip_prefix(b"%end ") {
+            if header == self.current_response_header {
+                let mut response = self
+                    .current_response
+                    .take()
+                    .expect("a control response block should have a pending command");
+                if let Some(after_end) = response.after_end.take() {
+                    after_end();
+                }
+                if let Some(sender) = response.response_sender.take() {
+                    let _ = sender.send(Ok(std::mem::take(&mut self.response_body)));
+                }
+                self.current_response_header.clear();
+                self.response_body.clear();
+                let _ = self.ready_sender.try_send(());
+                return;
+            }
+        }
+        if let Some(header) = trimmed.strip_prefix(b"%error ") {
+            if header == self.current_response_header {
+                let mut response = self
+                    .current_response
+                    .take()
+                    .expect("a control response block should have a pending command");
+                let error = String::from_utf8_lossy(&self.response_body)
+                    .trim()
+                    .to_owned();
+                if let Some(sender) = response.response_sender.take() {
+                    let _ = sender.send(Err(if error.is_empty() {
+                        "tmux control command failed".to_owned()
+                    } else {
+                        error
+                    }));
+                }
+                self.current_response_header.clear();
+                self.response_body.clear();
+                let _ = self.ready_sender.try_send(());
+                return;
+            }
+        }
+
+        self.response_body.extend_from_slice(line);
+    }
+
+    fn finish(&mut self) {
+        if let Some(mut response) = self.current_response.take() {
+            if let Some(sender) = response.response_sender.take() {
+                let _ = sender.send(Err("tmux control client closed during a command".into()));
+            }
+        }
+        for mut response in self
+            .pending_responses
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .drain(..)
+        {
+            if let Some(sender) = response.response_sender.take() {
+                let _ = sender.send(Err(
+                    "tmux control client closed before a command completed".into()
+                ));
+            }
+        }
+    }
 }
 
 impl TmuxControlPane {
@@ -412,7 +556,15 @@ impl TmuxControlPane {
         let child = Arc::new(Mutex::new(child));
         let reader_child = Arc::clone(&child);
         let expected_pane_id = pane_id.to_owned();
-        let (ready_sender, ready_receiver) = std::sync::mpsc::sync_channel(1);
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        let pending_responses = Arc::new(Mutex::new(VecDeque::new()));
+        let mut control_reader = TmuxControlReader::new(
+            expected_pane_id,
+            Arc::clone(&pending_responses),
+            ready_sender,
+            on_output,
+            on_agent_state,
+        );
         thread::spawn(move || {
             let mut reader = BufReader::new(output);
             let mut line = Vec::new();
@@ -421,15 +573,12 @@ impl TmuxControlPane {
                 match reader.read_until(b'\n', &mut line) {
                     Ok(0) => break,
                     Ok(_) => {
-                        let trimmed = line.strip_suffix(b"\n").unwrap_or(&line);
-                        if trimmed.starts_with(b"%end ") {
-                            let _ = ready_sender.send(());
-                        }
-                        handle_control_line(&line, &expected_pane_id, &on_output, &on_agent_state);
+                        control_reader.handle_line(&line);
                     }
                     Err(_) => break,
                 }
             }
+            control_reader.finish();
             let status = reader_child
                 .lock()
                 .ok()
@@ -441,6 +590,8 @@ impl TmuxControlPane {
         let pane = Self {
             input: Arc::new(Mutex::new(input)),
             child,
+            pending_responses,
+            next_response_id: AtomicU64::new(0),
             pane_id: pane_id.to_owned(),
         };
         pane.send_command("list-panes")?;
@@ -478,6 +629,22 @@ impl TmuxControlPane {
         self.send_command(&format!("refresh-client -C {columns},{rows}"))
     }
 
+    pub fn capture_pane_snapshot(
+        &self,
+        after_end: impl FnOnce() + Send + 'static,
+    ) -> Result<Vec<u8>, String> {
+        validate_pane_id(&self.pane_id)?;
+        let (sender, receiver) = mpsc::sync_channel(1);
+        self.send_command_with_response(
+            &format!("capture-pane -p -e -t {}", self.pane_id),
+            sender,
+            Box::new(after_end),
+        )?;
+        receiver
+            .recv_timeout(Duration::from_secs(15))
+            .map_err(|error| format!("Could not capture Pane snapshot: {error}"))?
+    }
+
     pub fn close(&self) -> Result<(), String> {
         let mut child = self
             .child
@@ -499,15 +666,49 @@ impl TmuxControlPane {
     }
 
     fn send_command(&self, command: &str) -> Result<(), String> {
+        self.send_command_inner(command, None, None)
+    }
+
+    fn send_command_with_response(
+        &self,
+        command: &str,
+        response_sender: mpsc::SyncSender<Result<Vec<u8>, String>>,
+        after_end: Box<dyn FnOnce() + Send>,
+    ) -> Result<(), String> {
+        self.send_command_inner(command, Some(response_sender), Some(after_end))
+    }
+
+    fn send_command_inner(
+        &self,
+        command: &str,
+        response_sender: Option<mpsc::SyncSender<Result<Vec<u8>, String>>>,
+        after_end: Option<Box<dyn FnOnce() + Send>>,
+    ) -> Result<(), String> {
         let mut input = self
             .input
             .lock()
             .map_err(|_| "tmux control client is unavailable".to_owned())?;
-        input
+        let response_id = self.next_response_id.fetch_add(1, Ordering::Relaxed);
+        self.pending_responses
+            .lock()
+            .map_err(|_| "tmux control response queue is unavailable".to_owned())?
+            .push_back(PendingControlCommand {
+                id: response_id,
+                response_sender,
+                after_end,
+            });
+        let write_result = input
             .write_all(command.as_bytes())
             .and_then(|_| input.write_all(b"\n"))
-            .and_then(|_| input.flush())
-            .map_err(|error| format!("Could not send command to Pane: {error}"))
+            .and_then(|_| input.flush());
+        if let Err(error) = write_result {
+            self.pending_responses
+                .lock()
+                .map_err(|_| "tmux control response queue is unavailable".to_owned())?
+                .retain(|pending| pending.id != response_id);
+            return Err(format!("Could not send command to Pane: {error}"));
+        }
+        Ok(())
     }
 }
 
@@ -652,11 +853,16 @@ pub(crate) enum FakeTerminalCommand {
 }
 
 #[cfg(test)]
+type FakeTranscriptCaptures =
+    Arc<Mutex<std::collections::HashMap<(i64, String), Result<Vec<u8>, String>>>>;
+
+#[cfg(test)]
 pub(crate) struct FakeTerminalRuntime {
     outcomes: std::collections::HashMap<i64, FakeMachineOutcome>,
     commands: Arc<Mutex<Vec<FakeTerminalCommand>>>,
     hook_configs: Arc<Mutex<std::collections::HashMap<(i64, String), String>>>,
     observed_panes: Arc<Mutex<std::collections::HashMap<i64, Vec<ObservedPane>>>>,
+    transcript_captures: FakeTranscriptCaptures,
     observation_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
 }
 
@@ -715,6 +921,7 @@ impl FakeTerminalRuntime {
             commands: Arc::new(Mutex::new(Vec::new())),
             hook_configs: Arc::new(Mutex::new(std::collections::HashMap::new())),
             observed_panes: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            transcript_captures: Arc::new(Mutex::new(std::collections::HashMap::new())),
             observation_gate: Arc::new((
                 Mutex::new(FakeObservationGateState::default()),
                 Condvar::new(),
@@ -740,6 +947,18 @@ impl FakeTerminalRuntime {
             .lock()
             .expect("fake observed pane list should remain available")
             .insert(machine_id, panes);
+    }
+
+    pub(crate) fn set_transcript_capture_failure(
+        &self,
+        machine_id: i64,
+        pane_id: impl Into<String>,
+        error: impl Into<String>,
+    ) {
+        self.transcript_captures
+            .lock()
+            .expect("fake transcript capture map should remain available")
+            .insert((machine_id, pane_id.into()), Err(error.into()));
     }
 
     pub(crate) fn command_log(&self) -> Arc<Mutex<Vec<FakeTerminalCommand>>> {
@@ -933,7 +1152,12 @@ impl TerminalRuntime for FakeTerminalRuntime {
             machine_id: machine.id,
             pane_id: pane_id.into(),
         });
-        Ok(Vec::new())
+        self.transcript_captures
+            .lock()
+            .expect("fake transcript capture map should remain available")
+            .get(&(machine.id, pane_id.into()))
+            .cloned()
+            .unwrap_or_else(|| Ok(Vec::new()))
     }
 
     fn list_panes(
@@ -1991,21 +2215,6 @@ pub fn list_agent_panes(machine: &Machine) -> Result<Vec<AgentPaneSummary>, Stri
         .collect::<Result<Vec<_>, _>>()
 }
 
-pub fn capture_pane(machine: &Machine, pane_id: &str) -> Result<Vec<u8>, String> {
-    validate_pane_id(pane_id)?;
-    let output = run_tmux_output(
-        machine,
-        &[
-            "capture-pane".into(),
-            "-p".into(),
-            "-e".into(),
-            "-t".into(),
-            pane_id.into(),
-        ],
-    )?;
-    Ok(output.stdout)
-}
-
 pub fn capture_pane_transcript(machine: &Machine, pane_id: &str) -> Result<Vec<u8>, String> {
     validate_pane_id(pane_id)?;
     let output = run_tmux_output(
@@ -2374,7 +2583,7 @@ fn format_commit_error(error: String, cleanup_error: Option<String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{path::Path, sync::mpsc};
 
     use tempfile::tempdir;
 
@@ -2396,6 +2605,55 @@ mod tests {
                 "-c",
                 "model_reasoning_effort=xhigh"
             ]
+        );
+    }
+
+    #[test]
+    fn control_snapshot_response_places_stream_barrier_between_notifications() {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let barrier_events = Arc::clone(&events);
+        let (response_sender, response_receiver) = mpsc::sync_channel(1);
+        let pending_responses = Arc::new(Mutex::new(VecDeque::from([PendingControlCommand {
+            id: 1,
+            response_sender: Some(response_sender),
+            after_end: Some(Box::new(move || {
+                barrier_events
+                    .lock()
+                    .expect("event log should remain available")
+                    .push("snapshot barrier".to_owned());
+            })),
+        }])));
+        let (ready_sender, _ready_receiver) = mpsc::sync_channel(1);
+        let output_events = Arc::clone(&events);
+        let mut reader = TmuxControlReader::new(
+            "%1".to_owned(),
+            pending_responses,
+            ready_sender,
+            move |output| {
+                output_events
+                    .lock()
+                    .expect("event log should remain available")
+                    .push(format!("output:{}", String::from_utf8_lossy(&output)));
+            },
+            |_| {},
+        );
+
+        reader.handle_line(b"%output %1 before\\015\n");
+        reader.handle_line(b"%begin 123 4 0\n");
+        reader.handle_line(b"snapshot bytes\n");
+        reader.handle_line(b"%end 123 4 0\n");
+        reader.handle_line(b"%output %1 after\\015\n");
+
+        assert_eq!(
+            response_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("snapshot response should be delivered")
+                .expect("snapshot command should succeed"),
+            b"snapshot bytes\n"
+        );
+        assert_eq!(
+            *events.lock().expect("event log should remain available"),
+            vec!["output:before\r", "snapshot barrier", "output:after\r"]
         );
     }
 
@@ -2529,7 +2787,8 @@ mod tests {
         let ready = receive_until(&output_receiver, "READY");
         assert!(ready.contains("READY"));
         assert!(String::from_utf8_lossy(
-            &capture_pane(&machine, &before.pane_id)
+            &pane
+                .capture_pane_snapshot(|| {})
                 .expect("the current Pane screen should be capturable")
         )
         .contains("READY"));

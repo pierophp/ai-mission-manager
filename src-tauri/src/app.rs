@@ -53,6 +53,12 @@ pub struct Runtime {
     pub(crate) pending_parent_deletion: Option<ParentDeletionPreview>,
     pub(crate) pending_reset_local_data: Option<ResetLocalDataPreview>,
     pub(crate) terminal_connections: HashMap<String, TmuxControlPane>,
+    pub(crate) terminal_open_request_generations: HashMap<String, u64>,
+    pub(crate) terminal_connection_generations: HashMap<String, u64>,
+    // These in-memory generations distinguish concurrent observations whose
+    // Unix-second `fetched_at` values are equal.
+    pub(crate) external_snapshot_request_generations: HashMap<i64, u64>,
+    pub(crate) external_snapshot_applied_generations: HashMap<i64, u64>,
     pub(crate) terminal_runtime: Arc<dyn TerminalRuntime>,
     pub(crate) reconciliation_in_progress: Arc<AtomicBool>,
     pub(crate) machine_readiness: HashMap<i64, MachineReadiness>,
@@ -138,6 +144,10 @@ impl Runtime {
             pending_parent_deletion: None,
             pending_reset_local_data: None,
             terminal_connections: HashMap::new(),
+            terminal_open_request_generations: HashMap::new(),
+            terminal_connection_generations: HashMap::new(),
+            external_snapshot_request_generations: HashMap::new(),
+            external_snapshot_applied_generations: HashMap::new(),
             terminal_runtime: Arc::new(terminal_runtime),
             reconciliation_in_progress: Arc::new(AtomicBool::new(false)),
             machine_readiness: HashMap::new(),
@@ -317,6 +327,7 @@ impl PaneTab {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalAttachment {
     pub terminal_id: String,
+    pub generation: u64,
     pub session_name: String,
     pub pane_id: String,
     pub snapshot: Vec<u8>,
@@ -327,6 +338,7 @@ pub struct TerminalAttachment {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOutputEvent {
     pub terminal_id: String,
+    pub generation: u64,
     pub pane_id: String,
     pub data: Vec<u8>,
 }
@@ -335,6 +347,7 @@ pub struct TerminalOutputEvent {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalExitEvent {
     pub terminal_id: String,
+    pub generation: u64,
     pub pane_id: String,
     pub code: Option<i32>,
 }
@@ -444,23 +457,23 @@ pub fn compose_grill_prompt(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn prepare_direct_run(
+pub async fn prepare_direct_run(
     item_id: i64,
     workspace_id: i64,
     machine_id: Option<i64>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<DirectRunPreview, String> {
-    crate::features::work::prepare_direct_run(item_id, workspace_id, machine_id, state)
+    crate::features::work::prepare_direct_run(item_id, workspace_id, machine_id, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn prepare_grill_run(
+pub async fn prepare_grill_run(
     item_id: i64,
     workspace_id: i64,
     machine_id: Option<i64>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<DirectRunPreview, String> {
-    crate::features::work::prepare_grill_run(item_id, workspace_id, machine_id, state)
+    crate::features::work::prepare_grill_run(item_id, workspace_id, machine_id, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -601,15 +614,15 @@ pub fn update_machine(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn check_machine(
+pub async fn check_machine(
     machine_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<MachineSettingsView, String> {
-    crate::features::structure::check_machine(machine_id, state)
+    crate::features::structure::check_machine(machine_id, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_terminal(
+pub async fn open_terminal(
     run_id: i64,
     terminal_id: String,
     session_name: String,
@@ -618,6 +631,7 @@ pub fn open_terminal(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<TerminalAttachment, String> {
     crate::features::work::open_terminal(&app, run_id, terminal_id, session_name, pane_id, state)
+        .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -663,8 +677,11 @@ pub fn close_terminal(terminal_id: String, state: State<'_, Mutex<Runtime>>) -> 
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn open_external_terminal(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<(), String> {
-    crate::features::work::open_external_terminal(run_id, state)
+pub async fn open_external_terminal(
+    run_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    crate::features::work::open_external_terminal(run_id, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -964,11 +981,11 @@ pub fn prepare_worktree(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn prepare_worktree_removal(
+pub async fn prepare_worktree_removal(
     worktree_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<WorktreeRemovalReport, String> {
-    crate::features::work::prepare_worktree_removal(worktree_id, state)
+    crate::features::work::prepare_worktree_removal(worktree_id, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1168,45 +1185,45 @@ pub fn set_item_relation(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn link_external_object(
+pub async fn link_external_object(
     item_id: i64,
     url: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkAction, String> {
-    crate::features::work::link_external_object(item_id, url, state)
+    crate::features::work::link_external_object(item_id, url, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn create_github_issue(
+pub async fn create_github_issue(
     item_id: i64,
     repository_id: i64,
     title: String,
     body: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkAction, String> {
-    crate::features::work::create_github_issue(item_id, repository_id, title, body, state)
+    crate::features::work::create_github_issue(item_id, repository_id, title, body, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn add_external_comment(
+pub async fn add_external_comment(
     link_id: i64,
     body: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkView, String> {
-    crate::features::work::add_external_comment(link_id, body, state)
+    crate::features::work::add_external_comment(link_id, body, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn refresh_external_object(
+pub async fn refresh_external_object(
     external_object_id: i64,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalSnapshot, String> {
-    crate::features::work::refresh_external_object(external_object_id, state)
+    crate::features::work::refresh_external_object(external_object_id, state).await
 }
 
 #[tauri::command]
-pub fn poll_external_objects(state: State<'_, Mutex<Runtime>>) -> Result<PollResult, String> {
-    crate::features::work::poll_external_objects(state)
+pub async fn poll_external_objects(state: State<'_, Mutex<Runtime>>) -> Result<PollResult, String> {
+    crate::features::work::poll_external_objects(state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -2537,6 +2554,55 @@ https://example.com/unrelated"#;
             runtime.state.snapshots[0].title,
             "Captured downstream Issue"
         );
+        assert_eq!(
+            runtime.state.links[0].provenance,
+            Some(crate::domain::LinkProvenance {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                discovery: crate::domain::DownstreamIssueDiscovery::StructuredEvent,
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reconciliation_confirms_downstream_issues_from_saved_transcript_when_capture_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let executable = directory.path().join("gh");
+        let script = r#"#!/bin/sh
+if [ "$1" = issue ] && [ "$2" = view ] && [ "$3" = "https://github.com/acme/app/issues/7" ]; then
+  printf '%s' '{"number":7,"title":"Saved downstream Issue","state":"OPEN","author":null,"labels":[],"milestone":null,"updatedAt":null}'
+  exit 0
+fi
+exit 1
+"#;
+        fs::write(&executable, script).expect("fake gh should be written");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("fake gh should be executable");
+        let mut store = SqliteStore::open(&database).expect("database should open");
+        store
+            .set_gh_executable_path(&executable)
+            .expect("fake gh path should persist");
+        drop(store);
+
+        let terminal = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+        terminal.set_transcript_capture_failure(1, "%1", "Pane disappeared during capture");
+        let mut runtime = runtime_with_single_reconciliation_run(&database, terminal);
+        let run = &mut runtime.state.runs[0];
+        run.execution_profile = ExecutionProfile::Grill;
+        run.grill_action = Some(GrillContinuationAction::ToTickets);
+        run.transcript = r#"AI_MISSION_MANAGER_EVENT {"event":"github.issue.created","url":"https://github.com/acme/app/issues/7","run_id":1,"action":"to-tickets"}"#.into();
+
+        runtime
+            .reconcile_runs()
+            .expect("saved transcript fallback should reconcile");
+
+        assert_eq!(runtime.state.external_objects.len(), 1);
+        assert_eq!(runtime.state.links.len(), 1);
+        assert_eq!(runtime.state.snapshots[0].title, "Saved downstream Issue");
         assert_eq!(
             runtime.state.links[0].provenance,
             Some(crate::domain::LinkProvenance {
