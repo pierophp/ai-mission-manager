@@ -2265,14 +2265,19 @@ impl RunLaunchSnapshot {
                         "The Worktree branch changed after it was approved; review the Worktree before starting a Run".into(),
                     );
                 }
-                if inspection
-                    .remote_url
-                    .as_deref()
-                    .is_some_and(|remote_url| remote_url != identity.repository.remote_url)
-                {
-                    return Err(
-                        "The Worktree remote does not match its registered Repository".into(),
-                    );
+                match inspection.remote_url.as_deref() {
+                    Some(remote_url) if remote_url == identity.repository.remote_url => {}
+                    Some(_) => {
+                        return Err(
+                            "The Worktree remote does not match its registered Repository".into(),
+                        )
+                    }
+                    None => {
+                        return Err(
+                            "The Worktree has no configured remote for its registered Repository"
+                                .into(),
+                        )
+                    }
                 }
                 (identity.worktree.path.clone(), Vec::new())
             }

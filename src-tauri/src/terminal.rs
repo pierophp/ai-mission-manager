@@ -916,6 +916,7 @@ pub(crate) struct FakeTerminalRuntime {
     transcript_captures: FakeTranscriptCaptures,
     release_failures: Arc<Mutex<std::collections::HashMap<i64, String>>>,
     dirty_checkout_on_launch: Arc<Mutex<bool>>,
+    checkout_remote_on_launch: Arc<Mutex<Option<String>>>,
     observation_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
     send_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
     release_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
@@ -979,6 +980,7 @@ impl FakeTerminalRuntime {
             transcript_captures: Arc::new(Mutex::new(std::collections::HashMap::new())),
             release_failures: Arc::new(Mutex::new(std::collections::HashMap::new())),
             dirty_checkout_on_launch: Arc::new(Mutex::new(false)),
+            checkout_remote_on_launch: Arc::new(Mutex::new(None)),
             observation_gate: Arc::new((
                 Mutex::new(FakeObservationGateState::default()),
                 Condvar::new(),
@@ -1068,6 +1070,13 @@ impl FakeTerminalRuntime {
             .dirty_checkout_on_launch
             .lock()
             .expect("fake launch mutation should remain available") = true;
+    }
+
+    pub(crate) fn change_checkout_remote_after_launch(&self, remote_url: impl Into<String>) {
+        *self
+            .checkout_remote_on_launch
+            .lock()
+            .expect("fake launch mutation should remain available") = Some(remote_url.into());
     }
 
     pub(crate) fn set_agent_hook_config(
@@ -1362,6 +1371,26 @@ impl TerminalRuntime for FakeTerminalRuntime {
                 b"dirty after launch",
             )
             .map_err(|error| format!("Could not simulate post-launch checkout dirt: {error}"))?;
+        }
+        let remote_after_launch = self
+            .checkout_remote_on_launch
+            .lock()
+            .expect("fake launch mutation should remain available")
+            .clone();
+        if let Some(remote_url) = remote_after_launch {
+            let output = Command::new("git")
+                .args(["-C", &root.to_string_lossy(), "remote", "set-url", "origin"])
+                .arg(remote_url)
+                .output()
+                .map_err(|error| {
+                    format!("Could not simulate post-launch remote change: {error}")
+                })?;
+            if !output.status.success() {
+                return Err(format!(
+                    "Could not simulate post-launch remote change: {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
         }
         Ok(format!("%fake-{}", launch.run_id))
     }
@@ -2628,22 +2657,6 @@ fn launch_tmux_agent(
     }
 
     let pane_target = format!("{session_name}:0.0");
-    if let Err(error) = run_tmux(
-        machine,
-        &[
-            "select-pane".into(),
-            "-T".into(),
-            launch.agent.slug().into(),
-            "-t".into(),
-            pane_target.clone(),
-        ],
-    ) {
-        let cleanup = kill_tmux_session(machine, session_name);
-        return Err(format_commit_error(
-            format!("Could not label the gated agent Pane: {error}"),
-            cleanup.err(),
-        ));
-    }
     let args = vec![
         "display-message".into(),
         "-p".into(),
@@ -2697,7 +2710,8 @@ fn build_gated_agent_command(
     validate_tmux_target(socket_name)?;
     validate_tmux_target(gate_channel)?;
     let mut command = format!(
-        "{} && export AI_MISSION_MANAGER_RUN_ID={}",
+        "{} && {} && export AI_MISSION_MANAGER_RUN_ID={}",
+        build_tmux_pane_title_command("tmux", socket_name, launch.agent.slug())?,
         build_tmux_wait_for_command("tmux", socket_name, gate_channel, false)?,
         shell_quote(&launch.run_id.to_string()),
     );
@@ -2724,6 +2738,37 @@ fn build_gated_agent_command(
     }
     command.push(' ');
     command.push_str(&shell_quote(prompt));
+    Ok(command)
+}
+
+fn build_tmux_pane_title_command(
+    tmux_path: &str,
+    socket_name: &str,
+    title: &str,
+) -> Result<String, String> {
+    if tmux_path.trim().is_empty() {
+        return Err("tmux executable path cannot be blank".to_owned());
+    }
+    validate_tmux_target(socket_name)?;
+    if title.trim().is_empty() {
+        return Err("tmux Pane title cannot be blank".to_owned());
+    }
+    let arguments = [
+        tmux_path,
+        "-f",
+        "/dev/null",
+        "-L",
+        socket_name,
+        "select-pane",
+        "-T",
+        title,
+    ];
+    let mut command = arguments
+        .into_iter()
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" ");
+    command.push_str(" -t \"$TMUX_PANE\"");
     Ok(command)
 }
 
@@ -2865,10 +2910,12 @@ mod tests {
             &launch,
         )
         .expect("launch command should be valid");
+        let title = "'tmux' '-f' '/dev/null' '-L' 'mission-socket' 'select-pane' '-T' 'codex' -t \"$TMUX_PANE\"";
         let gate = "'tmux' '-f' '/dev/null' '-L' 'mission-socket' 'wait-for' 'mission-launch-23-session-4'";
         let first_export = "export AI_MISSION_MANAGER_RUN_ID='23'";
         let agent = "exec '/opt/codex' '--model' 'gpt-6-luna' '-c' 'model_reasoning_effort=xhigh' 'Implement the issue'";
-        assert!(command.starts_with(gate));
+        assert!(command.starts_with(title));
+        assert!(command.find(title).unwrap() < command.find(gate).unwrap());
         assert!(command.find(gate).unwrap() < command.find(first_export).unwrap());
         assert!(command.ends_with(agent));
 

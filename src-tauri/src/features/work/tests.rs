@@ -797,6 +797,59 @@ fn a_failed_run_preflight_never_calls_the_agent_launcher() {
 }
 
 #[test]
+fn worktree_run_rejects_a_checkout_without_a_registered_remote() {
+    use crate::{
+        domain::{AgentKind, ExecutionProfile, RunPromptSelection},
+        terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime},
+    };
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let checkout = directory.path().join("checkout");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+    let commands = fake.command_log();
+    let (runtime, item, workspace, _, worktree) = runtime_for_run_launch(
+        &directory.path().join("mission-manager.sqlite"),
+        &checkout,
+        fake,
+    );
+    let output = Command::new("git")
+        .args([
+            "-C",
+            checkout.to_str().expect("checkout path should be UTF-8"),
+            "remote",
+            "remove",
+            "origin",
+        ])
+        .output()
+        .expect("git remote removal should run");
+    assert!(output.status.success(), "the test remote should be removed");
+
+    let state = Mutex::new(runtime);
+    let error = tauri::async_runtime::block_on(runs::start_worktree_run_with_state(
+        item.id,
+        workspace.id,
+        worktree.id,
+        AgentKind::Claude,
+        ExecutionProfile::Implement,
+        "Implement the change".into(),
+        RunPromptSelection {
+            include_objective: true,
+            include_notes: false,
+            external_object_ids: Vec::new(),
+        },
+        &state,
+    ))
+    .expect_err("a Worktree without a remote should be rejected");
+    assert!(error.contains("Worktree has no configured remote"));
+    assert!(state.lock().unwrap().state.runs.is_empty());
+    assert!(!commands
+        .lock()
+        .expect("fake command log should remain available")
+        .iter()
+        .any(|command| matches!(command, FakeTerminalCommand::LaunchAgent { .. })));
+}
+
+#[test]
 fn direct_grill_and_worktree_runs_are_persisted_before_their_gate_is_released() {
     use crate::{
         domain::{AgentKind, ExecutionProfile, GrillConfiguration, RunPromptSelection},
@@ -933,48 +986,127 @@ fn direct_grill_and_worktree_runs_are_persisted_before_their_gate_is_released() 
 }
 
 #[test]
-fn dirty_state_after_launch_does_not_abort_recording_the_direct_run() {
+fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
     use crate::{
-        domain::{AgentKind, ExecutionProfile, RunPromptSelection},
+        domain::{AgentKind, ExecutionProfile, GrillConfiguration, RunPromptSelection},
         terminal::{FakeMachineOutcome, FakeTerminalRuntime},
     };
+    use std::process::Command;
 
-    let directory = tempdir().expect("temporary app directory should exist");
-    let checkout = directory.path().join("checkout");
-    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
-    fake.dirty_checkout_after_launch();
-    let (runtime, item, workspace, repository, _) = runtime_for_run_launch(
-        &directory.path().join("mission-manager.sqlite"),
-        &checkout,
-        fake,
-    );
-    let state = Mutex::new(runtime);
-    let run = tauri::async_runtime::block_on(runs::start_direct_run_with_state(
-        item.id,
-        workspace.id,
-        None,
-        repository.id,
-        AgentKind::Claude,
-        ExecutionProfile::Implement,
-        "Implement the change".into(),
-        RunPromptSelection {
-            include_objective: true,
-            include_notes: false,
-            external_object_ids: Vec::new(),
-        },
-        vec![RunCheckout {
+    #[derive(Clone, Copy, Debug)]
+    enum Flow {
+        Direct,
+        Grill,
+        Worktree,
+    }
+
+    let selection = RunPromptSelection {
+        include_objective: true,
+        include_notes: false,
+        external_object_ids: Vec::new(),
+    };
+
+    for flow in [Flow::Direct, Flow::Grill, Flow::Worktree] {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let checkout = directory.path().join("checkout");
+        let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+        match flow {
+            Flow::Direct | Flow::Grill => fake.dirty_checkout_after_launch(),
+            Flow::Worktree => fake.change_checkout_remote_after_launch(
+                "https://example.com/changed-after-launch.git",
+            ),
+        }
+        let (runtime, item, workspace, repository, worktree) = runtime_for_run_launch(
+            &directory.path().join("mission-manager.sqlite"),
+            &checkout,
+            fake,
+        );
+        let expected_checkout = RunCheckout {
             repository_id: repository.id,
             path: checkout.to_string_lossy().into_owned(),
             branch: "feature/run-gate".into(),
             is_dirty: false,
-        }],
-        false,
-        false,
-        &state,
-    ))
-    .expect("post-launch checkout dirt should not abort Run recording");
-    assert!(checkout.join(".fake-terminal-launch-dirt").exists());
-    assert_eq!(state.lock().unwrap().state.runs[0].id, run.id);
+        };
+        let state = Mutex::new(runtime);
+        let run = tauri::async_runtime::block_on(async {
+            match flow {
+                Flow::Direct => {
+                    runs::start_direct_run_with_state(
+                        item.id,
+                        workspace.id,
+                        None,
+                        repository.id,
+                        AgentKind::Claude,
+                        ExecutionProfile::Implement,
+                        "Implement the change".into(),
+                        selection.clone(),
+                        vec![expected_checkout.clone()],
+                        false,
+                        false,
+                        &state,
+                    )
+                    .await
+                }
+                Flow::Grill => {
+                    runs::start_grill_run_with_state(
+                        item.id,
+                        workspace.id,
+                        None,
+                        repository.id,
+                        GrillConfiguration {
+                            agent: AgentKind::Claude,
+                            model: "claude-sonnet-4-5".into(),
+                            effort: "high".into(),
+                        },
+                        "Check the launch flow".into(),
+                        vec![expected_checkout.clone()],
+                        false,
+                        false,
+                        &state,
+                    )
+                    .await
+                }
+                Flow::Worktree => {
+                    runs::start_worktree_run_with_state(
+                        item.id,
+                        workspace.id,
+                        worktree.id,
+                        AgentKind::Claude,
+                        ExecutionProfile::Implement,
+                        "Implement the change".into(),
+                        selection.clone(),
+                        &state,
+                    )
+                    .await
+                }
+            }
+        })
+        .unwrap_or_else(|error| panic!("flow={flow:?}: {error}"));
+
+        assert_eq!(state.lock().unwrap().state.runs[0].id, run.id);
+        match flow {
+            Flow::Direct | Flow::Grill => {
+                assert!(checkout.join(".fake-terminal-launch-dirt").exists());
+            }
+            Flow::Worktree => {
+                let remote = Command::new("git")
+                    .args([
+                        "-C",
+                        checkout.to_str().expect("checkout path should be UTF-8"),
+                        "remote",
+                        "get-url",
+                        "origin",
+                    ])
+                    .output()
+                    .expect("git remote inspection should run");
+                assert!(remote.status.success());
+                assert_eq!(
+                    String::from_utf8_lossy(&remote.stdout).trim(),
+                    "https://example.com/changed-after-launch.git"
+                );
+            }
+        }
+    }
 }
 
 #[test]
