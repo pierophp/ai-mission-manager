@@ -6,7 +6,7 @@
 //! Worktree checks, and local-only cleanup before committing the reducer's
 //! decision through the shared `Runtime`.
 
-use std::{fs, time::Duration};
+use std::time::Duration;
 
 use crate::{
     app::{RunDeletionResult, Runtime},
@@ -616,10 +616,6 @@ impl Runtime {
         self.pending_machine_deletion = None;
         self.pending_parent_deletion = None;
         self.terminal_connections.clear();
-
-        if self.agent_state_directory.exists() {
-            let _ = fs::remove_dir_all(&self.agent_state_directory);
-        }
 
         Ok(ResetLocalDataResult {
             summary: current.plan.summary,

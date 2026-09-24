@@ -54,7 +54,7 @@ pub struct Runtime {
     pub(crate) pending_reset_local_data: Option<ResetLocalDataPreview>,
     pub(crate) terminal_connections: HashMap<String, TmuxControlPane>,
     pub(crate) terminal_runtime: Box<dyn TerminalRuntime>,
-    pub(crate) agent_state_directory: PathBuf,
+    pub(crate) legacy_agent_state_directory: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -100,7 +100,7 @@ impl Runtime {
         terminal_runtime: impl TerminalRuntime + 'static,
     ) -> Result<Self, String> {
         let database_path = path.as_ref().to_path_buf();
-        let agent_state_directory = database_path
+        let legacy_agent_state_directory = database_path
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("agent-state");
@@ -130,7 +130,7 @@ impl Runtime {
             pending_reset_local_data: None,
             terminal_connections: HashMap::new(),
             terminal_runtime: Box::new(terminal_runtime),
-            agent_state_directory,
+            legacy_agent_state_directory,
         };
         runtime.ensure_project_workspaces()?;
         runtime.recover_run_states()?;

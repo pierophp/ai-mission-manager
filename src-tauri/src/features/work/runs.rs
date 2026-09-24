@@ -253,7 +253,8 @@ impl Runtime {
             self.provision_agent_hooks()?;
         }
         let state_file = if matches!(machine.transport, MachineTransport::Local) {
-            state_file_path(&self.agent_state_directory, run_id)
+            let home = machine_home_directory(&machine);
+            state_file_path(&state_runs_directory(Path::new(&home)), run_id)
         } else {
             PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
         };
@@ -468,7 +469,8 @@ impl Runtime {
             self.provision_agent_hooks()?;
         }
         let state_file = if matches!(machine.transport, MachineTransport::Local) {
-            state_file_path(&self.agent_state_directory, run_id)
+            let home = machine_home_directory(&machine);
+            state_file_path(&state_runs_directory(Path::new(&home)), run_id)
         } else {
             PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
         };
@@ -605,7 +607,8 @@ impl Runtime {
             self.provision_agent_hooks()?;
         }
         let state_file = if matches!(machine.transport, MachineTransport::Local) {
-            state_file_path(&self.agent_state_directory, run_id)
+            let home = machine_home_directory(&machine);
+            state_file_path(&state_runs_directory(Path::new(&home)), run_id)
         } else {
             PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
         };
@@ -1444,26 +1447,40 @@ impl Runtime {
         let home = env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| "HOME is not set; agent hooks cannot be provisioned".to_owned())?;
-        let executable = env::current_exe()
-            .map_err(|error| format!("Could not locate the Mission Manager executable: {error}"))?;
-        provision_hooks(&home, &executable)
+        provision_hooks(&home)
     }
 
     pub(crate) fn recover_run_states(&mut self) -> Result<(), String> {
         for run in self.state.runs.clone() {
-            let path = state_file_path(&self.agent_state_directory, run.id);
-            let record = match read_state_file(&path) {
-                Ok(record) => record,
-                Err(error) => {
-                    if path.exists() {
-                        eprintln!(
-                            "Could not recover state for Run {} from {}: {error}",
-                            run.id,
-                            path.display()
-                        );
+            let current_path = self
+                .state
+                .machines
+                .iter()
+                .find(|machine| machine.id == run.machine_id)
+                .filter(|machine| matches!(machine.transport, MachineTransport::Local))
+                .map(|machine| {
+                    let home = machine_home_directory(machine);
+                    state_file_path(&state_runs_directory(Path::new(&home)), run.id)
+                });
+            let legacy_path = state_file_path(&self.legacy_agent_state_directory, run.id);
+            let record = [current_path, Some(legacy_path)]
+                .into_iter()
+                .flatten()
+                .find_map(|path| match read_state_file(&path) {
+                    Ok(record) => Some(record),
+                    Err(error) => {
+                        if path.exists() {
+                            eprintln!(
+                                "Could not recover state for Run {} from {}: {error}",
+                                run.id,
+                                path.display()
+                            );
+                        }
+                        None
                     }
-                    continue;
-                }
+                });
+            let Some(record) = record else {
+                continue;
             };
             let Ok(record_run_id) = record.run_id.parse::<i64>() else {
                 continue;
