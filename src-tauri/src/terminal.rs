@@ -57,15 +57,19 @@ pub trait TerminalRuntime: Send + Sync {
         send_input_to_pane(machine, pane_id, input)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn launch_agent(
         &self,
         machine: &Machine,
         session_name: &str,
+        gate_channel: &str,
         root: &Path,
         executable: &Path,
         prompt: &str,
         launch: AgentLaunchContext<'_>,
     ) -> Result<String, String>;
+
+    fn release_agent_launch(&self, machine: &Machine, gate_channel: &str) -> Result<(), String>;
 
     fn kill_session(&self, machine: &Machine, session_name: &str) -> Result<(), String>;
 
@@ -83,7 +87,7 @@ pub trait TerminalRuntime: Send + Sync {
 pub struct AgentLaunchContext<'a> {
     pub run_id: i64,
     pub state_file: &'a Path,
-    pub agent: Option<AgentKind>,
+    pub agent: AgentKind,
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
 }
@@ -782,16 +786,30 @@ impl TerminalRuntime for TmuxRuntime {
         crate::terminal::list_agent_panes(machine)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn launch_agent(
         &self,
         machine: &Machine,
         session_name: &str,
+        gate_channel: &str,
         root: &Path,
         executable: &Path,
         prompt: &str,
         launch: AgentLaunchContext<'_>,
     ) -> Result<String, String> {
-        launch_tmux_agent(machine, session_name, root, executable, prompt, launch)
+        launch_tmux_agent(
+            machine,
+            session_name,
+            gate_channel,
+            root,
+            executable,
+            prompt,
+            launch,
+        )
+    }
+
+    fn release_agent_launch(&self, machine: &Machine, gate_channel: &str) -> Result<(), String> {
+        release_tmux_agent_launch(machine, gate_channel)
     }
 
     fn kill_session(&self, machine: &Machine, session_name: &str) -> Result<(), String> {
@@ -857,7 +875,12 @@ pub(crate) enum FakeTerminalCommand {
     LaunchAgent {
         machine_id: i64,
         session_name: String,
+        gate_channel: String,
         run_id: i64,
+    },
+    ReleaseAgentLaunch {
+        machine_id: i64,
+        gate_channel: String,
     },
     KillSession {
         machine_id: i64,
@@ -891,8 +914,11 @@ pub(crate) struct FakeTerminalRuntime {
     hook_configs: Arc<Mutex<std::collections::HashMap<(i64, String), String>>>,
     observed_panes: Arc<Mutex<std::collections::HashMap<i64, Vec<ObservedPane>>>>,
     transcript_captures: FakeTranscriptCaptures,
+    release_failures: Arc<Mutex<std::collections::HashMap<i64, String>>>,
+    dirty_checkout_on_launch: Arc<Mutex<bool>>,
     observation_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
     send_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
+    release_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
 }
 
 #[cfg(test)]
@@ -951,11 +977,17 @@ impl FakeTerminalRuntime {
             hook_configs: Arc::new(Mutex::new(std::collections::HashMap::new())),
             observed_panes: Arc::new(Mutex::new(std::collections::HashMap::new())),
             transcript_captures: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            release_failures: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            dirty_checkout_on_launch: Arc::new(Mutex::new(false)),
             observation_gate: Arc::new((
                 Mutex::new(FakeObservationGateState::default()),
                 Condvar::new(),
             )),
             send_gate: Arc::new((
+                Mutex::new(FakeObservationGateState::default()),
+                Condvar::new(),
+            )),
+            release_gate: Arc::new((
                 Mutex::new(FakeObservationGateState::default()),
                 Condvar::new(),
             )),
@@ -968,6 +1000,10 @@ impl FakeTerminalRuntime {
 
     pub(crate) fn block_sends(&self) -> FakeObservationBlock {
         Self::block_gate(&self.send_gate)
+    }
+
+    pub(crate) fn block_launch_release(&self) -> FakeObservationBlock {
+        Self::block_gate(&self.release_gate)
     }
 
     fn block_gate(gate: &Arc<(Mutex<FakeObservationGateState>, Condvar)>) -> FakeObservationBlock {
@@ -1018,6 +1054,20 @@ impl FakeTerminalRuntime {
 
     pub(crate) fn command_log(&self) -> Arc<Mutex<Vec<FakeTerminalCommand>>> {
         Arc::clone(&self.commands)
+    }
+
+    pub(crate) fn fail_launch_release(&self, machine_id: i64, error: impl Into<String>) {
+        self.release_failures
+            .lock()
+            .expect("fake release failures should remain available")
+            .insert(machine_id, error.into());
+    }
+
+    pub(crate) fn dirty_checkout_after_launch(&self) {
+        *self
+            .dirty_checkout_on_launch
+            .lock()
+            .expect("fake launch mutation should remain available") = true;
     }
 
     pub(crate) fn set_agent_hook_config(
@@ -1285,11 +1335,13 @@ impl TerminalRuntime for FakeTerminalRuntime {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn launch_agent(
         &self,
         machine: &Machine,
         session_name: &str,
-        _root: &Path,
+        gate_channel: &str,
+        root: &Path,
         _executable: &Path,
         _prompt: &str,
         launch: AgentLaunchContext<'_>,
@@ -1297,9 +1349,36 @@ impl TerminalRuntime for FakeTerminalRuntime {
         self.record(FakeTerminalCommand::LaunchAgent {
             machine_id: machine.id,
             session_name: session_name.into(),
+            gate_channel: gate_channel.into(),
             run_id: launch.run_id,
         });
+        let dirty_after_launch = *self
+            .dirty_checkout_on_launch
+            .lock()
+            .expect("fake launch mutation should remain available");
+        if dirty_after_launch {
+            std::fs::write(
+                root.join(".fake-terminal-launch-dirt"),
+                b"dirty after launch",
+            )
+            .map_err(|error| format!("Could not simulate post-launch checkout dirt: {error}"))?;
+        }
         Ok(format!("%fake-{}", launch.run_id))
+    }
+
+    fn release_agent_launch(&self, machine: &Machine, gate_channel: &str) -> Result<(), String> {
+        self.record(FakeTerminalCommand::ReleaseAgentLaunch {
+            machine_id: machine.id,
+            gate_channel: gate_channel.into(),
+        });
+        self.release_failures
+            .lock()
+            .expect("fake release failures should remain available")
+            .get(&machine.id)
+            .cloned()
+            .map_or(Ok(()), Err)?;
+        Self::wait_for_gate(&self.release_gate);
+        Ok(())
     }
 
     fn kill_session(&self, machine: &Machine, session_name: &str) -> Result<(), String> {
@@ -2519,26 +2598,20 @@ fn decode_control_output(encoded: &[u8]) -> Vec<u8> {
 fn launch_tmux_agent(
     machine: &Machine,
     session_name: &str,
+    gate_channel: &str,
     root: &Path,
     executable: &Path,
     prompt: &str,
     launch: AgentLaunchContext<'_>,
 ) -> Result<String, String> {
-    let mut command = format!(
-        "export AI_MISSION_MANAGER_RUN_ID={}; export AI_MISSION_MANAGER_STATE_FILE={}; export AI_MISSION_MANAGER_TMUX_PATH=tmux; export AI_MISSION_MANAGER_TMUX_SOCKET={}; export AI_MISSION_MANAGER_PANE_ID=\"$TMUX_PANE\"; exec {}",
-        shell_quote(&launch.run_id.to_string()),
-        shell_quote(&launch.state_file.to_string_lossy()),
-        shell_quote(&machine.socket_name),
-        shell_quote(&executable.to_string_lossy()),
-    );
-    if let Some(agent) = launch.agent {
-        for argument in agent_cli_arguments(agent, launch.model, launch.effort)? {
-            command.push(' ');
-            command.push_str(&shell_quote(&argument));
-        }
-    }
-    command.push(' ');
-    command.push_str(&shell_quote(prompt));
+    validate_tmux_target(session_name)?;
+    let command = build_gated_agent_command(
+        &machine.socket_name,
+        gate_channel,
+        executable,
+        prompt,
+        &launch,
+    )?;
     let args = vec![
         "new-session".into(),
         "-d".into(),
@@ -2555,6 +2628,22 @@ fn launch_tmux_agent(
     }
 
     let pane_target = format!("{session_name}:0.0");
+    if let Err(error) = run_tmux(
+        machine,
+        &[
+            "select-pane".into(),
+            "-T".into(),
+            launch.agent.slug().into(),
+            "-t".into(),
+            pane_target.clone(),
+        ],
+    ) {
+        let cleanup = kill_tmux_session(machine, session_name);
+        return Err(format_commit_error(
+            format!("Could not label the gated agent Pane: {error}"),
+            cleanup.err(),
+        ));
+    }
     let args = vec![
         "display-message".into(),
         "-p".into(),
@@ -2596,6 +2685,74 @@ fn launch_tmux_agent(
         ));
     }
     Ok(pane_id)
+}
+
+fn build_gated_agent_command(
+    socket_name: &str,
+    gate_channel: &str,
+    executable: &Path,
+    prompt: &str,
+    launch: &AgentLaunchContext<'_>,
+) -> Result<String, String> {
+    validate_tmux_target(socket_name)?;
+    validate_tmux_target(gate_channel)?;
+    let mut command = format!(
+        "{} && export AI_MISSION_MANAGER_RUN_ID={}",
+        build_tmux_wait_for_command("tmux", socket_name, gate_channel, false)?,
+        shell_quote(&launch.run_id.to_string()),
+    );
+    for assignment in [
+        format!(
+            "export AI_MISSION_MANAGER_STATE_FILE={}",
+            shell_quote(&launch.state_file.to_string_lossy())
+        ),
+        "export AI_MISSION_MANAGER_TMUX_PATH=tmux".to_owned(),
+        format!(
+            "export AI_MISSION_MANAGER_TMUX_SOCKET={}",
+            shell_quote(socket_name)
+        ),
+        "export AI_MISSION_MANAGER_PANE_ID=\"$TMUX_PANE\"".to_owned(),
+    ] {
+        command.push_str(" && ");
+        command.push_str(&assignment);
+    }
+    command.push_str(" && exec ");
+    command.push_str(&shell_quote(&executable.to_string_lossy()));
+    for argument in agent_cli_arguments(launch.agent, launch.model, launch.effort)? {
+        command.push(' ');
+        command.push_str(&shell_quote(&argument));
+    }
+    command.push(' ');
+    command.push_str(&shell_quote(prompt));
+    Ok(command)
+}
+
+fn build_tmux_wait_for_command(
+    tmux_path: &str,
+    socket_name: &str,
+    gate_channel: &str,
+    release: bool,
+) -> Result<String, String> {
+    if tmux_path.trim().is_empty() {
+        return Err("tmux executable path cannot be blank".to_owned());
+    }
+    validate_tmux_target(socket_name)?;
+    validate_tmux_target(gate_channel)?;
+    let mut arguments = vec![tmux_path, "-f", "/dev/null", "-L", socket_name, "wait-for"];
+    if release {
+        arguments.push("-S");
+    }
+    arguments.push(gate_channel);
+    Ok(arguments
+        .into_iter()
+        .map(shell_quote)
+        .collect::<Vec<_>>()
+        .join(" "))
+}
+
+fn release_tmux_agent_launch(machine: &Machine, gate_channel: &str) -> Result<(), String> {
+    let args = ["wait-for".into(), "-S".into(), gate_channel.into()];
+    run_tmux(machine, &args).map(|_| ())
 }
 
 pub fn agent_cli_arguments(
@@ -2687,6 +2844,44 @@ mod tests {
                 "-c",
                 "model_reasoning_effort=xhigh"
             ]
+        );
+    }
+
+    #[test]
+    fn launch_gate_command_waits_on_the_machine_socket_before_exporting_or_execing_agent() {
+        let state_file = Path::new("/home/runner/.local/state/ai-mission-manager/runs/run-23.json");
+        let launch = AgentLaunchContext {
+            run_id: 23,
+            state_file,
+            agent: AgentKind::Codex,
+            model: Some("gpt-6-luna"),
+            effort: Some("xhigh"),
+        };
+        let command = build_gated_agent_command(
+            "mission-socket",
+            "mission-launch-23-session-4",
+            Path::new("/opt/codex"),
+            "Implement the issue",
+            &launch,
+        )
+        .expect("launch command should be valid");
+        let gate = "'tmux' '-f' '/dev/null' '-L' 'mission-socket' 'wait-for' 'mission-launch-23-session-4'";
+        let first_export = "export AI_MISSION_MANAGER_RUN_ID='23'";
+        let agent = "exec '/opt/codex' '--model' 'gpt-6-luna' '-c' 'model_reasoning_effort=xhigh' 'Implement the issue'";
+        assert!(command.starts_with(gate));
+        assert!(command.find(gate).unwrap() < command.find(first_export).unwrap());
+        assert!(command.ends_with(agent));
+
+        let release = build_tmux_wait_for_command(
+            "tmux",
+            "mission-socket",
+            "mission-launch-23-session-4",
+            true,
+        )
+        .expect("release command should be valid");
+        assert_eq!(
+            release,
+            "'tmux' '-f' '/dev/null' '-L' 'mission-socket' 'wait-for' '-S' 'mission-launch-23-session-4'"
         );
     }
 
@@ -2819,18 +3014,23 @@ mod tests {
             .launch_agent(
                 &machine,
                 &session_name,
+                &format!("launch-test-{}", std::process::id()),
                 directory.path(),
                 Path::new("/bin/sleep"),
                 "30",
                 AgentLaunchContext {
                     run_id: 1,
                     state_file: &directory.path().join("state.json"),
-                    agent: None,
+                    agent: AgentKind::Claude,
                     model: None,
                     effort: None,
                 },
             )
             .expect("tmux should launch the test process");
+
+        TmuxRuntime
+            .release_agent_launch(&machine, &format!("launch-test-{}", std::process::id()))
+            .expect("tmux should release the test process");
 
         let panes = run_tmux(
             &machine,
@@ -3251,8 +3451,15 @@ mod tests {
                 .expect("Codex should be recognized");
         assert_eq!(codex.agent, AgentKind::Codex);
 
+        let gated = parse_agent_pane_summary(
+            "mission-item-3-run-9\t%9\tsh\tclaude\t/tmp/working-directory",
+        )
+        .expect("the gated Pane description should parse")
+        .expect("the agent title should identify the waiting shell");
+        assert_eq!(gated.agent, AgentKind::Claude);
+
         assert!(
-            parse_agent_pane_summary("shell\t%9\tbash\tterminal\t/tmp/working-directory")
+            parse_agent_pane_summary("shell\t%10\tbash\tterminal\t/tmp/working-directory")
                 .expect("the Pane description should parse")
                 .is_none()
         );

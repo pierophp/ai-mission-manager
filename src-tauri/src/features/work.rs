@@ -30,13 +30,13 @@ use crate::{
         grill_transcript_extends, home_view, normalize_machine_path, parse_grill_question_group,
         parse_grill_question_group_since, run_is_active, search_items, suggest_untracked_runs,
         worktree_path, AgentKind, AgentPaneObservation, AuditAction, ConfirmedDownstreamIssue,
-        DomainState, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
+        Context, DomainState, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
         ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshot, GrillAnswer,
         GrillConfiguration, GrillContinuationAction, GrillPhase, HomeView, Item, ItemRelation,
         ItemRelationKind, ItemStatus, ItemView, Machine, MachineObservation, MachineTransport,
-        Repository, RepositoryLocation, Run, RunCheckout, RunPaneStatus, RunPromptSelection,
-        RunState, RunSuggestion, Workspace, WorkspaceRepository, WorkspaceRepositoryInput,
-        Worktree,
+        Project, Repository, RepositoryLocation, Run, RunCheckout, RunPaneStatus,
+        RunPromptSelection, RunState, RunSuggestion, Workspace, WorkspaceRepository,
+        WorkspaceRepositoryInput, Worktree,
     },
     git::GitCli,
     provider::{classify_url, github_repository_name, resolve_gh_executable, GithubCli},
@@ -52,13 +52,7 @@ use crate::features::deletion::{
 };
 use crate::features::structure::{machine_home_directory, resolve_machine_path};
 
-fn format_commit_error(error: String, cleanup_error: Option<String>) -> String {
-    match cleanup_error {
-        Some(cleanup_error) => format!("{error}; {cleanup_error}"),
-        None => error,
-    }
-}
-
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn worktree_run_event(
     item_id: i64,
@@ -87,6 +81,13 @@ pub(crate) fn worktree_run_event(
         pane_id,
         started_at,
         prompt_selection,
+    }
+}
+
+fn format_commit_error(error: String, cleanup_error: Option<String>) -> String {
+    match cleanup_error {
+        Some(cleanup_error) => format!("{error}; {cleanup_error}"),
+        None => error,
     }
 }
 
@@ -505,7 +506,7 @@ pub(crate) async fn prepare_grill_run(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn start_direct_run(
+pub(crate) async fn start_direct_run(
     item_id: i64,
     workspace_id: i64,
     machine_id: Option<i64>,
@@ -519,25 +520,25 @@ pub(crate) fn start_direct_run(
     allow_shared_checkouts: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    locked(state, |runtime| {
-        runtime.start_direct_run(
-            item_id,
-            workspace_id,
-            machine_id,
-            primary_repository_id,
-            agent,
-            execution_profile,
-            prompt,
-            prompt_selection,
-            expected_checkouts,
-            allow_dirty,
-            allow_shared_checkouts,
-        )
-    })
+    runs::start_direct_run_with_state(
+        item_id,
+        workspace_id,
+        machine_id,
+        primary_repository_id,
+        agent,
+        execution_profile,
+        prompt,
+        prompt_selection,
+        expected_checkouts,
+        allow_dirty,
+        allow_shared_checkouts,
+        state.inner(),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn start_grill_run(
+pub(crate) async fn start_grill_run(
     item_id: i64,
     workspace_id: i64,
     machine_id: Option<i64>,
@@ -549,23 +550,23 @@ pub(crate) fn start_grill_run(
     allow_shared_checkouts: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    locked(state, |runtime| {
-        runtime.start_grill_run(
-            item_id,
-            workspace_id,
-            machine_id,
-            primary_repository_id,
-            configuration,
-            initial_prompt,
-            expected_checkouts,
-            allow_dirty,
-            allow_shared_checkouts,
-        )
-    })
+    runs::start_grill_run_with_state(
+        item_id,
+        workspace_id,
+        machine_id,
+        primary_repository_id,
+        configuration,
+        initial_prompt,
+        expected_checkouts,
+        allow_dirty,
+        allow_shared_checkouts,
+        state.inner(),
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn start_worktree_run(
+pub(crate) async fn start_worktree_run(
     item_id: i64,
     workspace_id: i64,
     worktree_id: i64,
@@ -575,17 +576,17 @@ pub(crate) fn start_worktree_run(
     prompt_selection: RunPromptSelection,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    locked(state, |runtime| {
-        runtime.start_worktree_run(
-            item_id,
-            workspace_id,
-            worktree_id,
-            agent,
-            execution_profile,
-            prompt,
-            prompt_selection,
-        )
-    })
+    runs::start_worktree_run_with_state(
+        item_id,
+        workspace_id,
+        worktree_id,
+        agent,
+        execution_profile,
+        prompt,
+        prompt_selection,
+        state.inner(),
+    )
+    .await
 }
 
 pub(crate) async fn list_run_suggestions(

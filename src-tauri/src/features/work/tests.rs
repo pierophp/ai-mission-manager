@@ -91,6 +91,118 @@ fn runtime_with_grill_run(
     (runtime, run_id)
 }
 
+fn init_test_repository(path: &Path, remote_url: &str, branch: &str) {
+    std::fs::create_dir_all(path).expect("repository directory should be created");
+    let output = Command::new("git")
+        .args(["init", &format!("--initial-branch={branch}")])
+        .arg(path)
+        .output()
+        .expect("git init should run");
+    assert!(output.status.success(), "git init should succeed");
+    for (key, value) in [
+        ("user.email", "run-test@example.com"),
+        ("user.name", "Run Test"),
+    ] {
+        let output = Command::new("git")
+            .args([
+                "-C",
+                path.to_str().expect("test path should be UTF-8"),
+                "config",
+                key,
+                value,
+            ])
+            .output()
+            .expect("git config should run");
+        assert!(output.status.success(), "git config should succeed");
+    }
+    std::fs::write(path.join("README.md"), "test checkout\n")
+        .expect("repository file should be written");
+    for args in [
+        vec!["-C", path.to_str().unwrap(), "add", "README.md"],
+        vec!["-C", path.to_str().unwrap(), "commit", "-m", "initial"],
+        vec![
+            "-C",
+            path.to_str().unwrap(),
+            "remote",
+            "add",
+            "origin",
+            remote_url,
+        ],
+    ] {
+        let output = Command::new("git")
+            .args(args)
+            .output()
+            .expect("git command should run");
+        assert!(
+            output.status.success(),
+            "git command should succeed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+fn runtime_for_run_launch(
+    database: &Path,
+    checkout_path: &Path,
+    terminal: crate::terminal::FakeTerminalRuntime,
+) -> (Runtime, Item, Workspace, Repository, Worktree) {
+    use crate::domain::MachineTransport;
+
+    let remote_url = "https://example.com/service.git";
+    let branch = "feature/run-gate";
+    init_test_repository(checkout_path, remote_url, branch);
+    let mut runtime = Runtime::open_with_terminal_runtime(database, terminal)
+        .expect("runtime should open with the fake Terminal Runtime");
+    let machine = runtime
+        .register_machine(
+            1,
+            "Test Machine".into(),
+            "mission".into(),
+            MachineTransport::Local,
+        )
+        .expect("Machine should register");
+    runtime
+        .set_context_execution_machine(1, Some(machine.id))
+        .expect("Context should use the Machine");
+    let repository = runtime
+        .register_repository(1, "service".into(), remote_url.into())
+        .expect("Repository should register");
+    runtime.state.repository_locations.push(RepositoryLocation {
+        repository_id: repository.id,
+        machine_id: machine.id,
+        checkout_path: checkout_path.to_string_lossy().into_owned(),
+        worktree_root: checkout_path
+            .parent()
+            .unwrap_or(checkout_path)
+            .to_string_lossy()
+            .into_owned(),
+    });
+    let item = runtime
+        .create_item("Exercise gated Run launch".into(), 1, 1)
+        .expect("Item should be created");
+    let workspace = runtime
+        .create_workspace(
+            item.id,
+            vec![WorkspaceRepositoryInput {
+                repository_id: repository.id,
+                branch: branch.into(),
+                base_branch: "main".into(),
+            }],
+        )
+        .expect("Workspace should be created");
+    let worktree = runtime
+        .create_worktree(
+            workspace.id,
+            repository.id,
+            machine.id,
+            checkout_path.to_string_lossy().into_owned(),
+            branch.into(),
+            "main".into(),
+        )
+        .expect("Worktree should be registered");
+    (runtime, item, workspace, repository, worktree)
+}
+
 fn wait_for_grill_operation_waiter(state: &std::sync::Arc<Mutex<Runtime>>, run_id: i64) -> bool {
     use std::{thread, time::Duration};
 
@@ -628,7 +740,7 @@ fn direct_run_preview_inspects_checkouts_before_returning_the_existing_contract(
 #[test]
 fn a_failed_run_preflight_never_calls_the_agent_launcher() {
     use crate::{
-        domain::{AgentKind, ExecutionProfile, MachineTransport, RunPromptSelection, Worktree},
+        domain::{AgentKind, ExecutionProfile, RunPromptSelection},
         terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime},
     };
 
@@ -640,75 +752,30 @@ fn a_failed_run_preflight_never_calls_the_agent_launcher() {
         FakeMachineOutcome::HookProvisioningFailed,
     ] {
         let directory = tempdir().expect("temporary app directory should exist");
-        let database = directory.path().join("mission-manager.sqlite");
+        let checkout = directory.path().join("checkout");
         let fake = FakeTerminalRuntime::new([(1, outcome)]);
         let commands = fake.command_log();
-        let mut runtime = Runtime::open_with_terminal_runtime(&database, fake)
-            .expect("runtime should open with the fake Terminal Runtime");
-        runtime
-            .register_machine(
-                1,
-                "Test Machine".into(),
-                "mission".into(),
-                MachineTransport::Ssh {
-                    host: "build.example".into(),
-                    user: Some("runner".into()),
-                    port: None,
-                    identity_file: None,
-                    known_hosts_file: None,
-                    strict_host_key_checking: None,
-                },
-            )
-            .expect("Machine should be registered");
-        runtime
-            .set_context_execution_machine(1, Some(1))
-            .expect("Context should use the Machine");
-        runtime
-            .register_repository(
-                1,
-                "service".into(),
-                "https://example.com/service.git".into(),
-            )
-            .expect("Repository should be registered");
-        let item = runtime
-            .create_item("Start a Run".into(), 1, 1)
-            .expect("Item should be created");
-        let workspace = runtime
-            .create_workspace(
-                item.id,
-                vec![WorkspaceRepositoryInput {
-                    repository_id: 1,
-                    branch: "feature/preflight".into(),
-                    base_branch: "main".into(),
-                }],
-            )
-            .expect("execution setup should be created");
-        runtime.state.worktrees.push(Worktree {
-            id: 1,
-            workspace_id: workspace.id,
-            repository_id: 1,
-            machine_id: 1,
-            path: directory.path().to_string_lossy().into_owned(),
-            branch: "feature/preflight".into(),
-            base_branch: "main".into(),
-            is_dirty: false,
-        });
-
-        let error = runtime
-            .start_worktree_run(
-                item.id,
-                workspace.id,
-                1,
-                AgentKind::Claude,
-                ExecutionProfile::Implement,
-                "Implement the change".into(),
-                RunPromptSelection {
-                    include_objective: true,
-                    include_notes: false,
-                    external_object_ids: Vec::new(),
-                },
-            )
-            .expect_err("a failed preflight should abort the Run");
+        let (runtime, item, workspace, _, worktree) = runtime_for_run_launch(
+            &directory.path().join("mission-manager.sqlite"),
+            &checkout,
+            fake,
+        );
+        let state = Mutex::new(runtime);
+        let error = tauri::async_runtime::block_on(runs::start_worktree_run_with_state(
+            item.id,
+            workspace.id,
+            worktree.id,
+            AgentKind::Claude,
+            ExecutionProfile::Implement,
+            "Implement the change".into(),
+            RunPromptSelection {
+                include_objective: true,
+                include_notes: false,
+                external_object_ids: Vec::new(),
+            },
+            &state,
+        ))
+        .expect_err("a failed preflight should abort the Run");
         assert!(error.contains("Run preflight failed on Machine Test Machine"));
         assert!(error.contains("not started locally"));
         let recorded = commands
@@ -727,6 +794,302 @@ fn a_failed_run_preflight_never_calls_the_agent_launcher() {
             .iter()
             .any(|command| matches!(command, FakeTerminalCommand::LaunchAgent { .. })));
     }
+}
+
+#[test]
+fn direct_grill_and_worktree_runs_are_persisted_before_their_gate_is_released() {
+    use crate::{
+        domain::{AgentKind, ExecutionProfile, GrillConfiguration, RunPromptSelection},
+        terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime},
+    };
+    use std::{sync::Arc, thread, time::Duration};
+
+    #[derive(Clone, Copy, Debug)]
+    enum Flow {
+        Direct,
+        Grill,
+        Worktree,
+    }
+
+    for flow in [Flow::Direct, Flow::Grill, Flow::Worktree] {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let checkout = directory.path().join("checkout");
+        let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+        let blocked_release = fake.block_launch_release();
+        let commands = fake.command_log();
+        let (runtime, item, workspace, repository, worktree) = runtime_for_run_launch(
+            &directory.path().join("mission-manager.sqlite"),
+            &checkout,
+            fake,
+        );
+        let expected_checkout = RunCheckout {
+            repository_id: repository.id,
+            path: checkout.to_string_lossy().into_owned(),
+            branch: "feature/run-gate".into(),
+            is_dirty: false,
+        };
+        let state = Arc::new(Mutex::new(runtime));
+        let worker_state = Arc::clone(&state);
+        let worker = thread::spawn(move || {
+            tauri::async_runtime::block_on(async move {
+                let selection = RunPromptSelection {
+                    include_objective: true,
+                    include_notes: false,
+                    external_object_ids: Vec::new(),
+                };
+                match flow {
+                    Flow::Direct => {
+                        runs::start_direct_run_with_state(
+                            item.id,
+                            workspace.id,
+                            None,
+                            repository.id,
+                            AgentKind::Claude,
+                            ExecutionProfile::Implement,
+                            "Implement the change".into(),
+                            selection,
+                            vec![expected_checkout],
+                            false,
+                            false,
+                            &worker_state,
+                        )
+                        .await
+                    }
+                    Flow::Grill => {
+                        runs::start_grill_run_with_state(
+                            item.id,
+                            workspace.id,
+                            None,
+                            repository.id,
+                            GrillConfiguration {
+                                agent: AgentKind::Claude,
+                                model: "claude-sonnet-4-5".into(),
+                                effort: "high".into(),
+                            },
+                            "Check the launch flow".into(),
+                            vec![expected_checkout],
+                            false,
+                            false,
+                            &worker_state,
+                        )
+                        .await
+                    }
+                    Flow::Worktree => {
+                        runs::start_worktree_run_with_state(
+                            item.id,
+                            workspace.id,
+                            worktree.id,
+                            AgentKind::Claude,
+                            ExecutionProfile::Implement,
+                            "Implement the change".into(),
+                            selection,
+                            &worker_state,
+                        )
+                        .await
+                    }
+                }
+            })
+        });
+
+        if !blocked_release.wait_until_started(Duration::from_secs(5)) {
+            blocked_release.release();
+            let worker_result = worker
+                .join()
+                .expect("Run launch worker should finish without blocking");
+            panic!(
+                "flow={flow:?} did not reach release: result={worker_result:?}, commands={:?}",
+                commands.lock().unwrap(),
+            );
+        }
+        {
+            let runtime = state
+                .lock()
+                .expect("Runtime should remain lockable during the blocked release");
+            assert_eq!(runtime.state.runs.len(), 1);
+            assert_eq!(runtime.state.runs[0].state, RunState::Unknown);
+            assert_eq!(runtime.state.runs[0].pane_id, "%fake-1");
+        }
+        blocked_release.release();
+        let run = worker
+            .join()
+            .expect("Run launch worker should finish")
+            .expect("Run launch should succeed");
+        assert_eq!(run.state, RunState::Unknown);
+
+        let recorded = commands
+            .lock()
+            .expect("fake command log should remain available")
+            .clone();
+        let launch_index = recorded
+            .iter()
+            .position(|command| matches!(command, FakeTerminalCommand::LaunchAgent { .. }))
+            .expect("gated session should be created");
+        let release_index = recorded
+            .iter()
+            .position(|command| matches!(command, FakeTerminalCommand::ReleaseAgentLaunch { .. }))
+            .expect("gated session should be released");
+        assert!(launch_index < release_index);
+    }
+}
+
+#[test]
+fn dirty_state_after_launch_does_not_abort_recording_the_direct_run() {
+    use crate::{
+        domain::{AgentKind, ExecutionProfile, RunPromptSelection},
+        terminal::{FakeMachineOutcome, FakeTerminalRuntime},
+    };
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let checkout = directory.path().join("checkout");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+    fake.dirty_checkout_after_launch();
+    let (runtime, item, workspace, repository, _) = runtime_for_run_launch(
+        &directory.path().join("mission-manager.sqlite"),
+        &checkout,
+        fake,
+    );
+    let state = Mutex::new(runtime);
+    let run = tauri::async_runtime::block_on(runs::start_direct_run_with_state(
+        item.id,
+        workspace.id,
+        None,
+        repository.id,
+        AgentKind::Claude,
+        ExecutionProfile::Implement,
+        "Implement the change".into(),
+        RunPromptSelection {
+            include_objective: true,
+            include_notes: false,
+            external_object_ids: Vec::new(),
+        },
+        vec![RunCheckout {
+            repository_id: repository.id,
+            path: checkout.to_string_lossy().into_owned(),
+            branch: "feature/run-gate".into(),
+            is_dirty: false,
+        }],
+        false,
+        false,
+        &state,
+    ))
+    .expect("post-launch checkout dirt should not abort Run recording");
+    assert!(checkout.join(".fake-terminal-launch-dirt").exists());
+    assert_eq!(state.lock().unwrap().state.runs[0].id, run.id);
+}
+
+#[test]
+fn failed_run_commit_kills_only_its_gated_session_without_release() {
+    use crate::{
+        domain::{AgentKind, ExecutionProfile, RunPromptSelection},
+        terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime},
+    };
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let checkout = directory.path().join("checkout");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+    let commands = fake.command_log();
+    let (runtime, item, workspace, repository, _) =
+        runtime_for_run_launch(&database, &checkout, fake);
+    rusqlite::Connection::open(&database)
+        .expect("database should be available")
+        .execute_batch(
+            "CREATE TRIGGER reject_run_insert BEFORE INSERT ON runs
+             BEGIN SELECT RAISE(ABORT, 'simulated run commit failure'); END;",
+        )
+        .expect("test trigger should be created");
+    let state = Mutex::new(runtime);
+    let error = tauri::async_runtime::block_on(runs::start_direct_run_with_state(
+        item.id,
+        workspace.id,
+        None,
+        repository.id,
+        AgentKind::Claude,
+        ExecutionProfile::Implement,
+        "Implement the change".into(),
+        RunPromptSelection {
+            include_objective: true,
+            include_notes: false,
+            external_object_ids: Vec::new(),
+        },
+        vec![RunCheckout {
+            repository_id: repository.id,
+            path: checkout.to_string_lossy().into_owned(),
+            branch: "feature/run-gate".into(),
+            is_dirty: false,
+        }],
+        false,
+        false,
+        &state,
+    ))
+    .expect_err("simulated persistence failure should abort Run launch");
+    assert!(error.contains("simulated run commit failure"));
+    assert!(state.lock().unwrap().state.runs.is_empty());
+    let recorded = commands.lock().unwrap().clone();
+    assert!(recorded.iter().any(|command| matches!(
+        command,
+        FakeTerminalCommand::KillSession {
+            session_name,
+            ..
+        } if session_name == "mission-item-1-run-1"
+    )));
+    assert!(!recorded
+        .iter()
+        .any(|command| matches!(command, FakeTerminalCommand::ReleaseAgentLaunch { .. })));
+}
+
+#[test]
+fn release_failure_keeps_recorded_run_unknown_and_reports_that_it_was_not_released() {
+    use crate::{
+        domain::{AgentKind, ExecutionProfile, RunPromptSelection, RunState},
+        terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime},
+    };
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let checkout = directory.path().join("checkout");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+    fake.fail_launch_release(1, "simulated release failure");
+    let commands = fake.command_log();
+    let (runtime, item, workspace, repository, _) = runtime_for_run_launch(
+        &directory.path().join("mission-manager.sqlite"),
+        &checkout,
+        fake,
+    );
+    let state = Mutex::new(runtime);
+    let error = tauri::async_runtime::block_on(runs::start_direct_run_with_state(
+        item.id,
+        workspace.id,
+        None,
+        repository.id,
+        AgentKind::Claude,
+        ExecutionProfile::Implement,
+        "Implement the change".into(),
+        RunPromptSelection {
+            include_objective: true,
+            include_notes: false,
+            external_object_ids: Vec::new(),
+        },
+        vec![RunCheckout {
+            repository_id: repository.id,
+            path: checkout.to_string_lossy().into_owned(),
+            branch: "feature/run-gate".into(),
+            is_dirty: false,
+        }],
+        false,
+        false,
+        &state,
+    ))
+    .expect_err("release failure should be returned to the caller");
+    assert!(error.contains("Run 1 is recorded but the agent was not released"));
+    assert!(error.contains("simulated release failure"));
+    let runs = &state.lock().unwrap().state.runs;
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].state, RunState::Unknown);
+    assert!(commands
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|command| matches!(command, FakeTerminalCommand::ReleaseAgentLaunch { .. })));
 }
 
 #[test]

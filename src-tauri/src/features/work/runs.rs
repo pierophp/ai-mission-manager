@@ -1647,6 +1647,7 @@ pub(crate) async fn open_external_terminal_with_state(
     Ok(())
 }
 
+#[derive(Clone)]
 struct DirectCheckoutSnapshot {
     item_id: i64,
     item_project_id: i64,
@@ -1944,6 +1945,927 @@ pub(crate) async fn prepare_direct_run_with_state(
     runtime.apply_direct_checkout_observation(observation)
 }
 
+#[derive(Clone)]
+enum RunLaunchInput {
+    Direct {
+        item_id: i64,
+        workspace_id: i64,
+        machine_id: Option<i64>,
+        primary_repository_id: i64,
+        agent: AgentKind,
+        execution_profile: ExecutionProfile,
+        prompt: String,
+        prompt_selection: RunPromptSelection,
+        expected_checkouts: Vec<RunCheckout>,
+        allow_dirty: bool,
+        allow_shared_checkouts: bool,
+    },
+    Grill {
+        item_id: i64,
+        workspace_id: i64,
+        machine_id: Option<i64>,
+        primary_repository_id: i64,
+        configuration: GrillConfiguration,
+        initial_prompt: String,
+        expected_checkouts: Vec<RunCheckout>,
+        allow_dirty: bool,
+        allow_shared_checkouts: bool,
+    },
+    Worktree {
+        item_id: i64,
+        workspace_id: i64,
+        worktree_id: i64,
+        agent: AgentKind,
+        execution_profile: ExecutionProfile,
+        prompt: String,
+        prompt_selection: RunPromptSelection,
+    },
+}
+
+impl RunLaunchInput {
+    fn item_id(&self) -> i64 {
+        match self {
+            Self::Direct { item_id, .. }
+            | Self::Grill { item_id, .. }
+            | Self::Worktree { item_id, .. } => *item_id,
+        }
+    }
+
+    fn agent(&self) -> AgentKind {
+        match self {
+            Self::Direct { agent, .. } | Self::Worktree { agent, .. } => *agent,
+            Self::Grill { configuration, .. } => configuration.agent,
+        }
+    }
+
+    fn expected_checkouts(&self) -> Option<&[RunCheckout]> {
+        match self {
+            Self::Direct {
+                expected_checkouts, ..
+            }
+            | Self::Grill {
+                expected_checkouts, ..
+            } => Some(expected_checkouts),
+            Self::Worktree { .. } => None,
+        }
+    }
+
+    fn session_kind(&self) -> &'static str {
+        match self {
+            Self::Grill { .. } => "grill",
+            Self::Direct { .. } | Self::Worktree { .. } => "run",
+        }
+    }
+}
+
+#[derive(Clone)]
+struct WorktreeRunIdentity {
+    workspace: Workspace,
+    worktree: Worktree,
+    repository: Repository,
+}
+
+#[derive(Clone)]
+struct RunLaunchSnapshot {
+    state: DomainState,
+    item: Item,
+    project: Project,
+    context: Context,
+    workspace: Workspace,
+    machine: Machine,
+    terminal_runtime: Arc<dyn TerminalRuntime>,
+    preferred_executable: Option<PathBuf>,
+    input: RunLaunchInput,
+    prompt: String,
+    direct_checkout: Option<DirectCheckoutSnapshot>,
+    worktree: Option<WorktreeRunIdentity>,
+    run_id: i64,
+    session_name: String,
+    gate_channel: String,
+    started_at: i64,
+}
+
+struct RunLaunchObservation {
+    snapshot: RunLaunchSnapshot,
+    working_directory: String,
+    checkouts: Vec<RunCheckout>,
+}
+
+impl RunLaunchSnapshot {
+    fn event(&self, session_name: String, pane_id: String, checkouts: Vec<RunCheckout>) -> Event {
+        match &self.input {
+            RunLaunchInput::Direct {
+                item_id,
+                workspace_id,
+                primary_repository_id,
+                agent,
+                execution_profile,
+                prompt_selection,
+                allow_dirty,
+                allow_shared_checkouts,
+                ..
+            } => {
+                let working_directory = checkouts
+                    .iter()
+                    .find(|checkout| checkout.repository_id == *primary_repository_id)
+                    .map(|checkout| checkout.path.clone())
+                    .unwrap_or_default();
+                Event::StartDirectRun {
+                    item_id: *item_id,
+                    workspace_id: *workspace_id,
+                    machine_id: self.machine.id,
+                    agent: *agent,
+                    execution_profile: *execution_profile,
+                    prompt: self.prompt.clone(),
+                    working_directory,
+                    session_name,
+                    pane_id,
+                    started_at: self.started_at,
+                    prompt_selection: prompt_selection.clone(),
+                    checkouts,
+                    repository_id: *primary_repository_id,
+                    allow_dirty: *allow_dirty,
+                    allow_shared_checkouts: *allow_shared_checkouts,
+                }
+            }
+            RunLaunchInput::Grill {
+                item_id,
+                workspace_id,
+                primary_repository_id,
+                configuration,
+                ..
+            } => {
+                let working_directory = checkouts
+                    .iter()
+                    .find(|checkout| checkout.repository_id == *primary_repository_id)
+                    .map(|checkout| checkout.path.clone())
+                    .unwrap_or_default();
+                Event::StartGrillRun {
+                    item_id: *item_id,
+                    workspace_id: *workspace_id,
+                    repository_id: *primary_repository_id,
+                    machine_id: self.machine.id,
+                    configuration: configuration.clone(),
+                    prompt: self.prompt.clone(),
+                    skill_snapshot: crate::domain::GRILL_SKILL_SNAPSHOT.into(),
+                    working_directory,
+                    session_name,
+                    pane_id,
+                    started_at: self.started_at,
+                    checkouts,
+                }
+            }
+            RunLaunchInput::Worktree {
+                item_id,
+                workspace_id,
+                worktree_id,
+                agent,
+                execution_profile,
+                prompt_selection,
+                ..
+            } => Event::StartWorktreeRun {
+                item_id: *item_id,
+                workspace_id: *workspace_id,
+                worktree_id: *worktree_id,
+                machine_id: self.machine.id,
+                agent: *agent,
+                execution_profile: *execution_profile,
+                prompt: self.prompt.clone(),
+                working_directory: self
+                    .worktree
+                    .as_ref()
+                    .map(|identity| identity.worktree.path.clone())
+                    .unwrap_or_default(),
+                session_name,
+                pane_id,
+                started_at: self.started_at,
+                prompt_selection: prompt_selection.clone(),
+            },
+        }
+    }
+
+    fn is_current(&self, runtime: &Runtime) -> bool {
+        if runtime.state.next_run_id != self.run_id
+            || !runtime
+                .state
+                .items
+                .iter()
+                .any(|current| current == &self.item)
+            || !runtime
+                .state
+                .projects
+                .iter()
+                .any(|current| current == &self.project)
+            || !runtime
+                .state
+                .contexts
+                .iter()
+                .any(|current| current == &self.context)
+            || !runtime
+                .state
+                .workspaces
+                .iter()
+                .any(|current| current == &self.workspace)
+            || !runtime
+                .state
+                .machines
+                .iter()
+                .any(|current| machine_execution_identity_matches(current, &self.machine))
+        {
+            return false;
+        }
+        if let Some(snapshot) = &self.direct_checkout {
+            if !runtime.direct_checkout_snapshot_is_current(snapshot) {
+                return false;
+            }
+        }
+        if let Some(identity) = &self.worktree {
+            if !runtime
+                .state
+                .worktrees
+                .iter()
+                .any(|current| current == &identity.worktree)
+                || !runtime
+                    .state
+                    .repositories
+                    .iter()
+                    .any(|current| current == &identity.repository)
+            {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn observe(self) -> Result<RunLaunchObservation, String> {
+        let (working_directory, checkouts) = match &self.input {
+            RunLaunchInput::Direct {
+                primary_repository_id,
+                expected_checkouts,
+                ..
+            }
+            | RunLaunchInput::Grill {
+                primary_repository_id,
+                expected_checkouts,
+                ..
+            } => {
+                let checkout = self
+                    .direct_checkout
+                    .as_ref()
+                    .ok_or_else(|| "Direct checkout snapshot is unavailable".to_owned())?
+                    .clone()
+                    .observe()?;
+                let checkouts = checkout
+                    .checkouts
+                    .iter()
+                    .map(|checkout| RunCheckout {
+                        repository_id: checkout.repository_id,
+                        path: checkout.path.clone(),
+                        branch: checkout.branch.clone(),
+                        is_dirty: checkout.is_dirty,
+                    })
+                    .collect::<Vec<_>>();
+                if &checkouts != expected_checkouts {
+                    return Err(match &self.input {
+                        RunLaunchInput::Direct { .. } => "A Direct checkout changed after the preview (branch or dirty state); review the Direct Run preview again before starting".into(),
+                        _ => "A Grill checkout changed after the preview (branch or dirty state); review the Grill preview again before starting".into(),
+                    });
+                }
+                let working_directory = checkouts
+                    .iter()
+                    .find(|checkout| checkout.repository_id == *primary_repository_id)
+                    .map(|checkout| checkout.path.clone())
+                    .ok_or_else(|| {
+                        "Choose a configured Repository checkout before starting".to_owned()
+                    })?;
+                (working_directory, checkouts)
+            }
+            RunLaunchInput::Worktree { .. } => {
+                let identity = self
+                    .worktree
+                    .as_ref()
+                    .ok_or_else(|| "Worktree snapshot is unavailable".to_owned())?;
+                let checkout_path = match self.machine.transport {
+                    MachineTransport::Local => resolve_machine_path(
+                        &identity.worktree.path,
+                        &machine_home_directory(&self.machine),
+                    ),
+                    MachineTransport::Ssh { .. } => PathBuf::from(&identity.worktree.path),
+                };
+                let inspection = GitCli::system()
+                    .inspect_checkout_on_machine(&self.machine, &checkout_path)
+                    .map_err(|error| {
+                        format!(
+                            "Could not inspect Worktree {} on Machine {}: {error}",
+                            identity.worktree.path, self.machine.name
+                        )
+                    })?;
+                if inspection.current_branch != identity.worktree.branch {
+                    return Err(
+                        "The Worktree branch changed after it was approved; review the Worktree before starting a Run".into(),
+                    );
+                }
+                if inspection
+                    .remote_url
+                    .as_deref()
+                    .is_some_and(|remote_url| remote_url != identity.repository.remote_url)
+                {
+                    return Err(
+                        "The Worktree remote does not match its registered Repository".into(),
+                    );
+                }
+                (identity.worktree.path.clone(), Vec::new())
+            }
+        };
+        let event = self.event(
+            format!("{}-preflight", self.session_name),
+            "%preflight".into(),
+            checkouts.clone(),
+        );
+        if let RunLaunchInput::Grill {
+            allow_dirty,
+            allow_shared_checkouts,
+            ..
+        } = &self.input
+        {
+            validate_grill_launch_approvals(
+                &self.state,
+                self.machine.id,
+                &checkouts,
+                *allow_dirty,
+                *allow_shared_checkouts,
+            )?;
+        }
+        decide(self.state.clone(), event).map_err(|error| error.to_string())?;
+        Ok(RunLaunchObservation {
+            snapshot: self,
+            working_directory,
+            checkouts,
+        })
+    }
+}
+
+fn machine_execution_identity_matches(current: &Machine, expected: &Machine) -> bool {
+    current.id == expected.id
+        && current.context_id == expected.context_id
+        && current.name == expected.name
+        && current.socket_name == expected.socket_name
+        && current.transport == expected.transport
+}
+
+fn validate_grill_launch_approvals(
+    state: &DomainState,
+    machine_id: i64,
+    checkouts: &[RunCheckout],
+    allow_dirty: bool,
+    allow_shared_checkouts: bool,
+) -> Result<(), String> {
+    if !allow_dirty {
+        let dirty_repository_ids = checkouts
+            .iter()
+            .filter(|checkout| checkout.is_dirty)
+            .map(|checkout| checkout.repository_id)
+            .collect::<Vec<_>>();
+        if !dirty_repository_ids.is_empty() {
+            return Err(format!(
+                "Grill checkout(s) are dirty: {}; review the preview and confirm before starting",
+                dirty_repository_ids
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    if !allow_shared_checkouts {
+        let shared_paths = state
+            .runs
+            .iter()
+            .filter(|run| {
+                run.machine_id == machine_id
+                    && run_is_active(run)
+                    && run.pane_status != RunPaneStatus::Missing
+            })
+            .flat_map(|run| {
+                checkouts.iter().filter_map(move |checkout| {
+                    run.direct_checkouts
+                        .iter()
+                        .any(|active| active.path == checkout.path)
+                        .then_some(checkout.path.clone())
+                })
+            })
+            .collect::<Vec<_>>();
+        if !shared_paths.is_empty() {
+            return Err(format!(
+                "Grill checkout(s) are already used by an active Run: {}; review the preview and confirm before starting",
+                shared_paths.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn worktree_run_identity(
+    runtime: &mut Runtime,
+    item_id: i64,
+    workspace_id: i64,
+    worktree_id: i64,
+) -> Result<(Machine, WorktreeRunIdentity), String> {
+    let workspace = runtime
+        .state
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id && workspace.item_id == item_id)
+        .cloned()
+        .ok_or_else(|| format!("Workspace {workspace_id} does not belong to Item {item_id}"))?;
+    let worktree = runtime
+        .state
+        .worktrees
+        .iter()
+        .find(|worktree| worktree.id == worktree_id && worktree.workspace_id == workspace_id)
+        .cloned()
+        .ok_or_else(|| format!("Worktree {worktree_id} is not registered for this Item"))?;
+    let repository = runtime
+        .state
+        .repositories
+        .iter()
+        .find(|repository| repository.id == worktree.repository_id)
+        .cloned()
+        .ok_or_else(|| format!("Repository {} does not exist", worktree.repository_id))?;
+    let machine = runtime.machine_for_item(item_id, Some(worktree.machine_id))?;
+    Ok((
+        machine,
+        WorktreeRunIdentity {
+            workspace,
+            worktree,
+            repository,
+        },
+    ))
+}
+
+fn run_launch_snapshot(
+    runtime: &mut Runtime,
+    input: RunLaunchInput,
+) -> Result<RunLaunchSnapshot, String> {
+    let (machine, direct_checkout, worktree) = match &input {
+        RunLaunchInput::Direct {
+            item_id,
+            workspace_id,
+            machine_id,
+            ..
+        }
+        | RunLaunchInput::Grill {
+            item_id,
+            workspace_id,
+            machine_id,
+            ..
+        } => {
+            let checkout = direct_checkout_snapshot(runtime, *item_id, *workspace_id, *machine_id)?;
+            (checkout.machine.clone(), Some(checkout), None)
+        }
+        RunLaunchInput::Worktree {
+            item_id,
+            workspace_id,
+            worktree_id,
+            ..
+        } => {
+            let (machine, identity) =
+                worktree_run_identity(runtime, *item_id, *workspace_id, *worktree_id)?;
+            (machine, None, Some(identity))
+        }
+    };
+    let item = runtime
+        .state
+        .items
+        .iter()
+        .find(|item| item.id == input.item_id())
+        .cloned()
+        .ok_or_else(|| format!("Item {} does not exist", input.item_id()))?;
+    let project = runtime
+        .state
+        .projects
+        .iter()
+        .find(|project| project.id == item.project_id)
+        .cloned()
+        .ok_or_else(|| format!("Project {} does not exist", item.project_id))?;
+    let context = runtime
+        .state
+        .contexts
+        .iter()
+        .find(|context| context.id == project.context_id)
+        .cloned()
+        .ok_or_else(|| format!("Context {} does not exist", project.context_id))?;
+    let workspace = direct_checkout
+        .as_ref()
+        .map(|snapshot| snapshot.workspace.clone())
+        .or_else(|| worktree.as_ref().map(|snapshot| snapshot.workspace.clone()))
+        .ok_or_else(|| "Run Workspace snapshot is unavailable".to_owned())?;
+    let run_id = runtime.state.next_run_id;
+    let session_name = format!(
+        "mission-item-{}-{}-{}",
+        input.item_id(),
+        input.session_kind(),
+        run_id
+    );
+    let gate_channel = format!("mission-launch-{run_id}-{session_name}");
+    let prompt = match &input {
+        RunLaunchInput::Grill {
+            configuration,
+            initial_prompt,
+            ..
+        } => build_grill_prompt(
+            &runtime.state,
+            input.item_id(),
+            configuration,
+            initial_prompt,
+        )
+        .map_err(|error| error.to_string())?,
+        RunLaunchInput::Direct { prompt, .. } | RunLaunchInput::Worktree { prompt, .. } => {
+            prompt.clone()
+        }
+    };
+    let preferred_executable = runtime.preferred_agent_executable(&machine, input.agent())?;
+    let snapshot = RunLaunchSnapshot {
+        state: runtime.state.clone(),
+        item,
+        project,
+        context,
+        workspace,
+        machine: machine.clone(),
+        terminal_runtime: Arc::clone(&runtime.terminal_runtime),
+        preferred_executable,
+        input,
+        prompt,
+        direct_checkout,
+        worktree,
+        run_id,
+        session_name,
+        gate_channel,
+        started_at: current_unix_seconds(),
+    };
+    let checkout_values = snapshot
+        .input
+        .expected_checkouts()
+        .unwrap_or_default()
+        .to_vec();
+    if let RunLaunchInput::Grill {
+        allow_dirty,
+        allow_shared_checkouts,
+        ..
+    } = &snapshot.input
+    {
+        validate_grill_launch_approvals(
+            &runtime.state,
+            snapshot.machine.id,
+            &checkout_values,
+            *allow_dirty,
+            *allow_shared_checkouts,
+        )?;
+    }
+    let candidate = snapshot.event(
+        format!("{}-preflight", snapshot.session_name),
+        "%preflight".into(),
+        checkout_values,
+    );
+    decide(runtime.state.clone(), candidate).map_err(|error| error.to_string())?;
+    Ok(snapshot)
+}
+
+async fn start_run_with_state(
+    input: RunLaunchInput,
+    state: &Mutex<Runtime>,
+) -> Result<Run, String> {
+    let serial = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        Arc::clone(&runtime.run_launch_lock)
+    };
+    let _serial_guard = serial.lock().await;
+    let snapshot = {
+        let mut runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        run_launch_snapshot(&mut runtime, input)?
+    };
+    let observation_snapshot = snapshot.clone();
+    let observation = tauri::async_runtime::spawn_blocking(move || observation_snapshot.observe())
+        .await
+        .map_err(|error| format!("Run checkout inspection worker failed: {error}"))??;
+    let preflight_snapshot = observation.snapshot.clone();
+    let preflight_result = tauri::async_runtime::spawn_blocking(move || {
+        let terminal_runtime = Arc::clone(&preflight_snapshot.terminal_runtime);
+        let machine = preflight_snapshot.machine.clone();
+        let preferred_executable = preflight_snapshot.preferred_executable.clone();
+        terminal_runtime.preflight_agent_run(
+            &machine,
+            preflight_snapshot.input.agent(),
+            preflight_snapshot.run_id,
+            preferred_executable.as_deref(),
+        )
+    })
+    .await
+    .map_err(|error| format!("Run preflight worker failed: {error}"))?;
+    let mut readiness = preflight_result.readiness.clone();
+    let preflight_values = (|| {
+        if let Some(error) = readiness.error.clone() {
+            return Err(format!(
+                "Run preflight failed on Machine {}. The Run was not started locally: {error}",
+                observation.snapshot.machine.name
+            ));
+        }
+        let executable = preflight_result.executable.clone().ok_or_else(|| {
+            let error = format!(
+                "{} executable did not resolve on Machine {}",
+                agent_display_name(observation.snapshot.input.agent()),
+                observation.snapshot.machine.name
+            );
+            readiness.error = Some(error.clone());
+            error
+        })?;
+        let state_file = preflight_result.state_file.clone().ok_or_else(|| {
+            let error = format!(
+                "Agent state file path was not prepared on Machine {}",
+                observation.snapshot.machine.name
+            );
+            readiness.error = Some(error.clone());
+            error
+        })?;
+        Ok((executable, state_file))
+    })();
+    {
+        let mut runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        if !observation.snapshot.is_current(&runtime) {
+            return Err("The Item, Workspace, Repository, Worktree, or Machine changed while the Run was being prepared; review it again".into());
+        }
+        if let Err(error) = &preflight_values {
+            if readiness.error.is_none() {
+                readiness.error = Some(error.clone());
+            }
+            runtime
+                .machine_readiness
+                .insert(observation.snapshot.machine.id, readiness);
+            return Err(error.clone());
+        }
+        runtime
+            .machine_readiness
+            .insert(observation.snapshot.machine.id, readiness);
+        let (executable, _) = preflight_values.as_ref().expect("checked preflight values");
+        if let Err(error) = runtime.store_agent_executable(
+            &observation.snapshot.machine,
+            observation.snapshot.input.agent(),
+            executable,
+        ) {
+            let readiness = runtime
+                .machine_readiness
+                .get_mut(&observation.snapshot.machine.id)
+                .expect("preflight readiness was just stored");
+            readiness.error = Some(error.clone());
+            return Err(format!(
+                "Run preflight failed on Machine {}. The Run was not started locally: {error}",
+                observation.snapshot.machine.name
+            ));
+        }
+        runtime.observe_machine(
+            observation.snapshot.machine.id,
+            MachineObservation::Available,
+        )?;
+    }
+    let (executable, state_file) = preflight_values?;
+    {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        if !observation.snapshot.is_current(&runtime) {
+            return Err("The Item, Workspace, Repository, Worktree, or Machine changed while the Run was being prepared; review it again".into());
+        }
+    }
+    let (agent, model, effort) = match &observation.snapshot.input {
+        RunLaunchInput::Grill { configuration, .. } => (
+            configuration.agent,
+            Some(configuration.model.clone()),
+            Some(configuration.effort.clone()),
+        ),
+        _ => (observation.snapshot.input.agent(), None, None),
+    };
+    let run_id = observation.snapshot.run_id;
+    let terminal_runtime = Arc::clone(&observation.snapshot.terminal_runtime);
+    let machine = observation.snapshot.machine.clone();
+    let session_name = observation.snapshot.session_name.clone();
+    let gate_channel = observation.snapshot.gate_channel.clone();
+    let working_directory = observation.working_directory.clone();
+    let prompt = observation.snapshot.prompt.clone();
+    let pane_id = tauri::async_runtime::spawn_blocking(move || {
+        let launch = AgentLaunchContext {
+            run_id,
+            state_file: &state_file,
+            agent,
+            model: model.as_deref(),
+            effort: effort.as_deref(),
+        };
+        terminal_runtime.launch_agent(
+            &machine,
+            &session_name,
+            &gate_channel,
+            Path::new(&working_directory),
+            &executable,
+            &prompt,
+            launch,
+        )
+    })
+    .await
+    .map_err(|error| format!("Agent launch worker failed: {error}"))??;
+
+    let record_result = match state.lock() {
+        Ok(mut runtime) => {
+            if !observation.snapshot.is_current(&runtime) {
+                Err("The Item, Workspace, Repository, Worktree, or Machine changed before the Run could be recorded; review it again".to_owned())
+            } else {
+                let approval = match &observation.snapshot.input {
+                    RunLaunchInput::Grill {
+                        allow_dirty,
+                        allow_shared_checkouts,
+                        ..
+                    } => validate_grill_launch_approvals(
+                        &runtime.state,
+                        observation.snapshot.machine.id,
+                        &observation.checkouts,
+                        *allow_dirty,
+                        *allow_shared_checkouts,
+                    ),
+                    _ => Ok(()),
+                };
+                match approval {
+                    Err(error) => Err(error),
+                    Ok(()) => {
+                        let decision = decide(
+                            runtime.state.clone(),
+                            observation.snapshot.event(
+                                observation.snapshot.session_name.clone(),
+                                pane_id,
+                                observation.checkouts.clone(),
+                            ),
+                        )
+                        .map_err(|error| error.to_string());
+                        match decision {
+                            Ok(decision) => {
+                                let run = decision
+                                    .state
+                                    .runs
+                                    .last()
+                                    .cloned()
+                                    .ok_or_else(|| "Run creation produced no Run".to_owned());
+                                match run {
+                                    Ok(run) => match runtime.commit(decision) {
+                                        Ok(()) => Ok(run),
+                                        Err(error) => Err(error),
+                                    },
+                                    Err(error) => Err(error),
+                                }
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                }
+            }
+        }
+        Err(_) => {
+            Err("Mission Manager state is unavailable after the gated Pane was created".to_owned())
+        }
+    };
+    let run = match record_result {
+        Ok(run) => run,
+        Err(error) => {
+            let terminal_runtime = Arc::clone(&observation.snapshot.terminal_runtime);
+            let machine = observation.snapshot.machine.clone();
+            let session_name = observation.snapshot.session_name.clone();
+            let cleanup = tauri::async_runtime::spawn_blocking(move || {
+                terminal_runtime.kill_session(&machine, &session_name)
+            })
+            .await
+            .map_err(|worker_error| format!("Launch cleanup worker failed: {worker_error}"));
+            let cleanup_error = match cleanup {
+                Ok(result) => result.err(),
+                Err(error) => Some(error),
+            };
+            return Err(format_commit_error(error, cleanup_error));
+        }
+    };
+
+    let terminal_runtime = Arc::clone(&observation.snapshot.terminal_runtime);
+    let machine = observation.snapshot.machine.clone();
+    let gate_channel = observation.snapshot.gate_channel.clone();
+    let release = tauri::async_runtime::spawn_blocking(move || {
+        terminal_runtime.release_agent_launch(&machine, &gate_channel)
+    })
+    .await
+    .map_err(|error| format!("Launch release worker failed: {error}"));
+    let release_error = match release {
+        Ok(Ok(())) => None,
+        Ok(Err(error)) => Some(error),
+        Err(error) => Some(error),
+    };
+    if let Some(error) = release_error {
+        return Err(format!(
+            "Run {} is recorded but the agent was not released: {error}",
+            run.id
+        ));
+    }
+    Ok(run)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_direct_run_with_state(
+    item_id: i64,
+    workspace_id: i64,
+    machine_id: Option<i64>,
+    primary_repository_id: i64,
+    agent: AgentKind,
+    execution_profile: ExecutionProfile,
+    prompt: String,
+    prompt_selection: RunPromptSelection,
+    expected_checkouts: Vec<RunCheckout>,
+    allow_dirty: bool,
+    allow_shared_checkouts: bool,
+    state: &Mutex<Runtime>,
+) -> Result<Run, String> {
+    start_run_with_state(
+        RunLaunchInput::Direct {
+            item_id,
+            workspace_id,
+            machine_id,
+            primary_repository_id,
+            agent,
+            execution_profile,
+            prompt,
+            prompt_selection,
+            expected_checkouts,
+            allow_dirty,
+            allow_shared_checkouts,
+        },
+        state,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_grill_run_with_state(
+    item_id: i64,
+    workspace_id: i64,
+    machine_id: Option<i64>,
+    primary_repository_id: i64,
+    configuration: GrillConfiguration,
+    initial_prompt: String,
+    expected_checkouts: Vec<RunCheckout>,
+    allow_dirty: bool,
+    allow_shared_checkouts: bool,
+    state: &Mutex<Runtime>,
+) -> Result<Run, String> {
+    start_run_with_state(
+        RunLaunchInput::Grill {
+            item_id,
+            workspace_id,
+            machine_id,
+            primary_repository_id,
+            configuration,
+            initial_prompt,
+            expected_checkouts,
+            allow_dirty,
+            allow_shared_checkouts,
+        },
+        state,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn start_worktree_run_with_state(
+    item_id: i64,
+    workspace_id: i64,
+    worktree_id: i64,
+    agent: AgentKind,
+    execution_profile: ExecutionProfile,
+    prompt: String,
+    prompt_selection: RunPromptSelection,
+    state: &Mutex<Runtime>,
+) -> Result<Run, String> {
+    start_run_with_state(
+        RunLaunchInput::Worktree {
+            item_id,
+            workspace_id,
+            worktree_id,
+            agent,
+            execution_profile,
+            prompt,
+            prompt_selection,
+        },
+        state,
+    )
+    .await
+}
+
 impl Runtime {
     pub(crate) fn reconciliation_snapshot(&self) -> ReconciliationSnapshot {
         let runs = self
@@ -2145,591 +3067,6 @@ impl Runtime {
     ) -> Result<String, String> {
         build_grill_prompt(&self.state, item_id, &configuration, &initial_prompt)
             .map_err(|error| error.to_string())
-    }
-
-    fn prepare_run_environment(
-        &mut self,
-        machine: &Machine,
-        agent: AgentKind,
-        run_id: i64,
-    ) -> Result<(PathBuf, PathBuf), String> {
-        let preferred_executable = match self.preferred_agent_executable(machine, agent) {
-            Ok(executable) => executable,
-            Err(error) => {
-                let readiness = crate::terminal::MachineReadiness {
-                    error: Some(error.clone()),
-                    ..Default::default()
-                };
-                self.machine_readiness.insert(machine.id, readiness);
-                return Err(format!(
-                    "Run preflight failed on Machine {}. The Run was not started locally: {error}",
-                    machine.name
-                ));
-            }
-        };
-        let preflight = self.terminal_runtime.preflight_agent_run(
-            machine,
-            agent,
-            run_id,
-            preferred_executable.as_deref(),
-        );
-        let mut readiness = preflight.readiness;
-        self.machine_readiness.insert(machine.id, readiness.clone());
-        if let Some(error) = readiness.error.clone() {
-            return Err(format!(
-                "Run preflight failed on Machine {}. The Run was not started locally: {error}",
-                machine.name
-            ));
-        }
-        let executable = preflight.executable.ok_or_else(|| {
-            let error = format!(
-                "{} executable did not resolve on Machine {}",
-                agent_display_name(agent),
-                machine.name
-            );
-            readiness.error = Some(error.clone());
-            self.machine_readiness.insert(machine.id, readiness.clone());
-            error
-        })?;
-        let state_file = preflight.state_file.ok_or_else(|| {
-            let error = format!(
-                "Agent state file path was not prepared on Machine {}",
-                machine.name
-            );
-            readiness.error = Some(error.clone());
-            self.machine_readiness.insert(machine.id, readiness.clone());
-            error
-        })?;
-        if let Err(error) = self.store_agent_executable(machine, agent, &executable) {
-            readiness.error = Some(error.clone());
-            self.machine_readiness.insert(machine.id, readiness.clone());
-            return Err(format!(
-                "Run preflight failed on Machine {}. The Run was not started locally: {error}",
-                machine.name
-            ));
-        }
-        self.observe_machine(machine.id, MachineObservation::Available)?;
-        Ok((state_file, executable))
-    }
-
-    pub(crate) fn inspect_direct_checkouts(
-        &mut self,
-        item_id: i64,
-        workspace_id: i64,
-        machine_id: Option<i64>,
-    ) -> Result<(Machine, Vec<DirectRunCheckoutPreview>), String> {
-        if !self
-            .state
-            .workspaces
-            .iter()
-            .any(|workspace| workspace.id == workspace_id && workspace.item_id == item_id)
-        {
-            return Err(format!(
-                "Project Repository execution setup does not belong to Item {item_id}"
-            ));
-        }
-        let machine = self.machine_for_item(item_id, machine_id)?;
-        let machine_home = machine_home_directory(&machine);
-        let git = GitCli::system();
-        let item = self
-            .state
-            .items
-            .iter()
-            .find(|item| item.id == item_id)
-            .cloned()
-            .ok_or_else(|| format!("Item {item_id} does not exist"))?;
-        let repositories = self
-            .state
-            .repositories
-            .iter()
-            .filter(|repository| repository.project_id == item.project_id)
-            .cloned()
-            .collect::<Vec<_>>();
-        if repositories.is_empty() {
-            return Err("Register a Repository under this Project before starting a Run".into());
-        }
-        let mut previews = Vec::with_capacity(repositories.len());
-
-        for repository in repositories {
-            let location = self
-                .state
-                .repository_locations
-                .iter()
-                .find(|location| {
-                    location.repository_id == repository.id && location.machine_id == machine.id
-                })
-                .ok_or_else(|| {
-                    format!(
-                        "Repository {} has no checkout registered on Machine {}",
-                        repository.name, machine.name
-                    )
-                })?;
-            let path = match machine.transport {
-                MachineTransport::Local => {
-                    resolve_machine_path(&location.checkout_path, &machine_home)
-                }
-                MachineTransport::Ssh { .. } => PathBuf::from(&location.checkout_path),
-            };
-            let inspection = git
-                .inspect_checkout_on_machine(&machine, &path)
-                .map_err(|error| {
-                    format!(
-                        "Could not inspect Repository {} on Machine {}: {error}",
-                        repository.name, machine.name
-                    )
-                })?;
-            if let Some(remote_url) = inspection.remote_url.as_deref() {
-                if remote_url != repository.remote_url {
-                    return Err(format!(
-                        "Repository {} checkout remote does not match its registered Repository",
-                        repository.name
-                    ));
-                }
-            }
-            previews.push(DirectRunCheckoutPreview {
-                repository_id: repository.id,
-                repository_name: repository.name.clone(),
-                path: path.to_string_lossy().into_owned(),
-                branch: inspection.current_branch,
-                is_dirty: inspection.is_dirty,
-            });
-        }
-
-        Ok((machine, previews))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn start_direct_run(
-        &mut self,
-        item_id: i64,
-        workspace_id: i64,
-        machine_id: Option<i64>,
-        primary_repository_id: i64,
-        agent: AgentKind,
-        execution_profile: ExecutionProfile,
-        prompt: String,
-        prompt_selection: RunPromptSelection,
-        expected_checkouts: Vec<RunCheckout>,
-        allow_dirty: bool,
-        allow_shared_checkouts: bool,
-    ) -> Result<Run, String> {
-        let (machine, checkout_details) =
-            self.inspect_direct_checkouts(item_id, workspace_id, machine_id)?;
-        let current_checkouts = checkout_details
-            .iter()
-            .map(|checkout| RunCheckout {
-                repository_id: checkout.repository_id,
-                path: checkout.path.clone(),
-                branch: checkout.branch.clone(),
-                is_dirty: checkout.is_dirty,
-            })
-            .collect::<Vec<_>>();
-        if current_checkouts != expected_checkouts {
-            return Err(
-                "A Direct checkout changed after the preview (branch or dirty state); review the Direct Run preview again before starting"
-                    .into(),
-            );
-        }
-        let working_directory = current_checkouts
-            .iter()
-            .find(|checkout| checkout.repository_id == primary_repository_id)
-            .map(|checkout| checkout.path.clone())
-            .ok_or_else(|| "Project has no configured Repositories".to_owned())?;
-        let run_id = self.state.next_run_id;
-        let session_name = format!("mission-item-{item_id}-run-{run_id}");
-        let preflight = decide(
-            self.state.clone(),
-            Event::StartDirectRun {
-                item_id,
-                workspace_id,
-                machine_id: machine.id,
-                agent,
-                execution_profile,
-                prompt: prompt.clone(),
-                working_directory: working_directory.clone(),
-                session_name: format!("{session_name}-preflight"),
-                pane_id: "%preflight".into(),
-                started_at: current_unix_seconds(),
-                prompt_selection: prompt_selection.clone(),
-                checkouts: current_checkouts.clone(),
-                repository_id: primary_repository_id,
-                allow_dirty,
-                allow_shared_checkouts,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-
-        let (state_file, executable) = self.prepare_run_environment(&machine, agent, run_id)?;
-        let (_, before_launch) =
-            self.inspect_direct_checkouts(item_id, workspace_id, Some(machine.id))?;
-        let before_launch = before_launch
-            .iter()
-            .map(|checkout| RunCheckout {
-                repository_id: checkout.repository_id,
-                path: checkout.path.clone(),
-                branch: checkout.branch.clone(),
-                is_dirty: checkout.is_dirty,
-            })
-            .collect::<Vec<_>>();
-        if before_launch != current_checkouts {
-            return Err(
-                "A Direct checkout changed while preparing the Run; review the Direct Run preview again"
-                    .into(),
-            );
-        }
-        let pane_id = self.terminal_runtime.launch_agent(
-            &machine,
-            &session_name,
-            Path::new(&working_directory),
-            &executable,
-            &prompt,
-            AgentLaunchContext {
-                run_id,
-                state_file: &state_file,
-                agent: None,
-                model: None,
-                effort: None,
-            },
-        )?;
-        let (_, after_launch) =
-            match self.inspect_direct_checkouts(item_id, workspace_id, Some(machine.id)) {
-                Ok(value) => value,
-                Err(error) => {
-                    let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
-                    return Err(format_commit_error(error, cleanup.err()));
-                }
-            };
-        let after_launch = after_launch
-            .iter()
-            .map(|checkout| RunCheckout {
-                repository_id: checkout.repository_id,
-                path: checkout.path.clone(),
-                branch: checkout.branch.clone(),
-                is_dirty: checkout.is_dirty,
-            })
-            .collect::<Vec<_>>();
-        if after_launch != current_checkouts {
-            let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
-            return Err(format_commit_error(
-                "A Direct checkout changed before the Run was recorded; review the Direct Run preview again".into(),
-                cleanup.err(),
-            ));
-        }
-        let decision = match decide(
-            self.state.clone(),
-            Event::StartDirectRun {
-                item_id,
-                workspace_id,
-                machine_id: machine.id,
-                agent,
-                execution_profile,
-                prompt,
-                working_directory,
-                session_name: session_name.clone(),
-                pane_id,
-                started_at: current_unix_seconds(),
-                prompt_selection,
-                checkouts: after_launch,
-                repository_id: primary_repository_id,
-                allow_dirty,
-                allow_shared_checkouts,
-            },
-        ) {
-            Ok(decision) => decision,
-            Err(error) => {
-                let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
-                return Err(format_commit_error(error.to_string(), cleanup.err()));
-            }
-        };
-        let run = decision
-            .state
-            .runs
-            .last()
-            .cloned()
-            .ok_or_else(|| "Direct Run creation produced no Run".to_owned())?;
-        if let Err(error) = self.commit(decision) {
-            let cleanup = self
-                .terminal_runtime
-                .kill_session(&machine, &run.session_name);
-            return Err(format_commit_error(error, cleanup.err()));
-        }
-        let _ = preflight;
-        Ok(run)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn start_grill_run(
-        &mut self,
-        item_id: i64,
-        workspace_id: i64,
-        machine_id: Option<i64>,
-        primary_repository_id: i64,
-        configuration: GrillConfiguration,
-        initial_prompt: String,
-        expected_checkouts: Vec<RunCheckout>,
-        allow_dirty: bool,
-        allow_shared_checkouts: bool,
-    ) -> Result<Run, String> {
-        let (machine, checkout_details) =
-            self.inspect_direct_checkouts(item_id, workspace_id, machine_id)?;
-        let current_checkouts = checkout_details
-            .iter()
-            .map(|checkout| RunCheckout {
-                repository_id: checkout.repository_id,
-                path: checkout.path.clone(),
-                branch: checkout.branch.clone(),
-                is_dirty: checkout.is_dirty,
-            })
-            .collect::<Vec<_>>();
-        if current_checkouts != expected_checkouts {
-            return Err(
-                "A Grill checkout changed after the preview (branch or dirty state); review the Grill preview again before starting"
-                    .into(),
-            );
-        }
-        let working_directory = current_checkouts
-            .iter()
-            .find(|checkout| checkout.repository_id == primary_repository_id)
-            .map(|checkout| checkout.path.clone())
-            .ok_or_else(|| "Choose a selected Repository checkout for the Grill".to_owned())?;
-        if !allow_dirty {
-            let dirty_repository_ids = current_checkouts
-                .iter()
-                .filter(|checkout| checkout.is_dirty)
-                .map(|checkout| checkout.repository_id)
-                .collect::<Vec<_>>();
-            if !dirty_repository_ids.is_empty() {
-                return Err(format!(
-                    "Grill checkout(s) are dirty: {}; review the preview and confirm before starting",
-                    dirty_repository_ids
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
-            }
-        }
-        if !allow_shared_checkouts {
-            let shared_paths = self
-                .state
-                .runs
-                .iter()
-                .filter(|run| {
-                    run.machine_id == machine.id
-                        && run_is_active(run)
-                        && run.pane_status != RunPaneStatus::Missing
-                })
-                .flat_map(|run| {
-                    current_checkouts.iter().filter_map(move |checkout| {
-                        run.direct_checkouts
-                            .iter()
-                            .any(|active| active.path == checkout.path)
-                            .then_some(checkout.path.clone())
-                    })
-                })
-                .collect::<Vec<_>>();
-            if !shared_paths.is_empty() {
-                return Err(format!(
-                    "Grill checkout(s) are already used by an active Run: {}; review the preview and confirm before starting",
-                    shared_paths.join(", ")
-                ));
-            }
-        }
-        let prompt = self.compose_grill_prompt(item_id, configuration.clone(), initial_prompt)?;
-        let run_id = self.state.next_run_id;
-        let session_name = format!("mission-item-{item_id}-grill-{run_id}");
-        let preflight = decide(
-            self.state.clone(),
-            Event::StartGrillRun {
-                item_id,
-                workspace_id,
-                repository_id: primary_repository_id,
-                machine_id: machine.id,
-                configuration: configuration.clone(),
-                prompt: prompt.clone(),
-                skill_snapshot: crate::domain::GRILL_SKILL_SNAPSHOT.into(),
-                working_directory: working_directory.clone(),
-                session_name: format!("{session_name}-preflight"),
-                pane_id: "%preflight".into(),
-                started_at: current_unix_seconds(),
-                checkouts: current_checkouts.clone(),
-            },
-        )
-        .map_err(|error| error.to_string())?;
-
-        let (state_file, executable) =
-            self.prepare_run_environment(&machine, configuration.agent, run_id)?;
-        let pane_id = self.terminal_runtime.launch_agent(
-            &machine,
-            &session_name,
-            Path::new(&working_directory),
-            &executable,
-            &prompt,
-            AgentLaunchContext {
-                run_id,
-                state_file: &state_file,
-                agent: Some(configuration.agent),
-                model: Some(&configuration.model),
-                effort: Some(&configuration.effort),
-            },
-        )?;
-        let (_, after_launch) =
-            match self.inspect_direct_checkouts(item_id, workspace_id, Some(machine.id)) {
-                Ok(value) => value,
-                Err(error) => {
-                    let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
-                    return Err(format_commit_error(error, cleanup.err()));
-                }
-            };
-        let after_launch = after_launch
-            .iter()
-            .map(|checkout| RunCheckout {
-                repository_id: checkout.repository_id,
-                path: checkout.path.clone(),
-                branch: checkout.branch.clone(),
-                is_dirty: checkout.is_dirty,
-            })
-            .collect::<Vec<_>>();
-        if after_launch != current_checkouts {
-            let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
-            return Err(format_commit_error(
-                "A Grill checkout changed before the Run was recorded; review the Grill preview again"
-                    .into(),
-                cleanup.err(),
-            ));
-        }
-        let decision = match decide(
-            self.state.clone(),
-            Event::StartGrillRun {
-                item_id,
-                workspace_id,
-                repository_id: primary_repository_id,
-                machine_id: machine.id,
-                configuration,
-                prompt,
-                skill_snapshot: crate::domain::GRILL_SKILL_SNAPSHOT.into(),
-                working_directory,
-                session_name: session_name.clone(),
-                pane_id,
-                started_at: current_unix_seconds(),
-                checkouts: after_launch,
-            },
-        ) {
-            Ok(decision) => decision,
-            Err(error) => {
-                let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
-                return Err(format_commit_error(error.to_string(), cleanup.err()));
-            }
-        };
-        let run = decision
-            .state
-            .runs
-            .last()
-            .cloned()
-            .ok_or_else(|| "Grill Run creation produced no Run".to_owned())?;
-        if let Err(error) = self.commit(decision) {
-            let cleanup = self
-                .terminal_runtime
-                .kill_session(&machine, &run.session_name);
-            return Err(format_commit_error(error, cleanup.err()));
-        }
-        let _ = (preflight, allow_dirty, allow_shared_checkouts);
-        Ok(run)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn start_worktree_run(
-        &mut self,
-        item_id: i64,
-        workspace_id: i64,
-        worktree_id: i64,
-        agent: AgentKind,
-        execution_profile: ExecutionProfile,
-        prompt: String,
-        prompt_selection: RunPromptSelection,
-    ) -> Result<Run, String> {
-        let worktree = self
-            .state
-            .worktrees
-            .iter()
-            .find(|worktree| worktree.id == worktree_id && worktree.workspace_id == workspace_id)
-            .cloned()
-            .ok_or_else(|| format!("Worktree {worktree_id} is not registered for this Item"))?;
-        let machine = self.machine_for_item(item_id, Some(worktree.machine_id))?;
-        let working_directory = worktree.path.clone();
-        let run_id = self.state.next_run_id;
-        let session_name = format!("mission-item-{item_id}-run-{run_id}");
-        let preflight = decide(
-            self.state.clone(),
-            worktree_run_event(
-                item_id,
-                workspace_id,
-                worktree_id,
-                machine.id,
-                agent,
-                execution_profile,
-                prompt.clone(),
-                working_directory.clone(),
-                format!("{session_name}-preflight"),
-                "%preflight".into(),
-                current_unix_seconds(),
-                prompt_selection.clone(),
-            ),
-        )
-        .map_err(|error| error.to_string())?;
-
-        let (state_file, executable) = self.prepare_run_environment(&machine, agent, run_id)?;
-        let pane_id = self.terminal_runtime.launch_agent(
-            &machine,
-            &session_name,
-            Path::new(&working_directory),
-            &executable,
-            &prompt,
-            AgentLaunchContext {
-                run_id,
-                state_file: &state_file,
-                agent: None,
-                model: None,
-                effort: None,
-            },
-        )?;
-        let decision = match decide(
-            self.state.clone(),
-            worktree_run_event(
-                item_id,
-                workspace_id,
-                worktree_id,
-                machine.id,
-                agent,
-                execution_profile,
-                prompt,
-                working_directory,
-                session_name.clone(),
-                pane_id,
-                current_unix_seconds(),
-                prompt_selection,
-            ),
-        ) {
-            Ok(decision) => decision,
-            Err(error) => {
-                let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
-                return Err(format_commit_error(error.to_string(), cleanup.err()));
-            }
-        };
-        let run = decision
-            .state
-            .runs
-            .last()
-            .cloned()
-            .ok_or_else(|| "Worktree Run creation produced no Run".to_owned())?;
-        if let Err(error) = self.commit(decision) {
-            let cleanup = self
-                .terminal_runtime
-                .kill_session(&machine, &run.session_name);
-            return Err(format_commit_error(error, cleanup.err()));
-        }
-        let _ = preflight;
-        Ok(run)
     }
 
     #[cfg(test)]

@@ -62,6 +62,7 @@ pub struct Runtime {
     pub(crate) external_snapshot_request_generations: HashMap<i64, u64>,
     pub(crate) external_snapshot_applied_generations: HashMap<i64, u64>,
     pub(crate) pending_grill_transcript_captures: HashSet<i64>,
+    pub(crate) run_launch_lock: Arc<tauri::async_runtime::Mutex<()>>,
     pub(crate) terminal_runtime: Arc<dyn TerminalRuntime>,
     pub(crate) reconciliation_in_progress: Arc<AtomicBool>,
     pub(crate) machine_readiness: HashMap<i64, MachineReadiness>,
@@ -154,6 +155,7 @@ impl Runtime {
             external_snapshot_request_generations: HashMap::new(),
             external_snapshot_applied_generations: HashMap::new(),
             pending_grill_transcript_captures: HashSet::new(),
+            run_launch_lock: Arc::new(tauri::async_runtime::Mutex::new(())),
             terminal_runtime: Arc::new(terminal_runtime),
             reconciliation_in_progress: Arc::new(AtomicBool::new(false)),
             machine_readiness: HashMap::new(),
@@ -504,7 +506,7 @@ pub async fn prepare_grill_run(
 
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
-pub fn start_direct_run(
+pub async fn start_direct_run(
     item_id: i64,
     workspace_id: i64,
     machine_id: Option<i64>,
@@ -532,11 +534,12 @@ pub fn start_direct_run(
         allow_shared_checkouts,
         state,
     )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
-pub fn start_grill_run(
+pub async fn start_grill_run(
     item_id: i64,
     workspace_id: i64,
     machine_id: Option<i64>,
@@ -560,11 +563,12 @@ pub fn start_grill_run(
         allow_shared_checkouts,
         state,
     )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
-pub fn start_worktree_run(
+pub async fn start_worktree_run(
     item_id: i64,
     workspace_id: i64,
     worktree_id: i64,
@@ -584,6 +588,7 @@ pub fn start_worktree_run(
         prompt_selection,
         state,
     )
+    .await
 }
 
 #[tauri::command]
