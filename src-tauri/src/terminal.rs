@@ -15,7 +15,14 @@ use crate::{
     domain::{AgentKind, Machine, MachineTransport},
 };
 
-pub trait TerminalRuntime {
+pub trait TerminalRuntime: Send + Sync {
+    fn probe_machine(&self, machine: &Machine) -> Result<(), String>;
+
+    fn list_panes(&self, machine: &Machine, session_name: &str)
+        -> Result<Vec<PaneSummary>, String>;
+
+    fn list_agent_panes(&self, machine: &Machine) -> Result<Vec<AgentPaneSummary>, String>;
+
     fn launch_agent(
         &self,
         machine: &Machine,
@@ -429,6 +436,22 @@ impl Drop for TmuxControlPane {
 pub struct TmuxRuntime;
 
 impl TerminalRuntime for TmuxRuntime {
+    fn probe_machine(&self, machine: &Machine) -> Result<(), String> {
+        crate::terminal::probe_machine(machine)
+    }
+
+    fn list_panes(
+        &self,
+        machine: &Machine,
+        session_name: &str,
+    ) -> Result<Vec<PaneSummary>, String> {
+        crate::terminal::list_panes(machine, session_name)
+    }
+
+    fn list_agent_panes(&self, machine: &Machine) -> Result<Vec<AgentPaneSummary>, String> {
+        crate::terminal::list_agent_panes(machine)
+    }
+
     fn launch_agent(
         &self,
         machine: &Machine,
@@ -461,6 +484,200 @@ impl TerminalRuntime for TmuxRuntime {
         pane_id: &str,
     ) -> Result<(), String> {
         interrupt_tmux_pane(machine, pane_id)
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FakeMachineOutcome {
+    Available,
+    Unreachable,
+    TmuxQueryFailed,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FakeTerminalCommand {
+    ProbeMachine {
+        machine_id: i64,
+    },
+    ListPanes {
+        machine_id: i64,
+        session_name: String,
+    },
+    ListAgentPanes {
+        machine_id: i64,
+    },
+    LaunchAgent {
+        machine_id: i64,
+        session_name: String,
+        run_id: i64,
+    },
+    KillSession {
+        machine_id: i64,
+        session_name: String,
+    },
+    KillPane {
+        machine_id: i64,
+        session_name: String,
+        pane_id: String,
+    },
+    InterruptPane {
+        machine_id: i64,
+        session_name: String,
+        pane_id: String,
+    },
+}
+
+#[cfg(test)]
+pub(crate) struct FakeTerminalRuntime {
+    outcomes: std::collections::HashMap<i64, FakeMachineOutcome>,
+    commands: Arc<Mutex<Vec<FakeTerminalCommand>>>,
+}
+
+#[cfg(test)]
+impl FakeTerminalRuntime {
+    pub(crate) fn new(outcomes: impl IntoIterator<Item = (i64, FakeMachineOutcome)>) -> Self {
+        Self {
+            outcomes: outcomes.into_iter().collect(),
+            commands: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    pub(crate) fn command_log(&self) -> Arc<Mutex<Vec<FakeTerminalCommand>>> {
+        Arc::clone(&self.commands)
+    }
+
+    fn outcome(&self, machine: &Machine) -> FakeMachineOutcome {
+        self.outcomes
+            .get(&machine.id)
+            .copied()
+            .unwrap_or(FakeMachineOutcome::Unreachable)
+    }
+
+    fn record(&self, command: FakeTerminalCommand) {
+        self.commands
+            .lock()
+            .expect("fake terminal command log should remain available")
+            .push(command);
+    }
+
+    fn available_pane() -> PaneSummary {
+        PaneSummary {
+            pane_id: "%1".into(),
+            pane_index: 0,
+            pid: 1,
+            columns: 80,
+            rows: 24,
+            title: "fake pane".into(),
+            current_command: "fake-agent".into(),
+            current_path: "/fake/worktree".into(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl TerminalRuntime for FakeTerminalRuntime {
+    fn probe_machine(&self, machine: &Machine) -> Result<(), String> {
+        self.record(FakeTerminalCommand::ProbeMachine {
+            machine_id: machine.id,
+        });
+        match self.outcome(machine) {
+            FakeMachineOutcome::Available | FakeMachineOutcome::TmuxQueryFailed => Ok(()),
+            FakeMachineOutcome::Unreachable => {
+                Err(format!("fake Machine {} is unreachable", machine.name))
+            }
+        }
+    }
+
+    fn list_panes(
+        &self,
+        machine: &Machine,
+        session_name: &str,
+    ) -> Result<Vec<PaneSummary>, String> {
+        self.record(FakeTerminalCommand::ListPanes {
+            machine_id: machine.id,
+            session_name: session_name.into(),
+        });
+        match self.outcome(machine) {
+            FakeMachineOutcome::Available => Ok(vec![Self::available_pane()]),
+            FakeMachineOutcome::Unreachable => {
+                Err(format!("fake Machine {} is unreachable", machine.name))
+            }
+            FakeMachineOutcome::TmuxQueryFailed => Err(format!(
+                "fake tmux query failed on Machine {}",
+                machine.name
+            )),
+        }
+    }
+
+    fn list_agent_panes(&self, machine: &Machine) -> Result<Vec<AgentPaneSummary>, String> {
+        self.record(FakeTerminalCommand::ListAgentPanes {
+            machine_id: machine.id,
+        });
+        match self.outcome(machine) {
+            FakeMachineOutcome::Available => Ok(Vec::new()),
+            FakeMachineOutcome::Unreachable => {
+                Err(format!("fake Machine {} is unreachable", machine.name))
+            }
+            FakeMachineOutcome::TmuxQueryFailed => Err(format!(
+                "fake tmux query failed on Machine {}",
+                machine.name
+            )),
+        }
+    }
+
+    fn launch_agent(
+        &self,
+        machine: &Machine,
+        session_name: &str,
+        _root: &Path,
+        _executable: &Path,
+        _prompt: &str,
+        launch: AgentLaunchContext<'_>,
+    ) -> Result<String, String> {
+        self.record(FakeTerminalCommand::LaunchAgent {
+            machine_id: machine.id,
+            session_name: session_name.into(),
+            run_id: launch.run_id,
+        });
+        Ok(format!("%fake-{}", launch.run_id))
+    }
+
+    fn kill_session(&self, machine: &Machine, session_name: &str) -> Result<(), String> {
+        self.record(FakeTerminalCommand::KillSession {
+            machine_id: machine.id,
+            session_name: session_name.into(),
+        });
+        Ok(())
+    }
+
+    fn kill_pane(
+        &self,
+        machine: &Machine,
+        session_name: &str,
+        pane_id: &str,
+    ) -> Result<(), String> {
+        self.record(FakeTerminalCommand::KillPane {
+            machine_id: machine.id,
+            session_name: session_name.into(),
+            pane_id: pane_id.into(),
+        });
+        Ok(())
+    }
+
+    fn interrupt_pane(
+        &self,
+        machine: &Machine,
+        session_name: &str,
+        pane_id: &str,
+    ) -> Result<(), String> {
+        self.record(FakeTerminalCommand::InterruptPane {
+            machine_id: machine.id,
+            session_name: session_name.into(),
+            pane_id: pane_id.into(),
+        });
+        Ok(())
     }
 }
 
@@ -502,7 +719,7 @@ pub(crate) fn kill_pane_with_timeout(
     pane_id: &str,
     timeout: Duration,
 ) -> Result<(), String> {
-    let args = vec!["kill-pane".into(), "-t".into(), pane_id.into()];
+    let args = ["kill-pane".into(), "-t".into(), pane_id.into()];
     let mut tmux_args = vec!["-f", "/dev/null", "-L", machine.socket_name.as_str()];
     tmux_args.extend(args.iter().map(String::as_str));
     let (program, arguments) =

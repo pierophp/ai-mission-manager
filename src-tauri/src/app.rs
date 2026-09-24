@@ -28,7 +28,7 @@ use crate::{
     },
     persistence::SqliteStore,
     provider::resolve_gh_executable,
-    terminal::{find_agent_executable, PaneSummary, TmuxControlPane},
+    terminal::{find_agent_executable, PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime},
 };
 
 pub(crate) use crate::features::deletion::{
@@ -53,6 +53,7 @@ pub struct Runtime {
     pub(crate) pending_parent_deletion: Option<ParentDeletionPreview>,
     pub(crate) pending_reset_local_data: Option<ResetLocalDataPreview>,
     pub(crate) terminal_connections: HashMap<String, TmuxControlPane>,
+    pub(crate) terminal_runtime: Box<dyn TerminalRuntime>,
     pub(crate) agent_state_directory: PathBuf,
 }
 
@@ -91,6 +92,13 @@ pub struct DirectRunPreview {
 
 impl Runtime {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, String> {
+        Self::open_with_terminal_runtime(path, TmuxRuntime)
+    }
+
+    pub(crate) fn open_with_terminal_runtime(
+        path: impl AsRef<Path>,
+        terminal_runtime: impl TerminalRuntime + 'static,
+    ) -> Result<Self, String> {
         let database_path = path.as_ref().to_path_buf();
         let agent_state_directory = database_path
             .parent()
@@ -121,6 +129,7 @@ impl Runtime {
             pending_parent_deletion: None,
             pending_reset_local_data: None,
             terminal_connections: HashMap::new(),
+            terminal_runtime: Box::new(terminal_runtime),
             agent_state_directory,
         };
         runtime.ensure_project_workspaces()?;
@@ -1244,6 +1253,7 @@ mod tests {
     };
     use crate::features::deletion::RESET_CONFIRMATION_PHRASE;
     use crate::persistence::SqliteStore;
+    use crate::terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime};
 
     #[test]
     fn project_repositories_are_implicitly_available_to_items_and_persist() {
@@ -1723,6 +1733,86 @@ mod tests {
             "-t",
             &session,
         ]);
+    }
+
+    #[test]
+    fn reconciliation_uses_the_injected_terminal_runtime_per_machine() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let terminal = FakeTerminalRuntime::new([
+            (1, FakeMachineOutcome::Available),
+            (2, FakeMachineOutcome::Unreachable),
+            (3, FakeMachineOutcome::TmuxQueryFailed),
+        ]);
+        let commands = terminal.command_log();
+        let mut runtime = Runtime::open_with_terminal_runtime(&database, terminal)
+            .expect("runtime should open with the fake terminal runtime");
+
+        runtime.state.machines.extend((1..=3).map(|id| Machine {
+            id,
+            context_id: 1,
+            name: format!("Machine {id}"),
+            socket_name: format!("machine-{id}"),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        }));
+        runtime.state.runs.extend((1..=3).map(|id| Run {
+            id,
+            item_id: 1,
+            machine_id: id,
+            agent: AgentKind::Claude,
+            execution_profile: ExecutionProfile::Implement,
+            model: None,
+            effort: None,
+            skill_snapshot: None,
+            prompt: format!("Run {id}"),
+            working_directory: directory.path().to_string_lossy().into_owned(),
+            session_name: format!("session-{id}"),
+            pane_id: "%1".into(),
+            started_at: id,
+            state: RunState::Working,
+            pane_status: RunPaneStatus::Unknown,
+            workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
+            direct_checkouts: Vec::new(),
+            transcript: String::new(),
+            grill_question_group: None,
+            grill_answers: Vec::new(),
+            grill_decisions: Vec::new(),
+            grill_response: None,
+            grill_phase: None,
+            grill_action: None,
+        }));
+
+        runtime
+            .reconcile_runs()
+            .expect("Run reconciliation should complete through the fake");
+
+        assert_eq!(runtime.state.runs[0].pane_status, RunPaneStatus::Available);
+        assert_eq!(runtime.state.runs[1].pane_status, RunPaneStatus::Unknown);
+        assert_eq!(runtime.state.runs[2].pane_status, RunPaneStatus::Missing);
+        let recorded_commands = commands
+            .lock()
+            .expect("fake terminal command log should remain available")
+            .clone();
+        assert_eq!(
+            recorded_commands,
+            vec![
+                FakeTerminalCommand::ProbeMachine { machine_id: 1 },
+                FakeTerminalCommand::ListPanes {
+                    machine_id: 1,
+                    session_name: "session-1".into(),
+                },
+                FakeTerminalCommand::ProbeMachine { machine_id: 2 },
+                FakeTerminalCommand::ProbeMachine { machine_id: 3 },
+                FakeTerminalCommand::ListPanes {
+                    machine_id: 3,
+                    session_name: "session-3".into(),
+                },
+            ]
+        );
     }
 
     #[test]

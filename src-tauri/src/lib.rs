@@ -172,6 +172,13 @@ pub fn run() {
         .expect("error while running AI Mission Manager");
 }
 
+pub fn run_agent_state_hook(args: &[String]) -> Result<(), String> {
+    let provider = args
+        .first()
+        .ok_or_else(|| "usage: --agent-state-hook <claude|codex>".to_owned())?;
+    agent_state::run_hook_from_stdin(provider)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -228,11 +235,4 @@ mod tests {
             b"legacy"
         );
     }
-}
-
-pub fn run_agent_state_hook(args: &[String]) -> Result<(), String> {
-    let provider = args
-        .first()
-        .ok_or_else(|| "usage: --agent-state-hook <claude|codex>".to_owned())?;
-    agent_state::run_hook_from_stdin(provider)
 }

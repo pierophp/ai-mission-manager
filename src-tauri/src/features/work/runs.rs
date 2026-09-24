@@ -242,7 +242,7 @@ impl Runtime {
         )
         .map_err(|error| error.to_string())?;
 
-        if let Err(error) = probe_machine(&machine) {
+        if let Err(error) = self.terminal_runtime.probe_machine(&machine) {
             return Err(format!(
                 "Could not reach Machine {}. The Run was not started locally: {error}",
                 machine.name
@@ -277,8 +277,7 @@ impl Runtime {
                     .into(),
             );
         }
-        let terminal = TmuxRuntime;
-        let pane_id = terminal.launch_agent(
+        let pane_id = self.terminal_runtime.launch_agent(
             &machine,
             &session_name,
             Path::new(&working_directory),
@@ -296,7 +295,7 @@ impl Runtime {
             match self.inspect_direct_checkouts(item_id, workspace_id, Some(machine.id)) {
                 Ok(value) => value,
                 Err(error) => {
-                    let cleanup = terminal.kill_session(&machine, &session_name);
+                    let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
                     return Err(format_commit_error(error, cleanup.err()));
                 }
             };
@@ -310,7 +309,7 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         if after_launch != current_checkouts {
-            let cleanup = terminal.kill_session(&machine, &session_name);
+            let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
             return Err(format_commit_error(
                 "A Direct checkout changed before the Run was recorded; review the Direct Run preview again".into(),
                 cleanup.err(),
@@ -338,7 +337,7 @@ impl Runtime {
         ) {
             Ok(decision) => decision,
             Err(error) => {
-                let cleanup = terminal.kill_session(&machine, &session_name);
+                let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
                 return Err(format_commit_error(error.to_string(), cleanup.err()));
             }
         };
@@ -349,7 +348,9 @@ impl Runtime {
             .cloned()
             .ok_or_else(|| "Direct Run creation produced no Run".to_owned())?;
         if let Err(error) = self.commit(decision) {
-            let cleanup = terminal.kill_session(&machine, &run.session_name);
+            let cleanup = self
+                .terminal_runtime
+                .kill_session(&machine, &run.session_name);
             return Err(format_commit_error(error, cleanup.err()));
         }
         let _ = preflight;
@@ -456,7 +457,7 @@ impl Runtime {
         )
         .map_err(|error| error.to_string())?;
 
-        if let Err(error) = probe_machine(&machine) {
+        if let Err(error) = self.terminal_runtime.probe_machine(&machine) {
             return Err(format!(
                 "Could not reach Machine {}. The Grill was not started locally: {error}",
                 machine.name
@@ -474,8 +475,7 @@ impl Runtime {
         let executable = self
             .agent_executable(&machine, configuration.agent)
             .map_err(|error| format!("{}: {error}", agent_display_name(configuration.agent)))?;
-        let terminal = TmuxRuntime;
-        let pane_id = terminal.launch_agent(
+        let pane_id = self.terminal_runtime.launch_agent(
             &machine,
             &session_name,
             Path::new(&working_directory),
@@ -493,7 +493,7 @@ impl Runtime {
             match self.inspect_direct_checkouts(item_id, workspace_id, Some(machine.id)) {
                 Ok(value) => value,
                 Err(error) => {
-                    let cleanup = terminal.kill_session(&machine, &session_name);
+                    let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
                     return Err(format_commit_error(error, cleanup.err()));
                 }
             };
@@ -507,7 +507,7 @@ impl Runtime {
             })
             .collect::<Vec<_>>();
         if after_launch != current_checkouts {
-            let cleanup = terminal.kill_session(&machine, &session_name);
+            let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
             return Err(format_commit_error(
                 "A Grill checkout changed before the Run was recorded; review the Grill preview again"
                     .into(),
@@ -533,7 +533,7 @@ impl Runtime {
         ) {
             Ok(decision) => decision,
             Err(error) => {
-                let cleanup = terminal.kill_session(&machine, &session_name);
+                let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
                 return Err(format_commit_error(error.to_string(), cleanup.err()));
             }
         };
@@ -544,7 +544,9 @@ impl Runtime {
             .cloned()
             .ok_or_else(|| "Grill Run creation produced no Run".to_owned())?;
         if let Err(error) = self.commit(decision) {
-            let cleanup = terminal.kill_session(&machine, &run.session_name);
+            let cleanup = self
+                .terminal_runtime
+                .kill_session(&machine, &run.session_name);
             return Err(format_commit_error(error, cleanup.err()));
         }
         let _ = (preflight, allow_dirty, allow_shared_checkouts);
@@ -592,7 +594,7 @@ impl Runtime {
         )
         .map_err(|error| error.to_string())?;
 
-        if let Err(error) = probe_machine(&machine) {
+        if let Err(error) = self.terminal_runtime.probe_machine(&machine) {
             return Err(format!(
                 "Could not reach Machine {}. The Run was not started locally: {error}",
                 machine.name
@@ -610,8 +612,7 @@ impl Runtime {
         let executable = self
             .agent_executable(&machine, agent)
             .map_err(|error| format!("{}: {error}", agent_display_name(agent)))?;
-        let terminal = TmuxRuntime;
-        let pane_id = terminal.launch_agent(
+        let pane_id = self.terminal_runtime.launch_agent(
             &machine,
             &session_name,
             Path::new(&working_directory),
@@ -644,7 +645,7 @@ impl Runtime {
         ) {
             Ok(decision) => decision,
             Err(error) => {
-                let cleanup = terminal.kill_session(&machine, &session_name);
+                let cleanup = self.terminal_runtime.kill_session(&machine, &session_name);
                 return Err(format_commit_error(error.to_string(), cleanup.err()));
             }
         };
@@ -655,7 +656,9 @@ impl Runtime {
             .cloned()
             .ok_or_else(|| "Worktree Run creation produced no Run".to_owned())?;
         if let Err(error) = self.commit(decision) {
-            let cleanup = terminal.kill_session(&machine, &run.session_name);
+            let cleanup = self
+                .terminal_runtime
+                .kill_session(&machine, &run.session_name);
             return Err(format_commit_error(error, cleanup.err()));
         }
         let _ = preflight;
@@ -674,26 +677,28 @@ impl Runtime {
                     .iter()
                     .any(|context| context.execution_machine_id == Some(machine.id))
             })
-            .flat_map(|machine| match list_agent_panes(machine) {
-                Ok(panes) => panes
-                    .into_iter()
-                    .map(|pane| AgentPaneObservation {
-                        machine_id: machine.id,
-                        agent: pane.agent,
-                        session_name: pane.session_name,
-                        pane_id: pane.pane_id,
-                        current_path: pane.current_path,
-                        machine_home: machine_home_directory(machine),
-                    })
-                    .collect::<Vec<_>>(),
-                Err(error) => {
-                    eprintln!(
-                        "Could not inspect Machine {} for agent Panes: {error}",
-                        machine.name
-                    );
-                    Vec::new()
-                }
-            })
+            .flat_map(
+                |machine| match self.terminal_runtime.list_agent_panes(machine) {
+                    Ok(panes) => panes
+                        .into_iter()
+                        .map(|pane| AgentPaneObservation {
+                            machine_id: machine.id,
+                            agent: pane.agent,
+                            session_name: pane.session_name,
+                            pane_id: pane.pane_id,
+                            current_path: pane.current_path,
+                            machine_home: machine_home_directory(machine),
+                        })
+                        .collect::<Vec<_>>(),
+                    Err(error) => {
+                        eprintln!(
+                            "Could not inspect Machine {} for agent Panes: {error}",
+                            machine.name
+                        );
+                        Vec::new()
+                    }
+                },
+            )
             .collect::<Vec<_>>();
         Ok(suggest_untracked_runs(&self.state, &observations))
     }
@@ -741,7 +746,7 @@ impl Runtime {
 
     pub(crate) fn stop_untracked_agent(&mut self, suggestion: RunSuggestion) -> Result<(), String> {
         let (machine, canonical) = self.canonical_untracked_agent(&suggestion)?;
-        TmuxRuntime
+        self.terminal_runtime
             .interrupt_pane(&machine, &canonical.session_name, &canonical.pane_id)
             .map_err(|error| format!("Could not stop the untracked agent: {error}"))
     }
@@ -751,7 +756,7 @@ impl Runtime {
         suggestion: RunSuggestion,
     ) -> Result<(), String> {
         let (machine, canonical) = self.canonical_untracked_agent(&suggestion)?;
-        TmuxRuntime
+        self.terminal_runtime
             .kill_pane(&machine, &canonical.session_name, &canonical.pane_id)
             .map_err(|error| format!("Could not delete the untracked agent Pane: {error}"))
     }
@@ -767,7 +772,9 @@ impl Runtime {
             .find(|machine| machine.id == suggestion.machine_id)
             .cloned()
             .ok_or_else(|| format!("Machine {} does not exist", suggestion.machine_id))?;
-        let observation = list_agent_panes(&machine)?
+        let observation = self
+            .terminal_runtime
+            .list_agent_panes(&machine)?
             .into_iter()
             .find(|pane| {
                 pane.agent == suggestion.agent
@@ -829,7 +836,9 @@ impl Runtime {
             .find(|machine| machine.id == run.machine_id)
             .cloned()
             .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-        let pane_exists = list_panes(&machine, &session_name)?
+        let pane_exists = self
+            .terminal_runtime
+            .list_panes(&machine, &session_name)?
             .iter()
             .any(|pane| pane.pane_id == pane_id);
         if !pane_exists {
@@ -973,7 +982,9 @@ impl Runtime {
             .iter()
             .find(|machine| machine.id == run.machine_id)
             .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-        let panes = list_panes(machine, &run.session_name)?;
+        let panes = self
+            .terminal_runtime
+            .list_panes(machine, &run.session_name)?;
         Ok(panes
             .into_iter()
             .map(|pane| PaneTab::from_summary(&run, &run.session_name, pane, true))
@@ -1033,15 +1044,13 @@ impl Runtime {
                 return Err(error);
             }
         };
-        let transcript_extends_previous =
-            grill_transcript_extends(&run.transcript, &transcript);
-        let captured_question_group = if run.grill_decisions.is_empty()
-            && run.grill_response.is_none()
-        {
-            parse_grill_question_group(&transcript)
-        } else {
-            parse_grill_question_group_since(&run.transcript, &transcript)
-        };
+        let transcript_extends_previous = grill_transcript_extends(&run.transcript, &transcript);
+        let captured_question_group =
+            if run.grill_decisions.is_empty() && run.grill_response.is_none() {
+                parse_grill_question_group(&transcript)
+            } else {
+                parse_grill_question_group_since(&run.transcript, &transcript)
+            };
         let question_group = match (run.grill_question_group.as_ref(), captured_question_group) {
             (Some(previous), None)
                 if run.state == RunState::Working || run.grill_response.is_none() =>
@@ -1353,7 +1362,7 @@ impl Runtime {
             .cloned()
             .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
 
-        TmuxRuntime
+        self.terminal_runtime
             .kill_pane(&machine, &run.session_name, &run.pane_id)
             .map_err(|error| format!("Could not stop Run {run_id}: {error}"))?;
         let decision = decide(
@@ -1404,12 +1413,15 @@ impl Runtime {
             .find(|machine| machine.id == run.machine_id)
             .cloned()
             .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-        let panes = list_panes(&machine, &run.session_name).map_err(|error| {
-            format!(
-                "Pane {} is not available in session {}: {error}",
-                run.pane_id, run.session_name
-            )
-        })?;
+        let panes = self
+            .terminal_runtime
+            .list_panes(&machine, &run.session_name)
+            .map_err(|error| {
+                format!(
+                    "Pane {} is not available in session {}: {error}",
+                    run.pane_id, run.session_name
+                )
+            })?;
         if !panes.iter().any(|pane| pane.pane_id == run.pane_id) {
             return Err(format!(
                 "Pane {} is not available in session {}",
@@ -1482,10 +1494,10 @@ impl Runtime {
             else {
                 continue;
             };
-            let pane_status = if probe_machine(machine).is_err() {
+            let pane_status = if self.terminal_runtime.probe_machine(machine).is_err() {
                 RunPaneStatus::Unknown
             } else {
-                match list_panes(machine, &run.session_name) {
+                match self.terminal_runtime.list_panes(machine, &run.session_name) {
                     Ok(panes) if panes.iter().any(|pane| pane.pane_id == run.pane_id) => {
                         RunPaneStatus::Available
                     }
