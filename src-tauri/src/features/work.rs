@@ -26,7 +26,8 @@ use crate::{
     domain::{
         compose_grill_continuation_prompt as build_grill_continuation_prompt,
         compose_grill_prompt as build_grill_prompt, compose_run_prompt as build_run_prompt, decide,
-        discover_downstream_issue_candidates, external_link_view, format_grill_response, home_view,
+        discover_downstream_issue_candidates, external_link_view, format_grill_response,
+        grill_transcript_extends, home_view,
         normalize_machine_path, parse_grill_question_group, parse_grill_question_group_since,
         run_is_active, search_items, suggest_untracked_runs, worktree_path, AgentKind,
         AgentPaneObservation, AuditAction,
@@ -606,6 +607,20 @@ pub(crate) fn attach_run(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
     locked(state, |runtime| runtime.attach_run(suggestion))
+}
+
+pub(crate) fn stop_untracked_agent(
+    suggestion: RunSuggestion,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    locked(state, |runtime| runtime.stop_untracked_agent(suggestion))
+}
+
+pub(crate) fn delete_untracked_agent(
+    suggestion: RunSuggestion,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    locked(state, |runtime| runtime.delete_untracked_agent(suggestion))
 }
 
 pub(crate) fn open_terminal(

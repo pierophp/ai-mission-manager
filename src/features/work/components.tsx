@@ -1,4 +1,10 @@
-import { type FormEvent, type KeyboardEvent, useEffect, useState } from "react";
+import {
+  type FormEvent,
+  type KeyboardEvent,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -38,6 +44,7 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "../../components/ui/dropdown-menu";
+import { Spinner } from "../../components/ui/spinner";
 import { EllipsisVerticalIcon } from "lucide-react";
 import { currentMinute } from "../../runtime/time";
 import { errorMessage } from "../../runtime/errors";
@@ -217,6 +224,8 @@ export function ItemCard({
   const [directRunSharedConfirmed, setDirectRunSharedConfirmed] =
     useState(false);
   const [isGrillRunOpen, setIsGrillRunOpen] = useState(false);
+  const [isStartingGrillRun, setIsStartingGrillRun] = useState(false);
+  const [grillRunLaunchedId, setGrillRunLaunchedId] = useState<number>();
   const [isGrillQuestionDialogOpen, setIsGrillQuestionDialogOpen] =
     useState(false);
   const [grillAnswerDrafts, setGrillAnswerDrafts] = useState<
@@ -248,6 +257,7 @@ export function ItemCard({
   const [isSaving, setIsSaving] = useState(false);
   const [isExpanded, setIsExpanded] = useState(false);
   const workCommand = useWorkCommand();
+  const grillSubmissionLocks = useRef(new Set<string>());
 
   const displayIdentifier = displayItemIdentifier(view.item.human_identifier);
 
@@ -268,8 +278,12 @@ export function ItemCard({
       run.grill_phase === "waitingForAnswers" &&
       !run.grill_response,
   );
+  const launchedGrillQuestionRun =
+    pendingGrillQuestionRun?.id === grillRunLaunchedId
+      ? pendingGrillQuestionRun
+      : undefined;
   const grillQuestionDraftKey = pendingGrillQuestionRun
-    ? `${pendingGrillQuestionRun.id}:${JSON.stringify(pendingGrillQuestionRun.grill_question_group)}`
+    ? `${pendingGrillQuestionRun.id}:${pendingGrillQuestionRun.grill_question_group?.round ?? 0}:${JSON.stringify(pendingGrillQuestionRun.grill_question_group)}`
     : undefined;
   const persistedGrillAnswers = pendingGrillQuestionRun
     ? Object.fromEntries(
@@ -298,8 +312,10 @@ export function ItemCard({
   }, [view.item.title]);
 
   useEffect(() => {
-    setIsGrillQuestionDialogOpen(grillQuestionDraftKey !== undefined);
-  }, [grillQuestionDraftKey]);
+    setIsGrillQuestionDialogOpen(
+      !isGrillRunOpen && grillQuestionDraftKey !== undefined,
+    );
+  }, [grillQuestionDraftKey, isGrillRunOpen]);
 
   function openGrillStart() {
     const context = contexts.find((candidate) => candidate.id === view.context_id);
@@ -307,6 +323,8 @@ export function ItemCard({
     const executionWorkspaceId = view.workspaces[0]?.id;
     setIsExpanded(true);
     setIsGrillRunOpen(true);
+    setIsStartingGrillRun(false);
+    setGrillRunLaunchedId(undefined);
     setGrillRunWorkspaceId(executionWorkspaceId);
     setGrillRunRepositoryId(undefined);
     setGrillRunPreview(undefined);
@@ -390,28 +408,66 @@ export function ItemCard({
       grillRunPreview.sharedPaths.length === 0 || grillSharedConfirmed;
     if (!dirtyConfirmed || !sharedConfirmed) return;
 
-    const started = await saveItem(
-      workActions.startGrillRun({
-        itemId: view.item.id,
-        workspaceId: grillRunWorkspaceId,
-        primaryRepositoryId: grillRunRepositoryId,
-        machineId: null,
-        configuration: {
-          agent: grillAgent,
-          model: grillModel,
-          effort: grillEffort,
-        },
-        initialPrompt: grillInitialPrompt,
-        expectedCheckouts: grillRunPreview.checkouts,
-        allowDirty: grillRunPreview.dirtyRepositoryIds.length > 0,
-        allowSharedCheckouts: grillRunPreview.sharedPaths.length > 0,
-      }),
+    setIsStartingGrillRun(true);
+    try {
+      const started = await saveItem(
+        workActions.startGrillRun({
+          itemId: view.item.id,
+          workspaceId: grillRunWorkspaceId,
+          primaryRepositoryId: grillRunRepositoryId,
+          machineId: null,
+          configuration: {
+            agent: grillAgent,
+            model: grillModel,
+            effort: grillEffort,
+          },
+          initialPrompt: grillInitialPrompt,
+          expectedCheckouts: grillRunPreview.checkouts,
+          allowDirty: grillRunPreview.dirtyRepositoryIds.length > 0,
+          allowSharedCheckouts: grillRunPreview.sharedPaths.length > 0,
+        }),
+      );
+      if (started) {
+        setGrillRunLaunchedId(started.id);
+        setIsGrillQuestionDialogOpen(false);
+      }
+    } finally {
+      setIsStartingGrillRun(false);
+    }
+  }
+
+  async function handleSubmitGrillAnswers(
+    run: Run,
+    submissionKey: string | undefined,
+    answers: GrillAnswer[],
+  ) {
+    if (
+      !submissionKey ||
+      grillSubmissionLocks.current.has(submissionKey)
+    ) {
+      return;
+    }
+    grillSubmissionLocks.current.add(submissionKey);
+    const submitted = await saveItem(
+      workActions.submitGrillAnswers(run.id, answers),
     );
-    if (!started) return;
-    setIsGrillRunOpen(false);
-    setGrillRunWorkspaceId(undefined);
-    setGrillRunPreview(undefined);
-    setGrillPromptPreview("");
+    if (!submitted) {
+      grillSubmissionLocks.current.delete(submissionKey);
+      return;
+    }
+    setGrillAnswerDrafts((current) => {
+      const next = { ...current };
+      delete next[submissionKey];
+      return next;
+    });
+    setIsGrillQuestionDialogOpen(false);
+    if (grillRunLaunchedId === run.id) {
+      setGrillRunLaunchedId(undefined);
+      setIsGrillRunOpen(false);
+      setGrillRunWorkspaceId(undefined);
+      setGrillRunPreview(undefined);
+      setGrillPromptPreview("");
+    }
   }
 
   async function handleContinueGrill(
@@ -986,10 +1042,9 @@ export function ItemCard({
       candidate.item.id !== view.item.id &&
       candidate.context_name === view.context_name,
   );
-
   function renderWorkspaceCard(workspace: Workspace) {
-    const workspaceWorktrees = view.worktrees.filter((worktree) =>
-      view.workspaces.some((candidate) => candidate.id === worktree.workspace_id),
+    const workspaceWorktrees = view.worktrees.filter(
+      (worktree) => worktree.workspace_id === workspace.id,
     );
 
     return (
@@ -1017,14 +1072,6 @@ export function ItemCard({
               </Badge>
             ))}
           </div>
-          <Button
-            type="button"
-            size="sm"
-            disabled={isSaving}
-            onClick={() => void openDirectRunPreview(workspace)}
-          >
-            Start Direct Run
-          </Button>
           <div className="grid gap-2 rounded-md border p-3">
             <p className="m-0 text-sm">
               <span className="font-medium">Context execution Machine: </span>
@@ -1318,224 +1365,6 @@ export function ItemCard({
                 </div>
               </form>
             )}
-          {directRunWorkspaceId === workspace.id && directRunPreview && (
-            <form
-              className="grid gap-4 rounded-lg border border-primary/30 bg-primary/5 p-4"
-              onSubmit={handleStartDirectRun}
-            >
-              <div className="flex flex-wrap items-start justify-between gap-3">
-                <div>
-                  <h4 className="m-0 text-base font-medium">
-                    Confirm Direct Run
-                  </h4>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    Context: {view.context_name} · Project: {view.project_name}
-                  </p>
-                </div>
-                <Badge variant="outline">
-                  Machine: {directRunPreview.machineName}
-                </Badge>
-              </div>
-              <p className="m-0 text-sm">
-                <span className="font-medium">Context execution Machine: </span>
-                {executionMachine
-                  ? `${executionMachine.name} · ${executionMachine.last_observed}`
-                  : "Not configured"}
-              </p>
-              <div className="grid gap-2 rounded-md border p-3 text-sm">
-                <p className="m-0 font-medium">Registered checkouts</p>
-                {directRunPreview.checkoutDetails.map((checkout) => (
-                  <div
-                    className="flex flex-wrap justify-between gap-2"
-                    key={checkout.repositoryId}
-                  >
-                    <span>
-                      {checkout.repositoryName} · {checkout.branch}
-                    </span>
-                    <code className="break-all text-xs text-muted-foreground">
-                      {checkout.path}
-                    </code>
-                  </div>
-                ))}
-              </div>
-              <label className="grid gap-1.5 text-sm font-medium">
-                <span>Primary Repository / working directory</span>
-                <NativeSelect
-                  value={directRunRepositoryId ?? ""}
-                  onChange={(event) =>
-                    setDirectRunRepositoryId(
-                      Number(event.target.value) || undefined,
-                    )
-                  }
-                  disabled={isSaving}
-                >
-                  <NativeSelectOption value="">
-                    Choose the checkout for this Run
-                  </NativeSelectOption>
-                  {directRunPreview.checkoutDetails.map((checkout) => (
-                    <NativeSelectOption
-                      value={checkout.repositoryId}
-                      key={checkout.repositoryId}
-                    >
-                      {checkout.repositoryName} · {checkout.path}
-                    </NativeSelectOption>
-                  ))}
-                </NativeSelect>
-              </label>
-              {[...new Set(directRunPreview.currentBranches)].length > 1 && (
-                <Alert>
-                  <AlertTitle>Repositories are on different branches</AlertTitle>
-                  <AlertDescription>
-                    {directRunPreview.currentBranches.join(", ")}. The Run
-                    will use each checkout's current branch without switching
-                    it.
-                  </AlertDescription>
-                </Alert>
-              )}
-              {directRunPreview.dirtyRepositoryIds.length > 0 && (
-                <Alert variant="destructive">
-                  <AlertTitle>Dirty checkouts detected</AlertTitle>
-                  <AlertDescription>
-                    Existing uncommitted changes will remain in the shared
-                    checkouts.
-                    <label className="mt-2 flex items-center gap-2 font-normal">
-                      <Checkbox
-                        checked={directRunDirtyConfirmed}
-                        onCheckedChange={(checked) =>
-                          setDirectRunDirtyConfirmed(checked === true)
-                        }
-                        disabled={isSaving}
-                      />
-                      I understand and want to use these dirty checkouts.
-                    </label>
-                  </AlertDescription>
-                </Alert>
-              )}
-              {directRunPreview.sharedPaths.length > 0 && (
-                <Alert variant="destructive">
-                  <AlertTitle>Checkouts are shared with active Runs</AlertTitle>
-                  <AlertDescription>
-                    {directRunPreview.sharedRuns.map((shared) => (
-                      <div key={`${shared.runId}-${shared.path}`}>
-                        Run #{shared.runId} · {shared.path}
-                      </div>
-                    ))}
-                    <label className="mt-2 flex items-center gap-2 font-normal">
-                      <Checkbox
-                        checked={directRunSharedConfirmed}
-                        onCheckedChange={(checked) =>
-                          setDirectRunSharedConfirmed(checked === true)
-                        }
-                        disabled={isSaving}
-                      />
-                      I understand and want to share these checkouts.
-                    </label>
-                  </AlertDescription>
-                </Alert>
-              )}
-              <div className="grid gap-3 md:grid-cols-2">
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Agent</span>
-                  <NativeSelect
-                    value={runAgent}
-                    onChange={(event) =>
-                      setRunAgent(event.target.value as AgentKind)
-                    }
-                    disabled={isSaving}
-                  >
-                    <NativeSelectOption value="claude">
-                      Claude Code
-                    </NativeSelectOption>
-                    <NativeSelectOption value="codex">Codex</NativeSelectOption>
-                  </NativeSelect>
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Execution Profile</span>
-                  <NativeSelect
-                    value={runProfile}
-                    onChange={(event) => {
-                      setRunProfile(event.target.value as ExecutionProfile);
-                      setRunPromptNeedsCompose(true);
-                    }}
-                    disabled={isSaving}
-                  >
-                    <NativeSelectOption value="investigate">
-                      Investigate
-                    </NativeSelectOption>
-                    <NativeSelectOption value="implement">
-                      Implement
-                    </NativeSelectOption>
-                    <NativeSelectOption value="review">Review</NativeSelectOption>
-                    <NativeSelectOption value="custom">
-                      Custom prompt
-                    </NativeSelectOption>
-                  </NativeSelect>
-                </label>
-              </div>
-              {runProfile === "custom" && (
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Custom prompt source</span>
-                  <Textarea
-                    value={runCustomPrompt}
-                    onChange={(event) => {
-                      setRunCustomPrompt(event.target.value);
-                      setRunPromptNeedsCompose(true);
-                    }}
-                    rows={3}
-                    placeholder="Tell the agent exactly what to do"
-                    disabled={isSaving}
-                  />
-                </label>
-              )}
-              <label className="grid gap-1.5 text-sm font-medium">
-                <span>Editable composed prompt</span>
-                <Textarea
-                  value={runPrompt}
-                  onChange={(event) => setRunPrompt(event.target.value)}
-                  rows={6}
-                  disabled={isSaving}
-                />
-              </label>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={isSaving}
-                  onClick={() => void composeRunPromptPreview()}
-                >
-                  Compose from selection
-                </Button>
-                <Button
-                  type="submit"
-                  disabled={
-                    isSaving ||
-                    !directRunRepositoryId ||
-                    !runPrompt.trim() ||
-                    runPromptNeedsCompose ||
-                    (directRunPreview.dirtyRepositoryIds.length > 0 &&
-                      !directRunDirtyConfirmed) ||
-                    (directRunPreview.sharedPaths.length > 0 &&
-                      !directRunSharedConfirmed)
-                  }
-                >
-                  {isSaving ? "Starting…" : "Confirm and start Direct Run"}
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  disabled={isSaving}
-                  onClick={() => {
-                    setDirectRunWorkspaceId(undefined);
-                    setDirectRunPreview(undefined);
-                  }}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </form>
-          )}
         </CardContent>
       </Card>
     );
@@ -1590,6 +1419,15 @@ export function ItemCard({
                   onSelect={openGrillStart}
                 >
                   {activeGrillRun ? "Grill Run already active" : "Start Grill Run"}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={isSaving || !view.workspaces[0]}
+                  onSelect={() => {
+                    const workspace = view.workspaces[0];
+                    if (workspace) void openDirectRunPreview(workspace);
+                  }}
+                >
+                  Start Direct Run
                 </DropdownMenuItem>
                 <DropdownMenuItem
                   disabled={isSaving}
@@ -1659,6 +1497,8 @@ export function ItemCard({
             onOpenChange={(open) => {
               if (!open && !isSaving) {
                 setIsGrillRunOpen(false);
+                setIsStartingGrillRun(false);
+                setGrillRunLaunchedId(undefined);
                 setGrillRunWorkspaceId(undefined);
                 setGrillRunPreview(undefined);
                 setGrillRunPreviewError(undefined);
@@ -1670,16 +1510,64 @@ export function ItemCard({
               <DialogHeader>
                 <div className="flex flex-wrap items-start justify-between gap-3 pr-8">
                   <div className="grid gap-1">
-                    <DialogTitle>Start Grill Run</DialogTitle>
+                    <DialogTitle>
+                      {launchedGrillQuestionRun
+                        ? `Grill questions · Run #${launchedGrillQuestionRun.id}`
+                        : "Start Grill Run"}
+                    </DialogTitle>
                     <DialogDescription>
-                      The Run uses this Item&apos;s Context defaults unless you override them here.
+                      {launchedGrillQuestionRun
+                        ? "Answer the complete group once. Mission Manager will send one numbered response to the same Pane."
+                        : isStartingGrillRun
+                          ? "Starting the Grill and opening its Run."
+                          : grillRunLaunchedId !== undefined
+                            ? "The Run has started. Waiting for its first questions."
+                            : "The Run uses this Item’s Context defaults unless you override them here."}
                     </DialogDescription>
                   </div>
-                  {grillRunPreview && (
+                  {!grillRunLaunchedId && grillRunPreview && (
                     <Badge variant="outline">Machine: {grillRunPreview.machineName}</Badge>
                   )}
                 </div>
               </DialogHeader>
+              {launchedGrillQuestionRun ? (
+                <GrillQuestionFlow
+                  key={grillQuestionDraftKey}
+                  run={launchedGrillQuestionRun}
+                  answers={grillQuestionAnswers}
+                  disabled={isSaving}
+                  onAnswerChange={(questionNumber, answer) => {
+                    if (!grillQuestionDraftKey) return;
+                    setGrillAnswerDrafts((current) => ({
+                      ...current,
+                      [grillQuestionDraftKey]: {
+                        ...(current[grillQuestionDraftKey] ?? persistedGrillAnswers),
+                        [questionNumber]: answer,
+                      },
+                    }));
+                  }}
+                  onSubmit={(answers) =>
+                    handleSubmitGrillAnswers(
+                      launchedGrillQuestionRun,
+                      grillQuestionDraftKey,
+                      answers,
+                    )
+                  }
+                />
+              ) : isStartingGrillRun || grillRunLaunchedId !== undefined ? (
+                <div
+                  className="flex min-h-28 items-center justify-center gap-3 text-sm text-muted-foreground"
+                  aria-live="polite"
+                  aria-busy="true"
+                >
+                  <Spinner />
+                  <span>
+                    {isStartingGrillRun
+                      ? "Starting the Grill Run…"
+                      : "Waiting for the Grill’s first questions…"}
+                  </span>
+                </div>
+              ) : (
               <form className="grid gap-4" onSubmit={handleStartGrillRun}>
             {itemRepositories.length === 0 && (
               <Alert variant="destructive">
@@ -1894,6 +1782,7 @@ export function ItemCard({
                 disabled={isSaving}
                 onClick={() => {
                   setIsGrillRunOpen(false);
+                  setGrillRunLaunchedId(undefined);
                   setGrillRunWorkspaceId(undefined);
                   setGrillRunPreview(undefined);
                   setGrillRunPreviewError(undefined);
@@ -1904,6 +1793,7 @@ export function ItemCard({
               </Button>
             </DialogFooter>
               </form>
+              )}
             </DialogContent>
           </Dialog>
         )}
@@ -2354,6 +2244,239 @@ export function ItemCard({
           </CardContent>
         )}
       </Card>
+      <Dialog
+        open={Boolean(directRunWorkspaceId)}
+        onOpenChange={(open) => {
+          if (!open && !isSaving) {
+            setDirectRunWorkspaceId(undefined);
+            setDirectRunPreview(undefined);
+            setRunPrompt("");
+          }
+        }}
+      >
+        <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-3xl">
+          <DialogHeader>
+            <div className="flex flex-wrap items-start justify-between gap-3 pr-8">
+              <div className="grid gap-1">
+                <DialogTitle>Start Direct Run</DialogTitle>
+                <DialogDescription>
+                  Configure a Run for {displayIdentifier} in {view.context_name} ·{" "}
+                  {view.project_name}.
+                </DialogDescription>
+              </div>
+              {directRunPreview && (
+                <Badge variant="outline">
+                  Machine: {directRunPreview.machineName}
+                </Badge>
+              )}
+            </div>
+          </DialogHeader>
+          {directRunPreview ? (
+            <form className="grid gap-4" onSubmit={handleStartDirectRun}>
+              <p className="m-0 text-sm text-muted-foreground">
+                This Run will use {executionMachine?.name ?? "the Context execution Machine"} configured for {view.context_name}.
+              </p>
+              <div className="grid gap-2 rounded-md border p-3 text-sm">
+                <p className="m-0 font-medium">Registered checkouts</p>
+                {directRunPreview.checkoutDetails.map((checkout) => (
+                  <div
+                    className="flex flex-wrap justify-between gap-2"
+                    key={checkout.repositoryId}
+                  >
+                    <span>
+                      {checkout.repositoryName} · {checkout.branch}
+                    </span>
+                    <code className="break-all text-xs text-muted-foreground">
+                      {checkout.path}
+                    </code>
+                  </div>
+                ))}
+              </div>
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Primary Repository / working directory</span>
+                <NativeSelect
+                  value={directRunRepositoryId ?? ""}
+                  onChange={(event) =>
+                    setDirectRunRepositoryId(
+                      Number(event.target.value) || undefined,
+                    )
+                  }
+                  disabled={isSaving}
+                >
+                  <NativeSelectOption value="">
+                    Choose the checkout for this Run
+                  </NativeSelectOption>
+                  {directRunPreview.checkoutDetails.map((checkout) => (
+                    <NativeSelectOption
+                      value={checkout.repositoryId}
+                      key={checkout.repositoryId}
+                    >
+                      {checkout.repositoryName} · {checkout.path}
+                    </NativeSelectOption>
+                  ))}
+                </NativeSelect>
+              </label>
+              {[...new Set(directRunPreview.currentBranches)].length > 1 && (
+                <Alert>
+                  <AlertTitle>Repositories are on different branches</AlertTitle>
+                  <AlertDescription>
+                    {directRunPreview.currentBranches.join(", ")}. The Run
+                    will use each checkout&apos;s current branch without
+                    switching it.
+                  </AlertDescription>
+                </Alert>
+              )}
+              {directRunPreview.dirtyRepositoryIds.length > 0 && (
+                <Alert variant="destructive">
+                  <AlertTitle>Dirty checkouts detected</AlertTitle>
+                  <AlertDescription>
+                    Existing uncommitted changes will remain in the shared
+                    checkouts.
+                    <label className="mt-2 flex items-center gap-2 font-normal">
+                      <Checkbox
+                        checked={directRunDirtyConfirmed}
+                        onCheckedChange={(checked) =>
+                          setDirectRunDirtyConfirmed(checked === true)
+                        }
+                        disabled={isSaving}
+                      />
+                      I understand and want to use these dirty checkouts.
+                    </label>
+                  </AlertDescription>
+                </Alert>
+              )}
+              {directRunPreview.sharedPaths.length > 0 && (
+                <Alert variant="destructive">
+                  <AlertTitle>Checkouts are shared with active Runs</AlertTitle>
+                  <AlertDescription>
+                    {directRunPreview.sharedRuns.map((shared) => (
+                      <div key={`${shared.runId}-${shared.path}`}>
+                        Run #{shared.runId} · {shared.path}
+                      </div>
+                    ))}
+                    <label className="mt-2 flex items-center gap-2 font-normal">
+                      <Checkbox
+                        checked={directRunSharedConfirmed}
+                        onCheckedChange={(checked) =>
+                          setDirectRunSharedConfirmed(checked === true)
+                        }
+                        disabled={isSaving}
+                      />
+                      I understand and want to share these checkouts.
+                    </label>
+                  </AlertDescription>
+                </Alert>
+              )}
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Agent</span>
+                  <NativeSelect
+                    value={runAgent}
+                    onChange={(event) =>
+                      setRunAgent(event.target.value as AgentKind)
+                    }
+                    disabled={isSaving}
+                  >
+                    <NativeSelectOption value="claude">
+                      Claude Code
+                    </NativeSelectOption>
+                    <NativeSelectOption value="codex">Codex</NativeSelectOption>
+                  </NativeSelect>
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Execution Profile</span>
+                  <NativeSelect
+                    value={runProfile}
+                    onChange={(event) => {
+                      setRunProfile(event.target.value as ExecutionProfile);
+                      setRunPromptNeedsCompose(true);
+                    }}
+                    disabled={isSaving}
+                  >
+                    <NativeSelectOption value="investigate">
+                      Investigate
+                    </NativeSelectOption>
+                    <NativeSelectOption value="implement">
+                      Implement
+                    </NativeSelectOption>
+                    <NativeSelectOption value="review">Review</NativeSelectOption>
+                    <NativeSelectOption value="custom">
+                      Custom prompt
+                    </NativeSelectOption>
+                  </NativeSelect>
+                </label>
+              </div>
+              {runProfile === "custom" && (
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Custom prompt source</span>
+                  <Textarea
+                    value={runCustomPrompt}
+                    onChange={(event) => {
+                      setRunCustomPrompt(event.target.value);
+                      setRunPromptNeedsCompose(true);
+                    }}
+                    rows={3}
+                    placeholder="Tell the agent exactly what to do"
+                    disabled={isSaving}
+                  />
+                </label>
+              )}
+              <label className="grid gap-1.5 text-sm font-medium">
+                <span>Editable composed prompt</span>
+                <Textarea
+                  value={runPrompt}
+                  onChange={(event) => setRunPrompt(event.target.value)}
+                  rows={6}
+                  disabled={isSaving}
+                />
+              </label>
+              <DialogFooter>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="outline"
+                  disabled={isSaving}
+                  onClick={() => void composeRunPromptPreview()}
+                >
+                  Compose from selection
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant="ghost"
+                  disabled={isSaving}
+                  onClick={() => {
+                    setDirectRunWorkspaceId(undefined);
+                    setDirectRunPreview(undefined);
+                    setRunPrompt("");
+                  }}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  type="submit"
+                  disabled={
+                    isSaving ||
+                    !directRunRepositoryId ||
+                    !runPrompt.trim() ||
+                    runPromptNeedsCompose ||
+                    (directRunPreview.dirtyRepositoryIds.length > 0 &&
+                      !directRunDirtyConfirmed) ||
+                    (directRunPreview.sharedPaths.length > 0 &&
+                      !directRunSharedConfirmed)
+                  }
+                >
+                  {isSaving ? "Starting…" : "Confirm and start Direct Run"}
+                </Button>
+              </DialogFooter>
+            </form>
+          ) : (
+            <p className="text-sm text-muted-foreground">
+              Preparing checkout preview…
+            </p>
+          )}
+        </DialogContent>
+      </Dialog>
       {isExternalLinkDialogOpen && (
         <Dialog
           open
@@ -2654,60 +2777,50 @@ export function ItemCard({
           </DialogContent>
         </Dialog>
       )}
-      {pendingGrillQuestionRun && (
-        <Dialog
-          open={isGrillQuestionDialogOpen}
-          onOpenChange={(open) => {
-            if (!open && !isSaving) setIsGrillQuestionDialogOpen(false);
-          }}
-        >
-          <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-3xl">
-            <DialogHeader>
-              <DialogTitle>
-                Grill questions · Run #{pendingGrillQuestionRun.id}
-              </DialogTitle>
-              <DialogDescription>
-                Answer the complete group once. Mission Manager will send one
-                numbered response to the same Pane.
-              </DialogDescription>
-            </DialogHeader>
-            <GrillQuestionFlow
-              key={grillQuestionDraftKey}
-              run={pendingGrillQuestionRun}
-              answers={grillQuestionAnswers}
-              disabled={isSaving}
-              onAnswerChange={(questionNumber, answer) => {
-                if (!grillQuestionDraftKey) return;
-                setGrillAnswerDrafts((current) => ({
-                  ...current,
-                  [grillQuestionDraftKey]: {
-                    ...(current[grillQuestionDraftKey] ?? persistedGrillAnswers),
-                    [questionNumber]: answer,
-                  },
-                }));
-              }}
-              onSubmit={async (answers) => {
-                const submitted = await saveItem(
-                  workActions.submitGrillAnswers(
-                    pendingGrillQuestionRun.id,
+      {pendingGrillQuestionRun &&
+        pendingGrillQuestionRun.id !== grillRunLaunchedId && (
+          <Dialog
+            open={isGrillQuestionDialogOpen}
+            onOpenChange={(open) => {
+              if (!open && !isSaving) setIsGrillQuestionDialogOpen(false);
+            }}
+          >
+            <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-3xl">
+              <DialogHeader>
+                <DialogTitle>
+                  Grill questions · Run #{pendingGrillQuestionRun.id}
+                </DialogTitle>
+                <DialogDescription>
+                  Answer the complete group once. Mission Manager will send one
+                  numbered response to the same Pane.
+                </DialogDescription>
+              </DialogHeader>
+              <GrillQuestionFlow
+                key={grillQuestionDraftKey}
+                run={pendingGrillQuestionRun}
+                answers={grillQuestionAnswers}
+                disabled={isSaving}
+                onAnswerChange={(questionNumber, answer) => {
+                  if (!grillQuestionDraftKey) return;
+                  setGrillAnswerDrafts((current) => ({
+                    ...current,
+                    [grillQuestionDraftKey]: {
+                      ...(current[grillQuestionDraftKey] ?? persistedGrillAnswers),
+                      [questionNumber]: answer,
+                    },
+                  }));
+                }}
+                onSubmit={(answers) =>
+                  handleSubmitGrillAnswers(
+                    pendingGrillQuestionRun,
+                    grillQuestionDraftKey,
                     answers,
-                  ),
-                );
-                if (submitted) {
-                  if (grillQuestionDraftKey) {
-                    setGrillAnswerDrafts((current) => {
-                      const next = { ...current };
-                      delete next[grillQuestionDraftKey];
-                      return next;
-                    });
-                  }
-                  setIsGrillQuestionDialogOpen(false);
+                  )
                 }
-              }}
-            />
-          </DialogContent>
-        </Dialog>
-      )}
+              />
+            </DialogContent>
+          </Dialog>
+        )}
     </>
   );
 }
@@ -2762,10 +2875,13 @@ function GrillQuestionFlow({
 
   return (
     <section className="grid gap-3">
-      {questionGroup.questions.map((question) => {
+      {questionGroup.questions.map((question, index) => {
         const recommendationAnswer = question.recommendation ? "ok" : undefined;
         return (
-          <div className="grid gap-2 rounded-md border bg-background/60 p-3" key={question.number}>
+          <div
+            className="grid gap-2 rounded-md border bg-background/60 p-3"
+            key={`${questionGroup.round}:${question.number}:${index}`}
+          >
             <div className="text-sm">
               <strong>
                 {question.number}. {question.title ?? "Question"}
@@ -3274,14 +3390,18 @@ export function RunSuggestionCard({
   suggestion,
   disabled,
   onAttach,
+  onStop,
+  onDelete,
 }: {
   suggestion: RunSuggestion;
   disabled: boolean;
   onAttach: (suggestion: RunSuggestion) => Promise<void>;
+  onStop: (suggestion: RunSuggestion) => void;
+  onDelete: (suggestion: RunSuggestion) => void;
 }) {
   return (
     <Card size="sm">
-      <CardContent className="grid gap-3 pt-4 md:grid-cols-[1fr_1fr_auto] md:items-center">
+      <CardContent className="grid gap-3 pt-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)] md:items-center xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]">
         <div className="grid gap-1">
           <strong className="text-sm">
             {suggestion.agent === "claude" ? "Claude Code" : "Codex"} in{" "}
@@ -3314,15 +3434,35 @@ export function RunSuggestionCard({
             {suggestion.currentPath}
           </code>
         </div>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
-          disabled={disabled}
-          onClick={() => void onAttach(suggestion)}
-        >
-          Attach Run
-        </Button>
+        <div className="flex flex-wrap justify-end gap-2 md:col-span-2 xl:col-span-1">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={disabled}
+            onClick={() => void onAttach(suggestion)}
+          >
+            Attach Run
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={disabled}
+            onClick={() => onStop(suggestion)}
+          >
+            Stop
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="destructive"
+            disabled={disabled}
+            onClick={() => onDelete(suggestion)}
+          >
+            Delete
+          </Button>
+        </div>
       </CardContent>
     </Card>
   );

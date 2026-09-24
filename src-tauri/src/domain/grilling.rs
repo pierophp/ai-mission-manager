@@ -177,6 +177,8 @@ pub struct GrillConfiguration {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrillQuestionGroup {
+    #[serde(default)]
+    pub round: usize,
     pub questions: Vec<GrillQuestion>,
 }
 
@@ -223,7 +225,9 @@ fn parse_grill_question_group_with_fence_state(
             continue;
         }
         let line = line.trim_end();
-        if let Some(header) = line.trim_start().strip_prefix("❓") {
+        let line = line.trim_start();
+        let line = line.strip_prefix('•').map(str::trim_start).unwrap_or(line);
+        if let Some(header) = line.strip_prefix("❓") {
             if let Some(question) = current.take() {
                 if !question.prompt.is_empty() {
                     questions.push(question);
@@ -273,7 +277,7 @@ fn parse_grill_question_group_with_fence_state(
             questions.push(question);
         }
     }
-    (!questions.is_empty()).then_some(GrillQuestionGroup { questions })
+    (!questions.is_empty()).then_some(GrillQuestionGroup { round: 0, questions })
 }
 
 /// Parse only the newly captured portion of a Pane transcript. The Terminal
@@ -291,6 +295,14 @@ pub fn parse_grill_question_group_since(
     } else {
         parse_grill_question_group_with_fence_state(&transcript, None)
     }
+}
+
+/// Whether a Pane capture still contains the previously captured transcript
+/// as its prefix after removing terminal escape sequences.
+pub fn grill_transcript_extends(previous_transcript: &str, transcript: &str) -> bool {
+    let previous_transcript = strip_terminal_escape_sequences(previous_transcript);
+    let transcript = strip_terminal_escape_sequences(transcript);
+    transcript.starts_with(previous_transcript.as_str())
 }
 
 fn markdown_code_fence_state(transcript: &str) -> Option<(char, usize)> {
@@ -352,7 +364,7 @@ pub fn format_grill_response(answers: &[GrillAnswer]) -> Result<String, DomainEr
         .map(|answer| {
             let mut lines = answer.answer.trim().lines();
             let first = format!(
-                "Q{} {}",
+                "{}. {}",
                 answer.question_number,
                 lines.next().unwrap_or_default().trim()
             );

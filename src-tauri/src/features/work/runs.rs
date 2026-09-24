@@ -699,6 +699,67 @@ impl Runtime {
     }
 
     pub(crate) fn attach_run(&mut self, suggestion: RunSuggestion) -> Result<Run, String> {
+        let (machine, canonical) = self.canonical_untracked_agent(&suggestion)?;
+        let decision = if let Some(workspace_id) = canonical.workspace_id {
+            let repository_id = canonical.repository_id.ok_or_else(|| {
+                "The suggested Item execution location has no Repository".to_owned()
+            })?;
+            decide(
+                self.state.clone(),
+                Event::AttachRun {
+                    item_id: canonical.item_id,
+                    workspace_id,
+                    worktree_id: canonical.worktree_id,
+                    repository_id,
+                    machine_id: canonical.machine_id,
+                    agent: canonical.agent,
+                    working_directory: canonical
+                        .location_path
+                        .clone()
+                        .unwrap_or(canonical.current_path.clone()),
+                    machine_home: machine_home_directory(&machine),
+                    session_name: canonical.session_name,
+                    pane_id: canonical.pane_id,
+                    attached_at: current_unix_seconds(),
+                },
+            )
+        } else {
+            return Err(
+                "The suggested agent is not in a registered Item execution location".into(),
+            );
+        }
+        .map_err(|error| error.to_string())?;
+        let run = decision
+            .state
+            .runs
+            .last()
+            .cloned()
+            .ok_or_else(|| "Run attachment produced no Run".to_owned())?;
+        self.commit(decision)?;
+        Ok(run)
+    }
+
+    pub(crate) fn stop_untracked_agent(&mut self, suggestion: RunSuggestion) -> Result<(), String> {
+        let (machine, canonical) = self.canonical_untracked_agent(&suggestion)?;
+        TmuxRuntime
+            .interrupt_pane(&machine, &canonical.session_name, &canonical.pane_id)
+            .map_err(|error| format!("Could not stop the untracked agent: {error}"))
+    }
+
+    pub(crate) fn delete_untracked_agent(
+        &mut self,
+        suggestion: RunSuggestion,
+    ) -> Result<(), String> {
+        let (machine, canonical) = self.canonical_untracked_agent(&suggestion)?;
+        TmuxRuntime
+            .kill_pane(&machine, &canonical.session_name, &canonical.pane_id)
+            .map_err(|error| format!("Could not delete the untracked agent Pane: {error}"))
+    }
+
+    fn canonical_untracked_agent(
+        &self,
+        suggestion: &RunSuggestion,
+    ) -> Result<(Machine, RunSuggestion), String> {
         let machine = self
             .state
             .machines
@@ -739,43 +800,8 @@ impl Runtime {
         .ok_or_else(|| {
             "The suggested agent no longer matches its registered working location".to_owned()
         })?;
-        let decision = if let Some(workspace_id) = canonical.workspace_id {
-            let repository_id = canonical.repository_id.ok_or_else(|| {
-                "The suggested Item execution location has no Repository".to_owned()
-            })?;
-            decide(
-                self.state.clone(),
-                Event::AttachRun {
-                    item_id: canonical.item_id,
-                    workspace_id,
-                    worktree_id: canonical.worktree_id,
-                    repository_id,
-                    machine_id: canonical.machine_id,
-                    agent: canonical.agent,
-                    working_directory: canonical
-                        .location_path
-                        .clone()
-                        .unwrap_or(canonical.current_path.clone()),
-                    machine_home: machine_home_directory(&machine),
-                    session_name: canonical.session_name,
-                    pane_id: canonical.pane_id,
-                    attached_at: current_unix_seconds(),
-                },
-            )
-        } else {
-            return Err(
-                "The suggested agent is not in a registered Item execution location".into(),
-            );
-        }
-        .map_err(|error| error.to_string())?;
-        let run = decision
-            .state
-            .runs
-            .last()
-            .cloned()
-            .ok_or_else(|| "Run attachment produced no Run".to_owned())?;
-        self.commit(decision)?;
-        Ok(run)
+
+        Ok((machine, canonical))
     }
 
     pub(crate) fn open_terminal(
@@ -1007,6 +1033,8 @@ impl Runtime {
                 return Err(error);
             }
         };
+        let transcript_extends_previous =
+            grill_transcript_extends(&run.transcript, &transcript);
         let captured_question_group = if run.grill_decisions.is_empty()
             && run.grill_response.is_none()
         {
@@ -1034,6 +1062,7 @@ impl Runtime {
             }
             (Some(previous), Some(captured))
                 if previous.questions.len() == captured.questions.len()
+                    && run.grill_response.is_none()
                     && previous
                         .questions
                         .iter()
@@ -1045,7 +1074,28 @@ impl Runtime {
             {
                 Some(previous.clone())
             }
-            (_, captured) => captured,
+            (Some(previous), Some(mut captured))
+                if run.grill_response.is_some() && !transcript_extends_previous =>
+            {
+                if captured.questions.starts_with(&previous.questions) {
+                    captured.questions.drain(..previous.questions.len());
+                    if captured.questions.is_empty() {
+                        Some(previous.clone())
+                    } else {
+                        captured.round = run.grill_decisions.len();
+                        Some(captured)
+                    }
+                } else if previous.questions.starts_with(&captured.questions) {
+                    Some(previous.clone())
+                } else {
+                    captured.round = run.grill_decisions.len();
+                    Some(captured)
+                }
+            }
+            (_, captured) => captured.map(|mut group| {
+                group.round = run.grill_decisions.len();
+                group
+            }),
         };
         let question_group_is_pending = question_group.is_some()
             && (run.grill_response.is_none() || run.grill_question_group != question_group);

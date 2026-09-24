@@ -30,6 +30,13 @@ pub trait TerminalRuntime {
 
     fn kill_pane(&self, machine: &Machine, session_name: &str, pane_id: &str)
         -> Result<(), String>;
+
+    fn interrupt_pane(
+        &self,
+        machine: &Machine,
+        session_name: &str,
+        pane_id: &str,
+    ) -> Result<(), String>;
 }
 
 pub struct AgentLaunchContext<'a> {
@@ -446,6 +453,15 @@ impl TerminalRuntime for TmuxRuntime {
     ) -> Result<(), String> {
         kill_tmux_pane(machine, pane_id)
     }
+
+    fn interrupt_pane(
+        &self,
+        machine: &Machine,
+        _session_name: &str,
+        pane_id: &str,
+    ) -> Result<(), String> {
+        interrupt_tmux_pane(machine, pane_id)
+    }
 }
 
 fn shell_quote(value: &str) -> String {
@@ -845,9 +861,34 @@ pub fn send_input_to_pane(machine: &Machine, pane_id: &str, input: &[u8]) -> Res
         None => (input, false),
     };
     if !text.is_empty() {
-        let mut args = vec!["send-keys".into(), "-t".into(), pane_id.into(), "-H".into()];
-        args.extend(text.iter().map(|byte| format!("0x{byte:02x}")));
-        run_tmux(machine, &args)?;
+        let text = std::str::from_utf8(text)
+            .map_err(|error| format!("Terminal input is not valid UTF-8: {error}"))?;
+        let buffer_name = format!(
+            "ai-mission-manager-input-{}",
+            pane_id.trim_start_matches('%')
+        );
+        run_tmux(
+            machine,
+            &[
+                "set-buffer".into(),
+                "-b".into(),
+                buffer_name.clone(),
+                text.into(),
+            ],
+        )?;
+        run_tmux(
+            machine,
+            &[
+                "paste-buffer".into(),
+                "-r".into(),
+                "-p".into(),
+                "-d".into(),
+                "-b".into(),
+                buffer_name,
+                "-t".into(),
+                pane_id.into(),
+            ],
+        )?;
     }
     if should_submit {
         run_tmux(
@@ -856,7 +897,7 @@ pub fn send_input_to_pane(machine: &Machine, pane_id: &str, input: &[u8]) -> Res
                 "send-keys".into(),
                 "-t".into(),
                 pane_id.into(),
-                "Enter".into(),
+                "C-m".into(),
             ],
         )?;
     }
@@ -1139,6 +1180,17 @@ fn kill_tmux_session(machine: &Machine, session_name: &str) -> Result<(), String
 
 fn kill_tmux_pane(machine: &Machine, pane_id: &str) -> Result<(), String> {
     let args = vec!["kill-pane".into(), "-t".into(), pane_id.into()];
+    run_tmux(machine, &args).map(|_| ())
+}
+
+fn interrupt_tmux_pane(machine: &Machine, pane_id: &str) -> Result<(), String> {
+    validate_pane_id(pane_id)?;
+    let args = vec![
+        "send-keys".into(),
+        "-t".into(),
+        pane_id.into(),
+        "C-c".into(),
+    ];
     run_tmux(machine, &args).map(|_| ())
 }
 

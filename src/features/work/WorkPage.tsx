@@ -15,6 +15,7 @@ import { Empty, EmptyDescription } from "../../components/ui/empty";
 import { Input } from "../../components/ui/input";
 import { NativeSelect, NativeSelectOption } from "../../components/ui/native-select";
 import { Spinner } from "../../components/ui/spinner";
+import { ConfirmationDialog } from "../../components/ui/confirmation-dialog";
 import {
   Dialog,
   DialogClose,
@@ -27,6 +28,7 @@ import {
 import { useAppShell } from "../../components/app-shell";
 import { errorMessage } from "../../runtime/errors";
 import {
+  invalidateRunQueries,
   invalidateWorkQueries,
 } from "../../runtime/query-invalidation";
 import { usePollExternalObjects } from "../../runtime/RuntimeEventsBridge";
@@ -48,6 +50,11 @@ import {
 } from "./work-queries";
 import { useWorkCommand, workActions } from "./work-mutations";
 import { useStructureData } from "../structure/structure-queries";
+
+type UntrackedAgentAction = {
+  action: "stop" | "delete";
+  suggestion: RunSuggestion;
+};
 
 export function WorkPage() {
   const { openTerminal: onOpenTerminal } = useAppShell();
@@ -77,6 +84,8 @@ export function WorkPage() {
   const [captureProjectId, setCaptureProjectId] = useState<number>();
   const [title, setTitle] = useState("");
   const [isCreateItemOpen, setIsCreateItemOpen] = useState(false);
+  const [untrackedAgentAction, setUntrackedAgentAction] =
+    useState<UntrackedAgentAction>();
   const isSaving = workCommand.isPending || structureCommand.isPending;
 
   const captureProjects = projects.filter(
@@ -169,9 +178,35 @@ export function WorkPage() {
 
   async function handleAttachRun(suggestion: RunSuggestion) {
     try {
-      await workCommand.execute(workActions.attachRun(suggestion));
+      await workCommand.execute(workActions.attachRun(suggestion), false);
+      await invalidateRunQueries(queryClient);
     } catch (attachError) {
       window.alert(errorMessage(attachError));
+    }
+  }
+
+  function requestUntrackedAgentAction(
+    action: UntrackedAgentAction["action"],
+    suggestion: RunSuggestion,
+  ) {
+    setUntrackedAgentAction({ action, suggestion });
+  }
+
+  async function confirmUntrackedAgentAction() {
+    if (!untrackedAgentAction) return;
+
+    const { action, suggestion } = untrackedAgentAction;
+    try {
+      await workCommand.execute(
+        action === "stop"
+          ? workActions.stopUntrackedAgent(suggestion)
+          : workActions.deleteUntrackedAgent(suggestion),
+        false,
+      );
+      setUntrackedAgentAction(undefined);
+      await invalidateRunQueries(queryClient);
+    } catch (actionError) {
+      window.alert(errorMessage(actionError));
     }
   }
 
@@ -238,10 +273,40 @@ export function WorkPage() {
                 suggestion={suggestion}
                 disabled={isSaving}
                 onAttach={handleAttachRun}
+                onStop={(target) =>
+                  requestUntrackedAgentAction("stop", target)
+                }
+                onDelete={(target) =>
+                  requestUntrackedAgentAction("delete", target)
+                }
               />
             ))}
           </CardContent>
         </Card>
+      )}
+
+      {untrackedAgentAction && (
+        <ConfirmationDialog
+          open
+          title={
+            untrackedAgentAction.action === "stop"
+              ? "Stop this agent?"
+              : "Delete this agent Pane?"
+          }
+          description={
+            untrackedAgentAction.action === "stop"
+              ? `Send Ctrl+C to Pane ${untrackedAgentAction.suggestion.paneId} on ${untrackedAgentAction.suggestion.machineName}. The Pane stays open.`
+              : `Close Pane ${untrackedAgentAction.suggestion.paneId} on ${untrackedAgentAction.suggestion.machineName}. If it is the session's last Pane, the session will close too.`
+          }
+          confirmLabel={
+            untrackedAgentAction.action === "stop" ? "Stop agent" : "Delete Pane"
+          }
+          disabled={isSaving}
+          onOpenChange={(open) => {
+            if (!open && !isSaving) setUntrackedAgentAction(undefined);
+          }}
+          onConfirm={() => void confirmUntrackedAgentAction()}
+        />
       )}
 
       {searchQuery.trim() && (

@@ -19,9 +19,9 @@ use crate::domain::Event;
 use crate::{
     dependencies::resolve_executable,
     domain::{
-        ActivityTabView, AgentKind, AuditEntry, Context, ContextAttentionDefault,
-        DomainState, ExecutionMode, ExecutionProfile, ExternalChangePolicy,
-        ExternalLinkView, ExternalObjectKind, ExternalSnapshot, GrillAnswer, GrillConfiguration,
+        ActivityTabView, AgentKind, AuditEntry, Context, ContextAttentionDefault, DomainState,
+        ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
+        ExternalObjectKind, ExternalSnapshot, GrillAnswer, GrillConfiguration,
         GrillContinuationAction, HomeView, Item, ItemRelation, ItemRelationKind, ItemStatus,
         ItemView, Machine, MachineTransport, Project, Repository, Run, RunCheckout,
         RunPromptSelection, RunState, RunSuggestion, Worktree,
@@ -530,6 +530,22 @@ pub fn attach_run(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
     crate::features::work::attach_run(suggestion, state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn stop_untracked_agent(
+    suggestion: RunSuggestion,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    crate::features::work::stop_untracked_agent(suggestion, state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_untracked_agent(
+    suggestion: RunSuggestion,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    crate::features::work::delete_untracked_agent(suggestion, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]

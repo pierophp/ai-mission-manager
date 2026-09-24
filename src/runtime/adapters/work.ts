@@ -38,6 +38,10 @@ export const workAdapter = {
   listRunSuggestions: () => command<RunSuggestion[]>("list_run_suggestions"),
   attachRun: (suggestion: RunSuggestion) =>
     command<Run>("attach_run", { suggestion }),
+  stopUntrackedAgent: (suggestion: RunSuggestion) =>
+    command<void>("stop_untracked_agent", { suggestion }),
+  deleteUntrackedAgent: (suggestion: RunSuggestion) =>
+    command<void>("delete_untracked_agent", { suggestion }),
   pollExternalObjects: () => command<PollResult>("poll_external_objects"),
   setItemStatus: (itemId: number, status: Item["status"]) =>
     command<Item>("set_item_status", { itemId, status }),

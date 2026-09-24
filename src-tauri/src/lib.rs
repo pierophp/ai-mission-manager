@@ -137,6 +137,8 @@ pub fn run() {
             app::start_worktree_run,
             app::list_run_suggestions,
             app::attach_run,
+            app::stop_untracked_agent,
+            app::delete_untracked_agent,
             app::open_terminal,
             app::terminal_input,
             app::submit_grill_answers,

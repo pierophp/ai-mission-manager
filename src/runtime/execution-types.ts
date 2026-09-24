@@ -38,6 +38,7 @@ export type GrillQuestion = {
 };
 
 export type GrillQuestionGroup = {
+  round: number;
   questions: GrillQuestion[];
 };
 

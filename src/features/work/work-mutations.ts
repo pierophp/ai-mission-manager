@@ -112,6 +112,10 @@ export const workActions = {
   openExternalTerminal: (runId: number) => () => workAdapter.openExternalTerminal(runId),
   attachRun: (suggestion: Parameters<typeof workAdapter.attachRun>[0]) =>
     () => workAdapter.attachRun(suggestion),
+  stopUntrackedAgent: (suggestion: Parameters<typeof workAdapter.stopUntrackedAgent>[0]) =>
+    () => workAdapter.stopUntrackedAgent(suggestion),
+  deleteUntrackedAgent: (suggestion: Parameters<typeof workAdapter.deleteUntrackedAgent>[0]) =>
+    () => workAdapter.deleteUntrackedAgent(suggestion),
 };
 
 export function useWorkCommand() {
