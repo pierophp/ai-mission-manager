@@ -9,9 +9,9 @@
 //! command registration local without becoming a replacement monolith.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{atomic::Ordering, Arc, Mutex},
 };
 
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -40,8 +40,8 @@ use crate::{
     git::GitCli,
     provider::{classify_url, github_repository_name, resolve_gh_executable, GithubCli},
     terminal::{
-        capture_pane, capture_pane_transcript, open_pane_in_terminal, send_input_to_pane,
-        terminal_transport, AgentLaunchContext, ExternalPaneIdentity, MachineObservationFailure,
+        capture_pane, open_pane_in_terminal, send_input_to_pane, terminal_transport,
+        AgentLaunchContext, ExternalPaneIdentity, MachineObservationFailure,
         RunReconciliationResult, TmuxControlPane,
     },
 };
@@ -693,10 +693,52 @@ pub(crate) fn finish_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Resul
     locked(state, |runtime| runtime.finish_run(run_id))
 }
 
-pub(crate) fn reconcile_runs(
-    state: State<'_, Mutex<Runtime>>,
+struct ReconciliationFlight(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for ReconciliationFlight {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+pub(crate) async fn reconcile_runs_with_state(
+    state: &Mutex<Runtime>,
+    app: Option<AppHandle>,
 ) -> Result<RunReconciliationResult, String> {
-    locked(state, |runtime| runtime.reconcile_runs())
+    let (snapshot, flight) = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let in_progress = Arc::clone(&runtime.reconciliation_in_progress);
+        if in_progress
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Ok(RunReconciliationResult::default());
+        }
+        let flight = ReconciliationFlight(in_progress);
+        (runtime.reconciliation_snapshot(), flight)
+    };
+
+    let (observations, _flight) = tauri::async_runtime::spawn_blocking(move || {
+        let observations = snapshot.observe();
+        (observations, flight)
+    })
+    .await
+    .map_err(|error| format!("Run reconciliation worker failed: {error}"))?;
+
+    let applied = {
+        let mut runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        runtime.apply_reconciliation(observations)?
+    };
+    if let Some(app) = app {
+        for event in applied.changed_runs {
+            let _ = app.emit("run-state-changed", event);
+        }
+    }
+    Ok(applied.result)
 }
 
 pub(crate) fn delete_run(

@@ -281,10 +281,15 @@ fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
         .expect("sequence 4 should update the applied marker");
 
     assert!(first.accepted && first.state_changed);
+    assert!(first.run_changed);
     assert!(third.accepted && third.state_changed);
+    assert!(third.run_changed);
     assert!(!stale.accepted && !stale.state_changed);
+    assert!(!stale.run_changed);
     assert!(!duplicate.accepted && !duplicate.state_changed);
+    assert!(!duplicate.run_changed);
     assert!(fourth.accepted && !fourth.state_changed);
+    assert!(fourth.run_changed, "the accepted sequence marker changed");
     assert_eq!(
         runtime.state.runs[0].state,
         crate::domain::RunState::Finished

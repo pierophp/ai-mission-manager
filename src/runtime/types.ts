@@ -591,6 +591,7 @@ export type MachineObservationFailure = {
 
 export type RunReconciliationResult = {
   failures: MachineObservationFailure[];
+  changed: boolean;
 };
 
 export type AuditAction = {

@@ -9,8 +9,8 @@ export function RuntimeEventsBridge() {
   const queryClient = useQueryClient();
   const reconcileMutation = useMutation({
     mutationFn: workAdapter.reconcileRuns,
-    onSuccess: async () => {
-      await invalidateRunQueries(queryClient);
+    onSuccess: async (result) => {
+      if (result.changed) await invalidateRunQueries(queryClient);
     },
   });
   const pollMutation = useMutation({
@@ -23,11 +23,22 @@ export function RuntimeEventsBridge() {
   const pollExternalObjects = pollMutation.mutateAsync;
 
   useEffect(() => {
-    void reconcileRuns().catch(() => undefined);
-    const interval = window.setInterval(() => {
-      void reconcileRuns().catch(() => undefined);
-    }, 3_000);
-    return () => window.clearInterval(interval);
+    let disposed = false;
+    let timeout: number | undefined;
+    const reconcileAndSchedule = () => {
+      void reconcileRuns()
+        .catch(() => undefined)
+        .finally(() => {
+          if (!disposed) {
+            timeout = window.setTimeout(reconcileAndSchedule, 3_000);
+          }
+        });
+    };
+    reconcileAndSchedule();
+    return () => {
+      disposed = true;
+      if (timeout !== undefined) window.clearTimeout(timeout);
+    };
   }, [reconcileRuns]);
 
   useEffect(() => {

@@ -7,7 +7,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{atomic::AtomicBool, Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -53,7 +53,8 @@ pub struct Runtime {
     pub(crate) pending_parent_deletion: Option<ParentDeletionPreview>,
     pub(crate) pending_reset_local_data: Option<ResetLocalDataPreview>,
     pub(crate) terminal_connections: HashMap<String, TmuxControlPane>,
-    pub(crate) terminal_runtime: Box<dyn TerminalRuntime>,
+    pub(crate) terminal_runtime: Arc<dyn TerminalRuntime>,
+    pub(crate) reconciliation_in_progress: Arc<AtomicBool>,
     pub(crate) machine_readiness: HashMap<i64, MachineReadiness>,
     pub(crate) legacy_agent_state_directory: PathBuf,
 }
@@ -137,7 +138,8 @@ impl Runtime {
             pending_parent_deletion: None,
             pending_reset_local_data: None,
             terminal_connections: HashMap::new(),
-            terminal_runtime: Box::new(terminal_runtime),
+            terminal_runtime: Arc::new(terminal_runtime),
+            reconciliation_in_progress: Arc::new(AtomicBool::new(false)),
             machine_readiness: HashMap::new(),
             legacy_agent_state_directory,
         };
@@ -702,10 +704,11 @@ pub fn get_home(
 }
 
 #[tauri::command]
-pub fn reconcile_runs(
+pub async fn reconcile_runs(
+    app: AppHandle,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<crate::terminal::RunReconciliationResult, String> {
-    crate::features::work::reconcile_runs(state)
+    crate::features::work::reconcile_runs_with_state(state.inner(), Some(app)).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1266,7 +1269,14 @@ pub fn mark_link_reviewed(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, process::Command};
+    use std::{
+        fs,
+        path::Path,
+        process::Command,
+        sync::{mpsc, Arc, Mutex},
+        thread,
+        time::Duration,
+    };
 
     use tempfile::tempdir;
 
@@ -1280,6 +1290,59 @@ mod tests {
     use crate::terminal::{
         FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime, MachineObservationFailureKind,
     };
+
+    fn runtime_with_single_reconciliation_run(
+        database: &Path,
+        terminal: FakeTerminalRuntime,
+    ) -> Runtime {
+        let directory = database
+            .parent()
+            .expect("the test database should have a parent directory");
+        let mut runtime = Runtime::open_with_terminal_runtime(database, terminal)
+            .expect("runtime should open with the fake terminal runtime");
+        runtime
+            .create_item("Reconcile this Run".into(), 1, 1)
+            .expect("the Run Item should be created");
+        runtime.state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Machine".into(),
+            socket_name: "local-machine".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+        runtime.state.runs.push(Run {
+            id: 1,
+            item_id: 1,
+            workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
+            machine_id: 1,
+            agent: AgentKind::Claude,
+            execution_profile: ExecutionProfile::Implement,
+            model: None,
+            effort: None,
+            skill_snapshot: None,
+            prompt: "Implement the change".into(),
+            working_directory: directory.to_string_lossy().into_owned(),
+            session_name: "session-1".into(),
+            pane_id: "%1".into(),
+            started_at: 1,
+            state: RunState::Working,
+            last_applied_agent_state_sequence: None,
+            pane_status: RunPaneStatus::Unknown,
+            direct_checkouts: Vec::new(),
+            transcript: String::new(),
+            grill_question_group: None,
+            grill_answers: Vec::new(),
+            grill_decisions: Vec::new(),
+            grill_response: None,
+            grill_phase: None,
+            grill_action: None,
+        });
+        runtime
+    }
 
     #[test]
     fn project_repositories_are_implicitly_available_to_items_and_persist() {
@@ -1860,6 +1923,224 @@ mod tests {
                 FakeTerminalCommand::ObserveMachine { machine_id: 2 },
                 FakeTerminalCommand::ObserveMachine { machine_id: 3 },
             ]
+        );
+    }
+
+    #[test]
+    fn creating_an_item_does_not_wait_for_run_machine_observation() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let terminal = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+        let observation = terminal.block_observations();
+        let mut runtime = Runtime::open_with_terminal_runtime(&database, terminal)
+            .expect("runtime should open with the fake terminal runtime");
+        runtime
+            .create_item("Existing Item".into(), 1, 1)
+            .expect("the initial Item should be created");
+        runtime.state.machines.push(Machine {
+            id: 1,
+            context_id: 1,
+            name: "Local Machine".into(),
+            socket_name: "local-machine".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        });
+        runtime.state.runs.push(Run {
+            id: 1,
+            item_id: 1,
+            workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
+            machine_id: 1,
+            agent: AgentKind::Claude,
+            execution_profile: ExecutionProfile::Implement,
+            model: None,
+            effort: None,
+            skill_snapshot: None,
+            prompt: "Implement the change".into(),
+            working_directory: directory.path().to_string_lossy().into_owned(),
+            session_name: "session-1".into(),
+            pane_id: "%1".into(),
+            started_at: 1,
+            state: RunState::Working,
+            last_applied_agent_state_sequence: None,
+            pane_status: RunPaneStatus::Unknown,
+            direct_checkouts: Vec::new(),
+            transcript: String::new(),
+            grill_question_group: None,
+            grill_answers: Vec::new(),
+            grill_decisions: Vec::new(),
+            grill_response: None,
+            grill_phase: None,
+            grill_action: None,
+        });
+        let runtime = Arc::new(Mutex::new(runtime));
+        let reconciliation_runtime = Arc::clone(&runtime);
+        let reconciliation = thread::spawn(move || {
+            tauri::async_runtime::block_on(crate::features::work::reconcile_runs_with_state(
+                &reconciliation_runtime,
+                None,
+            ))
+            .expect("Run reconciliation should complete")
+        });
+
+        assert!(observation.wait_until_started(Duration::from_secs(2)));
+        let (created_tx, created_rx) = mpsc::channel();
+        let create_runtime = Arc::clone(&runtime);
+        let create_item = thread::spawn(move || {
+            let mut runtime = create_runtime
+                .lock()
+                .expect("runtime should remain available");
+            let result = runtime
+                .update_item(
+                    Event::SetItemNotes {
+                        item_id: 1,
+                        notes: "Updated while reconciliation was observing".into(),
+                    },
+                    1,
+                )
+                .and_then(|_| runtime.create_item("Concurrent Item".into(), 1, 1));
+            created_tx
+                .send(result.is_ok())
+                .expect("the Item creation result should be received");
+        });
+
+        let created_while_observation_was_blocked = created_rx
+            .recv_timeout(Duration::from_millis(250))
+            .unwrap_or(false);
+        observation.release();
+        reconciliation
+            .join()
+            .expect("reconciliation thread should finish");
+        create_item
+            .join()
+            .expect("Item creation thread should finish");
+
+        assert!(
+            created_while_observation_was_blocked,
+            "creating an Item should not wait for the Machine observation"
+        );
+    }
+
+    #[test]
+    fn reconciliation_discards_observations_for_deleted_or_retargeted_runs() {
+        let cases = ["deleted", "machine", "session", "pane"];
+        for case in cases {
+            let directory = tempdir().expect("temporary app directory should exist");
+            let database = directory.path().join("mission-manager.sqlite");
+            let terminal = FakeTerminalRuntime::new([
+                (1, FakeMachineOutcome::Available),
+                (2, FakeMachineOutcome::Available),
+            ]);
+            let mut runtime = runtime_with_single_reconciliation_run(&database, terminal);
+            if case == "machine" {
+                runtime.state.machines.push(Machine {
+                    id: 2,
+                    context_id: 1,
+                    name: "Other Machine".into(),
+                    socket_name: "other-machine".into(),
+                    transport: MachineTransport::Local,
+                    last_observed: MachineObservation::Unknown,
+                    last_observed_at: None,
+                });
+            }
+            let observations = runtime.reconciliation_snapshot().observe();
+            match case {
+                "deleted" => runtime.state.runs.clear(),
+                "machine" => runtime.state.runs[0].machine_id = 2,
+                "session" => runtime.state.runs[0].session_name = "session-now".into(),
+                "pane" => runtime.state.runs[0].pane_id = "%2".into(),
+                _ => unreachable!(),
+            }
+
+            let applied = runtime
+                .apply_reconciliation(observations)
+                .expect("stale reconciliation observations should be discarded");
+
+            if case == "deleted" {
+                assert!(runtime.state.runs.is_empty());
+            } else {
+                assert_eq!(runtime.state.runs[0].pane_status, RunPaneStatus::Unknown);
+            }
+            assert!(
+                !applied.result.changed,
+                "stale {case} observation must not apply"
+            );
+        }
+    }
+
+    #[test]
+    fn pane_id_reported_under_another_session_is_treated_as_missing() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let terminal = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+        terminal.set_observed_panes(
+            1,
+            vec![crate::terminal::ObservedPane {
+                session_name: "session-2".into(),
+                pane_id: "%1".into(),
+            }],
+        );
+        let mut runtime = runtime_with_single_reconciliation_run(&database, terminal);
+        let observations = runtime.reconciliation_snapshot().observe();
+
+        let applied = runtime
+            .apply_reconciliation(observations)
+            .expect("pane identity should apply through the observation seam");
+
+        assert!(applied.result.changed);
+        assert_eq!(runtime.state.runs[0].pane_status, RunPaneStatus::Missing);
+    }
+
+    #[test]
+    fn reconciliation_is_single_flight_and_idempotent() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let terminal = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+        let observation = terminal.block_observations();
+        let runtime = Arc::new(Mutex::new(runtime_with_single_reconciliation_run(
+            &database, terminal,
+        )));
+
+        let first_runtime = Arc::clone(&runtime);
+        let first = thread::spawn(move || {
+            tauri::async_runtime::block_on(crate::features::work::reconcile_runs_with_state(
+                &first_runtime,
+                None,
+            ))
+            .expect("the first reconciliation should finish")
+        });
+        assert!(observation.wait_until_started(Duration::from_secs(2)));
+
+        let overlapping = tauri::async_runtime::block_on(
+            crate::features::work::reconcile_runs_with_state(&runtime, None),
+        )
+        .expect("an overlapping reconciliation should return immediately");
+        assert!(!overlapping.changed);
+
+        observation.release();
+        let first = first
+            .join()
+            .expect("the first reconciliation thread should join");
+        assert!(first.changed, "the first pass should update pane_status");
+        assert_eq!(
+            runtime
+                .lock()
+                .expect("runtime should remain available")
+                .state
+                .runs[0]
+                .pane_status,
+            RunPaneStatus::Available
+        );
+
+        let settled = tauri::async_runtime::block_on(
+            crate::features::work::reconcile_runs_with_state(&runtime, None),
+        )
+        .expect("a settled reconciliation should complete");
+        assert!(
+            !settled.changed,
+            "an idempotent pass should report no changes"
         );
     }
 

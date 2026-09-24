@@ -1,19 +1,390 @@
 use super::*;
+use std::sync::Arc;
+
+use crate::terminal::{MachineObservationError, ObservedPane};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AgentStateApplication {
     pub accepted: bool,
     pub state_changed: bool,
+    pub run_changed: bool,
 }
 
 impl AgentStateApplication {
     const IGNORED: Self = Self {
         accepted: false,
         state_changed: false,
+        run_changed: false,
     };
 }
 
+pub(crate) struct ReconciliationSnapshot {
+    runs: Vec<ReconciliationRunIdentity>,
+    machines: Vec<Machine>,
+    terminal_runtime: Arc<dyn crate::terminal::TerminalRuntime>,
+    legacy_agent_state_directory: PathBuf,
+    gh_executable_path: Option<PathBuf>,
+}
+
+#[derive(Clone)]
+struct ReconciliationRunIdentity {
+    id: i64,
+    machine_id: i64,
+    agent: AgentKind,
+    execution_profile: ExecutionProfile,
+    session_name: String,
+    pane_id: String,
+    grill_action: Option<GrillContinuationAction>,
+}
+
+struct MachineReconciliationObservation {
+    machine_id: i64,
+    machine_name: String,
+    panes: Result<Vec<ObservedPane>, MachineObservationError>,
+}
+
+struct RunReconciliationObservation {
+    run: ReconciliationRunIdentity,
+    pane_status: RunPaneStatus,
+    state_record: Option<AgentStateRecord>,
+    transcript: Option<Result<String, String>>,
+    confirmed_downstream_issues: Vec<ConfirmedDownstreamIssue>,
+}
+
+pub(crate) struct ReconciliationObservations {
+    machines: Vec<MachineReconciliationObservation>,
+    runs: Vec<RunReconciliationObservation>,
+}
+
+pub(crate) struct ReconciliationApply {
+    pub result: RunReconciliationResult,
+    pub changed_runs: Vec<RunStateChangedEvent>,
+}
+
+impl ReconciliationSnapshot {
+    pub(crate) fn observe(self) -> ReconciliationObservations {
+        let mut machines = Vec::new();
+        let mut observed_machine_ids = HashSet::new();
+        for run in &self.runs {
+            if !observed_machine_ids.insert(run.machine_id) {
+                continue;
+            }
+            let Some(machine) = self
+                .machines
+                .iter()
+                .find(|machine| machine.id == run.machine_id)
+            else {
+                continue;
+            };
+            machines.push(MachineReconciliationObservation {
+                machine_id: machine.id,
+                machine_name: machine.name.clone(),
+                panes: self.terminal_runtime.observe_machine(machine),
+            });
+        }
+
+        let runs = self
+            .runs
+            .iter()
+            .map(|run| {
+                let state_record = self.read_state_record(run);
+                let pane_status = match machines
+                    .iter()
+                    .find(|observation| observation.machine_id == run.machine_id)
+                    .map(|observation| &observation.panes)
+                {
+                    Some(Ok(panes))
+                        if panes.iter().any(|pane| {
+                            pane.session_name == run.session_name && pane.pane_id == run.pane_id
+                        }) =>
+                    {
+                        RunPaneStatus::Available
+                    }
+                    Some(Ok(_)) => RunPaneStatus::Missing,
+                    Some(Err(_)) | None => RunPaneStatus::Unknown,
+                };
+                let should_capture_transcript = run.execution_profile == ExecutionProfile::Grill
+                    && (pane_status == RunPaneStatus::Available
+                        || state_record.as_ref().is_some_and(|record| {
+                            matches!(record.state, RunState::Blocked | RunState::Finished)
+                        }));
+                let transcript = if should_capture_transcript {
+                    self.machines
+                        .iter()
+                        .find(|machine| machine.id == run.machine_id)
+                        .map(|machine| {
+                            self.terminal_runtime
+                                .capture_pane_transcript(machine, &run.pane_id)
+                                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                        })
+                } else {
+                    None
+                };
+                let confirmed_downstream_issues = match transcript.as_ref() {
+                    Some(Ok(transcript)) => self.confirm_downstream_issues(run, transcript),
+                    _ => Vec::new(),
+                };
+                RunReconciliationObservation {
+                    run: run.clone(),
+                    pane_status,
+                    state_record,
+                    transcript,
+                    confirmed_downstream_issues,
+                }
+            })
+            .collect();
+        ReconciliationObservations { machines, runs }
+    }
+
+    fn read_state_record(&self, run: &ReconciliationRunIdentity) -> Option<AgentStateRecord> {
+        let current_path = self
+            .machines
+            .iter()
+            .find(|machine| machine.id == run.machine_id)
+            .filter(|machine| matches!(machine.transport, MachineTransport::Local))
+            .map(|machine| {
+                let home = machine_home_directory(machine);
+                state_file_path(&state_runs_directory(Path::new(&home)), run.id)
+            });
+        let legacy_path = state_file_path(&self.legacy_agent_state_directory, run.id);
+        [current_path, Some(legacy_path)]
+            .into_iter()
+            .flatten()
+            .find_map(|path| match read_state_file(&path) {
+                Ok(record) => Some(record),
+                Err(error) => {
+                    if path.exists() {
+                        eprintln!(
+                            "Could not recover state for Run {} from {}: {error}",
+                            run.id,
+                            path.display()
+                        );
+                    }
+                    None
+                }
+            })
+    }
+
+    fn confirm_downstream_issues(
+        &self,
+        run: &ReconciliationRunIdentity,
+        transcript: &str,
+    ) -> Vec<ConfirmedDownstreamIssue> {
+        let Some(action @ (GrillContinuationAction::ToSpec | GrillContinuationAction::ToTickets)) =
+            run.grill_action
+        else {
+            return Vec::new();
+        };
+        let candidates = discover_downstream_issue_candidates(transcript)
+            .into_iter()
+            .filter(|candidate| {
+                candidate
+                    .run_id
+                    .is_none_or(|candidate_run_id| candidate_run_id == run.id)
+                    && candidate
+                        .action
+                        .is_none_or(|candidate_action| candidate_action == action)
+            })
+            .collect::<Vec<_>>();
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+        let executable = self
+            .gh_executable_path
+            .as_deref()
+            .map(PathBuf::from)
+            .or_else(|| resolve_gh_executable(None).ok());
+        let Some(executable) = executable else {
+            return Vec::new();
+        };
+        let github = GithubCli::new(executable);
+        let mut confirmed = Vec::new();
+        for candidate in candidates {
+            let object = match classify_url(&candidate.url) {
+                Ok(object)
+                    if object.provider == ExternalProvider::GitHub
+                        && object.kind == ExternalObjectKind::Issue =>
+                {
+                    object
+                }
+                Ok(_) | Err(_) => continue,
+            };
+            let snapshot = match github.fetch(&object, current_unix_seconds()) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    eprintln!(
+                        "Could not confirm downstream GitHub Issue {} for Run {}: {error}",
+                        candidate.url, run.id
+                    );
+                    continue;
+                }
+            };
+            if confirmed.iter().any(|issue: &ConfirmedDownstreamIssue| {
+                issue.object.external_key == object.external_key
+            }) {
+                continue;
+            }
+            confirmed.push(ConfirmedDownstreamIssue {
+                object,
+                snapshot,
+                discovery: candidate.discovery,
+            });
+        }
+        confirmed
+    }
+}
+
 impl Runtime {
+    pub(crate) fn reconciliation_snapshot(&self) -> ReconciliationSnapshot {
+        let runs = self
+            .state
+            .runs
+            .iter()
+            .map(|run| ReconciliationRunIdentity {
+                id: run.id,
+                machine_id: run.machine_id,
+                agent: run.agent,
+                execution_profile: run.execution_profile,
+                session_name: run.session_name.clone(),
+                pane_id: run.pane_id.clone(),
+                grill_action: run.grill_action,
+            })
+            .collect::<Vec<_>>();
+        let mut machine_ids = HashSet::new();
+        let machines = runs
+            .iter()
+            .filter_map(|run| {
+                if !machine_ids.insert(run.machine_id) {
+                    return None;
+                }
+                self.state
+                    .machines
+                    .iter()
+                    .find(|machine| machine.id == run.machine_id)
+                    .cloned()
+            })
+            .collect();
+        ReconciliationSnapshot {
+            runs,
+            machines,
+            terminal_runtime: Arc::clone(&self.terminal_runtime),
+            legacy_agent_state_directory: self.legacy_agent_state_directory.clone(),
+            gh_executable_path: self.gh_executable_path.clone(),
+        }
+    }
+
+    pub(crate) fn apply_reconciliation(
+        &mut self,
+        observations: ReconciliationObservations,
+    ) -> Result<ReconciliationApply, String> {
+        let mut changed_run_ids = HashSet::new();
+        let mut any_changed = false;
+        let mut failures = Vec::new();
+        for observation in &observations.machines {
+            if let Err(error) = &observation.panes {
+                failures.push(MachineObservationFailure {
+                    machine_id: observation.machine_id,
+                    machine_name: observation.machine_name.clone(),
+                    kind: error.kind,
+                    message: error.message.clone(),
+                });
+            }
+        }
+
+        for observation in observations.runs {
+            let Some(current) = self
+                .state
+                .runs
+                .iter()
+                .find(|run| run.id == observation.run.id)
+            else {
+                continue;
+            };
+            if current.machine_id != observation.run.machine_id
+                || current.session_name != observation.run.session_name
+                || current.pane_id != observation.run.pane_id
+            {
+                continue;
+            }
+
+            if let Some(record) = observation.state_record {
+                if record.run_id.parse::<i64>().ok() == Some(observation.run.id)
+                    && record.agent == observation.run.agent
+                    && self
+                        .apply_agent_state_record(observation.run.id, record)?
+                        .run_changed
+                {
+                    changed_run_ids.insert(observation.run.id);
+                    any_changed = true;
+                }
+            }
+
+            let current_pane_status = self
+                .state
+                .runs
+                .iter()
+                .find(|run| run.id == observation.run.id)
+                .map(|run| run.pane_status);
+            if current_pane_status.is_some_and(|status| status != observation.pane_status) {
+                let decision = decide(
+                    self.state.clone(),
+                    Event::SetRunPaneStatus {
+                        run_id: observation.run.id,
+                        status: observation.pane_status,
+                    },
+                )
+                .map_err(|error| error.to_string())?;
+                self.commit(decision)?;
+                changed_run_ids.insert(observation.run.id);
+                any_changed = true;
+            }
+
+            if let Some(transcript) = observation.transcript {
+                match transcript {
+                    Ok(transcript) => {
+                        let (run_changed, domain_changed) = self
+                            .apply_grill_transcript_with_confirmed_issues(
+                                observation.run.id,
+                                transcript,
+                                observation.run.grill_action,
+                                observation.confirmed_downstream_issues,
+                            )?;
+                        if run_changed {
+                            changed_run_ids.insert(observation.run.id);
+                        }
+                        any_changed |= domain_changed;
+                    }
+                    Err(error) => eprintln!(
+                        "Could not reconcile transcript for Grill Run {}: {error}",
+                        observation.run.id
+                    ),
+                }
+            }
+        }
+
+        let changed_runs = changed_run_ids
+            .into_iter()
+            .filter_map(|run_id| {
+                self.state
+                    .runs
+                    .iter()
+                    .find(|run| run.id == run_id)
+                    .map(|run| RunStateChangedEvent {
+                        run_id: run.id,
+                        state: run.state,
+                    })
+            })
+            .collect::<Vec<_>>();
+
+        Ok(ReconciliationApply {
+            result: RunReconciliationResult {
+                failures,
+                changed: any_changed || !changed_runs.is_empty(),
+            },
+            changed_runs,
+        })
+    }
+
     pub(crate) fn compose_run_prompt(
         &self,
         item_id: i64,
@@ -1064,8 +1435,12 @@ impl Runtime {
             .find(|machine| machine.id == run.machine_id)
             .cloned()
             .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-        let transcript = match capture_pane_transcript(&machine, &run.pane_id) {
-            Ok(transcript) => String::from_utf8_lossy(&transcript).into_owned(),
+        let transcript = self
+            .terminal_runtime
+            .capture_pane_transcript(&machine, &run.pane_id)
+            .map(|transcript| String::from_utf8_lossy(&transcript).into_owned());
+        let transcript = match transcript {
+            Ok(transcript) => transcript,
             Err(error) => {
                 if run.grill_action.is_some() && !run.transcript.trim().is_empty() {
                     self.capture_downstream_issues(run_id, &run.transcript)?;
@@ -1073,6 +1448,47 @@ impl Runtime {
                 return Err(error);
             }
         };
+        self.apply_grill_transcript(run_id, transcript)
+    }
+
+    pub(crate) fn apply_grill_transcript(
+        &mut self,
+        run_id: i64,
+        transcript: String,
+    ) -> Result<bool, String> {
+        let changed = self.apply_grill_transcript_record(run_id, transcript.clone())?;
+        self.capture_downstream_issues(run_id, &transcript)?;
+        Ok(changed)
+    }
+
+    fn apply_grill_transcript_with_confirmed_issues(
+        &mut self,
+        run_id: i64,
+        transcript: String,
+        expected_action: Option<GrillContinuationAction>,
+        confirmed: Vec<ConfirmedDownstreamIssue>,
+    ) -> Result<(bool, bool), String> {
+        let changed = self.apply_grill_transcript_record(run_id, transcript)?;
+        let downstream_changed =
+            self.apply_confirmed_downstream_issues(run_id, expected_action, confirmed)?;
+        Ok((changed, changed || downstream_changed))
+    }
+
+    fn apply_grill_transcript_record(
+        &mut self,
+        run_id: i64,
+        transcript: String,
+    ) -> Result<bool, String> {
+        let run = self
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        if run.execution_profile != ExecutionProfile::Grill {
+            return Ok(false);
+        }
         let transcript_extends_previous = grill_transcript_extends(&run.transcript, &transcript);
         let captured_question_group =
             if run.grill_decisions.is_empty() && run.grill_response.is_none() {
@@ -1149,10 +1565,8 @@ impl Runtime {
             && run.grill_question_group == question_group
             && finished_phase_is_synchronized
         {
-            self.capture_downstream_issues(run_id, &transcript)?;
             return Ok(false);
         }
-        let captured_transcript = transcript.clone();
         let decision = decide(
             self.state.clone(),
             Event::RecordRunTranscript {
@@ -1163,8 +1577,43 @@ impl Runtime {
         )
         .map_err(|error| error.to_string())?;
         self.commit(decision)?;
-        self.capture_downstream_issues(run_id, &captured_transcript)?;
         Ok(true)
+    }
+
+    fn apply_confirmed_downstream_issues(
+        &mut self,
+        run_id: i64,
+        expected_action: Option<GrillContinuationAction>,
+        confirmed: Vec<ConfirmedDownstreamIssue>,
+    ) -> Result<bool, String> {
+        if confirmed.is_empty() {
+            return Ok(false);
+        }
+        let Some(run) = self.state.runs.iter().find(|run| run.id == run_id) else {
+            return Ok(false);
+        };
+        if run.grill_action != expected_action {
+            return Ok(false);
+        }
+        let Some(action @ (GrillContinuationAction::ToSpec | GrillContinuationAction::ToTickets)) =
+            run.grill_action
+        else {
+            return Ok(false);
+        };
+        let decision = decide(
+            self.state.clone(),
+            Event::CaptureDownstreamIssues {
+                run_id,
+                action,
+                issues: confirmed,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let changed = decision.state != self.state;
+        if changed {
+            self.commit(decision)?;
+        }
+        Ok(changed)
     }
 
     pub(crate) fn capture_downstream_issues(
@@ -1521,93 +1970,11 @@ impl Runtime {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) fn reconcile_runs(&mut self) -> Result<RunReconciliationResult, String> {
-        self.recover_run_states()?;
-        let runs = self.state.runs.clone();
-        let mut observations = HashMap::new();
-        let mut failures = Vec::new();
-        let mut observed_machine_ids = HashSet::new();
-        for run in &runs {
-            if !observed_machine_ids.insert(run.machine_id) {
-                continue;
-            }
-            let Some(machine) = self
-                .state
-                .machines
-                .iter()
-                .find(|machine| machine.id == run.machine_id)
-            else {
-                continue;
-            };
-            match self.terminal_runtime.observe_machine(machine) {
-                Ok(panes) => {
-                    observations.insert(machine.id, Ok(panes));
-                }
-                Err(error) => {
-                    failures.push(MachineObservationFailure {
-                        machine_id: machine.id,
-                        machine_name: machine.name.clone(),
-                        kind: error.kind,
-                        message: error.message,
-                    });
-                    observations.insert(machine.id, Err(()));
-                }
-            }
-        }
-
-        for run in runs {
-            let Some(observation) = observations.get(&run.machine_id) else {
-                continue;
-            };
-            let pane_status = match observation {
-                Err(()) => RunPaneStatus::Unknown,
-                Ok(panes)
-                    if panes.iter().any(|pane| {
-                        pane.session_name == run.session_name && pane.pane_id == run.pane_id
-                    }) =>
-                {
-                    RunPaneStatus::Available
-                }
-                Ok(_) => RunPaneStatus::Missing,
-            };
-            let phase_needs_recovery =
-                run.execution_profile == ExecutionProfile::Grill && run.grill_phase.is_none();
-            if pane_status == run.pane_status
-                && (!phase_needs_recovery || pane_status == RunPaneStatus::Unknown)
-            {
-                if pane_status == RunPaneStatus::Available
-                    && run.execution_profile == ExecutionProfile::Grill
-                {
-                    if let Err(error) = self.capture_grill_transcript(run.id) {
-                        eprintln!(
-                            "Could not reconcile transcript for Grill Run {}: {error}",
-                            run.id
-                        );
-                    }
-                }
-                continue;
-            }
-            let decision = decide(
-                self.state.clone(),
-                Event::SetRunPaneStatus {
-                    run_id: run.id,
-                    status: pane_status,
-                },
-            )
-            .map_err(|error| error.to_string())?;
-            self.commit(decision)?;
-            if pane_status == RunPaneStatus::Available
-                && run.execution_profile == ExecutionProfile::Grill
-            {
-                if let Err(error) = self.capture_grill_transcript(run.id) {
-                    eprintln!(
-                        "Could not reconcile transcript for Grill Run {}: {error}",
-                        run.id
-                    );
-                }
-            }
-        }
-        Ok(RunReconciliationResult { failures })
+        let snapshot = self.reconciliation_snapshot();
+        let observations = snapshot.observe();
+        Ok(self.apply_reconciliation(observations)?.result)
     }
 
     pub(crate) fn apply_agent_state_record(
@@ -1634,6 +2001,9 @@ impl Runtime {
             return Ok(AgentStateApplication::IGNORED);
         }
         let state_changed = run.state != record.state;
+        let previous_state = run.state;
+        let previous_sequence = run.last_applied_agent_state_sequence;
+        let previous_grill_phase = run.grill_phase;
         let decision = decide(
             self.state.clone(),
             Event::ApplyAgentStateReport {
@@ -1644,9 +2014,20 @@ impl Runtime {
         )
         .map_err(|error| error.to_string())?;
         self.commit(decision)?;
+        let run_changed = self
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .is_some_and(|run| {
+                run.state != previous_state
+                    || run.last_applied_agent_state_sequence != previous_sequence
+                    || run.grill_phase != previous_grill_phase
+            });
         Ok(AgentStateApplication {
             accepted: true,
             state_changed,
+            run_changed,
         })
     }
 }

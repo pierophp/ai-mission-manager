@@ -8,6 +8,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(test)]
+use std::sync::Condvar;
+
 use serde::Serialize;
 
 use crate::{
@@ -33,6 +36,8 @@ pub trait TerminalRuntime: Send + Sync {
         &self,
         machine: &Machine,
     ) -> Result<Vec<ObservedPane>, MachineObservationError>;
+
+    fn capture_pane_transcript(&self, machine: &Machine, pane_id: &str) -> Result<Vec<u8>, String>;
 
     fn list_panes(&self, machine: &Machine, session_name: &str)
         -> Result<Vec<PaneSummary>, String>;
@@ -123,6 +128,7 @@ pub struct MachineObservationFailure {
 #[serde(rename_all = "camelCase")]
 pub struct RunReconciliationResult {
     pub failures: Vec<MachineObservationFailure>,
+    pub changed: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -536,6 +542,10 @@ impl TerminalRuntime for TmuxRuntime {
         crate::terminal::observe_machine(machine)
     }
 
+    fn capture_pane_transcript(&self, machine: &Machine, pane_id: &str) -> Result<Vec<u8>, String> {
+        crate::terminal::capture_pane_transcript(machine, pane_id)
+    }
+
     fn list_panes(
         &self,
         machine: &Machine,
@@ -609,6 +619,10 @@ pub(crate) enum FakeTerminalCommand {
     ObserveMachine {
         machine_id: i64,
     },
+    CapturePaneTranscript {
+        machine_id: i64,
+        pane_id: String,
+    },
     ListPanes {
         machine_id: i64,
         session_name: String,
@@ -642,6 +656,55 @@ pub(crate) struct FakeTerminalRuntime {
     outcomes: std::collections::HashMap<i64, FakeMachineOutcome>,
     commands: Arc<Mutex<Vec<FakeTerminalCommand>>>,
     hook_configs: Arc<Mutex<std::collections::HashMap<(i64, String), String>>>,
+    observed_panes: Arc<Mutex<std::collections::HashMap<i64, Vec<ObservedPane>>>>,
+    observation_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct FakeObservationGateState {
+    enabled: bool,
+    started: bool,
+    released: bool,
+}
+
+#[cfg(test)]
+pub(crate) struct FakeObservationBlock {
+    gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
+}
+
+#[cfg(test)]
+impl FakeObservationBlock {
+    pub(crate) fn wait_until_started(&self, timeout: Duration) -> bool {
+        let (state, changed) = &*self.gate;
+        let state = state
+            .lock()
+            .expect("fake observation gate should remain available");
+        if state.started {
+            return true;
+        }
+        let (state, _) = changed
+            .wait_timeout_while(state, timeout, |state| !state.started)
+            .expect("fake observation gate should remain available");
+        state.started
+    }
+
+    pub(crate) fn release(&self) {
+        let (state, changed) = &*self.gate;
+        let mut state = state
+            .lock()
+            .expect("fake observation gate should remain available");
+        state.enabled = false;
+        state.released = true;
+        changed.notify_all();
+    }
+}
+
+#[cfg(test)]
+impl Drop for FakeObservationBlock {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 #[cfg(test)]
@@ -651,7 +714,32 @@ impl FakeTerminalRuntime {
             outcomes: outcomes.into_iter().collect(),
             commands: Arc::new(Mutex::new(Vec::new())),
             hook_configs: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            observed_panes: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            observation_gate: Arc::new((
+                Mutex::new(FakeObservationGateState::default()),
+                Condvar::new(),
+            )),
         }
+    }
+
+    pub(crate) fn block_observations(&self) -> FakeObservationBlock {
+        let gate = Arc::clone(&self.observation_gate);
+        let (state, _) = &*gate;
+        let mut state = state
+            .lock()
+            .expect("fake observation gate should remain available");
+        state.enabled = true;
+        state.started = false;
+        state.released = false;
+        drop(state);
+        FakeObservationBlock { gate }
+    }
+
+    pub(crate) fn set_observed_panes(&self, machine_id: i64, panes: Vec<ObservedPane>) {
+        self.observed_panes
+            .lock()
+            .expect("fake observed pane list should remain available")
+            .insert(machine_id, panes);
     }
 
     pub(crate) fn command_log(&self) -> Arc<Mutex<Vec<FakeTerminalCommand>>> {
@@ -799,14 +887,34 @@ impl TerminalRuntime for FakeTerminalRuntime {
         self.record(FakeTerminalCommand::ObserveMachine {
             machine_id: machine.id,
         });
+        let (state, changed) = &*self.observation_gate;
+        let mut state = state
+            .lock()
+            .expect("fake observation gate should remain available");
+        if state.enabled {
+            state.started = true;
+            changed.notify_all();
+            state = changed
+                .wait_while(state, |state| !state.released)
+                .expect("fake observation gate should remain available");
+        }
+        drop(state);
         match self.outcome(machine) {
             FakeMachineOutcome::Available
             | FakeMachineOutcome::AgentUnavailable
             | FakeMachineOutcome::StateDirectoryUnwritable
-            | FakeMachineOutcome::HookProvisioningFailed => Ok(vec![ObservedPane {
-                session_name: format!("session-{}", machine.id),
-                pane_id: "%1".into(),
-            }]),
+            | FakeMachineOutcome::HookProvisioningFailed => Ok(self
+                .observed_panes
+                .lock()
+                .expect("fake observed pane list should remain available")
+                .get(&machine.id)
+                .cloned()
+                .unwrap_or_else(|| {
+                    vec![ObservedPane {
+                        session_name: format!("session-{}", machine.id),
+                        pane_id: "%1".into(),
+                    }]
+                })),
             FakeMachineOutcome::Unreachable | FakeMachineOutcome::TmuxUnavailable => {
                 Err(MachineObservationError {
                     kind: MachineObservationFailureKind::Unreachable,
@@ -818,6 +926,14 @@ impl TerminalRuntime for FakeTerminalRuntime {
                 message: format!("fake tmux query failed on Machine {}", machine.name),
             }),
         }
+    }
+
+    fn capture_pane_transcript(&self, machine: &Machine, pane_id: &str) -> Result<Vec<u8>, String> {
+        self.record(FakeTerminalCommand::CapturePaneTranscript {
+            machine_id: machine.id,
+            pane_id: pane_id.into(),
+        });
+        Ok(Vec::new())
     }
 
     fn list_panes(
