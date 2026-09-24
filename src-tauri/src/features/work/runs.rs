@@ -3,6 +3,100 @@ use std::sync::Arc;
 
 use crate::terminal::{MachineObservationError, ObservedPane};
 
+fn read_run_state_record(
+    run_id: i64,
+    machine: Option<&Machine>,
+    legacy_agent_state_directory: &Path,
+) -> Option<AgentStateRecord> {
+    let current_path = machine
+        .filter(|machine| matches!(machine.transport, MachineTransport::Local))
+        .map(|machine| {
+            let home = machine_home_directory(machine);
+            state_file_path(&state_runs_directory(Path::new(&home)), run_id)
+        });
+    let legacy_path = state_file_path(legacy_agent_state_directory, run_id);
+    [current_path, Some(legacy_path)]
+        .into_iter()
+        .flatten()
+        .find_map(|path| match read_state_file(&path) {
+            Ok(record) => Some(record),
+            Err(error) => {
+                if path.exists() {
+                    eprintln!(
+                        "Could not recover state for Run {run_id} from {}: {error}",
+                        path.display()
+                    );
+                }
+                None
+            }
+        })
+}
+
+fn confirm_downstream_issues(
+    run_id: i64,
+    action: GrillContinuationAction,
+    transcript: &str,
+    executable: impl FnOnce() -> Option<PathBuf>,
+) -> Vec<ConfirmedDownstreamIssue> {
+    if !matches!(
+        action,
+        GrillContinuationAction::ToSpec | GrillContinuationAction::ToTickets
+    ) {
+        return Vec::new();
+    }
+    let candidates = discover_downstream_issue_candidates(transcript)
+        .into_iter()
+        .filter(|candidate| {
+            candidate
+                .run_id
+                .is_none_or(|candidate_run_id| candidate_run_id == run_id)
+                && candidate
+                    .action
+                    .is_none_or(|candidate_action| candidate_action == action)
+        })
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    let Some(executable) = executable() else {
+        return Vec::new();
+    };
+    let github = GithubCli::new(executable);
+    let mut confirmed = Vec::new();
+    for candidate in candidates {
+        let object = match classify_url(&candidate.url) {
+            Ok(object)
+                if object.provider == ExternalProvider::GitHub
+                    && object.kind == ExternalObjectKind::Issue =>
+            {
+                object
+            }
+            Ok(_) | Err(_) => continue,
+        };
+        let snapshot = match github.fetch(&object, current_unix_seconds()) {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                eprintln!(
+                    "Could not confirm downstream GitHub Issue {} for Run {run_id}: {error}",
+                    candidate.url
+                );
+                continue;
+            }
+        };
+        if confirmed.iter().any(|issue: &ConfirmedDownstreamIssue| {
+            issue.object.external_key == object.external_key
+        }) {
+            continue;
+        }
+        confirmed.push(ConfirmedDownstreamIssue {
+            object,
+            snapshot,
+            discovery: candidate.discovery,
+        });
+    }
+    confirmed
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct AgentStateApplication {
     pub accepted: bool,
@@ -45,7 +139,7 @@ struct MachineReconciliationObservation {
 
 struct RunReconciliationObservation {
     run: ReconciliationRunIdentity,
-    pane_status: RunPaneStatus,
+    pane_status: Option<RunPaneStatus>,
     state_record: Option<AgentStateRecord>,
     transcript: Option<Result<String, String>>,
     confirmed_downstream_issues: Vec<ConfirmedDownstreamIssue>,
@@ -98,13 +192,15 @@ impl ReconciliationSnapshot {
                             pane.session_name == run.session_name && pane.pane_id == run.pane_id
                         }) =>
                     {
-                        RunPaneStatus::Available
+                        Some(RunPaneStatus::Available)
                     }
-                    Some(Ok(_)) => RunPaneStatus::Missing,
-                    Some(Err(_)) | None => RunPaneStatus::Unknown,
+                    Some(Ok(panes)) if panes.iter().any(|pane| pane.pane_id == run.pane_id) => None,
+                    Some(Ok(_)) => Some(RunPaneStatus::Missing),
+                    Some(Err(_)) | None => Some(RunPaneStatus::Unknown),
                 };
                 let should_capture_transcript = run.execution_profile == ExecutionProfile::Grill
-                    && (pane_status == RunPaneStatus::Available
+                    && pane_status.is_some()
+                    && (pane_status == Some(RunPaneStatus::Available)
                         || state_record.as_ref().is_some_and(|record| {
                             matches!(record.state, RunState::Blocked | RunState::Finished)
                         }));
@@ -120,8 +216,15 @@ impl ReconciliationSnapshot {
                 } else {
                     None
                 };
-                let confirmed_downstream_issues = match transcript.as_ref() {
-                    Some(Ok(transcript)) => self.confirm_downstream_issues(run, transcript),
+                let confirmed_downstream_issues = match (run.grill_action, transcript.as_ref()) {
+                    (Some(action), Some(Ok(transcript))) => {
+                        confirm_downstream_issues(run.id, action, transcript, || {
+                            self.gh_executable_path
+                                .as_deref()
+                                .map(PathBuf::from)
+                                .or_else(|| resolve_gh_executable(None).ok())
+                        })
+                    }
                     _ => Vec::new(),
                 };
                 RunReconciliationObservation {
@@ -137,100 +240,11 @@ impl ReconciliationSnapshot {
     }
 
     fn read_state_record(&self, run: &ReconciliationRunIdentity) -> Option<AgentStateRecord> {
-        let current_path = self
+        let machine = self
             .machines
             .iter()
-            .find(|machine| machine.id == run.machine_id)
-            .filter(|machine| matches!(machine.transport, MachineTransport::Local))
-            .map(|machine| {
-                let home = machine_home_directory(machine);
-                state_file_path(&state_runs_directory(Path::new(&home)), run.id)
-            });
-        let legacy_path = state_file_path(&self.legacy_agent_state_directory, run.id);
-        [current_path, Some(legacy_path)]
-            .into_iter()
-            .flatten()
-            .find_map(|path| match read_state_file(&path) {
-                Ok(record) => Some(record),
-                Err(error) => {
-                    if path.exists() {
-                        eprintln!(
-                            "Could not recover state for Run {} from {}: {error}",
-                            run.id,
-                            path.display()
-                        );
-                    }
-                    None
-                }
-            })
-    }
-
-    fn confirm_downstream_issues(
-        &self,
-        run: &ReconciliationRunIdentity,
-        transcript: &str,
-    ) -> Vec<ConfirmedDownstreamIssue> {
-        let Some(action @ (GrillContinuationAction::ToSpec | GrillContinuationAction::ToTickets)) =
-            run.grill_action
-        else {
-            return Vec::new();
-        };
-        let candidates = discover_downstream_issue_candidates(transcript)
-            .into_iter()
-            .filter(|candidate| {
-                candidate
-                    .run_id
-                    .is_none_or(|candidate_run_id| candidate_run_id == run.id)
-                    && candidate
-                        .action
-                        .is_none_or(|candidate_action| candidate_action == action)
-            })
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            return Vec::new();
-        }
-        let executable = self
-            .gh_executable_path
-            .as_deref()
-            .map(PathBuf::from)
-            .or_else(|| resolve_gh_executable(None).ok());
-        let Some(executable) = executable else {
-            return Vec::new();
-        };
-        let github = GithubCli::new(executable);
-        let mut confirmed = Vec::new();
-        for candidate in candidates {
-            let object = match classify_url(&candidate.url) {
-                Ok(object)
-                    if object.provider == ExternalProvider::GitHub
-                        && object.kind == ExternalObjectKind::Issue =>
-                {
-                    object
-                }
-                Ok(_) | Err(_) => continue,
-            };
-            let snapshot = match github.fetch(&object, current_unix_seconds()) {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    eprintln!(
-                        "Could not confirm downstream GitHub Issue {} for Run {}: {error}",
-                        candidate.url, run.id
-                    );
-                    continue;
-                }
-            };
-            if confirmed.iter().any(|issue: &ConfirmedDownstreamIssue| {
-                issue.object.external_key == object.external_key
-            }) {
-                continue;
-            }
-            confirmed.push(ConfirmedDownstreamIssue {
-                object,
-                snapshot,
-                discovery: candidate.discovery,
-            });
-        }
-        confirmed
+            .find(|machine| machine.id == run.machine_id);
+        read_run_state_record(run.id, machine, &self.legacy_agent_state_directory)
     }
 }
 
@@ -325,12 +339,16 @@ impl Runtime {
                 .iter()
                 .find(|run| run.id == observation.run.id)
                 .map(|run| run.pane_status);
-            if current_pane_status.is_some_and(|status| status != observation.pane_status) {
+            if observation
+                .pane_status
+                .is_some_and(|status| current_pane_status.is_some_and(|current| current != status))
+            {
+                let pane_status = observation.pane_status.expect("pane status was checked");
                 let decision = decide(
                     self.state.clone(),
                     Event::SetRunPaneStatus {
                         run_id: observation.run.id,
-                        status: observation.pane_status,
+                        status: pane_status,
                     },
                 )
                 .map_err(|error| error.to_string())?;
@@ -1638,75 +1656,19 @@ impl Runtime {
             return Ok(());
         }
 
-        let candidates = discover_downstream_issue_candidates(transcript)
-            .into_iter()
-            .filter(|candidate| {
-                candidate
-                    .run_id
-                    .is_none_or(|candidate_run_id| candidate_run_id == run_id)
-                    && candidate
-                        .action
-                        .is_none_or(|candidate_action| candidate_action == action)
-            })
-            .collect::<Vec<_>>();
-        if candidates.is_empty() {
-            return Ok(());
-        }
-
-        let executable = match self.gh_executable_path() {
-            Ok(executable) => executable,
-            Err(error) => {
-                eprintln!("Could not confirm downstream GitHub Issues for Run {run_id}: {error}");
-                return Ok(());
-            }
-        };
-        let github = GithubCli::new(executable);
-        let mut confirmed = Vec::new();
-        for candidate in candidates {
-            let object = match classify_url(&candidate.url) {
-                Ok(object)
-                    if object.provider == ExternalProvider::GitHub
-                        && object.kind == ExternalObjectKind::Issue =>
-                {
-                    object
-                }
-                Ok(_) | Err(_) => continue,
-            };
-            let snapshot = match github.fetch(&object, current_unix_seconds()) {
-                Ok(snapshot) => snapshot,
+        let confirmed = confirm_downstream_issues(run_id, action, transcript, || {
+            match self.gh_executable_path() {
+                Ok(executable) => Some(executable),
                 Err(error) => {
                     eprintln!(
-                        "Could not confirm downstream GitHub Issue {} for Run {run_id}: {error}",
-                        candidate.url
+                        "Could not confirm downstream GitHub Issues for Run {run_id}: {error}"
                     );
-                    continue;
+                    None
                 }
-            };
-            if confirmed.iter().any(|issue: &ConfirmedDownstreamIssue| {
-                issue.object.external_key == object.external_key
-            }) {
-                continue;
             }
-            confirmed.push(ConfirmedDownstreamIssue {
-                object,
-                snapshot,
-                discovery: candidate.discovery,
-            });
-        }
-        if confirmed.is_empty() {
-            return Ok(());
-        }
-
-        let decision = decide(
-            self.state.clone(),
-            Event::CaptureDownstreamIssues {
-                run_id,
-                action,
-                issues: confirmed,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        self.commit(decision)
+        });
+        self.apply_confirmed_downstream_issues(run_id, Some(action), confirmed)
+            .map(|_| ())
     }
 
     pub(crate) fn submit_grill_answers(
@@ -1920,33 +1882,12 @@ impl Runtime {
 
     pub(crate) fn recover_run_states(&mut self) -> Result<(), String> {
         for run in self.state.runs.clone() {
-            let current_path = self
+            let machine = self
                 .state
                 .machines
                 .iter()
-                .find(|machine| machine.id == run.machine_id)
-                .filter(|machine| matches!(machine.transport, MachineTransport::Local))
-                .map(|machine| {
-                    let home = machine_home_directory(machine);
-                    state_file_path(&state_runs_directory(Path::new(&home)), run.id)
-                });
-            let legacy_path = state_file_path(&self.legacy_agent_state_directory, run.id);
-            let record = [current_path, Some(legacy_path)]
-                .into_iter()
-                .flatten()
-                .find_map(|path| match read_state_file(&path) {
-                    Ok(record) => Some(record),
-                    Err(error) => {
-                        if path.exists() {
-                            eprintln!(
-                                "Could not recover state for Run {} from {}: {error}",
-                                run.id,
-                                path.display()
-                            );
-                        }
-                        None
-                    }
-                });
+                .find(|machine| machine.id == run.machine_id);
+            let record = read_run_state_record(run.id, machine, &self.legacy_agent_state_directory);
             let Some(record) = record else {
                 continue;
             };

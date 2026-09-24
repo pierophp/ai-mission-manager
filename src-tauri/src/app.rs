@@ -1932,50 +1932,9 @@ mod tests {
         let database = directory.path().join("mission-manager.sqlite");
         let terminal = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
         let observation = terminal.block_observations();
-        let mut runtime = Runtime::open_with_terminal_runtime(&database, terminal)
-            .expect("runtime should open with the fake terminal runtime");
-        runtime
-            .create_item("Existing Item".into(), 1, 1)
-            .expect("the initial Item should be created");
-        runtime.state.machines.push(Machine {
-            id: 1,
-            context_id: 1,
-            name: "Local Machine".into(),
-            socket_name: "local-machine".into(),
-            transport: MachineTransport::Local,
-            last_observed: MachineObservation::Unknown,
-            last_observed_at: None,
-        });
-        runtime.state.runs.push(Run {
-            id: 1,
-            item_id: 1,
-            workspace_id: None,
-            repository_id: None,
-            worktree_id: None,
-            machine_id: 1,
-            agent: AgentKind::Claude,
-            execution_profile: ExecutionProfile::Implement,
-            model: None,
-            effort: None,
-            skill_snapshot: None,
-            prompt: "Implement the change".into(),
-            working_directory: directory.path().to_string_lossy().into_owned(),
-            session_name: "session-1".into(),
-            pane_id: "%1".into(),
-            started_at: 1,
-            state: RunState::Working,
-            last_applied_agent_state_sequence: None,
-            pane_status: RunPaneStatus::Unknown,
-            direct_checkouts: Vec::new(),
-            transcript: String::new(),
-            grill_question_group: None,
-            grill_answers: Vec::new(),
-            grill_decisions: Vec::new(),
-            grill_response: None,
-            grill_phase: None,
-            grill_action: None,
-        });
-        let runtime = Arc::new(Mutex::new(runtime));
+        let runtime = Arc::new(Mutex::new(runtime_with_single_reconciliation_run(
+            &database, terminal,
+        )));
         let reconciliation_runtime = Arc::clone(&runtime);
         let reconciliation = thread::spawn(move || {
             tauri::async_runtime::block_on(crate::features::work::reconcile_runs_with_state(
@@ -2071,10 +2030,11 @@ mod tests {
     }
 
     #[test]
-    fn pane_id_reported_under_another_session_is_treated_as_missing() {
+    fn pane_id_reported_under_another_session_is_discarded_without_grill_capture() {
         let directory = tempdir().expect("temporary app directory should exist");
         let database = directory.path().join("mission-manager.sqlite");
         let terminal = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+        let commands = terminal.command_log();
         terminal.set_observed_panes(
             1,
             vec![crate::terminal::ObservedPane {
@@ -2083,14 +2043,25 @@ mod tests {
             }],
         );
         let mut runtime = runtime_with_single_reconciliation_run(&database, terminal);
+        runtime.state.runs[0].execution_profile = ExecutionProfile::Grill;
+        runtime.state.runs[0].pane_status = RunPaneStatus::Available;
         let observations = runtime.reconciliation_snapshot().observe();
 
         let applied = runtime
             .apply_reconciliation(observations)
             .expect("pane identity should apply through the observation seam");
 
-        assert!(applied.result.changed);
-        assert_eq!(runtime.state.runs[0].pane_status, RunPaneStatus::Missing);
+        assert!(!applied.result.changed);
+        assert!(applied.changed_runs.is_empty());
+        assert_eq!(runtime.state.runs[0].pane_status, RunPaneStatus::Available);
+        assert_eq!(
+            commands
+                .lock()
+                .expect("fake command log should remain available")
+                .as_slice(),
+            &[FakeTerminalCommand::ObserveMachine { machine_id: 1 }],
+            "the stale pane must not be used to capture the Grill transcript"
+        );
     }
 
     #[test]
@@ -2251,15 +2222,6 @@ mod tests {
         assert_eq!(recovered.grill_answers.len(), 1);
         assert_eq!(recovered.grill_response.as_deref(), Some("1. Keep it"));
 
-        run_tmux(&[
-            "-f",
-            "/dev/null",
-            "-L",
-            &socket,
-            "kill-session",
-            "-t",
-            &session,
-        ]);
         let survivor_session = format!("grill-reconcile-survivor-{}", std::process::id());
         run_tmux(&[
             "-f",
@@ -2276,9 +2238,18 @@ mod tests {
                 .to_str()
                 .expect("temporary path should be valid"),
         ]);
+        run_tmux(&[
+            "-f",
+            "/dev/null",
+            "-L",
+            &socket,
+            "kill-session",
+            "-t",
+            &session,
+        ]);
         runtime
             .reconcile_runs()
-            .expect("Pane loss should remain recoverable");
+            .expect("Pane loss should remain recoverable while another session is alive");
         let missing = &runtime.state.runs[0];
         assert_eq!(missing.pane_status, RunPaneStatus::Missing);
         assert_eq!(missing.grill_phase, Some(GrillPhase::RecoverablePaneLoss));
