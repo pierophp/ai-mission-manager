@@ -2797,6 +2797,14 @@ mod tests {
             claude["hooks"]["SessionStart"][0]["hooks"][0]["command"],
             "user-claude-hook"
         );
+        assert!(claude["hooks"]["SessionStart"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+            .any(|hook| {
+                hook["command"] == "'/old/.local/share/ai-mission-manager/hook.sh' working claude"
+            }));
         assert_eq!(codex["model"], "gpt-5");
         assert_eq!(
             codex["hooks"]["PermissionRequest"][0]["hooks"][0]["command"],
@@ -2812,7 +2820,8 @@ mod tests {
                     .filter(|hook| {
                         hook["command"].as_str().is_some_and(|command| {
                             command.contains("--agent-state-hook")
-                                || command.contains(".local/share/ai-mission-manager/")
+                                || command
+                                    .contains(crate::agent_state::AGENT_STATE_HOOK_RELATIVE_PATH)
                         })
                     })
                     .count();
