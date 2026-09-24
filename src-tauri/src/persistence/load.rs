@@ -268,7 +268,8 @@ impl SqliteStore {
                 "SELECT id, item_id, workspace_id, repository_id, worktree_id,
                         machine_id, agent, execution_profile, model, effort, skill_snapshot,
                         prompt, working_directory, session_name, pane_id, started_at, state,
-                        pane_status, direct_checkouts_json, transcript,
+                        last_applied_agent_state_sequence, pane_status,
+                        direct_checkouts_json, transcript,
                         grill_question_group_json, grill_answers_json, grill_decisions_json,
                         grill_response, grill_phase, grill_action
                  FROM runs
@@ -277,17 +278,17 @@ impl SqliteStore {
             let rows = statement.query_map([], |row| {
                 let agent: String = row.get(6)?;
                 let execution_profile: String = row.get(7)?;
-                let direct_checkouts_json: String = row.get(18)?;
-                let grill_question_group_json: Option<String> = row.get(20)?;
-                let grill_answers_json: String = row.get(21)?;
-                let grill_decisions_json: String = row.get(22)?;
-                let grill_phase: Option<String> = row.get(24)?;
-                let grill_action: Option<String> = row.get(25)?;
+                let direct_checkouts_json: String = row.get(19)?;
+                let grill_question_group_json: Option<String> = row.get(21)?;
+                let grill_answers_json: String = row.get(22)?;
+                let grill_decisions_json: String = row.get(23)?;
+                let grill_phase: Option<String> = row.get(25)?;
+                let grill_action: Option<String> = row.get(26)?;
                 let grill_question_group = grill_question_group_json
                     .map(|json| {
                         serde_json::from_str::<GrillQuestionGroup>(&json).map_err(|error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                20,
+                                21,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
@@ -297,7 +298,7 @@ impl SqliteStore {
                 let grill_answers = serde_json::from_str::<Vec<GrillAnswer>>(&grill_answers_json)
                     .map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        21,
+                        22,
                         rusqlite::types::Type::Text,
                         Box::new(error),
                     )
@@ -307,7 +308,7 @@ impl SqliteStore {
                 )
                 .map_err(|error| {
                     rusqlite::Error::FromSqlConversionFailure(
-                        22,
+                        23,
                         rusqlite::types::Type::Text,
                         Box::new(error),
                     )
@@ -317,7 +318,7 @@ impl SqliteStore {
                     .transpose()
                     .map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            24,
+                            25,
                             rusqlite::types::Type::Text,
                             Box::new(error),
                         )
@@ -327,7 +328,7 @@ impl SqliteStore {
                     .transpose()
                     .map_err(|error| {
                         rusqlite::Error::FromSqlConversionFailure(
-                            25,
+                            26,
                             rusqlite::types::Type::Text,
                             Box::new(error),
                         )
@@ -370,10 +371,11 @@ impl SqliteStore {
                             Box::new(error),
                         )
                     })?,
-                    pane_status: parse_run_pane_status(&row.get::<_, String>(17)?).map_err(
+                    last_applied_agent_state_sequence: row.get(17)?,
+                    pane_status: parse_run_pane_status(&row.get::<_, String>(18)?).map_err(
                         |error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                17,
+                                18,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
@@ -388,11 +390,11 @@ impl SqliteStore {
                             )
                         },
                     )?,
-                    transcript: row.get(19)?,
+                    transcript: row.get(20)?,
                     grill_question_group,
                     grill_answers,
                     grill_decisions,
-                    grill_response: row.get(23)?,
+                    grill_response: row.get(24)?,
                     grill_phase,
                     grill_action,
                 })

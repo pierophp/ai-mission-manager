@@ -51,8 +51,17 @@ done
 
 temporary="$state_file.tmp.$$"
 updated_at=$(date +%s) || exit 1
-record=$(printf '{"agent":"%s","runId":"%s","state":"%s","updatedAt":"%s"}' \
-    "$agent" "$run_id" "$state" "$updated_at") || exit 1
+previous_sequence=0
+if [ -f "$state_file" ]; then
+    previous_sequence=$(sed -n 's/.*"sequence"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\)[[:space:]]*[,}].*/\1/p' \
+        "$state_file" 2>/dev/null | head -n 1)
+    case "$previous_sequence" in
+        ''|*[!0-9]*) previous_sequence=0 ;;
+    esac
+fi
+sequence=$((previous_sequence + 1))
+record=$(printf '{"agent":"%s","runId":"%s","state":"%s","updatedAt":"%s","sequence":%s}' \
+    "$agent" "$run_id" "$state" "$updated_at" "$sequence") || exit 1
 
 (umask 077; set -C; printf '%s\n' "$record" >"$temporary") || exit 1
 chmod 600 "$temporary" || { rm -f "$temporary"; exit 1; }
@@ -79,6 +88,8 @@ pub struct AgentStateRecord {
     pub state: RunState,
     #[serde(rename = "updatedAt")]
     pub updated_at: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<i64>,
 }
 
 #[cfg(test)]
@@ -533,6 +544,7 @@ mod tests {
         assert_eq!(record.agent, AgentKind::Claude);
         assert_eq!(record.run_id, "7");
         assert_eq!(record.state, RunState::Working);
+        assert_eq!(record.sequence, Some(1));
         assert_eq!(
             fs::metadata(&state_file).unwrap().permissions().mode() & 0o777,
             0o600
@@ -570,6 +582,7 @@ mod tests {
             assert!(status.success(), "{state} should be reported");
             let state_file = state_file_path(&state_runs_directory(home.path()), run_id);
             let record = read_state_file(&state_file).expect("the state should be readable");
+            assert_eq!(record.sequence, Some(1));
             assert_eq!(
                 record.state,
                 match state {
@@ -580,6 +593,30 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    fn installed_sh_hook_increments_the_existing_record_sequence() {
+        let home = tempdir().expect("temporary home should exist");
+        let script = install_agent_state_hook(home.path()).expect("hook should install");
+        let state_file = state_file_path(&state_runs_directory(home.path()), 7);
+
+        for expected_sequence in 1..=3 {
+            let status = run_installed_hook(&script, home.path(), "working", Some("7"), None);
+            assert!(status.success(), "the hook should report each event");
+            let record = read_state_file(&state_file).expect("the state should be readable");
+            assert_eq!(record.sequence, Some(expected_sequence));
+        }
+    }
+
+    #[test]
+    fn older_agent_state_records_deserialize_without_a_sequence() {
+        let record: AgentStateRecord = serde_json::from_str(
+            r#"{"agent":"claude","runId":"7","state":"working","updatedAt":"123"}"#,
+        )
+        .expect("an older state record should remain readable");
+
+        assert_eq!(record.sequence, None);
     }
 
     #[test]

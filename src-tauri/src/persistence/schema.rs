@@ -196,6 +196,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              pane_id TEXT NOT NULL,
              started_at INTEGER NOT NULL,
              state TEXT NOT NULL DEFAULT 'unknown',
+             last_applied_agent_state_sequence INTEGER,
              pane_status TEXT NOT NULL DEFAULT 'unknown',
              direct_checkouts_json TEXT NOT NULL DEFAULT '[]',
              transcript TEXT NOT NULL DEFAULT '',
@@ -331,6 +332,16 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
     if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "state") {
         connection.execute(
             "ALTER TABLE runs ADD COLUMN state TEXT NOT NULL DEFAULT 'unknown'",
+            [],
+        )?;
+    }
+    if !run_columns.is_empty()
+        && !run_columns
+            .iter()
+            .any(|column| column == "last_applied_agent_state_sequence")
+    {
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN last_applied_agent_state_sequence INTEGER",
             [],
         )?;
     }

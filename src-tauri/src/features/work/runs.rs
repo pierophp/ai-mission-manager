@@ -1,5 +1,18 @@
 use super::*;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct AgentStateApplication {
+    pub accepted: bool,
+    pub state_changed: bool,
+}
+
+impl AgentStateApplication {
+    const IGNORED: Self = Self {
+        accepted: false,
+        state_changed: false,
+    };
+}
+
 impl Runtime {
     pub(crate) fn compose_run_prompt(
         &self,
@@ -884,31 +897,32 @@ impl Runtime {
                 };
                 if let Some(run_id) = run_id {
                     match runtime.apply_agent_state_record(run_id, record.clone()) {
-                        Ok(true) => {
-                            let _ = state_app.emit(
-                                "run-state-changed",
-                                RunStateChangedEvent {
-                                    run_id,
-                                    state: record.state,
-                                },
-                            );
-                        }
-                        Ok(false) => {}
-                        Err(error) => {
-                            eprintln!("Could not persist state for Run {run_id}: {error}");
-                        }
-                    }
-                    if matches!(record.state, RunState::Blocked | RunState::Finished) {
-                        match runtime.capture_grill_transcript(run_id) {
-                            Ok(true) => {
-                                let _ = state_app.emit("run-questions-changed", run_id);
-                            }
-                            Ok(false) => {}
-                            Err(error) => {
-                                eprintln!(
-                                    "Could not retain transcript for waiting Grill Run {run_id}: {error}"
+                        Ok(application) => {
+                            if application.state_changed {
+                                let _ = state_app.emit(
+                                    "run-state-changed",
+                                    RunStateChangedEvent {
+                                        run_id,
+                                        state: record.state,
+                                    },
                                 );
                             }
+                            if application.accepted
+                                && matches!(record.state, RunState::Blocked | RunState::Finished)
+                            {
+                                match runtime.capture_grill_transcript(run_id) {
+                                    Ok(true) => {
+                                        let _ = state_app.emit("run-questions-changed", run_id);
+                                    }
+                                    Ok(false) => {}
+                                    Err(error) => eprintln!(
+                                        "Could not retain transcript for waiting Grill Run {run_id}: {error}"
+                                    ),
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            eprintln!("Could not persist state for Run {run_id}: {error}");
                         }
                     }
                 }
@@ -1488,8 +1502,10 @@ impl Runtime {
             if record_run_id != run.id || record.agent != run.agent {
                 continue;
             }
-            self.apply_agent_state_record(record_run_id, record.clone())?;
-            if matches!(record.state, RunState::Blocked | RunState::Finished) {
+            let application = self.apply_agent_state_record(record_run_id, record.clone())?;
+            if application.accepted
+                && matches!(record.state, RunState::Blocked | RunState::Finished)
+            {
                 if let Err(error) = self.capture_grill_transcript(record_run_id) {
                     eprintln!(
                         "Could not retain transcript for waiting Grill Run {record_run_id}: {error}"
@@ -1593,23 +1609,40 @@ impl Runtime {
         &mut self,
         run_id: i64,
         record: AgentStateRecord,
-    ) -> Result<bool, String> {
+    ) -> Result<AgentStateApplication, String> {
         let Some(run) = self.state.runs.iter().find(|run| run.id == run_id) else {
-            return Ok(false);
+            return Ok(AgentStateApplication::IGNORED);
         };
-        if run.agent != record.agent || run.state == record.state {
-            return Ok(false);
+        if record.run_id.parse::<i64>().ok() != Some(run_id) || run.agent != record.agent {
+            return Ok(AgentStateApplication::IGNORED);
         }
+        let accepted = match record.sequence {
+            Some(sequence) => {
+                sequence >= 0
+                    && run
+                        .last_applied_agent_state_sequence
+                        .is_none_or(|last| sequence > last)
+            }
+            None => run.last_applied_agent_state_sequence.is_none(),
+        };
+        if !accepted {
+            return Ok(AgentStateApplication::IGNORED);
+        }
+        let state_changed = run.state != record.state;
         let decision = decide(
             self.state.clone(),
-            Event::UpdateRunState {
+            Event::ApplyAgentStateReport {
                 run_id,
                 state: record.state,
+                sequence: record.sequence,
             },
         )
         .map_err(|error| error.to_string())?;
         self.commit(decision)?;
-        Ok(true)
+        Ok(AgentStateApplication {
+            accepted: true,
+            state_changed,
+        })
     }
 }
 

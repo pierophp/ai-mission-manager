@@ -203,6 +203,11 @@ pub enum Event {
         run_id: i64,
         state: RunState,
     },
+    ApplyAgentStateReport {
+        run_id: i64,
+        state: RunState,
+        sequence: Option<i64>,
+    },
     FinishRun {
         run_id: i64,
     },

@@ -545,7 +545,7 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
         "Stress-test the proposed architecture.",
     )
     .expect("Grill prompt should compose");
-    state = apply_event(
+    let _ = apply_event(
         &mut store,
         state,
         Event::StartGrillRun {
@@ -568,6 +568,18 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
             }],
         },
     );
+    store
+        .connection
+        .execute(
+            "ALTER TABLE runs DROP COLUMN last_applied_agent_state_sequence",
+            [],
+        )
+        .expect("the old schema should lack the sequence column");
+    drop(store);
+    let mut store = SqliteStore::open(&database_path)
+        .expect("the database should add the nullable sequence column");
+    state = store.load_state().expect("legacy Run should load");
+    assert_eq!(state.runs[0].last_applied_agent_state_sequence, None);
     let question_group = parse_grill_question_group(
             "❓ Q1: Which direction?\n➡️ Keep the current design\nA) Keep it\nB) Replace it\n❓ Q2: What should we document?",
         )
@@ -611,9 +623,10 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
     state = apply_event(
         &mut store,
         state,
-        Event::UpdateRunState {
+        Event::ApplyAgentStateReport {
             run_id: 1,
             state: crate::domain::RunState::Blocked,
+            sequence: Some(41),
         },
     );
     state = apply_event(
@@ -642,6 +655,7 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
     assert_eq!(reloaded.runs[0].grill_answers.len(), 2);
     assert_eq!(reloaded.runs[0].grill_decisions.len(), 2);
     assert_eq!(reloaded.runs[0].state, crate::domain::RunState::Blocked);
+    assert_eq!(reloaded.runs[0].last_applied_agent_state_sequence, Some(41));
     assert_eq!(
         reloaded.runs[0].pane_status,
         crate::domain::RunPaneStatus::Missing
@@ -702,6 +716,10 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
     assert_eq!(
         reloaded_with_capture.runs[0].grill_action,
         Some(GrillContinuationAction::ToTickets)
+    );
+    assert_eq!(
+        reloaded_with_capture.runs[0].last_applied_agent_state_sequence,
+        Some(41)
     );
     assert_eq!(reloaded_with_capture.external_objects.len(), 1);
     assert_eq!(

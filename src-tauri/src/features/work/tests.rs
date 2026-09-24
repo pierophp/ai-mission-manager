@@ -188,6 +188,7 @@ fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
         pane_id: "%7".into(),
         started_at: 1,
         state: crate::domain::RunState::Unknown,
+        last_applied_agent_state_sequence: None,
         pane_status: crate::domain::RunPaneStatus::Unknown,
         workspace_id: None,
         repository_id: None,
@@ -211,6 +212,7 @@ fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
             run_id: "7".into(),
             state: crate::domain::RunState::Blocked,
             updated_at: "123".into(),
+            sequence: None,
         })
         .unwrap(),
     )
@@ -223,6 +225,73 @@ fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
     assert_eq!(
         runtime.state.runs[0].state,
         crate::domain::RunState::Blocked
+    );
+    let wrong_run = runtime
+        .apply_agent_state_record(
+            7,
+            AgentStateRecord {
+                agent: crate::domain::AgentKind::Claude,
+                run_id: "8".into(),
+                state: crate::domain::RunState::Finished,
+                updated_at: "124".into(),
+                sequence: Some(1),
+            },
+        )
+        .expect("a report for another Run should be ignored");
+    let wrong_agent = runtime
+        .apply_agent_state_record(
+            7,
+            AgentStateRecord {
+                agent: crate::domain::AgentKind::Codex,
+                run_id: "7".into(),
+                state: crate::domain::RunState::Finished,
+                updated_at: "125".into(),
+                sequence: Some(1),
+            },
+        )
+        .expect("a report from another agent should be ignored");
+    assert!(!wrong_run.accepted);
+    assert!(!wrong_agent.accepted);
+    assert_eq!(
+        runtime.state.runs[0].state,
+        crate::domain::RunState::Blocked
+    );
+
+    let apply_report = |runtime: &mut Runtime, sequence, state| {
+        runtime.apply_agent_state_record(
+            7,
+            AgentStateRecord {
+                agent: crate::domain::AgentKind::Claude,
+                run_id: "7".into(),
+                state,
+                updated_at: "ignored for ordering".into(),
+                sequence: Some(sequence),
+            },
+        )
+    };
+    let first = apply_report(&mut runtime, 1, crate::domain::RunState::Working)
+        .expect("sequence 1 should apply");
+    let third = apply_report(&mut runtime, 3, crate::domain::RunState::Finished)
+        .expect("sequence 3 should apply");
+    let stale = apply_report(&mut runtime, 2, crate::domain::RunState::Blocked)
+        .expect("sequence 2 should be ignored");
+    let duplicate = apply_report(&mut runtime, 3, crate::domain::RunState::Blocked)
+        .expect("duplicate sequence 3 should be ignored");
+    let fourth = apply_report(&mut runtime, 4, crate::domain::RunState::Finished)
+        .expect("sequence 4 should update the applied marker");
+
+    assert!(first.accepted && first.state_changed);
+    assert!(third.accepted && third.state_changed);
+    assert!(!stale.accepted && !stale.state_changed);
+    assert!(!duplicate.accepted && !duplicate.state_changed);
+    assert!(fourth.accepted && !fourth.state_changed);
+    assert_eq!(
+        runtime.state.runs[0].state,
+        crate::domain::RunState::Finished
+    );
+    assert_eq!(
+        runtime.state.runs[0].last_applied_agent_state_sequence,
+        Some(4)
     );
     assert!(
         legacy_file.exists(),

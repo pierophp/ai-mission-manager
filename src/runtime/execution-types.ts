@@ -65,6 +65,7 @@ export type Run = {
   pane_id: string;
   started_at: number;
   state: RunState;
+  last_applied_agent_state_sequence?: number | null;
   pane_status: RunPaneStatus;
   direct_checkouts: RunCheckout[];
   transcript: string;

@@ -1658,6 +1658,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 pane_id,
                 started_at,
                 state: RunState::Unknown,
+                last_applied_agent_state_sequence: None,
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: checkouts,
                 transcript: String::new(),
@@ -1795,6 +1796,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 pane_id,
                 started_at,
                 state: RunState::Unknown,
+                last_applied_agent_state_sequence: None,
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: Vec::new(),
                 transcript: String::new(),
@@ -1958,6 +1960,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 pane_id,
                 started_at,
                 state: RunState::Unknown,
+                last_applied_agent_state_sequence: None,
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: checkouts,
                 transcript: String::new(),
@@ -2089,6 +2092,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 pane_id,
                 started_at: attached_at,
                 state: RunState::Unknown,
+                last_applied_agent_state_sequence: None,
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: Vec::new(),
                 transcript: String::new(),
@@ -2129,6 +2133,65 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                         GrillPhase::AwaitingNextAction
                     }),
                 };
+            }
+            let run = run.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRunState { run }],
+            })
+        }
+        Event::ApplyAgentStateReport {
+            run_id,
+            state: run_state,
+            sequence,
+        } => {
+            let run = state
+                .runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
+                .ok_or(DomainError::RunNotFound { run_id })?;
+            let is_stale = match sequence {
+                Some(sequence) => {
+                    sequence < 0
+                        || run
+                            .last_applied_agent_state_sequence
+                            .is_some_and(|last| sequence <= last)
+                }
+                None => run.last_applied_agent_state_sequence.is_some(),
+            };
+            if is_stale {
+                return Ok(Decision {
+                    state,
+                    effects: Vec::new(),
+                });
+            }
+
+            let state_changed = run.state != run_state;
+            if let Some(sequence) = sequence {
+                run.last_applied_agent_state_sequence = Some(sequence);
+            }
+            if state_changed {
+                run.state = run_state;
+                if run.execution_profile == ExecutionProfile::Grill {
+                    run.grill_phase = match run_state {
+                        RunState::Unknown => run.grill_phase.or(Some(GrillPhase::Starting)),
+                        RunState::Working => Some(GrillPhase::Working),
+                        RunState::Blocked => Some(GrillPhase::WaitingForAnswers),
+                        RunState::Finished => Some(
+                            if run.grill_question_group.is_some() && run.grill_response.is_none() {
+                                GrillPhase::WaitingForAnswers
+                            } else {
+                                GrillPhase::AwaitingNextAction
+                            },
+                        ),
+                    };
+                }
+            } else if sequence.is_none() {
+                return Ok(Decision {
+                    state,
+                    effects: Vec::new(),
+                });
             }
             let run = run.clone();
 

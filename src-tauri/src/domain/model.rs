@@ -269,6 +269,8 @@ pub struct Run {
     pub pane_id: String,
     pub started_at: i64,
     pub state: RunState,
+    #[serde(default)]
+    pub last_applied_agent_state_sequence: Option<i64>,
     pub pane_status: RunPaneStatus,
     pub direct_checkouts: Vec<RunCheckout>,
     #[serde(default)]

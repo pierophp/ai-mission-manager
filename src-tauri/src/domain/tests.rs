@@ -207,6 +207,7 @@ mod machine_deletion_tests {
                 pane_id: "%1".into(),
                 started_at: 1,
                 state: RunState::Working,
+                last_applied_agent_state_sequence: None,
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: Vec::new(),
                 transcript: String::new(),
@@ -778,6 +779,88 @@ mod grill_contract_tests {
         assert!(run.prompt.contains("Decide the next architecture"));
         assert!(run.prompt.contains("The decision must stay reversible."));
         assert!(run.prompt.contains(GRILL_SKILL_SNAPSHOT));
+    }
+
+    #[test]
+    fn agent_state_reports_only_apply_strictly_newer_sequences() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let reports = [
+            (1, RunState::Working),
+            (3, RunState::Finished),
+            (2, RunState::Blocked),
+            (3, RunState::Blocked),
+            (4, RunState::Finished),
+        ];
+        let mut state = started.state;
+        let mut state_transitions = 0;
+
+        for (sequence, report_state) in reports {
+            let before = state.runs[0].state;
+            let decision = decide(
+                state,
+                Event::ApplyAgentStateReport {
+                    run_id: 1,
+                    state: report_state,
+                    sequence: Some(sequence),
+                },
+            )
+            .expect("a report for the existing Run should be considered");
+            if before != decision.state.runs[0].state {
+                state_transitions += 1;
+            }
+            if sequence == 2 || sequence == 3 && report_state == RunState::Blocked {
+                assert!(decision.effects.is_empty(), "stale reports have no effects");
+            }
+            state = decision.state;
+        }
+
+        assert_eq!(state.runs[0].state, RunState::Finished);
+        assert_eq!(state.runs[0].last_applied_agent_state_sequence, Some(4));
+        assert_eq!(state_transitions, 2);
+    }
+
+    #[test]
+    fn legacy_agent_state_report_only_applies_before_versioned_history() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let legacy = decide(
+            started.state,
+            Event::ApplyAgentStateReport {
+                run_id: 1,
+                state: RunState::Working,
+                sequence: None,
+            },
+        )
+        .expect("a legacy report should apply without versioned history");
+        assert_eq!(legacy.state.runs[0].state, RunState::Working);
+        assert_eq!(legacy.state.runs[0].last_applied_agent_state_sequence, None);
+
+        let versioned = decide(
+            legacy.state,
+            Event::ApplyAgentStateReport {
+                run_id: 1,
+                state: RunState::Blocked,
+                sequence: Some(1),
+            },
+        )
+        .expect("a versioned report should apply");
+        let late_legacy = decide(
+            versioned.state,
+            Event::ApplyAgentStateReport {
+                run_id: 1,
+                state: RunState::Finished,
+                sequence: None,
+            },
+        )
+        .expect("a late legacy report should be ignored");
+
+        assert_eq!(late_legacy.state.runs[0].state, RunState::Blocked);
+        assert_eq!(
+            late_legacy.state.runs[0].last_applied_agent_state_sequence,
+            Some(1)
+        );
+        assert!(late_legacy.effects.is_empty());
     }
 
     #[test]
