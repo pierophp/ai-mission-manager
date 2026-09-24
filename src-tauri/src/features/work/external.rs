@@ -51,28 +51,70 @@ impl Runtime {
     pub(crate) fn create_github_issue(
         &mut self,
         item_id: i64,
-        repository: String,
+        repository_id: i64,
         title: String,
         body: String,
     ) -> Result<ExternalLinkAction, String> {
-        let item_exists = self.state.items.iter().any(|item| item.id == item_id);
-        if !item_exists {
-            return Err(format!("Item {item_id} does not exist"));
+        const UNAVAILABLE_SCOPE: &str =
+            "The Item or Repository is not available in the Item's Project";
+
+        let item = self
+            .state
+            .items
+            .iter()
+            .find(|item| item.id == item_id)
+            .ok_or_else(|| UNAVAILABLE_SCOPE.to_owned())?;
+        let project = self
+            .state
+            .projects
+            .iter()
+            .find(|project| project.id == item.project_id)
+            .ok_or_else(|| UNAVAILABLE_SCOPE.to_owned())?;
+        if !self
+            .state
+            .contexts
+            .iter()
+            .any(|context| context.id == project.context_id)
+        {
+            return Err(UNAVAILABLE_SCOPE.into());
         }
-        if repository.trim().is_empty() {
-            return Err("A GitHub repository is required".into());
+        let repository = self
+            .state
+            .repositories
+            .iter()
+            .find(|repository| repository.id == repository_id)
+            .ok_or_else(|| UNAVAILABLE_SCOPE.to_owned())?;
+        let repository_project = self
+            .state
+            .projects
+            .iter()
+            .find(|candidate| candidate.id == repository.project_id)
+            .ok_or_else(|| UNAVAILABLE_SCOPE.to_owned())?;
+        if repository.project_id != project.id
+            || repository_project.context_id != project.context_id
+        {
+            return Err(UNAVAILABLE_SCOPE.into());
         }
+        let repository_name = github_repository_name(&repository.remote_url).ok_or_else(|| {
+            "The selected Repository does not have a valid GitHub remote".to_owned()
+        })?;
         if title.trim().is_empty() {
             return Err("A GitHub Issue title is required".into());
         }
 
         let executable = self.gh_executable_path()?;
         let created_url = GithubCli::new(executable.clone())
-            .create_issue(repository.trim(), title.trim(), &body)
+            .create_issue(&repository_name, title.trim(), &body)
             .map_err(|error| error.to_string())?;
-        let object = classify_url(&created_url).map_err(|error| error.to_string())?;
+        let object = classify_url(&created_url).map_err(|error| {
+            format!(
+                "GitHub Issue was created at {created_url}, but linking it to the Item failed: {error}"
+            )
+        })?;
         if object.provider != ExternalProvider::GitHub || object.kind != ExternalObjectKind::Issue {
-            return Err("GitHub CLI returned a URL that is not a GitHub Issue".into());
+            return Err(format!(
+                "GitHub Issue was created at {created_url}, but linking it to the Item failed: GitHub CLI returned a URL that is not a GitHub Issue"
+            ));
         }
 
         let mut warning = None;
@@ -91,16 +133,32 @@ impl Runtime {
                 snapshot,
             },
         )
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| {
+            format!(
+                "GitHub Issue was created at {created_url}, but linking it to the Item failed: {error}"
+            )
+        })?;
         let link = decision
             .state
             .links
             .last()
             .cloned()
-            .ok_or_else(|| "Issue creation produced no Link".to_owned())?;
-        self.commit(decision)?;
+            .ok_or_else(|| {
+                format!(
+                    "GitHub Issue was created at {created_url}, but linking it to the Item failed: Issue creation produced no Link"
+                )
+            })?;
+        self.commit(decision).map_err(|error| {
+            format!(
+                "GitHub Issue was created at {created_url}, but linking it to the Item failed: {error}"
+            )
+        })?;
         let view = external_link_view(&self.state, &link)
-            .ok_or_else(|| "Issue creation produced no External Object".to_owned())?;
+            .ok_or_else(|| {
+                format!(
+                    "GitHub Issue was created at {created_url}, but linking it to the Item failed: Issue creation produced no External Object"
+                )
+            })?;
         Ok(ExternalLinkAction {
             link: view,
             warning,

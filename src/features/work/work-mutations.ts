@@ -95,8 +95,8 @@ export const workActions = {
     () => workAdapter.startWorktreeRun(input),
   refreshExternalObject: (externalObjectId: number) =>
     () => workAdapter.refreshExternalObject(externalObjectId),
-  createGithubIssue: (itemId: number, repository: string, title: string, body: string) =>
-    () => workAdapter.createGithubIssue(itemId, repository, title, body),
+  createGithubIssue: (itemId: number, repositoryId: number, title: string, body: string) =>
+    () => workAdapter.createGithubIssue(itemId, repositoryId, title, body),
   setLinkAttentionPolicy: (
     linkId: number,
     policy: Parameters<typeof workAdapter.setLinkAttentionPolicy>[1],

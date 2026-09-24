@@ -40,7 +40,7 @@ use crate::{
         RunSuggestion, Workspace, WorkspaceRepository, WorkspaceRepositoryInput, Worktree,
     },
     git::GitCli,
-    provider::{classify_url, resolve_gh_executable, GithubCli},
+    provider::{classify_url, github_repository_name, resolve_gh_executable, GithubCli},
     terminal::{
         capture_pane, capture_pane_transcript, open_pane_in_terminal, send_input_to_pane,
         terminal_transport, AgentLaunchContext, ExternalPaneIdentity, TmuxControlPane,
@@ -348,13 +348,13 @@ pub(crate) fn link_external_object(
 
 pub(crate) fn create_github_issue(
     item_id: i64,
-    repository: String,
+    repository_id: i64,
     title: String,
     body: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkAction, String> {
     locked(state, |runtime| {
-        runtime.create_github_issue(item_id, repository, title, body)
+        runtime.create_github_issue(item_id, repository_id, title, body)
     })
 }
 

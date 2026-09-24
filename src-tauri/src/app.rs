@@ -1152,12 +1152,12 @@ pub fn link_external_object(
 #[tauri::command(rename_all = "camelCase")]
 pub fn create_github_issue(
     item_id: i64,
-    repository: String,
+    repository_id: i64,
     title: String,
     body: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkAction, String> {
-    crate::features::work::create_github_issue(item_id, repository, title, body, state)
+    crate::features::work::create_github_issue(item_id, repository_id, title, body, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1983,11 +1983,18 @@ fi
         runtime
             .set_item_relation(1, 2, ItemRelationKind::Blocks)
             .expect("Item relationship should be saved");
+        let repository = runtime
+            .register_repository(
+                1,
+                "service-a".into(),
+                "https://github.com/acme/app.git".into(),
+            )
+            .expect("the Project Repository should be registered");
 
         let result = runtime
             .create_github_issue(
                 1,
-                "acme/app".into(),
+                repository.id,
                 "Public title".into(),
                 "Public body".into(),
             )
@@ -2006,6 +2013,128 @@ fi
             runtime.state.snapshots[0].title,
             "Created from Mission Manager"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn creating_a_github_issue_rejects_items_and_repositories_outside_the_same_project_before_gh() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let executable = directory.path().join("gh");
+        let calls = directory.path().join("gh-calls");
+        let quoted_calls_path = calls.to_string_lossy().replace('\'', "'\\''");
+        let script = format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{quoted_calls_path}'\nexit 1\n");
+        fs::write(&executable, script).expect("fake gh should be written");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("fake gh should be executable");
+        let mut store = SqliteStore::open(&database).expect("database should open");
+        store
+            .set_gh_executable_path(&executable)
+            .expect("fake gh path should persist");
+        drop(store);
+
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .create_item("Item in the original Project".into(), 1, 1)
+            .expect("Item should be created");
+        let other_project = runtime
+            .create_project("Another Project".into(), 1, ProjectDefaults::default())
+            .expect("another Project should be created");
+        let foreign_context = runtime
+            .create_context("Another Context".into())
+            .expect("another Context should be created");
+        let foreign_project_id = runtime
+            .state
+            .projects
+            .iter()
+            .find(|project| project.context_id == foreign_context.id)
+            .expect("the Context should own its default Project")
+            .id;
+        let project_repository = runtime
+            .register_repository(
+                other_project.id,
+                "other-project".into(),
+                "https://github.com/acme/other-project.git".into(),
+            )
+            .expect("Repository should register in another Project");
+        let context_repository = runtime
+            .register_repository(
+                foreign_project_id,
+                "other-context".into(),
+                "https://github.com/acme/other-context.git".into(),
+            )
+            .expect("Repository should register in another Context");
+        let current_repository = runtime
+            .register_repository(
+                1,
+                "current".into(),
+                "https://github.com/acme/current.git".into(),
+            )
+            .expect("Repository should register in the Item's Project");
+
+        let attempts = [
+            runtime.create_github_issue(404, current_repository.id, "Title".into(), String::new()),
+            runtime.create_github_issue(1, 404, "Title".into(), String::new()),
+            runtime.create_github_issue(1, project_repository.id, "Title".into(), String::new()),
+            runtime.create_github_issue(1, context_repository.id, "Title".into(), String::new()),
+        ];
+
+        let errors = attempts
+            .into_iter()
+            .map(|attempt| attempt.expect_err("invalid scope should be rejected"))
+            .collect::<Vec<_>>();
+        assert!(errors.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(
+            errors[0],
+            "The Item or Repository is not available in the Item's Project"
+        );
+        assert!(!calls.exists(), "invalid scope must not call GitHub CLI");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn failed_link_recording_after_issue_creation_returns_the_created_url() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let executable = directory.path().join("gh");
+        let script = r#"#!/bin/sh
+if [ "$1" = api ] && [ "$2" = repos/acme/app/issues ]; then
+  printf '%s' '{"html_url":"https://github.com/acme/app/issues/42"}'
+elif [ "$1" = issue ] && [ "$2" = view ]; then
+  printf '%s' '{"number":42,"title":"Created from Mission Manager","state":"OPEN","author":null,"labels":[],"milestone":null,"updatedAt":null}'
+fi
+"#;
+        fs::write(&executable, script).expect("fake gh should be written");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("fake gh should be executable");
+        let mut store = SqliteStore::open(&database).expect("database should open");
+        store
+            .set_gh_executable_path(&executable)
+            .expect("fake gh path should persist");
+        drop(store);
+
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        runtime
+            .create_item("Keep this Item".into(), 1, 1)
+            .expect("Item should be created");
+        let repository = runtime
+            .register_repository(
+                1,
+                "service-a".into(),
+                "https://github.com/acme/app.git".into(),
+            )
+            .expect("the Project Repository should be registered");
+        runtime.state.next_link_id = i64::MAX;
+
+        let error = runtime
+            .create_github_issue(1, repository.id, "Title".into(), String::new())
+            .expect_err("an exhausted Link sequence should reject Link recording");
+
+        assert!(error.contains("https://github.com/acme/app/issues/42"));
     }
 
     #[cfg(unix)]

@@ -199,7 +199,7 @@ export function ItemCard({
   const [isReminderDialogOpen, setIsReminderDialogOpen] = useState(false);
   const [isRenameDialogOpen, setIsRenameDialogOpen] = useState(false);
   const [titleDraft, setTitleDraft] = useState(view.item.title);
-  const [issueRepository, setIssueRepository] = useState("");
+  const [issueRepository, setIssueRepository] = useState<number>();
   const [issueTitle, setIssueTitle] = useState(view.item.title);
   const [issueBody, setIssueBody] = useState(view.item.notes);
   const [deletionPreview, setDeletionPreview] = useState<ItemDeletionPreview>();
@@ -1006,6 +1006,7 @@ export function ItemCard({
   }
 
   function openCreateIssueDialog() {
+    setIssueRepository(itemRepositories[0]?.id);
     setIssueTitle(view.item.title);
     setIssueBody(view.item.notes);
     setIsCreateIssueDialogOpen(true);
@@ -1013,7 +1014,7 @@ export function ItemCard({
 
   async function handleCreateIssue(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!issueRepository.trim() || !issueTitle.trim()) return;
+    if (issueRepository === undefined || !issueTitle.trim()) return;
     setIsSaving(true);
     try {
       const result = await workCommand.execute(
@@ -1025,7 +1026,7 @@ export function ItemCard({
         ),
       );
       setIsCreateIssueDialogOpen(false);
-      setIssueRepository("");
+      setIssueRepository(undefined);
       await onChanged();
       if (result.warning) {
         window.alert(result.warning);
@@ -2535,16 +2536,32 @@ export function ItemCard({
               </DialogDescription>
             </DialogHeader>
             <form className="grid gap-4" onSubmit={handleCreateIssue}>
-              <label className="grid gap-1.5 text-sm font-medium">
-                <span>Repository</span>
-                <Input
-                  autoFocus
-                  value={issueRepository}
-                  onChange={(event) => setIssueRepository(event.target.value)}
-                  placeholder="owner/repository"
-                  disabled={isSaving}
-                />
-              </label>
+              {itemRepositories.length > 0 ? (
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Repository</span>
+                  <NativeSelect
+                    autoFocus
+                    value={issueRepository ?? ""}
+                    onChange={(event) =>
+                      setIssueRepository(Number(event.target.value) || undefined)
+                    }
+                    disabled={isSaving}
+                  >
+                    {itemRepositories.map((repository) => (
+                      <NativeSelectOption
+                        value={repository.id}
+                        key={repository.id}
+                      >
+                        {repository.name} · {repository.remote_url}
+                      </NativeSelectOption>
+                    ))}
+                  </NativeSelect>
+                </label>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Register a Repository for this Item&apos;s Project before creating a GitHub Issue.
+                </p>
+              )}
               <label className="grid gap-1.5 text-sm font-medium">
                 <span>Public title</span>
                 <Input
@@ -2574,7 +2591,7 @@ export function ItemCard({
                 </Button>
                 <Button
                   type="submit"
-                  disabled={isSaving || !issueRepository.trim() || !issueTitle.trim()}
+                  disabled={isSaving || issueRepository === undefined || !issueTitle.trim()}
                 >
                   {isSaving ? "Creating…" : "Confirm and create Issue"}
                 </Button>

@@ -279,10 +279,10 @@ export const workAdapter = {
     }),
   refreshExternalObject: (externalObjectId: number) =>
     command<ExternalSnapshot>("refresh_external_object", { externalObjectId }),
-  createGithubIssue: (itemId: number, repository: string, title: string, body: string) =>
+  createGithubIssue: (itemId: number, repositoryId: number, title: string, body: string) =>
     command<ExternalLinkAction>("create_github_issue", {
       itemId,
-      repository,
+      repositoryId,
       title,
       body,
     }),

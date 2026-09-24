@@ -86,6 +86,63 @@ pub fn classify_url(raw_url: &str) -> Result<ExternalObjectInput, ProviderError>
     })
 }
 
+pub(crate) fn github_repository_name(remote_url: &str) -> Option<String> {
+    let remote_url = remote_url.trim();
+    let path = if let Some(rest) = remote_url.strip_prefix("git@") {
+        let (host, path) = rest.split_once(':')?;
+        if !host.eq_ignore_ascii_case("github.com") {
+            return None;
+        }
+        path
+    } else if let Some(rest) = remote_url.strip_prefix("ssh://") {
+        let (authority, path) = rest.split_once('/')?;
+        if !authority.eq_ignore_ascii_case("git@github.com") {
+            return None;
+        }
+        path
+    } else {
+        let (scheme, rest) = remote_url.split_once("://")?;
+        if !matches!(scheme, "https" | "http" | "git") {
+            return None;
+        }
+        let (host, path) = rest.split_once('/')?;
+        if !host.eq_ignore_ascii_case("github.com") && !host.eq_ignore_ascii_case("www.github.com")
+        {
+            return None;
+        }
+        path
+    };
+
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut segments = path.split('/');
+    let owner = segments.next()?.trim();
+    let repository = segments.next()?.trim();
+    if owner.is_empty()
+        || repository.is_empty()
+        || segments.next().is_some()
+        || owner.len() > 39
+        || !owner
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || !owner.as_bytes().first()?.is_ascii_alphanumeric()
+        || !owner.as_bytes().last()?.is_ascii_alphanumeric()
+        || repository.len() > 100
+        || !repository
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        || !repository.as_bytes().first()?.is_ascii_alphanumeric()
+    {
+        return None;
+    }
+
+    Some(format!(
+        "{}/{}",
+        owner.to_ascii_lowercase(),
+        repository.to_ascii_lowercase()
+    ))
+}
+
 pub struct GithubCli {
     executable: PathBuf,
 }
@@ -311,6 +368,25 @@ mod tests {
         assert_eq!(object.provider, ExternalProvider::Generic);
         assert_eq!(object.kind, ExternalObjectKind::Generic);
         assert_eq!(object.canonical_url, "https://example.com/a");
+    }
+
+    #[test]
+    fn github_repository_identity_comes_only_from_valid_github_remotes() {
+        assert_eq!(
+            github_repository_name("https://github.com/Acme/App.git"),
+            Some("acme/app".into())
+        );
+        assert_eq!(
+            github_repository_name("git@github.com:Acme/App.git"),
+            Some("acme/app".into())
+        );
+        assert_eq!(
+            github_repository_name("ssh://git@github.com/Acme/App.git"),
+            Some("acme/app".into())
+        );
+        assert_eq!(github_repository_name("ftp://github.com/acme/app"), None);
+        assert_eq!(github_repository_name("https://example.com/acme/app"), None);
+        assert_eq!(github_repository_name("https://github.com/acme/app/issues"), None);
     }
 
     #[test]
