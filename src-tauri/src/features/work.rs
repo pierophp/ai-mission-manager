@@ -17,7 +17,7 @@ use std::{
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::{
-    agent_state::{read_state_file, state_file_path, state_runs_directory, AgentStateRecord},
+    agent_state::{read_state_file, state_file_path, AgentStateRecord},
     app::{
         current_unix_seconds, DirectRunCheckoutPreview, DirectRunPreview, DirectRunSharedRun,
         PaneTab, RunDeletionResult, RunStateChangedEvent, Runtime, TerminalAttachment,

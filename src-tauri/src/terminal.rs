@@ -36,10 +36,7 @@ pub trait TerminalRuntime: Send + Sync {
 
     fn check_machine(&self, machine: &Machine) -> MachineReadiness;
 
-    fn observe_machine(
-        &self,
-        machine: &Machine,
-    ) -> Result<Vec<ObservedPane>, MachineObservationError>;
+    fn observe_machine(&self, machine: &Machine, state_run_ids: &[i64]) -> ObservedMachine;
 
     fn capture_pane_transcript(&self, machine: &Machine, pane_id: &str) -> Result<Vec<u8>, String>;
 
@@ -117,6 +114,20 @@ pub struct AgentPaneSummary {
 pub struct ObservedPane {
     pub session_name: String,
     pub pane_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedMachine {
+    pub panes: Result<Vec<ObservedPane>, MachineObservationError>,
+    pub pane_state_records: Vec<ObservedPaneAgentState>,
+    pub state_file_records: Vec<AgentStateRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObservedPaneAgentState {
+    pub session_name: String,
+    pub pane_id: String,
+    pub record: AgentStateRecord,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -763,11 +774,8 @@ impl TerminalRuntime for TmuxRuntime {
         prepare_machine_for_run(machine, None, None).readiness
     }
 
-    fn observe_machine(
-        &self,
-        machine: &Machine,
-    ) -> Result<Vec<ObservedPane>, MachineObservationError> {
-        crate::terminal::observe_machine(machine)
+    fn observe_machine(&self, machine: &Machine, state_run_ids: &[i64]) -> ObservedMachine {
+        crate::terminal::observe_machine(machine, state_run_ids)
     }
 
     fn capture_pane_transcript(&self, machine: &Machine, pane_id: &str) -> Result<Vec<u8>, String> {
@@ -861,6 +869,10 @@ pub(crate) enum FakeTerminalCommand {
     ObserveMachine {
         machine_id: i64,
     },
+    ReadAgentStateFiles {
+        machine_id: i64,
+        run_ids: Vec<i64>,
+    },
     CapturePaneTranscript {
         machine_id: i64,
         pane_id: String,
@@ -913,6 +925,8 @@ pub(crate) struct FakeTerminalRuntime {
     commands: Arc<Mutex<Vec<FakeTerminalCommand>>>,
     hook_configs: Arc<Mutex<std::collections::HashMap<(i64, String), String>>>,
     observed_panes: Arc<Mutex<std::collections::HashMap<i64, Vec<ObservedPane>>>>,
+    pane_state_records: Arc<Mutex<std::collections::HashMap<i64, Vec<ObservedPaneAgentState>>>>,
+    state_file_records: Arc<Mutex<std::collections::HashMap<i64, Vec<AgentStateRecord>>>>,
     transcript_captures: FakeTranscriptCaptures,
     release_failures: Arc<Mutex<std::collections::HashMap<i64, String>>>,
     dirty_checkout_on_launch: Arc<Mutex<bool>>,
@@ -977,6 +991,8 @@ impl FakeTerminalRuntime {
             commands: Arc::new(Mutex::new(Vec::new())),
             hook_configs: Arc::new(Mutex::new(std::collections::HashMap::new())),
             observed_panes: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            pane_state_records: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            state_file_records: Arc::new(Mutex::new(std::collections::HashMap::new())),
             transcript_captures: Arc::new(Mutex::new(std::collections::HashMap::new())),
             release_failures: Arc::new(Mutex::new(std::collections::HashMap::new())),
             dirty_checkout_on_launch: Arc::new(Mutex::new(false)),
@@ -1040,6 +1056,24 @@ impl FakeTerminalRuntime {
             .lock()
             .expect("fake observed pane list should remain available")
             .insert(machine_id, panes);
+    }
+
+    pub(crate) fn set_agent_state_records(&self, machine_id: i64, records: Vec<AgentStateRecord>) {
+        self.state_file_records
+            .lock()
+            .expect("fake agent state records should remain available")
+            .insert(machine_id, records);
+    }
+
+    pub(crate) fn set_pane_agent_state_records(
+        &self,
+        machine_id: i64,
+        records: Vec<ObservedPaneAgentState>,
+    ) {
+        self.pane_state_records
+            .lock()
+            .expect("fake Pane agent state records should remain available")
+            .insert(machine_id, records);
     }
 
     pub(crate) fn set_transcript_capture_failure(
@@ -1213,10 +1247,7 @@ impl TerminalRuntime for FakeTerminalRuntime {
         preflight.readiness
     }
 
-    fn observe_machine(
-        &self,
-        machine: &Machine,
-    ) -> Result<Vec<ObservedPane>, MachineObservationError> {
+    fn observe_machine(&self, machine: &Machine, state_run_ids: &[i64]) -> ObservedMachine {
         self.record(FakeTerminalCommand::ObserveMachine {
             machine_id: machine.id,
         });
@@ -1232,7 +1263,7 @@ impl TerminalRuntime for FakeTerminalRuntime {
                 .expect("fake observation gate should remain available");
         }
         drop(state);
-        match self.outcome(machine) {
+        let panes = match self.outcome(machine) {
             FakeMachineOutcome::Available
             | FakeMachineOutcome::AgentUnavailable
             | FakeMachineOutcome::StateDirectoryUnwritable
@@ -1258,6 +1289,59 @@ impl TerminalRuntime for FakeTerminalRuntime {
                 kind: MachineObservationFailureKind::TmuxQueryFailed,
                 message: format!("fake tmux query failed on Machine {}", machine.name),
             }),
+        };
+        let requested = state_run_ids
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>();
+        self.record(FakeTerminalCommand::ReadAgentStateFiles {
+            machine_id: machine.id,
+            run_ids: state_run_ids.to_vec(),
+        });
+        let state_records = if matches!(
+            &panes,
+            Err(MachineObservationError {
+                kind: MachineObservationFailureKind::Unreachable,
+                ..
+            })
+        ) {
+            Vec::new()
+        } else {
+            self.state_file_records
+                .lock()
+                .expect("fake agent state records should remain available")
+                .get(&machine.id)
+                .into_iter()
+                .flatten()
+                .filter(|record| {
+                    record
+                        .run_id
+                        .parse::<i64>()
+                        .is_ok_and(|run_id| requested.contains(&run_id))
+                })
+                .cloned()
+                .collect()
+        };
+        let pane_state_records = self
+            .pane_state_records
+            .lock()
+            .expect("fake Pane agent state records should remain available")
+            .get(&machine.id)
+            .into_iter()
+            .flatten()
+            .filter(|pane_state| {
+                pane_state
+                    .record
+                    .run_id
+                    .parse::<i64>()
+                    .is_ok_and(|run_id| requested.contains(&run_id))
+            })
+            .cloned()
+            .collect();
+        ObservedMachine {
+            panes,
+            pane_state_records,
+            state_file_records: state_records,
         }
     }
 
@@ -2299,9 +2383,51 @@ pub fn list_panes(machine: &Machine, session_name: &str) -> Result<Vec<PaneSumma
         .collect::<Result<Vec<_>, _>>()
 }
 
-pub fn observe_machine(machine: &Machine) -> Result<Vec<ObservedPane>, MachineObservationError> {
+pub fn observe_machine(machine: &Machine, state_run_ids: &[i64]) -> ObservedMachine {
+    let panes = observe_machine_panes(machine);
+    let pane_state_records = panes
+        .as_ref()
+        .map(|panes| {
+            panes
+                .iter()
+                .filter_map(|pane| {
+                    pane_agent_state(&pane.agent_state_json).map(|record| ObservedPaneAgentState {
+                        session_name: pane.session_name.clone(),
+                        pane_id: pane.pane_id.clone(),
+                        record,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let state_file_records = read_agent_state_files(machine, state_run_ids);
+    ObservedMachine {
+        panes: panes.map(|panes| {
+            panes
+                .into_iter()
+                .map(|pane| ObservedPane {
+                    session_name: pane.session_name,
+                    pane_id: pane.pane_id,
+                })
+                .collect()
+        }),
+        pane_state_records,
+        state_file_records,
+    }
+}
+
+struct ObservedPaneWithState {
+    session_name: String,
+    pane_id: String,
+    agent_state_json: String,
+}
+
+fn observe_machine_panes(
+    machine: &Machine,
+) -> Result<Vec<ObservedPaneWithState>, MachineObservationError> {
     let mut tmux_args = vec!["-f", "/dev/null", "-L", machine.socket_name.as_str()];
-    tmux_args.extend(["list-panes", "-a", "-F", "#{session_name}\t#{pane_id}"]);
+    let pane_format = machine_pane_query_format();
+    tmux_args.extend(["list-panes", "-a", "-F", pane_format.as_str()]);
     let (program, arguments) =
         build_tmux_process_command(&terminal_transport(machine), false, &tmux_args, "tmux")
             .map_err(|message| MachineObservationError {
@@ -2344,7 +2470,16 @@ pub fn observe_machine(machine: &Machine) -> Result<Vec<ObservedPane>, MachineOb
     String::from_utf8_lossy(&output.stdout)
         .lines()
         .map(|line| {
-            let Some((session_name, pane_id)) = line.split_once('\t') else {
+            let Some((session_name, remaining)) = line.split_once('\t') else {
+                return Err(MachineObservationError {
+                    kind: MachineObservationFailureKind::TmuxQueryFailed,
+                    message: format!(
+                        "Could not parse Machine {} tmux Pane observation",
+                        machine.name
+                    ),
+                });
+            };
+            let Some((pane_id, agent_state_json)) = remaining.split_once('\t') else {
                 return Err(MachineObservationError {
                     kind: MachineObservationFailureKind::TmuxQueryFailed,
                     message: format!(
@@ -2362,12 +2497,96 @@ pub fn observe_machine(machine: &Machine) -> Result<Vec<ObservedPane>, MachineOb
                     ),
                 });
             }
-            Ok(ObservedPane {
+            Ok(ObservedPaneWithState {
                 session_name: session_name.to_owned(),
                 pane_id: pane_id.to_owned(),
+                agent_state_json: agent_state_json.to_owned(),
             })
         })
         .collect()
+}
+
+fn machine_pane_query_format() -> String {
+    format!("#{{session_name}}\t#{{pane_id}}\t#{{{AGENT_STATE_OPTION}}}")
+}
+
+fn pane_agent_state(value: &str) -> Option<AgentStateRecord> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    serde_json::from_str(value).ok()
+}
+
+fn read_agent_state_files(machine: &Machine, run_ids: &[i64]) -> Vec<AgentStateRecord> {
+    let Some(command) = build_agent_state_files_read_command(run_ids) else {
+        return Vec::new();
+    };
+    match run_machine_shell(machine, &command) {
+        Ok(contents) => parse_agent_state_files_read(&contents, run_ids),
+        Err(error) => {
+            eprintln!(
+                "Could not read agent state files on Machine {}: {error}",
+                machine.name
+            );
+            Vec::new()
+        }
+    }
+}
+
+fn build_agent_state_files_read_command(run_ids: &[i64]) -> Option<String> {
+    let mut run_ids = run_ids
+        .iter()
+        .copied()
+        .filter(|run_id| *run_id > 0)
+        .collect::<Vec<_>>();
+    run_ids.sort_unstable();
+    run_ids.dedup();
+    if run_ids.is_empty() {
+        return None;
+    }
+    let run_ids = run_ids
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(format!(
+        "set -eu; state_dir=\"$HOME/{AGENT_STATE_RUNS_RELATIVE_PATH}\"; for run_id in {run_ids}; do state_file=\"$state_dir/run-$run_id.json\"; if [ -f \"$state_file\" ] && [ ! -L \"$state_file\" ] && [ -r \"$state_file\" ]; then printf '%s\\000' \"$run_id\"; if cat \"$state_file\"; then :; fi; printf '\\000'; fi; done"
+    ))
+}
+
+fn parse_agent_state_files_read(
+    contents: &str,
+    requested_run_ids: &[i64],
+) -> Vec<AgentStateRecord> {
+    let requested_run_ids = requested_run_ids
+        .iter()
+        .copied()
+        .filter(|run_id| *run_id > 0)
+        .collect::<std::collections::HashSet<_>>();
+    let Some(last_complete_record) = contents.rfind('\0') else {
+        return Vec::new();
+    };
+    let mut fields = contents[..last_complete_record].split('\0');
+    let mut records = Vec::new();
+    while let Some(path_run_id) = fields.next() {
+        let Some(record_json) = fields.next() else {
+            break;
+        };
+        let Some(path_run_id) = path_run_id.parse::<i64>().ok() else {
+            continue;
+        };
+        if !requested_run_ids.contains(&path_run_id) {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<AgentStateRecord>(record_json) else {
+            continue;
+        };
+        if record.run_id.parse::<i64>().ok() == Some(path_run_id) {
+            records.push(record);
+        }
+    }
+    records
 }
 
 fn is_ssh_connection_failure(detail: &str) -> bool {
@@ -3273,6 +3492,68 @@ mod tests {
         .expect_err("a display name must not be accepted as a Pane identity");
 
         assert_eq!(error, "invalid tmux Pane identity: main");
+    }
+
+    #[test]
+    fn machine_pane_query_includes_the_agent_state_option() {
+        assert_eq!(
+            machine_pane_query_format(),
+            format!("#{{session_name}}\t#{{pane_id}}\t#{{{AGENT_STATE_OPTION}}}")
+        );
+    }
+
+    #[test]
+    fn state_file_read_command_batches_deduplicated_runs_over_ssh() {
+        let command = build_agent_state_files_read_command(&[9, 7, 9, 0, -1])
+            .expect("valid Run IDs should create one batch command");
+
+        assert!(command.contains("state_dir=\"$HOME/.local/state/ai-mission-manager/runs\""));
+        assert!(command.contains("for run_id in 7 9; do"));
+        assert_eq!(command.matches("cat \"$state_file\"").count(), 1);
+        assert!(command.contains("printf '%s\\000' \"$run_id\""));
+        assert!(command.contains("printf '\\000'"));
+
+        let remote_machine = Machine {
+            id: 9,
+            context_id: 1,
+            name: "Remote Machine".into(),
+            socket_name: "mission".into(),
+            transport: MachineTransport::Ssh {
+                host: "build.example".into(),
+                user: Some("runner".into()),
+                port: Some(2222),
+                identity_file: None,
+                known_hosts_file: None,
+                strict_host_key_checking: None,
+            },
+            last_observed: crate::domain::MachineObservation::Unknown,
+            last_observed_at: None,
+        };
+        let (program, arguments) = build_machine_shell_command(&remote_machine, &command)
+            .expect("the batched file command should use SSH");
+        assert_eq!(program, "ssh");
+        assert!(arguments
+            .iter()
+            .any(|argument| argument == "runner@build.example"));
+        assert_eq!(arguments.last(), Some(&command));
+    }
+
+    #[test]
+    fn batched_state_reader_preserves_multiline_json_and_ignores_truncated_tail() {
+        let record = AgentStateRecord {
+            agent: AgentKind::Claude,
+            run_id: "7".into(),
+            state: crate::domain::RunState::Blocked,
+            updated_at: "2026-09-24T12:00:00Z".into(),
+            sequence: Some(3),
+        };
+        let pretty_record = serde_json::to_string_pretty(&record)
+            .expect("the state record should serialize as multiline JSON");
+        let contents = format!("7\0{pretty_record}\0{}\0{}", 8, r#"{"state":"blocked"}"#);
+
+        let records = parse_agent_state_files_read(&contents, &[7, 8]);
+
+        assert_eq!(records, vec![record]);
     }
 
     #[test]

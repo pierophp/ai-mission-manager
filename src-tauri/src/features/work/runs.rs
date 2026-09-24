@@ -656,35 +656,25 @@ pub(crate) async fn continue_grill_with_state(
 }
 use std::sync::Arc;
 
-use crate::terminal::{MachineObservationError, ObservedPane};
+use crate::terminal::{MachineObservationError, ObservedMachine};
 
 fn read_run_state_record(
     run_id: i64,
-    machine: Option<&Machine>,
     legacy_agent_state_directory: &Path,
 ) -> Option<AgentStateRecord> {
-    let current_path = machine
-        .filter(|machine| matches!(machine.transport, MachineTransport::Local))
-        .map(|machine| {
-            let home = machine_home_directory(machine);
-            state_file_path(&state_runs_directory(Path::new(&home)), run_id)
-        });
     let legacy_path = state_file_path(legacy_agent_state_directory, run_id);
-    [current_path, Some(legacy_path)]
-        .into_iter()
-        .flatten()
-        .find_map(|path| match read_state_file(&path) {
-            Ok(record) => Some(record),
-            Err(error) => {
-                if path.exists() {
-                    eprintln!(
-                        "Could not recover state for Run {run_id} from {}: {error}",
-                        path.display()
-                    );
-                }
-                None
+    match read_state_file(&legacy_path) {
+        Ok(record) => Some(record),
+        Err(error) => {
+            if legacy_path.exists() {
+                eprintln!(
+                    "Could not recover legacy state for Run {run_id} from {}: {error}",
+                    legacy_path.display()
+                );
             }
-        })
+            None
+        }
+    }
 }
 
 fn confirm_downstream_issues(
@@ -791,7 +781,6 @@ pub(crate) struct ReconciliationSnapshot {
     runs: Vec<ReconciliationRunIdentity>,
     machines: Vec<Machine>,
     terminal_runtime: Arc<dyn crate::terminal::TerminalRuntime>,
-    legacy_agent_state_directory: PathBuf,
     gh_executable_path: Option<PathBuf>,
 }
 
@@ -810,7 +799,7 @@ struct ReconciliationRunIdentity {
 struct MachineReconciliationObservation {
     machine_id: i64,
     machine_name: String,
-    panes: Result<Vec<ObservedPane>, MachineObservationError>,
+    observation: ObservedMachine,
 }
 
 struct RunReconciliationObservation {
@@ -833,47 +822,24 @@ pub(crate) struct ReconciliationApply {
 
 impl ReconciliationSnapshot {
     pub(crate) fn observe(self) -> ReconciliationObservations {
-        let mut machines = Vec::new();
-        let mut observed_machine_ids = HashSet::new();
-        for run in &self.runs {
-            if !observed_machine_ids.insert(run.machine_id) {
-                continue;
-            }
-            let Some(machine) = self
-                .machines
-                .iter()
-                .find(|machine| machine.id == run.machine_id)
-            else {
-                continue;
-            };
-            machines.push(MachineReconciliationObservation {
-                machine_id: machine.id,
-                machine_name: machine.name.clone(),
-                panes: self.terminal_runtime.observe_machine(machine),
-            });
-        }
+        let machines = self.observe_machines();
 
         let runs = self
             .runs
             .iter()
             .map(|run| {
-                let state_record = self.read_state_record(run);
-                let pane_status = match machines
+                let machine_observation = machines
                     .iter()
-                    .find(|observation| observation.machine_id == run.machine_id)
-                    .map(|observation| &observation.panes)
-                {
-                    Some(Ok(panes))
-                        if panes.iter().any(|pane| {
-                            pane.session_name == run.session_name && pane.pane_id == run.pane_id
-                        }) =>
-                    {
-                        Some(RunPaneStatus::Available)
-                    }
-                    Some(Ok(panes)) if panes.iter().any(|pane| pane.pane_id == run.pane_id) => None,
-                    Some(Ok(_)) => Some(RunPaneStatus::Missing),
-                    Some(Err(_)) | None => Some(RunPaneStatus::Unknown),
-                };
+                    .find(|observation| observation.machine_id == run.machine_id);
+                let state_record = machine_observation
+                    .map(|observation| observed_state_record(&observation.observation, run));
+                let state_record = state_record.flatten();
+                let pane_status = observed_pane_status(
+                    machines
+                        .iter()
+                        .find(|observation| observation.machine_id == run.machine_id),
+                    run,
+                );
                 let should_capture_transcript = run.execution_profile == ExecutionProfile::Grill
                     && pane_status.is_some()
                     && (pane_status == Some(RunPaneStatus::Available)
@@ -918,12 +884,108 @@ impl ReconciliationSnapshot {
         ReconciliationObservations { machines, runs }
     }
 
-    fn read_state_record(&self, run: &ReconciliationRunIdentity) -> Option<AgentStateRecord> {
-        let machine = self
-            .machines
-            .iter()
-            .find(|machine| machine.id == run.machine_id);
-        read_run_state_record(run.id, machine, &self.legacy_agent_state_directory)
+    fn observe_machines(&self) -> Vec<MachineReconciliationObservation> {
+        let mut machines = Vec::new();
+        let mut observed_machine_ids = HashSet::new();
+        for run in &self.runs {
+            if !observed_machine_ids.insert(run.machine_id) {
+                continue;
+            }
+            let Some(machine) = self
+                .machines
+                .iter()
+                .find(|machine| machine.id == run.machine_id)
+            else {
+                continue;
+            };
+            let mut state_run_ids = self
+                .runs
+                .iter()
+                .filter(|candidate| candidate.machine_id == machine.id)
+                .map(|candidate| candidate.id)
+                .collect::<Vec<_>>();
+            state_run_ids.sort_unstable();
+            state_run_ids.dedup();
+            machines.push(MachineReconciliationObservation {
+                machine_id: machine.id,
+                machine_name: machine.name.clone(),
+                observation: self
+                    .terminal_runtime
+                    .observe_machine(machine, &state_run_ids),
+            });
+        }
+        machines
+    }
+}
+
+fn observed_pane_status(
+    machine: Option<&MachineReconciliationObservation>,
+    run: &ReconciliationRunIdentity,
+) -> Option<RunPaneStatus> {
+    match machine.map(|observation| &observation.observation.panes) {
+        Some(Ok(panes))
+            if panes.iter().any(|pane| {
+                pane.session_name == run.session_name && pane.pane_id == run.pane_id
+            }) =>
+        {
+            Some(RunPaneStatus::Available)
+        }
+        Some(Ok(panes)) if panes.iter().any(|pane| pane.pane_id == run.pane_id) => None,
+        Some(Ok(_)) => Some(RunPaneStatus::Missing),
+        Some(Err(_)) | None => Some(RunPaneStatus::Unknown),
+    }
+}
+
+fn observed_state_record(
+    observation: &ObservedMachine,
+    run: &ReconciliationRunIdentity,
+) -> Option<AgentStateRecord> {
+    if matches!(
+        &observation.panes,
+        Err(MachineObservationError {
+            kind: crate::terminal::MachineObservationFailureKind::Unreachable,
+            ..
+        })
+    ) {
+        return None;
+    }
+    let pane_record = observation.pane_state_records.iter().filter(|pane_state| {
+        pane_state.session_name == run.session_name
+            && pane_state.pane_id == run.pane_id
+            && pane_state.record.run_id.parse::<i64>().ok() == Some(run.id)
+            && pane_state.record.agent == run.agent
+            && pane_state
+                .record
+                .sequence
+                .is_none_or(|sequence| sequence >= 0)
+    });
+    let file_record = observation.state_file_records.iter().filter(|record| {
+        record.run_id.parse::<i64>().ok() == Some(run.id)
+            && record.agent == run.agent
+            && record.sequence.is_none_or(|sequence| sequence >= 0)
+    });
+    let pane_record = pane_record
+        .map(|pane_state| &pane_state.record)
+        .max_by_key(|record| record.sequence.unwrap_or(-1));
+    let file_record = file_record.max_by_key(|record| record.sequence.unwrap_or(-1));
+    newer_agent_state_record(pane_record, file_record).cloned()
+}
+
+fn newer_agent_state_record<'a>(
+    pane_record: Option<&'a AgentStateRecord>,
+    file_record: Option<&'a AgentStateRecord>,
+) -> Option<&'a AgentStateRecord> {
+    match (pane_record, file_record) {
+        (Some(pane), Some(file)) => {
+            if file.sequence > pane.sequence {
+                Some(file)
+            } else {
+                Some(pane)
+            }
+        }
+        (Some(pane), None) => Some(pane),
+        (None, Some(file)) => Some(file),
+        (None, None) => None,
     }
 }
 
@@ -2906,7 +2968,6 @@ impl Runtime {
             runs,
             machines,
             terminal_runtime: Arc::clone(&self.terminal_runtime),
-            legacy_agent_state_directory: self.legacy_agent_state_directory.clone(),
             gh_executable_path: self.gh_executable_path.clone(),
         }
     }
@@ -2919,7 +2980,7 @@ impl Runtime {
         let mut any_changed = false;
         let mut failures = Vec::new();
         for observation in &observations.machines {
-            if let Err(error) = &observation.panes {
+            if let Err(error) = &observation.observation.panes {
                 failures.push(MachineObservationFailure {
                     machine_id: observation.machine_id,
                     machine_name: observation.machine_name.clone(),
@@ -3399,12 +3460,7 @@ impl Runtime {
 
     pub(crate) fn recover_run_state_records(&mut self) -> Result<(), String> {
         for run in self.state.runs.clone() {
-            let machine = self
-                .state
-                .machines
-                .iter()
-                .find(|machine| machine.id == run.machine_id);
-            let record = read_run_state_record(run.id, machine, &self.legacy_agent_state_directory);
+            let record = read_run_state_record(run.id, &self.legacy_agent_state_directory);
             let Some(record) = record else {
                 continue;
             };

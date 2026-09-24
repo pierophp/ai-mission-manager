@@ -162,9 +162,9 @@ impl Runtime {
             legacy_agent_state_directory,
         };
         runtime.ensure_project_workspaces()?;
-        // Startup hydrates agent-owned state files synchronously, but tmux
-        // transcript capture belongs to the asynchronous Home/suggestions
-        // recovery path after the shared Runtime is available.
+        // Preserve legacy database-adjacent state records synchronously. The
+        // machine-scoped Pane and state-file observations run from the async
+        // Run reconciliation command once the shared Runtime is available.
         runtime.recover_run_state_records()?;
         Ok(runtime)
     }
@@ -1344,7 +1344,8 @@ mod tests {
     use crate::features::deletion::RESET_CONFIRMATION_PHRASE;
     use crate::persistence::SqliteStore;
     use crate::terminal::{
-        FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime, MachineObservationFailureKind,
+        FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime,
+        MachineObservationFailureKind, ObservedPaneAgentState,
     };
 
     fn runtime_with_single_reconciliation_run(
@@ -1976,10 +1977,309 @@ mod tests {
             recorded_commands,
             vec![
                 FakeTerminalCommand::ObserveMachine { machine_id: 1 },
+                FakeTerminalCommand::ReadAgentStateFiles {
+                    machine_id: 1,
+                    run_ids: vec![1, 2],
+                },
                 FakeTerminalCommand::ObserveMachine { machine_id: 2 },
+                FakeTerminalCommand::ReadAgentStateFiles {
+                    machine_id: 2,
+                    run_ids: vec![3],
+                },
                 FakeTerminalCommand::ObserveMachine { machine_id: 3 },
+                FakeTerminalCommand::ReadAgentStateFiles {
+                    machine_id: 3,
+                    run_ids: vec![4],
+                },
             ]
         );
+    }
+
+    #[test]
+    fn remote_pane_option_updates_run_and_needs_attention_without_opening_terminal() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let terminal = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+        terminal.set_pane_agent_state_records(
+            1,
+            vec![ObservedPaneAgentState {
+                session_name: "session-1".into(),
+                pane_id: "%1".into(),
+                record: crate::agent_state::AgentStateRecord {
+                    agent: AgentKind::Claude,
+                    run_id: "1".into(),
+                    state: RunState::Blocked,
+                    updated_at: "2026-09-24T12:00:00Z".into(),
+                    sequence: Some(4),
+                },
+            }],
+        );
+        let commands = terminal.command_log();
+        let mut runtime = runtime_with_single_reconciliation_run(&database, terminal);
+        runtime.state.machines[0].transport = MachineTransport::Ssh {
+            host: "remote.example".into(),
+            user: Some("runner".into()),
+            port: None,
+            identity_file: None,
+            known_hosts_file: None,
+            strict_host_key_checking: None,
+        };
+
+        runtime
+            .reconcile_runs()
+            .expect("the remote Pane state should apply through the fake");
+
+        assert_eq!(runtime.state.runs[0].state, RunState::Blocked);
+        assert_eq!(
+            runtime.state.runs[0].last_applied_agent_state_sequence,
+            Some(4)
+        );
+        assert!(
+            crate::domain::attention_entries(&runtime.state, None, "2026-09-24")
+                .iter()
+                .any(|entry| {
+                    entry.kind == crate::domain::AttentionEntryKind::BlockedRun
+                        && entry.run_id == Some(1)
+                })
+        );
+        assert!(runtime.terminal_connections.is_empty());
+        assert_eq!(
+            commands
+                .lock()
+                .expect("fake command log should remain available")
+                .as_slice(),
+            &[
+                FakeTerminalCommand::ObserveMachine { machine_id: 1 },
+                FakeTerminalCommand::ReadAgentStateFiles {
+                    machine_id: 1,
+                    run_ids: vec![1],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn reconciliation_applies_the_highest_sequence_between_pane_and_file() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let terminal = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+        terminal.set_observed_panes(
+            1,
+            vec![
+                crate::terminal::ObservedPane {
+                    session_name: "session-1".into(),
+                    pane_id: "%1".into(),
+                },
+                crate::terminal::ObservedPane {
+                    session_name: "session-1".into(),
+                    pane_id: "%2".into(),
+                },
+            ],
+        );
+        let record =
+            |run_id: i64, state: RunState, sequence: i64| crate::agent_state::AgentStateRecord {
+                agent: AgentKind::Claude,
+                run_id: run_id.to_string(),
+                state,
+                updated_at: "2026-09-24T12:00:00Z".into(),
+                sequence: Some(sequence),
+            };
+        terminal.set_pane_agent_state_records(
+            1,
+            vec![
+                ObservedPaneAgentState {
+                    session_name: "session-1".into(),
+                    pane_id: "%1".into(),
+                    record: record(1, RunState::Working, 2),
+                },
+                ObservedPaneAgentState {
+                    session_name: "session-1".into(),
+                    pane_id: "%2".into(),
+                    record: record(2, RunState::Finished, 8),
+                },
+            ],
+        );
+        terminal.set_agent_state_records(
+            1,
+            vec![
+                record(1, RunState::Blocked, 5),
+                record(2, RunState::Blocked, 7),
+            ],
+        );
+        let mut runtime = runtime_with_single_reconciliation_run(&database, terminal);
+        let mut second = runtime.state.runs[0].clone();
+        second.id = 2;
+        second.pane_id = "%2".into();
+        second.prompt = "Second Run".into();
+        second.started_at = 2;
+        runtime.state.runs.push(second);
+
+        runtime
+            .reconcile_runs()
+            .expect("the newer reports should apply through the reducer");
+
+        assert_eq!(runtime.state.runs[0].state, RunState::Blocked);
+        assert_eq!(
+            runtime.state.runs[0].last_applied_agent_state_sequence,
+            Some(5)
+        );
+        assert_eq!(runtime.state.runs[1].state, RunState::Finished);
+        assert_eq!(
+            runtime.state.runs[1].last_applied_agent_state_sequence,
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn remote_state_file_recovers_after_database_reopen_when_pane_is_gone() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        let item = runtime
+            .create_item("Recover remote Run".into(), 1, 1)
+            .expect("the Item should be persisted");
+        let machine = runtime
+            .register_machine(
+                1,
+                "Remote Machine".into(),
+                "remote-mission".into(),
+                MachineTransport::Ssh {
+                    host: "remote.example".into(),
+                    user: Some("runner".into()),
+                    port: None,
+                    identity_file: None,
+                    known_hosts_file: None,
+                    strict_host_key_checking: None,
+                },
+            )
+            .expect("the remote Machine should be persisted");
+        let run = Run {
+            id: 1,
+            item_id: item.id,
+            machine_id: machine.id,
+            agent: AgentKind::Claude,
+            execution_profile: ExecutionProfile::Implement,
+            model: None,
+            effort: None,
+            skill_snapshot: None,
+            prompt: "Recover this Run".into(),
+            working_directory: directory.path().to_string_lossy().into_owned(),
+            session_name: "gone-session".into(),
+            pane_id: "%gone".into(),
+            started_at: 1,
+            state: RunState::Working,
+            last_applied_agent_state_sequence: None,
+            pane_status: RunPaneStatus::Unknown,
+            workspace_id: None,
+            repository_id: None,
+            worktree_id: None,
+            direct_checkouts: Vec::new(),
+            transcript: String::new(),
+            grill_question_group: None,
+            grill_answers: Vec::new(),
+            grill_decisions: Vec::new(),
+            grill_response: None,
+            grill_phase: None,
+            grill_action: None,
+        };
+        runtime
+            .store
+            .apply(&[crate::domain::Effect::PersistRun {
+                run: run.clone(),
+                next_run_id: 2,
+            }])
+            .expect("the Run should persist before reopening the database");
+        drop(runtime);
+
+        let terminal = FakeTerminalRuntime::new([(machine.id, FakeMachineOutcome::Available)]);
+        terminal.set_agent_state_records(
+            machine.id,
+            vec![crate::agent_state::AgentStateRecord {
+                agent: AgentKind::Claude,
+                run_id: "1".into(),
+                state: RunState::Blocked,
+                updated_at: "2026-09-24T12:00:00Z".into(),
+                sequence: Some(6),
+            }],
+        );
+        let commands = terminal.command_log();
+        let mut reopened = Runtime::open_with_terminal_runtime(&database, terminal)
+            .expect("the database should reopen with the fake remote Machine");
+        assert_eq!(reopened.state.runs[0].state, RunState::Working);
+
+        reopened
+            .reconcile_runs()
+            .expect("the remote state file should recover without an open Pane");
+
+        assert_eq!(reopened.state.runs[0].state, RunState::Blocked);
+        assert_eq!(
+            reopened.state.runs[0].last_applied_agent_state_sequence,
+            Some(6)
+        );
+        assert_eq!(reopened.state.runs[0].pane_status, RunPaneStatus::Missing);
+        assert_eq!(
+            commands
+                .lock()
+                .expect("fake command log should remain available")
+                .as_slice(),
+            &[
+                FakeTerminalCommand::ObserveMachine {
+                    machine_id: machine.id,
+                },
+                FakeTerminalCommand::ReadAgentStateFiles {
+                    machine_id: machine.id,
+                    run_ids: vec![1],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unreachable_remote_machine_does_not_change_run_state() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let terminal = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Unreachable)]);
+        let record = crate::agent_state::AgentStateRecord {
+            agent: AgentKind::Claude,
+            run_id: "1".into(),
+            state: RunState::Blocked,
+            updated_at: "2026-09-24T12:00:00Z".into(),
+            sequence: Some(99),
+        };
+        terminal.set_pane_agent_state_records(
+            1,
+            vec![ObservedPaneAgentState {
+                session_name: "session-1".into(),
+                pane_id: "%1".into(),
+                record: record.clone(),
+            }],
+        );
+        terminal.set_agent_state_records(1, vec![record]);
+        let mut runtime = runtime_with_single_reconciliation_run(&database, terminal);
+        runtime.state.machines[0].transport = MachineTransport::Ssh {
+            host: "offline.example".into(),
+            user: Some("runner".into()),
+            port: None,
+            identity_file: None,
+            known_hosts_file: None,
+            strict_host_key_checking: None,
+        };
+
+        let result = runtime
+            .reconcile_runs()
+            .expect("unreachable Machines should be represented as availability failures");
+
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(
+            result.failures[0].kind,
+            MachineObservationFailureKind::Unreachable
+        );
+        assert_eq!(runtime.state.runs[0].state, RunState::Working);
+        assert_eq!(
+            runtime.state.runs[0].last_applied_agent_state_sequence,
+            None
+        );
+        assert_eq!(runtime.state.runs[0].pane_status, RunPaneStatus::Unknown);
     }
 
     #[test]
@@ -2115,7 +2415,13 @@ mod tests {
                 .lock()
                 .expect("fake command log should remain available")
                 .as_slice(),
-            &[FakeTerminalCommand::ObserveMachine { machine_id: 1 }],
+            &[
+                FakeTerminalCommand::ObserveMachine { machine_id: 1 },
+                FakeTerminalCommand::ReadAgentStateFiles {
+                    machine_id: 1,
+                    run_ids: vec![1],
+                },
+            ],
             "the stale pane must not be used to capture the Grill transcript"
         );
     }
