@@ -14,14 +14,13 @@ use std::{
 use tauri::State;
 
 use crate::{
-    app::{current_unix_seconds, Runtime},
+    app::{current_unix_seconds, MachineSettingsView, Runtime},
     domain::{
         decide, normalize_machine_path, Context, ContextAttentionDefault, Event, ExecutionMode,
         ExternalChangePolicy, ExternalObjectKind, Machine, MachineObservation, MachineTransport,
         Project, ProjectDefaults, Repository,
     },
     git::GitCli,
-    terminal::probe_machine,
 };
 
 use crate::features::deletion::{
@@ -84,8 +83,17 @@ pub(crate) fn list_repository_locations(
     })
 }
 
-pub(crate) fn list_machines(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Machine>, String> {
-    locked(state, |runtime| Ok(runtime.state.machines.clone()))
+pub(crate) fn list_machines(
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Vec<MachineSettingsView>, String> {
+    locked(state, |runtime| {
+        Ok(runtime
+            .state
+            .machines
+            .iter()
+            .map(|machine| runtime.machine_settings_view(machine))
+            .collect())
+    })
 }
 
 pub(crate) fn list_context_attention_defaults(
@@ -264,7 +272,7 @@ pub(crate) fn update_machine(
 pub(crate) fn check_machine(
     machine_id: i64,
     state: State<'_, Mutex<Runtime>>,
-) -> Result<Machine, String> {
+) -> Result<MachineSettingsView, String> {
     locked(state, |runtime| runtime.check_machine(machine_id))
 }
 
@@ -767,6 +775,7 @@ impl Runtime {
             .cloned()
             .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
         self.commit(decision)?;
+        self.machine_readiness.remove(&machine_id);
         Ok(machine)
     }
 
@@ -795,7 +804,7 @@ impl Runtime {
         Ok(machine)
     }
 
-    pub(crate) fn check_machine(&mut self, machine_id: i64) -> Result<Machine, String> {
+    pub(crate) fn check_machine(&mut self, machine_id: i64) -> Result<MachineSettingsView, String> {
         let machine = self
             .state
             .machines
@@ -803,9 +812,16 @@ impl Runtime {
             .find(|machine| machine.id == machine_id)
             .cloned()
             .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
-        probe_machine(&machine)
-            .map_err(|error| format!("Could not check Machine {}: {error}", machine.name))?;
-        self.observe_machine(machine_id, MachineObservation::Available)
+        let readiness = self.terminal_runtime.check_machine(&machine);
+        let observation =
+            if readiness.reachable == Some(true) && readiness.tmux_available == Some(true) {
+                MachineObservation::Available
+            } else {
+                MachineObservation::Offline
+            };
+        self.machine_readiness.insert(machine.id, readiness);
+        let machine = self.observe_machine(machine_id, observation)?;
+        Ok(self.machine_settings_view(&machine))
     }
 
     pub(crate) fn set_context_attention_default(
@@ -875,5 +891,48 @@ mod tests {
             .repositories
             .iter()
             .any(|repository| repository.id == 1));
+    }
+
+    #[test]
+    fn updating_machine_invalidates_cached_readiness() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        let context = runtime
+            .create_context("Remote operations".into())
+            .expect("Context should be created");
+        let machine = runtime
+            .register_machine(
+                context.id,
+                "Local machine".into(),
+                "default".into(),
+                MachineTransport::Local,
+            )
+            .expect("Machine should register");
+        runtime.machine_readiness.insert(
+            machine.id,
+            crate::terminal::MachineReadiness {
+                reachable: Some(true),
+                ..Default::default()
+            },
+        );
+
+        runtime
+            .update_machine(
+                machine.id,
+                "Remote machine".into(),
+                "default".into(),
+                MachineTransport::Ssh {
+                    host: "example.invalid".into(),
+                    user: None,
+                    port: None,
+                    identity_file: None,
+                    known_hosts_file: None,
+                    strict_host_key_checking: None,
+                },
+            )
+            .expect("Machine should update");
+
+        assert!(!runtime.machine_readiness.contains_key(&machine.id));
     }
 }

@@ -10,10 +10,10 @@ use serde_json::{Map, Value};
 use crate::domain::{AgentKind, RunState};
 
 pub const AGENT_STATE_OPTION: &str = "@ai_mission_manager_run_state";
-const AGENT_STATE_HOOK_RELATIVE_PATH: &str =
+pub const AGENT_STATE_HOOK_RELATIVE_PATH: &str =
     ".local/share/ai-mission-manager/hooks/ai-mission-manager-agent-state-hook.sh";
-const AGENT_STATE_RUNS_RELATIVE_PATH: &str = ".local/state/ai-mission-manager/runs";
-const AGENT_STATE_HOOK_SCRIPT: &str = r#"#!/bin/sh
+pub const AGENT_STATE_RUNS_RELATIVE_PATH: &str = ".local/state/ai-mission-manager/runs";
+pub const AGENT_STATE_HOOK_SCRIPT: &str = r#"#!/bin/sh
 umask 077
 
 # Provider payloads are deliberately opaque; the state is fixed in argv.
@@ -132,7 +132,7 @@ pub fn install_agent_state_hook(home: &Path) -> Result<PathBuf, String> {
         .parent()
         .ok_or_else(|| "agent state hook path has no parent directory".to_owned())?;
     create_owned_directories(hooks_dir)?;
-    let installed = fs::read(&path).ok().is_some_and(|contents| {
+    let installed = read_regular_file_if_exists(&path)?.is_some_and(|contents| {
         contents == AGENT_STATE_HOOK_SCRIPT.as_bytes() && is_executable(&path)
     });
     if !installed {
@@ -141,33 +141,64 @@ pub fn install_agent_state_hook(home: &Path) -> Result<PathBuf, String> {
     Ok(path)
 }
 
-pub fn provision_hooks(home: &Path) -> Result<(), String> {
+#[cfg(test)]
+fn provision_hooks(home: &Path) -> Result<(), String> {
+    provision_agent_hooks_for(home, AgentKind::Claude)?;
+    provision_agent_hooks_for(home, AgentKind::Codex)
+}
+
+pub fn provision_agent_hooks_for(home: &Path, agent: AgentKind) -> Result<(), String> {
     let script = install_agent_state_hook(home)?;
-    provision_provider_hooks(
-        &home.join(".claude/settings.json"),
-        &script,
-        AgentKind::Claude,
-        &[
-            ("SessionStart", RunState::Working),
-            ("UserPromptSubmit", RunState::Working),
-            ("Notification", RunState::Blocked),
-            ("Stop", RunState::Finished),
-            ("SessionEnd", RunState::Finished),
-        ],
-    )?;
-    provision_provider_hooks(
-        &home.join(".codex/hooks.json"),
-        &script,
-        AgentKind::Codex,
-        &[
-            ("SessionStart", RunState::Working),
-            ("UserPromptSubmit", RunState::Working),
-            ("PermissionRequest", RunState::Blocked),
-            ("Stop", RunState::Finished),
-            ("SessionEnd", RunState::Finished),
-        ],
-    )?;
-    Ok(())
+    let path = match agent {
+        AgentKind::Claude => home.join(".claude/settings.json"),
+        AgentKind::Codex => home.join(".codex/hooks.json"),
+    };
+    provision_provider_hooks(&path, &script, agent, agent_hook_events(agent))
+}
+
+pub fn agent_hook_events(agent: AgentKind) -> &'static [(&'static str, RunState)] {
+    const CLAUDE_EVENTS: &[(&str, RunState)] = &[
+        ("SessionStart", RunState::Working),
+        ("UserPromptSubmit", RunState::Working),
+        ("Notification", RunState::Blocked),
+        ("Stop", RunState::Finished),
+        ("SessionEnd", RunState::Finished),
+    ];
+    const CODEX_EVENTS: &[(&str, RunState)] = &[
+        ("SessionStart", RunState::Working),
+        ("UserPromptSubmit", RunState::Working),
+        ("PermissionRequest", RunState::Blocked),
+        ("Stop", RunState::Finished),
+        ("SessionEnd", RunState::Finished),
+    ];
+    match agent {
+        AgentKind::Claude => CLAUDE_EVENTS,
+        AgentKind::Codex => CODEX_EVENTS,
+    }
+}
+
+pub fn ensure_state_runs_directory(home: &Path) -> Result<PathBuf, String> {
+    let directory = state_runs_directory(home);
+    create_owned_directories(&directory)?;
+    let probe = directory.join(format!(".preflight.{}", std::process::id()));
+    let result = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&probe)
+        .map_err(|error| {
+            format!(
+                "Could not write state directory {}: {error}",
+                directory.display()
+            )
+        })
+        .and_then(|file| {
+            drop(file);
+            fs::remove_file(&probe).map_err(|error| error.to_string())
+        });
+    if result.is_err() {
+        let _ = fs::remove_file(probe);
+    }
+    result.map(|()| directory)
 }
 
 fn provision_provider_hooks(
@@ -176,21 +207,34 @@ fn provision_provider_hooks(
     agent: AgentKind,
     events: &[(&str, RunState)],
 ) -> Result<(), String> {
-    let mut settings = if path.exists() {
-        let contents = fs::read_to_string(path).map_err(|error| error.to_string())?;
-        serde_json::from_str::<Value>(&contents)
-            .map_err(|error| format!("Could not read {} as JSON: {error}", path.display()))?
-    } else {
-        Value::Object(Map::new())
+    let existing = read_regular_file_if_exists(path)?
+        .map(String::from_utf8)
+        .transpose()
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    let merged = merge_provider_hooks(existing.as_deref(), script, agent, events)
+        .map_err(|error| format!("{}: {error}", path.display()))?;
+    write_bytes_atomically_if_changed(path, &merged)
+}
+
+pub fn merge_provider_hooks(
+    existing: Option<&str>,
+    script: &Path,
+    agent: AgentKind,
+    events: &[(&str, RunState)],
+) -> Result<Vec<u8>, String> {
+    let mut settings = match existing {
+        Some(contents) => serde_json::from_str::<Value>(contents)
+            .map_err(|error| format!("could not read provider hooks as JSON: {error}"))?,
+        None => Value::Object(Map::new()),
     };
     let root = settings
         .as_object_mut()
-        .ok_or_else(|| format!("{} must contain a JSON object", path.display()))?;
+        .ok_or_else(|| "provider settings must contain a JSON object".to_owned())?;
     let hooks = root
         .entry("hooks")
         .or_insert_with(|| Value::Object(Map::new()))
         .as_object_mut()
-        .ok_or_else(|| format!("hooks in {} must be a JSON object", path.display()))?;
+        .ok_or_else(|| "hooks in provider settings must be a JSON object".to_owned())?;
     for groups_value in hooks.values_mut() {
         let Some(groups) = groups_value.as_array_mut() else {
             continue;
@@ -204,7 +248,7 @@ fn provision_provider_hooks(
                 !hook
                     .get("command")
                     .and_then(Value::as_str)
-                    .is_some_and(is_app_agent_state_command)
+                    .is_some_and(|command| is_app_agent_state_command(command, script, agent))
             });
             let removed_our_hook = group_hooks.len() != before;
             !(removed_our_hook && group_hooks.is_empty())
@@ -215,7 +259,7 @@ fn provision_provider_hooks(
             .entry((*event).to_owned())
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
-            .ok_or_else(|| format!("hooks.{event} in {} must be an array", path.display()))?;
+            .ok_or_else(|| format!("hooks.{event} must be an array"))?;
         let mut hook = Map::new();
         hook.insert("type".into(), Value::String("command".into()));
         hook.insert(
@@ -232,7 +276,9 @@ fn provision_provider_hooks(
         group.insert("hooks".into(), Value::Array(vec![Value::Object(hook)]));
         groups.push(Value::Object(group));
     }
-    write_json_atomically(path, &settings)
+    let mut contents = serde_json::to_vec_pretty(&settings).map_err(|error| error.to_string())?;
+    contents.push(b'\n');
+    Ok(contents)
 }
 
 fn hook_command(script: &Path, agent: AgentKind, state: RunState) -> String {
@@ -240,13 +286,42 @@ fn hook_command(script: &Path, agent: AgentKind, state: RunState) -> String {
         "{} {} {}",
         shell_quote(&script.to_string_lossy()),
         run_state_name(state),
-        agent_name(agent)
+        agent.slug()
     )
 }
 
-fn is_app_agent_state_command(command: &str) -> bool {
-    command.contains("--agent-state-hook")
-        || command.contains(".local/share/ai-mission-manager/")
+fn is_app_agent_state_command(command: &str, script: &Path, agent: AgentKind) -> bool {
+    let script_command_prefix = format!("{} ", shell_quote(&script.to_string_lossy()));
+    if let Some(arguments) = command.strip_prefix(&script_command_prefix) {
+        return is_agent_state_hook_arguments(arguments, agent);
+    }
+
+    if let Some((quoted_executable, arguments)) = command
+        .strip_prefix('\'')
+        .and_then(|command| command.split_once("' "))
+    {
+        let legacy_script_suffix = format!("/{}", AGENT_STATE_HOOK_RELATIVE_PATH);
+        if quoted_executable.ends_with(&legacy_script_suffix)
+            && is_agent_state_hook_arguments(arguments, agent)
+        {
+            return true;
+        }
+
+        let legacy_argument = format!("--agent-state-hook {}", agent.slug());
+        if arguments == legacy_argument
+            && (quoted_executable.ends_with(".app/Contents/MacOS/app")
+                || quoted_executable.ends_with("/ai-mission-manager"))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_agent_state_hook_arguments(arguments: &str, agent: AgentKind) -> bool {
+    ["unknown", "working", "blocked", "finished"]
+        .into_iter()
+        .any(|state| arguments == format!("{state} {}", agent.slug()))
 }
 
 fn run_state_name(state: RunState) -> &'static str {
@@ -281,8 +356,10 @@ fn is_executable(path: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::metadata(path)
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
+        fs::symlink_metadata(path)
+            .map(|metadata| {
+                metadata.file_type().is_file() && metadata.permissions().mode() & 0o111 != 0
+            })
             .unwrap_or(false)
     }
     #[cfg(not(unix))]
@@ -304,18 +381,25 @@ fn set_permissions(path: &Path, mode: u32) -> Result<(), String> {
 }
 
 fn write_executable_atomically(path: &Path, contents: &[u8]) -> Result<(), String> {
+    validate_file_target(path)?;
     let temporary = path.with_extension(format!("sh.{}.tmp", std::process::id()));
+    let mut file = OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&temporary)
+        .map_err(|error| error.to_string())?;
     let result = (|| {
-        let mut file = OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temporary)
-            .map_err(|error| error.to_string())?;
-        set_permissions(&temporary, 0o700)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o700))
+                .map_err(|error| error.to_string())?;
+        }
         file.write_all(contents)
             .map_err(|error| error.to_string())?;
         file.sync_all().map_err(|error| error.to_string())?;
         drop(file);
+        validate_file_target(path)?;
         fs::rename(&temporary, path).map_err(|error| error.to_string())
     })();
     if result.is_err() {
@@ -324,36 +408,66 @@ fn write_executable_atomically(path: &Path, contents: &[u8]) -> Result<(), Strin
     result
 }
 
-fn write_json_atomically(path: &Path, value: &Value) -> Result<(), String> {
+fn write_bytes_atomically_if_changed(path: &Path, contents: &[u8]) -> Result<(), String> {
+    if read_regular_file_if_exists(path)?.is_some_and(|current| current == contents) {
+        return Ok(());
+    }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|error| error.to_string())?;
     }
     let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
-    let contents = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
     let mut file = OpenOptions::new()
-        .create(true)
-        .truncate(true)
+        .create_new(true)
         .write(true)
         .open(&temporary)
         .map_err(|error| error.to_string())?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        file.set_permissions(fs::Permissions::from_mode(0o600))
+    let write_result = (|| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))
+                .map_err(|error| error.to_string())?;
+        }
+        file.write_all(contents)
             .map_err(|error| error.to_string())?;
-    }
-    file.write_all(&contents)
-        .map_err(|error| error.to_string())?;
-    file.write_all(b"\n").map_err(|error| error.to_string())?;
-    file.sync_all().map_err(|error| error.to_string())?;
+        file.sync_all().map_err(|error| error.to_string())
+    })();
     drop(file);
-    fs::rename(temporary, path).map_err(|error| error.to_string())
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = validate_file_target(path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = fs::rename(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
-fn agent_name(agent: AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Claude => "claude",
-        AgentKind::Codex => "codex",
+fn read_regular_file_if_exists(path: &Path) -> Result<Option<Vec<u8>>, String> {
+    if !validate_file_target(path)? {
+        return Ok(None);
+    }
+    fs::read(path)
+        .map(Some)
+        .map_err(|error| format!("{}: {error}", path.display()))
+}
+
+fn validate_file_target(path: &Path) -> Result<bool, String> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(format!("{} is a symbolic link", path.display()))
+        }
+        Ok(metadata) if !metadata.file_type().is_file() => {
+            Err(format!("{} is not a regular file", path.display()))
+        }
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(format!("{}: {error}", path.display())),
     }
 }
 
@@ -369,7 +483,7 @@ pub fn state_file_path(directory: &Path, run_id: i64) -> PathBuf {
 mod tests {
     use std::{
         fs,
-        os::unix::fs::PermissionsExt,
+        os::unix::fs::{symlink, MetadataExt, PermissionsExt},
         process::{Command, Stdio},
     };
 
@@ -425,21 +539,35 @@ mod tests {
         fs::create_dir_all(settings_path.parent().expect("settings parent")).unwrap();
         fs::write(
             &settings_path,
-            r#"{"permissions":{"allow":["Bash(*)"]},"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"existing"}]},{"hooks":[{"type":"command","command":"'/old/app' --agent-state-hook claude"}]},{"hooks":[{"type":"command","command":"'/old/.local/share/ai-mission-manager/ai-mission-manager-agent-state-hook.sh' blocked claude"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"'~/bin/report-agent-state.sh'"}]}],"Stop":[{"hooks":[{"type":"command","command":"'/old/.local/share/ai-mission-manager/report-agent-state.sh' finished claude"}]}]}}"#,
+            r#"{"permissions":{"allow":["Bash(*)"]},"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"existing"}]},{"hooks":[{"type":"command","command":"'/Applications/Mission Manager.app/Contents/MacOS/app' --agent-state-hook claude"}]},{"hooks":[{"type":"command","command":"'/old/.local/share/ai-mission-manager/hooks/ai-mission-manager-agent-state-hook.sh' blocked claude"}]},{"hooks":[{"type":"command","command":"'/Users/runner/bin/custom' --agent-state-hook claude"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"'~/bin/report-agent-state.sh'"}]}],"Stop":[{"hooks":[{"type":"command","command":"'/old/.local/share/ai-mission-manager/report-agent-state.sh' finished claude"}]}]}}"#,
         )
         .unwrap();
         let codex_settings_path = home.path().join(".codex/hooks.json");
         fs::create_dir_all(codex_settings_path.parent().unwrap()).unwrap();
         fs::write(
             &codex_settings_path,
-            r#"{"model":"gpt-5","hooks":{"PermissionRequest":[{"hooks":[{"type":"command","command":"user-codex-hook"}]},{"hooks":[{"type":"command","command":"'/old/app' --agent-state-hook codex"}]}]}}"#,
+            r#"{"model":"gpt-5","hooks":{"PermissionRequest":[{"hooks":[{"type":"command","command":"user-codex-hook"}]},{"hooks":[{"type":"command","command":"'/Applications/Mission Manager.app/Contents/MacOS/app' --agent-state-hook codex"}]}]}}"#,
         )
         .unwrap();
 
         provision_hooks(home.path()).expect("hooks should be provisioned");
         let first_claude_settings = fs::read(&settings_path).unwrap();
+        let first_claude_inode = fs::metadata(&settings_path).unwrap().ino();
+        let first_hook_inode = fs::metadata(home.path().join(AGENT_STATE_HOOK_RELATIVE_PATH))
+            .unwrap()
+            .ino();
         provision_hooks(home.path()).expect("provisioning should be idempotent");
         assert_eq!(fs::read(&settings_path).unwrap(), first_claude_settings);
+        assert_eq!(
+            fs::metadata(&settings_path).unwrap().ino(),
+            first_claude_inode
+        );
+        assert_eq!(
+            fs::metadata(home.path().join(AGENT_STATE_HOOK_RELATIVE_PATH))
+                .unwrap()
+                .ino(),
+            first_hook_inode
+        );
 
         let settings: Value = serde_json::from_str(
             &fs::read_to_string(settings_path).expect("settings should be readable"),
@@ -448,15 +576,15 @@ mod tests {
         assert_eq!(settings["permissions"]["allow"][0], "Bash(*)");
         assert_eq!(
             settings["hooks"]["SessionStart"].as_array().unwrap().len(),
-            2
+            3
         );
-        assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 2);
         assert_eq!(
             settings["hooks"]["Notification"][0]["matcher"],
             "permission_prompt|elicitation_dialog|elicitation_url_dialog"
         );
         assert_eq!(
-            settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+            settings["hooks"]["Stop"][1]["hooks"][0]["command"],
             hook_command(
                 &home.path().join(AGENT_STATE_HOOK_RELATIVE_PATH),
                 AgentKind::Claude,
@@ -472,7 +600,7 @@ mod tests {
             )
         );
         assert_eq!(
-            settings["hooks"]["SessionStart"][1]["hooks"][0]["command"],
+            settings["hooks"]["SessionStart"][2]["hooks"][0]["command"],
             hook_command(
                 &home.path().join(AGENT_STATE_HOOK_RELATIVE_PATH),
                 AgentKind::Claude,
@@ -480,14 +608,24 @@ mod tests {
             )
         );
         assert_eq!(
-            settings["hooks"]["UserPromptSubmit"].as_array().unwrap().len(),
+            settings["hooks"]["SessionStart"][1]["hooks"][0]["command"],
+            "'/Users/runner/bin/custom' --agent-state-hook claude"
+        );
+        assert_eq!(
+            settings["hooks"]["UserPromptSubmit"]
+                .as_array()
+                .unwrap()
+                .len(),
             2
         );
         assert_eq!(
             settings["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
             "'~/bin/report-agent-state.sh'"
         );
-        assert_eq!(settings["hooks"]["Stop"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            settings["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "'/old/.local/share/ai-mission-manager/report-agent-state.sh' finished claude"
+        );
         assert!(is_executable(
             &home.path().join(AGENT_STATE_HOOK_RELATIVE_PATH)
         ));
@@ -506,6 +644,138 @@ mod tests {
                 RunState::Blocked
             )
         );
+    }
+
+    #[test]
+    fn local_provider_targets_reject_symlinks_dangling_links_and_directories() {
+        let home = tempdir().expect("temporary home should exist");
+        let external = tempdir().expect("external config directory should exist");
+        let claude_path = home.path().join(".claude/settings.json");
+        fs::create_dir_all(claude_path.parent().unwrap()).unwrap();
+        let external_claude = external.path().join("settings.json");
+        fs::write(&external_claude, b"{\"user\":true}\n").unwrap();
+        symlink(&external_claude, &claude_path).unwrap();
+
+        let error = provision_agent_hooks_for(home.path(), AgentKind::Claude)
+            .expect_err("Claude settings symlink should be rejected");
+        assert!(error.contains("symbolic link"));
+        assert!(fs::symlink_metadata(&claude_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&external_claude).unwrap(), b"{\"user\":true}\n");
+
+        let codex_path = home.path().join(".codex/hooks.json");
+        fs::create_dir_all(codex_path.parent().unwrap()).unwrap();
+        let missing_codex = external.path().join("missing-hooks.json");
+        symlink(&missing_codex, &codex_path).unwrap();
+        let error = provision_agent_hooks_for(home.path(), AgentKind::Codex)
+            .expect_err("dangling Codex hooks symlink should be rejected");
+        assert!(error.contains("symbolic link"));
+        assert!(fs::symlink_metadata(&codex_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert!(!missing_codex.exists());
+
+        let directory_home = tempdir().expect("second temporary home should exist");
+        let directory_path = directory_home.path().join(".claude/settings.json");
+        fs::create_dir_all(&directory_path).unwrap();
+        let error = provision_agent_hooks_for(directory_home.path(), AgentKind::Claude)
+            .expect_err("a directory at the settings path should be rejected");
+        assert!(error.contains("not a regular file"));
+        assert!(directory_path.is_dir());
+    }
+
+    #[test]
+    fn local_script_install_rejects_symlink_target() {
+        let home = tempdir().expect("temporary home should exist");
+        let external = tempdir().expect("external hook directory should exist");
+        let script_path = home.path().join(AGENT_STATE_HOOK_RELATIVE_PATH);
+        fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        let external_script = external.path().join("user-hook.sh");
+        fs::write(&external_script, b"#!/bin/sh\necho user\n").unwrap();
+        symlink(&external_script, &script_path).unwrap();
+
+        let error = install_agent_state_hook(home.path())
+            .expect_err("agent state script symlink should be rejected");
+
+        assert!(error.contains("symbolic link"));
+        assert!(fs::symlink_metadata(&script_path)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read(external_script).unwrap(),
+            b"#!/bin/sh\necho user\n"
+        );
+    }
+
+    #[test]
+    fn local_atomic_write_refuses_preexisting_temporary_files_and_symlinks() {
+        let home = tempdir().expect("temporary home should exist");
+        let target = home.path().join(".claude/settings.json");
+        fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let temporary = target.with_extension(format!("json.{}.tmp", std::process::id()));
+        let external = home.path().join("external-config.json");
+        fs::write(&external, b"external sentinel\n").unwrap();
+        symlink(&external, &temporary).unwrap();
+
+        assert!(write_bytes_atomically_if_changed(&target, b"new config\n").is_err());
+        assert!(fs::symlink_metadata(&temporary)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(fs::read(&external).unwrap(), b"external sentinel\n");
+        assert!(!target.exists());
+
+        fs::remove_file(&temporary).unwrap();
+        fs::write(&temporary, b"pre-existing temp sentinel\n").unwrap();
+        assert!(write_bytes_atomically_if_changed(&target, b"new config\n").is_err());
+        assert_eq!(
+            fs::read(&temporary).unwrap(),
+            b"pre-existing temp sentinel\n"
+        );
+        assert!(!target.exists());
+    }
+
+    #[test]
+    fn local_script_install_refuses_preexisting_temporary_symlink() {
+        let home = tempdir().expect("temporary home should exist");
+        let external = tempdir().expect("external hook directory should exist");
+        let script_path = home.path().join(AGENT_STATE_HOOK_RELATIVE_PATH);
+        fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        let temporary = script_path.with_extension(format!("sh.{}.tmp", std::process::id()));
+        let external_script = external.path().join("user-hook.sh");
+        fs::write(&external_script, b"#!/bin/sh\necho user\n").unwrap();
+        symlink(&external_script, &temporary).unwrap();
+
+        let error = install_agent_state_hook(home.path())
+            .expect_err("pre-existing temporary symlink should block installation");
+
+        assert!(!error.is_empty());
+        assert!(fs::symlink_metadata(&temporary)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            fs::read(external_script).unwrap(),
+            b"#!/bin/sh\necho user\n"
+        );
+        assert!(!script_path.exists());
+    }
+
+    #[test]
+    fn state_directory_preflight_creates_only_a_private_writable_runs_directory() {
+        let home = tempdir().expect("temporary home should exist");
+        let runs_directory = ensure_state_runs_directory(home.path())
+            .expect("the Run state directory should be writable");
+        assert_eq!(runs_directory, state_runs_directory(home.path()));
+        assert!(runs_directory.is_dir());
+        assert!(fs::read_dir(&runs_directory).unwrap().next().is_none());
+        let permissions = fs::metadata(&runs_directory).unwrap().permissions().mode() & 0o777;
+        assert_eq!(permissions, 0o700);
+        assert!(!home.path().join(".local/share/ai-mission-manager").exists());
     }
 
     #[test]

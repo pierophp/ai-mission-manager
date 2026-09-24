@@ -11,12 +11,23 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    agent_state::{AgentStateRecord, AGENT_STATE_OPTION},
+    agent_state::{
+        self, AgentStateRecord, AGENT_STATE_HOOK_RELATIVE_PATH, AGENT_STATE_OPTION,
+        AGENT_STATE_RUNS_RELATIVE_PATH,
+    },
     domain::{AgentKind, Machine, MachineTransport},
 };
 
 pub trait TerminalRuntime: Send + Sync {
-    fn probe_machine(&self, machine: &Machine) -> Result<(), String>;
+    fn preflight_agent_run(
+        &self,
+        machine: &Machine,
+        agent: AgentKind,
+        run_id: i64,
+        preferred_executable: Option<&Path>,
+    ) -> MachineRunPreflight;
+
+    fn check_machine(&self, machine: &Machine) -> MachineReadiness;
 
     fn observe_machine(
         &self,
@@ -112,6 +123,35 @@ pub struct MachineObservationFailure {
 #[serde(rename_all = "camelCase")]
 pub struct RunReconciliationResult {
     pub failures: Vec<MachineObservationFailure>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentHookReadiness {
+    pub provisioned: Option<bool>,
+    pub current: Option<bool>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MachineReadiness {
+    pub reachable: Option<bool>,
+    pub tmux_available: Option<bool>,
+    pub claude_executable_resolved: Option<bool>,
+    pub codex_executable_resolved: Option<bool>,
+    pub state_directory_writable: Option<bool>,
+    pub claude_hooks: AgentHookReadiness,
+    pub codex_hooks: AgentHookReadiness,
+    pub last_provisioning_error: Option<String>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MachineRunPreflight {
+    pub readiness: MachineReadiness,
+    pub executable: Option<PathBuf>,
+    pub state_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -475,8 +515,18 @@ impl Drop for TmuxControlPane {
 pub struct TmuxRuntime;
 
 impl TerminalRuntime for TmuxRuntime {
-    fn probe_machine(&self, machine: &Machine) -> Result<(), String> {
-        crate::terminal::probe_machine(machine)
+    fn preflight_agent_run(
+        &self,
+        machine: &Machine,
+        agent: AgentKind,
+        run_id: i64,
+        preferred_executable: Option<&Path>,
+    ) -> MachineRunPreflight {
+        prepare_machine_for_run(machine, Some((agent, run_id)), preferred_executable)
+    }
+
+    fn check_machine(&self, machine: &Machine) -> MachineReadiness {
+        prepare_machine_for_run(machine, None, None).readiness
     }
 
     fn observe_machine(
@@ -539,12 +589,21 @@ pub(crate) enum FakeMachineOutcome {
     Available,
     Unreachable,
     TmuxQueryFailed,
+    TmuxUnavailable,
+    AgentUnavailable,
+    StateDirectoryUnwritable,
+    HookProvisioningFailed,
 }
 
 #[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum FakeTerminalCommand {
-    ProbeMachine {
+    PreflightAgentRun {
+        machine_id: i64,
+        agent: AgentKind,
+        run_id: i64,
+    },
+    CheckMachine {
         machine_id: i64,
     },
     ObserveMachine {
@@ -582,6 +641,7 @@ pub(crate) enum FakeTerminalCommand {
 pub(crate) struct FakeTerminalRuntime {
     outcomes: std::collections::HashMap<i64, FakeMachineOutcome>,
     commands: Arc<Mutex<Vec<FakeTerminalCommand>>>,
+    hook_configs: Arc<Mutex<std::collections::HashMap<(i64, String), String>>>,
 }
 
 #[cfg(test)]
@@ -590,11 +650,32 @@ impl FakeTerminalRuntime {
         Self {
             outcomes: outcomes.into_iter().collect(),
             commands: Arc::new(Mutex::new(Vec::new())),
+            hook_configs: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 
     pub(crate) fn command_log(&self) -> Arc<Mutex<Vec<FakeTerminalCommand>>> {
         Arc::clone(&self.commands)
+    }
+
+    pub(crate) fn set_agent_hook_config(
+        &self,
+        machine_id: i64,
+        agent: AgentKind,
+        contents: impl Into<String>,
+    ) {
+        self.hook_configs
+            .lock()
+            .expect("fake hook config should remain available")
+            .insert((machine_id, agent.slug().into()), contents.into());
+    }
+
+    pub(crate) fn agent_hook_config(&self, machine_id: i64, agent: AgentKind) -> Option<String> {
+        self.hook_configs
+            .lock()
+            .expect("fake hook config should remain available")
+            .get(&(machine_id, agent.slug().into()))
+            .cloned()
     }
 
     fn outcome(&self, machine: &Machine) -> FakeMachineOutcome {
@@ -623,20 +704,92 @@ impl FakeTerminalRuntime {
             current_path: "/fake/worktree".into(),
         }
     }
+
+    fn simulate_hook_provisioning(
+        &self,
+        machine: &Machine,
+        readiness: &mut MachineReadiness,
+        run: Option<(AgentKind, i64)>,
+    ) {
+        if readiness.reachable != Some(true)
+            || (run.is_some() && readiness.state_directory_writable != Some(true))
+            || self.outcome(machine) == FakeMachineOutcome::HookProvisioningFailed
+        {
+            return;
+        }
+        let script = Path::new("/fake/home").join(AGENT_STATE_HOOK_RELATIVE_PATH);
+        for agent in [AgentKind::Claude, AgentKind::Codex] {
+            let key = (machine.id, agent.slug().to_owned());
+            let existing = self
+                .hook_configs
+                .lock()
+                .expect("fake hook config should remain available")
+                .get(&key)
+                .cloned();
+            let result = agent_state::merge_provider_hooks(
+                existing.as_deref(),
+                &script,
+                agent,
+                agent_state::agent_hook_events(agent),
+            )
+            .and_then(|merged| {
+                let contents = String::from_utf8(merged).map_err(|error| error.to_string())?;
+                self.hook_configs
+                    .lock()
+                    .expect("fake hook config should remain available")
+                    .insert(key, contents);
+                Ok(())
+            });
+            let status = match result {
+                Ok(()) => hook_provisioning_success(),
+                Err(error) => hook_provisioning_failure(error),
+            };
+            match agent {
+                AgentKind::Claude => readiness.claude_hooks = status,
+                AgentKind::Codex => readiness.codex_hooks = status,
+            }
+        }
+        readiness.last_provisioning_error = [
+            readiness.claude_hooks.error.as_deref(),
+            readiness.codex_hooks.error.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .next()
+        .map(str::to_owned);
+        if readiness.error.is_none() {
+            readiness.error = readiness.last_provisioning_error.clone();
+        }
+    }
 }
 
 #[cfg(test)]
 impl TerminalRuntime for FakeTerminalRuntime {
-    fn probe_machine(&self, machine: &Machine) -> Result<(), String> {
-        self.record(FakeTerminalCommand::ProbeMachine {
+    fn preflight_agent_run(
+        &self,
+        machine: &Machine,
+        agent: AgentKind,
+        run_id: i64,
+        _preferred_executable: Option<&Path>,
+    ) -> MachineRunPreflight {
+        self.record(FakeTerminalCommand::PreflightAgentRun {
+            machine_id: machine.id,
+            agent,
+            run_id,
+        });
+        let mut preflight =
+            fake_machine_preflight(machine, self.outcome(machine), Some((agent, run_id)));
+        self.simulate_hook_provisioning(machine, &mut preflight.readiness, Some((agent, run_id)));
+        preflight
+    }
+
+    fn check_machine(&self, machine: &Machine) -> MachineReadiness {
+        self.record(FakeTerminalCommand::CheckMachine {
             machine_id: machine.id,
         });
-        match self.outcome(machine) {
-            FakeMachineOutcome::Available | FakeMachineOutcome::TmuxQueryFailed => Ok(()),
-            FakeMachineOutcome::Unreachable => {
-                Err(format!("fake Machine {} is unreachable", machine.name))
-            }
-        }
+        let mut preflight = fake_machine_preflight(machine, self.outcome(machine), None);
+        self.simulate_hook_provisioning(machine, &mut preflight.readiness, None);
+        preflight.readiness
     }
 
     fn observe_machine(
@@ -647,14 +800,19 @@ impl TerminalRuntime for FakeTerminalRuntime {
             machine_id: machine.id,
         });
         match self.outcome(machine) {
-            FakeMachineOutcome::Available => Ok(vec![ObservedPane {
+            FakeMachineOutcome::Available
+            | FakeMachineOutcome::AgentUnavailable
+            | FakeMachineOutcome::StateDirectoryUnwritable
+            | FakeMachineOutcome::HookProvisioningFailed => Ok(vec![ObservedPane {
                 session_name: format!("session-{}", machine.id),
                 pane_id: "%1".into(),
             }]),
-            FakeMachineOutcome::Unreachable => Err(MachineObservationError {
-                kind: MachineObservationFailureKind::Unreachable,
-                message: format!("fake Machine {} is unreachable", machine.name),
-            }),
+            FakeMachineOutcome::Unreachable | FakeMachineOutcome::TmuxUnavailable => {
+                Err(MachineObservationError {
+                    kind: MachineObservationFailureKind::Unreachable,
+                    message: format!("fake Machine {} is unreachable", machine.name),
+                })
+            }
             FakeMachineOutcome::TmuxQueryFailed => Err(MachineObservationError {
                 kind: MachineObservationFailureKind::TmuxQueryFailed,
                 message: format!("fake tmux query failed on Machine {}", machine.name),
@@ -672,8 +830,11 @@ impl TerminalRuntime for FakeTerminalRuntime {
             session_name: session_name.into(),
         });
         match self.outcome(machine) {
-            FakeMachineOutcome::Available => Ok(vec![Self::available_pane()]),
-            FakeMachineOutcome::Unreachable => {
+            FakeMachineOutcome::Available
+            | FakeMachineOutcome::AgentUnavailable
+            | FakeMachineOutcome::StateDirectoryUnwritable
+            | FakeMachineOutcome::HookProvisioningFailed => Ok(vec![Self::available_pane()]),
+            FakeMachineOutcome::Unreachable | FakeMachineOutcome::TmuxUnavailable => {
                 Err(format!("fake Machine {} is unreachable", machine.name))
             }
             FakeMachineOutcome::TmuxQueryFailed => Err(format!(
@@ -688,8 +849,11 @@ impl TerminalRuntime for FakeTerminalRuntime {
             machine_id: machine.id,
         });
         match self.outcome(machine) {
-            FakeMachineOutcome::Available => Ok(Vec::new()),
-            FakeMachineOutcome::Unreachable => {
+            FakeMachineOutcome::Available
+            | FakeMachineOutcome::AgentUnavailable
+            | FakeMachineOutcome::StateDirectoryUnwritable
+            | FakeMachineOutcome::HookProvisioningFailed => Ok(Vec::new()),
+            FakeMachineOutcome::Unreachable | FakeMachineOutcome::TmuxUnavailable => {
                 Err(format!("fake Machine {} is unreachable", machine.name))
             }
             FakeMachineOutcome::TmuxQueryFailed => Err(format!(
@@ -750,6 +914,98 @@ impl TerminalRuntime for FakeTerminalRuntime {
             pane_id: pane_id.into(),
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+fn fake_machine_preflight(
+    machine: &Machine,
+    outcome: FakeMachineOutcome,
+    run: Option<(AgentKind, i64)>,
+) -> MachineRunPreflight {
+    let mut readiness = MachineReadiness {
+        reachable: Some(true),
+        ..MachineReadiness::default()
+    };
+    if outcome == FakeMachineOutcome::Unreachable {
+        readiness.reachable = Some(false);
+        readiness.error = Some(format!("Could not reach Machine {}", machine.name));
+        return MachineRunPreflight {
+            readiness,
+            ..MachineRunPreflight::default()
+        };
+    }
+    if outcome == FakeMachineOutcome::TmuxUnavailable {
+        readiness.tmux_available = Some(false);
+        readiness.error = Some(format!(
+            "Machine {} does not have tmux available",
+            machine.name
+        ));
+        if run.is_some() {
+            return MachineRunPreflight {
+                readiness,
+                ..MachineRunPreflight::default()
+            };
+        }
+    } else {
+        readiness.tmux_available = Some(true);
+    }
+
+    if let Some((agent, _)) = run {
+        set_executable_readiness(
+            &mut readiness,
+            agent,
+            Some(outcome != FakeMachineOutcome::AgentUnavailable),
+        );
+    }
+    if let (FakeMachineOutcome::AgentUnavailable, Some((agent, _))) = (outcome, run) {
+        readiness.error = Some(format!(
+            "{} executable is unavailable on Machine {}",
+            agent_display_name(agent),
+            machine.name
+        ));
+        return MachineRunPreflight {
+            readiness,
+            ..MachineRunPreflight::default()
+        };
+    }
+
+    if outcome == FakeMachineOutcome::StateDirectoryUnwritable {
+        readiness.state_directory_writable = Some(false);
+        readiness.error = Some(format!(
+            "Agent state directory is not writable on Machine {}",
+            machine.name
+        ));
+        if run.is_some() {
+            return MachineRunPreflight {
+                readiness,
+                ..MachineRunPreflight::default()
+            };
+        }
+    } else {
+        readiness.state_directory_writable = Some(true);
+    }
+
+    if outcome == FakeMachineOutcome::HookProvisioningFailed {
+        let error = "fake hook provisioning failed".to_owned();
+        readiness.claude_hooks = hook_provisioning_failure(error.clone());
+        readiness.codex_hooks = hook_provisioning_failure(error.clone());
+        readiness.last_provisioning_error = Some(error.clone());
+        readiness.error = Some(error);
+        return MachineRunPreflight {
+            readiness,
+            ..MachineRunPreflight::default()
+        };
+    }
+    readiness.claude_hooks = hook_provisioning_success();
+    readiness.codex_hooks = hook_provisioning_success();
+    let state_file =
+        run.map(|(_, run_id)| state_file_for_machine_run(Path::new("/fake/home"), run_id));
+    let executable = run.map(|(agent, _)| PathBuf::from(format!("/fake/bin/{}", agent.slug())));
+    MachineRunPreflight {
+        readiness,
+        executable,
+        state_file,
     }
 }
 
@@ -982,7 +1238,10 @@ pub fn find_agent_executable(machine: &Machine, name: &str) -> Result<PathBuf, S
             .and_then(|candidate| candidate.canonicalize().ok().or(Some(candidate)))
             .ok_or_else(|| format!("{name} is not installed on Machine {}", machine.name)),
         MachineTransport::Ssh { .. } => {
-            let output = run_machine_shell(machine, &format!("command -v {}", shell_quote(name)))?;
+            let output = run_machine_shell(
+                machine,
+                &format!("command -v {} || true", shell_quote(name)),
+            )?;
             let path = output.trim();
             if path.is_empty() {
                 Err(format!(
@@ -1002,11 +1261,41 @@ pub fn find_agent_executable(machine: &Machine, name: &str) -> Result<PathBuf, S
 }
 
 pub(crate) fn run_machine_shell(machine: &Machine, command: &str) -> Result<String, String> {
-    let output = match &machine.transport {
-        MachineTransport::Local => Command::new("sh")
-            .args(["-lc", command])
-            .output()
-            .map_err(|error| format!("Could not inspect Machine {}: {error}", machine.name))?,
+    run_machine_shell_with_input(machine, command, &[])
+}
+
+fn run_machine_shell_with_input(
+    machine: &Machine,
+    command: &str,
+    input: &[u8],
+) -> Result<String, String> {
+    let (program, arguments) = build_machine_shell_command(machine, command)?;
+    let output = run_shell_with_input(&program, &arguments, input).map_err(|error| {
+        let kind = if matches!(machine.transport, MachineTransport::Ssh { .. }) {
+            "connect to"
+        } else {
+            "inspect"
+        };
+        format!("Could not {kind} Machine {}: {error}", machine.name)
+    })?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        Err(if detail.is_empty() {
+            format!("command exited with {}", output.status)
+        } else {
+            detail
+        })
+    }
+}
+
+fn build_machine_shell_command(
+    machine: &Machine,
+    command: &str,
+) -> Result<(String, Vec<String>), String> {
+    match &machine.transport {
+        MachineTransport::Local => Ok(("sh".into(), vec!["-lc".into(), command.into()])),
         MachineTransport::Ssh { .. } => {
             let transport = terminal_transport(machine);
             let TerminalTransport::Ssh(transport) = transport else {
@@ -1037,24 +1326,411 @@ pub(crate) fn run_machine_shell(machine: &Machine, command: &str) -> Result<Stri
                 ]);
             }
             arguments.extend([target, command.to_owned()]);
-            Command::new(transport.ssh_path.as_deref().unwrap_or("ssh"))
-                .args(arguments)
-                .output()
-                .map_err(|error| {
-                    format!("Could not connect to Machine {}: {error}", machine.name)
-                })?
+            Ok((
+                transport.ssh_path.as_deref().unwrap_or("ssh").to_owned(),
+                arguments,
+            ))
+        }
+    }
+}
+
+fn run_shell_with_input(
+    program: &str,
+    arguments: &[impl AsRef<std::ffi::OsStr>],
+    input: &[u8],
+) -> std::io::Result<std::process::Output> {
+    if input.is_empty() {
+        return Command::new(program).args(arguments).output();
+    }
+    let mut child = Command::new(program)
+        .args(arguments)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .expect("piped shell stdin should be available")
+        .write_all(input)?;
+    child.wait_with_output()
+}
+
+#[derive(Clone, Copy)]
+enum RemoteHookFile {
+    Script,
+    ClaudeSettings,
+    CodexHooks,
+}
+
+fn remote_hook_file_path(file: RemoteHookFile) -> &'static str {
+    match file {
+        RemoteHookFile::Script => crate::agent_state::AGENT_STATE_HOOK_RELATIVE_PATH,
+        RemoteHookFile::ClaudeSettings => ".claude/settings.json",
+        RemoteHookFile::CodexHooks => ".codex/hooks.json",
+    }
+}
+
+fn build_remote_hook_read_command(agent: AgentKind) -> String {
+    let file = match agent {
+        AgentKind::Claude => RemoteHookFile::ClaudeSettings,
+        AgentKind::Codex => RemoteHookFile::CodexHooks,
+    };
+    let path = remote_hook_file_path(file);
+    format!(
+        "target=\"$HOME/{path}\"; if [ -L \"$target\" ] || {{ [ -e \"$target\" ] && [ ! -f \"$target\" ]; }}; then printf '%s\\n' 'agent hook target is not a regular file' >&2; exit 1; fi; if [ -f \"$target\" ]; then printf '\\001'; cat \"$target\"; else printf '\\002'; fi"
+    )
+}
+
+fn build_remote_hook_write_command(agent: AgentKind) -> String {
+    let file = match agent {
+        AgentKind::Claude => RemoteHookFile::ClaudeSettings,
+        AgentKind::Codex => RemoteHookFile::CodexHooks,
+    };
+    build_remote_atomic_file_write_command(file, 0o600, false)
+}
+
+fn build_remote_hook_script_install_command() -> String {
+    build_remote_atomic_file_write_command(RemoteHookFile::Script, 0o700, true)
+}
+
+fn build_remote_atomic_file_write_command(
+    file: RemoteHookFile,
+    mode: u32,
+    repair_existing_executable_mode: bool,
+) -> String {
+    let path = remote_hook_file_path(file);
+    let existing_mode_repair = if repair_existing_executable_mode {
+        "if [ ! -x \"$target\" ]; then chmod 700 \"$target\"; fi; "
+    } else {
+        ""
+    };
+    format!("set -eu; umask 077; target=\"$HOME/{path}\"; parent=${{target%/*}}; mkdir -p \"$parent\"; if [ -L \"$target\" ] || {{ [ -e \"$target\" ] && [ ! -f \"$target\" ]; }}; then printf '%s\\n' 'agent hook target is not a regular file' >&2; exit 1; fi; temporary=\"$target.tmp.$$\"; trap 'rm -f \"$temporary\"' EXIT HUP INT TERM; (set -C; : > \"$temporary\"); cat > \"$temporary\"; chmod {mode:o} \"$temporary\"; if [ -f \"$target\" ] && cmp -s \"$target\" \"$temporary\"; then {existing_mode_repair}rm -f \"$temporary\"; else mv -f \"$temporary\" \"$target\"; fi; if [ -L \"$target\" ] || [ ! -f \"$target\" ]; then printf '%s\\n' 'agent hook target was not written as a regular file' >&2; exit 1; fi; trap - EXIT HUP INT TERM")
+}
+
+fn build_remote_state_directory_probe_command() -> String {
+    "set -eu; state_dir=\"$HOME/.local/state/ai-mission-manager/runs\"; umask 077; mkdir -p \"$state_dir\"; temporary=\"$state_dir/.preflight.$$\"; (set -C; : > \"$temporary\"); rm -f \"$temporary\"".into()
+}
+
+fn read_remote_hook_file(machine: &Machine, agent: AgentKind) -> Result<Option<String>, String> {
+    let output = run_machine_shell(machine, &build_remote_hook_read_command(agent))?;
+    let Some(marker) = output.get(..1) else {
+        return Err(format!(
+            "Machine {} returned an invalid provider hooks response",
+            machine.name
+        ));
+    };
+    let contents = &output[1..];
+    match marker {
+        "\u{1}" => Ok(Some(contents.to_owned())),
+        "\u{2}" if contents.is_empty() => Ok(None),
+        _ => Err(format!(
+            "Machine {} returned an invalid provider hooks response",
+            machine.name
+        )),
+    }
+}
+
+fn write_remote_hook_file(
+    machine: &Machine,
+    agent: AgentKind,
+    contents: &[u8],
+) -> Result<(), String> {
+    run_machine_shell_with_input(machine, &build_remote_hook_write_command(agent), contents)
+        .map(|_| ())
+}
+
+fn install_remote_hook_script(machine: &Machine) -> Result<(), String> {
+    run_machine_shell_with_input(
+        machine,
+        &build_remote_hook_script_install_command(),
+        crate::agent_state::AGENT_STATE_HOOK_SCRIPT.as_bytes(),
+    )
+    .map(|_| ())
+}
+
+fn prepare_machine_for_run(
+    machine: &Machine,
+    run: Option<(AgentKind, i64)>,
+    preferred_executable: Option<&Path>,
+) -> MachineRunPreflight {
+    let mut readiness = MachineReadiness::default();
+    let home = match &machine.transport {
+        MachineTransport::Local => match env::var_os("HOME") {
+            Some(home) => PathBuf::from(home),
+            None => {
+                readiness.reachable = Some(true);
+                readiness.error = Some("HOME is not set on the local Machine".into());
+                return MachineRunPreflight {
+                    readiness,
+                    ..MachineRunPreflight::default()
+                };
+            }
+        },
+        MachineTransport::Ssh { .. } => match run_machine_shell(machine, "printf '%s' \"$HOME\"") {
+            Ok(home) if Path::new(home.trim()).is_absolute() => PathBuf::from(home.trim()),
+            Ok(_) => {
+                readiness.reachable = Some(true);
+                readiness.error = Some(format!(
+                    "Machine {} did not report an absolute home directory",
+                    machine.name
+                ));
+                return MachineRunPreflight {
+                    readiness,
+                    ..MachineRunPreflight::default()
+                };
+            }
+            Err(error) => {
+                readiness.reachable = Some(false);
+                readiness.error =
+                    Some(format!("Could not reach Machine {}: {error}", machine.name));
+                return MachineRunPreflight {
+                    readiness,
+                    ..MachineRunPreflight::default()
+                };
+            }
+        },
+    };
+    readiness.reachable = Some(true);
+
+    if let Err(error) = probe_machine(machine) {
+        readiness.tmux_available = Some(false);
+        readiness.error = Some(format!(
+            "Machine {} does not have a working tmux runtime: {error}",
+            machine.name
+        ));
+        if run.is_some() {
+            return MachineRunPreflight {
+                readiness,
+                ..MachineRunPreflight::default()
+            };
+        }
+    } else {
+        readiness.tmux_available = Some(true);
+    }
+
+    let mut executable = None;
+    if let Some((agent, _)) = run {
+        match resolve_run_executable(machine, agent, preferred_executable) {
+            Ok(path) => {
+                set_executable_readiness(&mut readiness, agent, Some(true));
+                executable = Some(path);
+            }
+            Err(error) => {
+                set_executable_readiness(&mut readiness, agent, Some(false));
+                readiness.error = Some(error);
+                return MachineRunPreflight {
+                    readiness,
+                    ..MachineRunPreflight::default()
+                };
+            }
+        }
+    }
+
+    let state_directory = match &machine.transport {
+        MachineTransport::Local => agent_state::ensure_state_runs_directory(&home),
+        MachineTransport::Ssh { .. } => {
+            run_machine_shell(machine, &build_remote_state_directory_probe_command())
+                .map(|_| home.join(AGENT_STATE_RUNS_RELATIVE_PATH))
         }
     };
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(if detail.is_empty() {
-            format!("command exited with {}", output.status)
-        } else {
-            detail
-        })
+    match state_directory {
+        Ok(_directory) => readiness.state_directory_writable = Some(true),
+        Err(error) => {
+            readiness.state_directory_writable = Some(false);
+            if readiness.error.is_none() {
+                readiness.error = Some(format!(
+                    "Agent state directory is not writable on Machine {}: {error}",
+                    machine.name
+                ));
+            }
+            if run.is_some() {
+                return MachineRunPreflight {
+                    readiness,
+                    ..MachineRunPreflight::default()
+                };
+            }
+        }
     }
+
+    let (claude_hooks, codex_hooks) = match &machine.transport {
+        MachineTransport::Local => provision_local_agent_hooks(&home),
+        MachineTransport::Ssh { .. } => provision_remote_agent_hooks(machine, &home),
+    };
+    readiness.claude_hooks = claude_hooks;
+    readiness.codex_hooks = codex_hooks;
+    readiness.last_provisioning_error = [
+        readiness.claude_hooks.error.as_deref(),
+        readiness.codex_hooks.error.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .next()
+    .map(str::to_owned);
+    if readiness.error.is_none() {
+        readiness.error = readiness.last_provisioning_error.clone();
+    }
+
+    if readiness.error.is_some() {
+        return MachineRunPreflight {
+            readiness,
+            ..MachineRunPreflight::default()
+        };
+    }
+
+    let state_file = run.map(|(_, run_id)| state_file_for_machine_run(&home, run_id));
+    MachineRunPreflight {
+        readiness,
+        executable,
+        state_file,
+    }
+}
+
+fn resolve_run_executable(
+    machine: &Machine,
+    agent: AgentKind,
+    preferred_executable: Option<&Path>,
+) -> Result<PathBuf, String> {
+    let name = agent.slug();
+    let path = if matches!(machine.transport, MachineTransport::Local) {
+        match preferred_executable {
+            Some(path) if is_executable(path) => Ok(path.to_owned()),
+            Some(path) => Err(format!(
+                "{} executable {} is not available on Machine {}",
+                agent_display_name(agent),
+                path.display(),
+                machine.name
+            )),
+            None => find_agent_executable(machine, name),
+        }
+    } else {
+        find_agent_executable(machine, name)
+    };
+    path.map_err(|error| {
+        format!(
+            "{} executable is unavailable on Machine {}: {error}",
+            agent_display_name(agent),
+            machine.name
+        )
+    })
+}
+
+fn provision_local_agent_hooks(home: &Path) -> (AgentHookReadiness, AgentHookReadiness) {
+    let script = agent_state::install_agent_state_hook(home);
+    let mut claude = match &script {
+        Ok(_) => provision_local_provider_hooks(home, AgentKind::Claude),
+        Err(error) => hook_provisioning_failure(error.clone()),
+    };
+    let mut codex = match &script {
+        Ok(_) => provision_local_provider_hooks(home, AgentKind::Codex),
+        Err(error) => hook_provisioning_failure(error.clone()),
+    };
+    if script.is_err() {
+        claude.current = Some(false);
+        codex.current = Some(false);
+    }
+    (claude, codex)
+}
+
+fn provision_local_provider_hooks(home: &Path, agent: AgentKind) -> AgentHookReadiness {
+    match agent_state::provision_agent_hooks_for(home, agent) {
+        Ok(()) => hook_provisioning_success(),
+        Err(error) => hook_provisioning_failure(error),
+    }
+}
+
+fn provision_remote_agent_hooks(
+    machine: &Machine,
+    home: &Path,
+) -> (AgentHookReadiness, AgentHookReadiness) {
+    if let Err(error) = install_remote_hook_script(machine) {
+        let message = format!("Could not provision the agent state hook script: {error}");
+        return (
+            hook_provisioning_failure(message.clone()),
+            hook_provisioning_failure(message),
+        );
+    }
+    let script = home.join(AGENT_STATE_HOOK_RELATIVE_PATH);
+    (
+        provision_remote_provider_hooks(machine, &script, AgentKind::Claude),
+        provision_remote_provider_hooks(machine, &script, AgentKind::Codex),
+    )
+}
+
+fn provision_remote_provider_hooks(
+    machine: &Machine,
+    script: &Path,
+    agent: AgentKind,
+) -> AgentHookReadiness {
+    let result = (|| {
+        let existing = read_remote_hook_file(machine, agent)?;
+        let merged = agent_state::merge_provider_hooks(
+            existing.as_deref(),
+            script,
+            agent,
+            agent_state::agent_hook_events(agent),
+        )
+        .map_err(|error| {
+            format!(
+                "Could not merge {} hooks: {error}",
+                agent_display_name(agent)
+            )
+        })?;
+        if existing
+            .as_deref()
+            .is_none_or(|current| current.as_bytes() != merged)
+        {
+            write_remote_hook_file(machine, agent, &merged).map_err(|error| {
+                format!(
+                    "Could not write {} hooks atomically: {error}",
+                    agent_display_name(agent)
+                )
+            })?;
+        }
+        Ok::<(), String>(())
+    })();
+    match result {
+        Ok(()) => hook_provisioning_success(),
+        Err(error) => hook_provisioning_failure(error),
+    }
+}
+
+fn hook_provisioning_success() -> AgentHookReadiness {
+    AgentHookReadiness {
+        provisioned: Some(true),
+        current: Some(true),
+        error: None,
+    }
+}
+
+fn hook_provisioning_failure(error: String) -> AgentHookReadiness {
+    AgentHookReadiness {
+        provisioned: Some(false),
+        current: Some(false),
+        error: Some(error),
+    }
+}
+
+fn set_executable_readiness(
+    readiness: &mut MachineReadiness,
+    agent: AgentKind,
+    result: Option<bool>,
+) {
+    match agent {
+        AgentKind::Claude => readiness.claude_executable_resolved = result,
+        AgentKind::Codex => readiness.codex_executable_resolved = result,
+    }
+}
+
+fn agent_display_name(agent: AgentKind) -> &'static str {
+    match agent {
+        AgentKind::Claude => "Claude Code",
+        AgentKind::Codex => "Codex",
+    }
+}
+
+fn state_file_for_machine_run(home: &Path, run_id: i64) -> PathBuf {
+    agent_state::state_file_path(&home.join(AGENT_STATE_RUNS_RELATIVE_PATH), run_id)
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -1861,6 +2537,172 @@ mod tests {
             .last()
             .is_some_and(|argument| argument.contains("'tmux'")));
         assert!(!command.0.ends_with("tmux"));
+    }
+
+    #[test]
+    fn remote_hook_commands_are_limited_to_owned_paths_and_write_atomically() {
+        let remote_machine = Machine {
+            id: 9,
+            context_id: 1,
+            name: "Remote Machine".into(),
+            socket_name: "mission".into(),
+            transport: MachineTransport::Ssh {
+                host: "build.example".into(),
+                user: Some("runner".into()),
+                port: Some(2222),
+                identity_file: Some("/Users/me/.ssh/mission".into()),
+                known_hosts_file: Some("/Users/me/.ssh/known_hosts".into()),
+                strict_host_key_checking: Some("yes".into()),
+            },
+            last_observed: crate::domain::MachineObservation::Unknown,
+            last_observed_at: None,
+        };
+        let claude_read = build_remote_hook_read_command(AgentKind::Claude);
+        assert!(claude_read.contains("$HOME/.claude/settings.json"));
+        assert!(claude_read.contains("[ -L \"$target\" ]"));
+        assert!(claude_read.contains("[ -e \"$target\" ] && [ ! -f \"$target\" ]"));
+        assert!(claude_read.contains("printf '\\001'; cat"));
+        assert!(!claude_read.contains(".codex/"));
+        let (ssh_read_program, ssh_read_arguments) =
+            build_machine_shell_command(&remote_machine, &claude_read)
+                .expect("remote settings read should use SSH");
+        assert_eq!(ssh_read_program, "ssh");
+        assert!(ssh_read_arguments.contains(&"runner@build.example".into()));
+        assert_eq!(ssh_read_arguments.last(), Some(&claude_read));
+
+        let codex_read = build_remote_hook_read_command(AgentKind::Codex);
+        assert!(codex_read.contains("$HOME/.codex/hooks.json"));
+        assert!(!codex_read.contains(".claude/"));
+
+        let claude_write = build_remote_hook_write_command(AgentKind::Claude);
+        assert!(claude_write.contains("set -eu; umask 077;"));
+        assert!(claude_write.contains("target=\"$HOME/.claude/settings.json\""));
+        assert!(claude_write.contains("[ -L \"$target\" ]"));
+        assert!(claude_write.contains("[ -e \"$target\" ] && [ ! -f \"$target\" ]"));
+        assert!(claude_write.contains("temporary=\"$target.tmp.$$\""));
+        assert!(claude_write.contains("(set -C; : > \"$temporary\")"));
+        assert!(claude_write.contains("cmp -s \"$target\" \"$temporary\""));
+        assert!(claude_write.contains("mv -f \"$temporary\" \"$target\""));
+        assert!(claude_write.contains("[ ! -f \"$target\" ]; then printf"));
+        assert!(claude_write.contains("chmod 600 \"$temporary\""));
+        assert!(!claude_write.contains(".codex/"));
+        let (ssh_write_program, ssh_write_arguments) =
+            build_machine_shell_command(&remote_machine, &claude_write)
+                .expect("remote settings write should use SSH");
+        assert_eq!(ssh_write_program, "ssh");
+        assert_eq!(ssh_write_arguments.last(), Some(&claude_write));
+
+        let script_install = build_remote_hook_script_install_command();
+        assert!(script_install.contains(&format!(
+            "$HOME/{}",
+            crate::agent_state::AGENT_STATE_HOOK_RELATIVE_PATH
+        )));
+        assert!(script_install.contains("cmp -s \"$target\" \"$temporary\""));
+        assert!(script_install.contains("if [ ! -x \"$target\" ]; then chmod 700"));
+        assert!(script_install.contains("chmod 700 \"$temporary\""));
+        assert!(!script_install.contains(".claude/"));
+        assert!(!script_install.contains(".codex/"));
+
+        let state_probe = build_remote_state_directory_probe_command();
+        assert!(state_probe.contains("$HOME/.local/state/ai-mission-manager/runs"));
+        assert!(state_probe.contains("set -C; : > \"$temporary\""));
+        assert!(state_probe.contains("rm -f \"$temporary\""));
+        assert!(!state_probe.contains(".ssh/"));
+        assert_eq!(
+            state_file_for_machine_run(Path::new("/home/runner"), 23),
+            PathBuf::from("/home/runner/.local/state/ai-mission-manager/runs/run-23.json")
+        );
+    }
+
+    #[test]
+    fn fake_remote_provisioning_is_idempotent_and_preserves_user_hooks() {
+        let machine = Machine {
+            id: 9,
+            context_id: 1,
+            name: "Remote Machine".into(),
+            socket_name: "mission".into(),
+            transport: MachineTransport::Ssh {
+                host: "build.example".into(),
+                user: Some("runner".into()),
+                port: None,
+                identity_file: None,
+                known_hosts_file: None,
+                strict_host_key_checking: None,
+            },
+            last_observed: crate::domain::MachineObservation::Unknown,
+            last_observed_at: None,
+        };
+        let fake = FakeTerminalRuntime::new([(machine.id, FakeMachineOutcome::Available)]);
+        fake.set_agent_hook_config(
+            machine.id,
+            AgentKind::Claude,
+            r#"{"permissions":{"allow":["Bash(*)"]},"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"user-claude-hook"}]},{"hooks":[{"type":"command","command":"'/old/.local/share/ai-mission-manager/hook.sh' working claude"}]}]}}"#,
+        );
+        fake.set_agent_hook_config(
+            machine.id,
+            AgentKind::Codex,
+            r#"{"model":"gpt-5","hooks":{"PermissionRequest":[{"hooks":[{"type":"command","command":"user-codex-hook"}]}]}}"#,
+        );
+
+        let first = fake.preflight_agent_run(&machine, AgentKind::Claude, 23, None);
+        assert_eq!(first.readiness.claude_hooks.current, Some(true));
+        assert_eq!(first.readiness.codex_hooks.current, Some(true));
+        assert_eq!(
+            first.state_file,
+            Some(PathBuf::from(
+                "/fake/home/.local/state/ai-mission-manager/runs/run-23.json"
+            ))
+        );
+        let claude_after_first = fake
+            .agent_hook_config(machine.id, AgentKind::Claude)
+            .unwrap();
+        let codex_after_first = fake
+            .agent_hook_config(machine.id, AgentKind::Codex)
+            .unwrap();
+
+        let second = fake.preflight_agent_run(&machine, AgentKind::Claude, 23, None);
+        assert_eq!(second.readiness.claude_hooks.current, Some(true));
+        assert_eq!(second.readiness.codex_hooks.current, Some(true));
+        assert_eq!(
+            fake.agent_hook_config(machine.id, AgentKind::Claude)
+                .as_deref(),
+            Some(claude_after_first.as_str())
+        );
+        assert_eq!(
+            fake.agent_hook_config(machine.id, AgentKind::Codex)
+                .as_deref(),
+            Some(codex_after_first.as_str())
+        );
+
+        let claude: serde_json::Value = serde_json::from_str(&claude_after_first).unwrap();
+        let codex: serde_json::Value = serde_json::from_str(&codex_after_first).unwrap();
+        assert_eq!(claude["permissions"]["allow"][0], "Bash(*)");
+        assert_eq!(
+            claude["hooks"]["SessionStart"][0]["hooks"][0]["command"],
+            "user-claude-hook"
+        );
+        assert_eq!(codex["model"], "gpt-5");
+        assert_eq!(
+            codex["hooks"]["PermissionRequest"][0]["hooks"][0]["command"],
+            "user-codex-hook"
+        );
+        for (agent, settings) in [(AgentKind::Claude, &claude), (AgentKind::Codex, &codex)] {
+            for (event, _) in agent_state::agent_hook_events(agent) {
+                let app_hooks = settings["hooks"][*event]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|group| group["hooks"].as_array().into_iter().flatten())
+                    .filter(|hook| {
+                        hook["command"].as_str().is_some_and(|command| {
+                            command.contains("--agent-state-hook")
+                                || command.contains(".local/share/ai-mission-manager/")
+                        })
+                    })
+                    .count();
+                assert_eq!(app_hooks, 1, "{agent:?} {event} should have one app hook");
+            }
+        }
     }
 
     #[test]

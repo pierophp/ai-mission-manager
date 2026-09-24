@@ -41,6 +41,71 @@ impl Runtime {
             .map_err(|error| error.to_string())
     }
 
+    fn prepare_run_environment(
+        &mut self,
+        machine: &Machine,
+        agent: AgentKind,
+        run_id: i64,
+    ) -> Result<(PathBuf, PathBuf), String> {
+        let preferred_executable = match self.preferred_agent_executable(machine, agent) {
+            Ok(executable) => executable,
+            Err(error) => {
+                let readiness = crate::terminal::MachineReadiness {
+                    error: Some(error.clone()),
+                    ..Default::default()
+                };
+                self.machine_readiness.insert(machine.id, readiness);
+                return Err(format!(
+                    "Run preflight failed on Machine {}. The Run was not started locally: {error}",
+                    machine.name
+                ));
+            }
+        };
+        let preflight = self.terminal_runtime.preflight_agent_run(
+            machine,
+            agent,
+            run_id,
+            preferred_executable.as_deref(),
+        );
+        let mut readiness = preflight.readiness;
+        self.machine_readiness.insert(machine.id, readiness.clone());
+        if let Some(error) = readiness.error.clone() {
+            return Err(format!(
+                "Run preflight failed on Machine {}. The Run was not started locally: {error}",
+                machine.name
+            ));
+        }
+        let executable = preflight.executable.ok_or_else(|| {
+            let error = format!(
+                "{} executable did not resolve on Machine {}",
+                agent_display_name(agent),
+                machine.name
+            );
+            readiness.error = Some(error.clone());
+            self.machine_readiness.insert(machine.id, readiness.clone());
+            error
+        })?;
+        let state_file = preflight.state_file.ok_or_else(|| {
+            let error = format!(
+                "Agent state file path was not prepared on Machine {}",
+                machine.name
+            );
+            readiness.error = Some(error.clone());
+            self.machine_readiness.insert(machine.id, readiness.clone());
+            error
+        })?;
+        if let Err(error) = self.store_agent_executable(machine, agent, &executable) {
+            readiness.error = Some(error.clone());
+            self.machine_readiness.insert(machine.id, readiness.clone());
+            return Err(format!(
+                "Run preflight failed on Machine {}. The Run was not started locally: {error}",
+                machine.name
+            ));
+        }
+        self.observe_machine(machine.id, MachineObservation::Available)?;
+        Ok((state_file, executable))
+    }
+
     pub(crate) fn inspect_direct_checkouts(
         &mut self,
         item_id: i64,
@@ -255,25 +320,7 @@ impl Runtime {
         )
         .map_err(|error| error.to_string())?;
 
-        if let Err(error) = self.terminal_runtime.probe_machine(&machine) {
-            return Err(format!(
-                "Could not reach Machine {}. The Run was not started locally: {error}",
-                machine.name
-            ));
-        }
-        self.observe_machine(machine.id, MachineObservation::Available)?;
-        if matches!(machine.transport, MachineTransport::Local) {
-            self.provision_agent_hooks()?;
-        }
-        let state_file = if matches!(machine.transport, MachineTransport::Local) {
-            let home = machine_home_directory(&machine);
-            state_file_path(&state_runs_directory(Path::new(&home)), run_id)
-        } else {
-            PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
-        };
-        let executable = self
-            .agent_executable(&machine, agent)
-            .map_err(|error| format!("{}: {error}", agent_display_name(agent)))?;
+        let (state_file, executable) = self.prepare_run_environment(&machine, agent, run_id)?;
         let (_, before_launch) =
             self.inspect_direct_checkouts(item_id, workspace_id, Some(machine.id))?;
         let before_launch = before_launch
@@ -471,25 +518,8 @@ impl Runtime {
         )
         .map_err(|error| error.to_string())?;
 
-        if let Err(error) = self.terminal_runtime.probe_machine(&machine) {
-            return Err(format!(
-                "Could not reach Machine {}. The Grill was not started locally: {error}",
-                machine.name
-            ));
-        }
-        self.observe_machine(machine.id, MachineObservation::Available)?;
-        if matches!(machine.transport, MachineTransport::Local) {
-            self.provision_agent_hooks()?;
-        }
-        let state_file = if matches!(machine.transport, MachineTransport::Local) {
-            let home = machine_home_directory(&machine);
-            state_file_path(&state_runs_directory(Path::new(&home)), run_id)
-        } else {
-            PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
-        };
-        let executable = self
-            .agent_executable(&machine, configuration.agent)
-            .map_err(|error| format!("{}: {error}", agent_display_name(configuration.agent)))?;
+        let (state_file, executable) =
+            self.prepare_run_environment(&machine, configuration.agent, run_id)?;
         let pane_id = self.terminal_runtime.launch_agent(
             &machine,
             &session_name,
@@ -609,25 +639,7 @@ impl Runtime {
         )
         .map_err(|error| error.to_string())?;
 
-        if let Err(error) = self.terminal_runtime.probe_machine(&machine) {
-            return Err(format!(
-                "Could not reach Machine {}. The Run was not started locally: {error}",
-                machine.name
-            ));
-        }
-        self.observe_machine(machine.id, MachineObservation::Available)?;
-        if matches!(machine.transport, MachineTransport::Local) {
-            self.provision_agent_hooks()?;
-        }
-        let state_file = if matches!(machine.transport, MachineTransport::Local) {
-            let home = machine_home_directory(&machine);
-            state_file_path(&state_runs_directory(Path::new(&home)), run_id)
-        } else {
-            PathBuf::from(format!("/tmp/ai-mission-manager-run-{run_id}.json"))
-        };
-        let executable = self
-            .agent_executable(&machine, agent)
-            .map_err(|error| format!("{}: {error}", agent_display_name(agent)))?;
+        let (state_file, executable) = self.prepare_run_environment(&machine, agent, run_id)?;
         let pane_id = self.terminal_runtime.launch_agent(
             &machine,
             &session_name,
@@ -1455,13 +1467,6 @@ impl Runtime {
             transport,
         };
         open_pane_in_terminal(&identity)
-    }
-
-    pub(crate) fn provision_agent_hooks(&self) -> Result<(), String> {
-        let home = env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| "HOME is not set; agent hooks cannot be provisioned".to_owned())?;
-        provision_hooks(&home)
     }
 
     pub(crate) fn recover_run_states(&mut self) -> Result<(), String> {

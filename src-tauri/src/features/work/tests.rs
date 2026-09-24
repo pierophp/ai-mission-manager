@@ -364,3 +364,190 @@ fn workspace_interface_keeps_repository_selection_and_worktree_identity() {
     assert_eq!(reopened.state.workspaces, runtime.state.workspaces);
     assert_eq!(reopened.state.worktrees, runtime.state.worktrees);
 }
+
+#[test]
+fn a_failed_run_preflight_never_calls_the_agent_launcher() {
+    use crate::{
+        domain::{AgentKind, ExecutionProfile, MachineTransport, RunPromptSelection, Worktree},
+        terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime},
+    };
+
+    for outcome in [
+        FakeMachineOutcome::Unreachable,
+        FakeMachineOutcome::TmuxUnavailable,
+        FakeMachineOutcome::AgentUnavailable,
+        FakeMachineOutcome::StateDirectoryUnwritable,
+        FakeMachineOutcome::HookProvisioningFailed,
+    ] {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let fake = FakeTerminalRuntime::new([(1, outcome)]);
+        let commands = fake.command_log();
+        let mut runtime = Runtime::open_with_terminal_runtime(&database, fake)
+            .expect("runtime should open with the fake Terminal Runtime");
+        runtime
+            .register_machine(
+                1,
+                "Test Machine".into(),
+                "mission".into(),
+                MachineTransport::Ssh {
+                    host: "build.example".into(),
+                    user: Some("runner".into()),
+                    port: None,
+                    identity_file: None,
+                    known_hosts_file: None,
+                    strict_host_key_checking: None,
+                },
+            )
+            .expect("Machine should be registered");
+        runtime
+            .set_context_execution_machine(1, Some(1))
+            .expect("Context should use the Machine");
+        runtime
+            .register_repository(
+                1,
+                "service".into(),
+                "https://example.com/service.git".into(),
+            )
+            .expect("Repository should be registered");
+        let item = runtime
+            .create_item("Start a Run".into(), 1, 1)
+            .expect("Item should be created");
+        let workspace = runtime
+            .create_workspace(
+                item.id,
+                vec![WorkspaceRepositoryInput {
+                    repository_id: 1,
+                    branch: "feature/preflight".into(),
+                    base_branch: "main".into(),
+                }],
+            )
+            .expect("execution setup should be created");
+        runtime.state.worktrees.push(Worktree {
+            id: 1,
+            workspace_id: workspace.id,
+            repository_id: 1,
+            machine_id: 1,
+            path: directory.path().to_string_lossy().into_owned(),
+            branch: "feature/preflight".into(),
+            base_branch: "main".into(),
+            is_dirty: false,
+        });
+
+        let error = runtime
+            .start_worktree_run(
+                item.id,
+                workspace.id,
+                1,
+                AgentKind::Claude,
+                ExecutionProfile::Implement,
+                "Implement the change".into(),
+                RunPromptSelection {
+                    include_objective: true,
+                    include_notes: false,
+                    external_object_ids: Vec::new(),
+                },
+            )
+            .expect_err("a failed preflight should abort the Run");
+        assert!(error.contains("Run preflight failed on Machine Test Machine"));
+        assert!(error.contains("not started locally"));
+        let recorded = commands
+            .lock()
+            .expect("fake command log should remain available")
+            .clone();
+        assert!(recorded.iter().any(|command| matches!(
+            command,
+            FakeTerminalCommand::PreflightAgentRun {
+                machine_id: 1,
+                agent: AgentKind::Claude,
+                run_id: 1,
+            }
+        )));
+        assert!(!recorded
+            .iter()
+            .any(|command| matches!(command, FakeTerminalCommand::LaunchAgent { .. })));
+    }
+}
+
+#[test]
+fn machine_check_returns_per_agent_hook_failures_for_settings() {
+    use crate::{
+        domain::MachineTransport,
+        terminal::{FakeMachineOutcome, FakeTerminalRuntime},
+    };
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::HookProvisioningFailed)]);
+    let mut runtime = Runtime::open_with_terminal_runtime(&database, fake)
+        .expect("runtime should open with the fake Terminal Runtime");
+    runtime
+        .register_machine(
+            1,
+            "Remote Machine".into(),
+            "mission".into(),
+            MachineTransport::Ssh {
+                host: "build.example".into(),
+                user: Some("runner".into()),
+                port: None,
+                identity_file: None,
+                known_hosts_file: None,
+                strict_host_key_checking: None,
+            },
+        )
+        .expect("Machine should be registered");
+
+    let checked = runtime
+        .check_machine(1)
+        .expect("hook provisioning failures should be represented in the readiness result");
+    let readiness = checked
+        .readiness
+        .expect("Settings should receive Machine readiness");
+    assert_eq!(readiness.claude_hooks.provisioned, Some(false));
+    assert_eq!(readiness.claude_hooks.current, Some(false));
+    assert_eq!(readiness.codex_hooks.provisioned, Some(false));
+    assert_eq!(readiness.codex_hooks.current, Some(false));
+    assert_eq!(
+        readiness.last_provisioning_error.as_deref(),
+        Some("fake hook provisioning failed")
+    );
+}
+
+#[test]
+fn settings_check_reports_hooks_even_when_tmux_is_unavailable() {
+    use crate::{
+        domain::MachineTransport,
+        terminal::{FakeMachineOutcome, FakeTerminalRuntime},
+    };
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::TmuxUnavailable)]);
+    let mut runtime = Runtime::open_with_terminal_runtime(&database, fake)
+        .expect("runtime should open with the fake Terminal Runtime");
+    runtime
+        .register_machine(
+            1,
+            "Remote Machine".into(),
+            "mission".into(),
+            MachineTransport::Ssh {
+                host: "build.example".into(),
+                user: Some("runner".into()),
+                port: None,
+                identity_file: None,
+                known_hosts_file: None,
+                strict_host_key_checking: None,
+            },
+        )
+        .expect("Machine should be registered");
+
+    let checked = runtime
+        .check_machine(1)
+        .expect("Machine checks should return readiness even when tmux is missing");
+    let readiness = checked.readiness.expect("readiness should be returned");
+    assert_eq!(readiness.tmux_available, Some(false));
+    assert_eq!(readiness.claude_hooks.provisioned, Some(true));
+    assert_eq!(readiness.claude_hooks.current, Some(true));
+    assert_eq!(readiness.codex_hooks.provisioned, Some(true));
+    assert_eq!(readiness.codex_hooks.current, Some(true));
+}

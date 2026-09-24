@@ -182,6 +182,25 @@ export type Machine = {
   transport: MachineTransport;
   last_observed: "unknown" | "available" | "offline";
   last_observed_at: number | null;
+  readiness?: MachineReadiness | null;
+};
+
+export type AgentHookReadiness = {
+  provisioned: boolean | null;
+  current: boolean | null;
+  error: string | null;
+};
+
+export type MachineReadiness = {
+  reachable: boolean | null;
+  tmuxAvailable: boolean | null;
+  claudeExecutableResolved: boolean | null;
+  codexExecutableResolved: boolean | null;
+  stateDirectoryWritable: boolean | null;
+  claudeHooks: AgentHookReadiness;
+  codexHooks: AgentHookReadiness;
+  lastProvisioningError: string | null;
+  error: string | null;
 };
 
 export type Item = {

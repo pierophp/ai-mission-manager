@@ -54,12 +54,14 @@ import {
 } from "./structure-mutations";
 import type {
   Context,
+  AgentHookReadiness,
   ExternalChangePolicy,
   ExternalObjectKind,
   ItemStatus,
   ExecutionMode,
   GrillConfiguration,
   MachineDeletionPreview,
+  Machine,
   MachineTransport,
   ParentDeletionPreview,
   ParentDeletionResult,
@@ -79,6 +81,33 @@ const defaultAttentionPolicy: ExternalChangePolicy = {
   state: true,
   metadata: true,
 };
+
+function hookReadinessLabel(agent: string, readiness?: AgentHookReadiness): string {
+  if (!readiness || readiness.provisioned === null || readiness.current === null) {
+    return `${agent} hooks not checked`;
+  }
+  if (readiness.error) return `${agent} hooks error: ${readiness.error}`;
+  return readiness.provisioned && readiness.current
+    ? `${agent} hooks current`
+    : `${agent} hooks need provisioning`;
+}
+
+function machineReadinessDetail(machine: Machine): string {
+  const parts = [
+    `Last observed: ${machine.last_observed}${machine.last_observed_at ? ` · ${new Date(machine.last_observed_at * 1000).toLocaleString()}` : ""}`,
+  ];
+  if (machine.readiness) {
+    if (machine.readiness.error) parts.push(`Machine check error: ${machine.readiness.error}`);
+    parts.push(hookReadinessLabel("Claude Code", machine.readiness.claudeHooks));
+    parts.push(hookReadinessLabel("Codex", machine.readiness.codexHooks));
+    if (machine.readiness.lastProvisioningError) {
+      parts.push(`Last provisioning error: ${machine.readiness.lastProvisioningError}`);
+    }
+  } else {
+    parts.push("Agent hooks not checked");
+  }
+  return parts.join(" · ");
+}
 
 type StructureConfirmation = {
   title: string;
@@ -1153,7 +1182,7 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                 </div>
                 <EntityList>
                   {selectedMachines.length === 0 ? <EmptyDescription>No Machines are registered in this Context.</EmptyDescription> : selectedMachines.map((machine) => (
-                    <EntityRow key={machine.id} title={`${machine.name} · ${machine.transport.kind === "ssh" ? "SSH" : "Local"}`} detail={`Last observed: ${machine.last_observed}${machine.last_observed_at ? ` · ${new Date(machine.last_observed_at * 1000).toLocaleString()}` : ""}`}>
+                    <EntityRow key={machine.id} title={`${machine.name} · ${machine.transport.kind === "ssh" ? "SSH" : "Local"}`} detail={machineReadinessDetail(machine)}>
                       <div className="flex flex-wrap gap-2"><Button type="button" variant="ghost" size="sm" disabled={isSaving} onClick={() => openEditMachine(machine)}>Edit</Button><Button type="button" variant="ghost" size="sm" disabled={isSaving} onClick={() => void handleCheckMachine(machine.id)}>Check</Button><Button type="button" variant="outline" size="sm" disabled={isSaving} onClick={() => void handlePrepareMachineDeletion(machine.id)}>Delete</Button></div>
                     </EntityRow>
                   ))}

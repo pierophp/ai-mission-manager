@@ -192,6 +192,15 @@ pub enum AgentKind {
     Codex,
 }
 
+impl AgentKind {
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ExecutionProfile {
     #[serde(rename = "investigate")]

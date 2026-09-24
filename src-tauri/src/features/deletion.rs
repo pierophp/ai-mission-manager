@@ -896,6 +896,7 @@ impl Runtime {
         )
         .map_err(|error| error.to_string())?;
         self.commit(decision)?;
+        self.machine_readiness.remove(&machine_id);
         self.pending_machine_deletion = None;
 
         Ok(MachineDeletionResult {

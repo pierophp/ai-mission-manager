@@ -28,7 +28,7 @@ use crate::{
     },
     persistence::SqliteStore,
     provider::resolve_gh_executable,
-    terminal::{find_agent_executable, PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime},
+    terminal::{MachineReadiness, PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime},
 };
 
 pub(crate) use crate::features::deletion::{
@@ -54,7 +54,15 @@ pub struct Runtime {
     pub(crate) pending_reset_local_data: Option<ResetLocalDataPreview>,
     pub(crate) terminal_connections: HashMap<String, TmuxControlPane>,
     pub(crate) terminal_runtime: Box<dyn TerminalRuntime>,
+    pub(crate) machine_readiness: HashMap<i64, MachineReadiness>,
     pub(crate) legacy_agent_state_directory: PathBuf,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct MachineSettingsView {
+    #[serde(flatten)]
+    pub machine: Machine,
+    pub readiness: Option<MachineReadiness>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -130,6 +138,7 @@ impl Runtime {
             pending_reset_local_data: None,
             terminal_connections: HashMap::new(),
             terminal_runtime: Box::new(terminal_runtime),
+            machine_readiness: HashMap::new(),
             legacy_agent_state_directory,
         };
         runtime.ensure_project_workspaces()?;
@@ -157,34 +166,51 @@ impl Runtime {
         Ok(path)
     }
 
-    pub(crate) fn agent_executable(
+    pub(crate) fn machine_settings_view(&self, machine: &Machine) -> MachineSettingsView {
+        MachineSettingsView {
+            machine: machine.clone(),
+            readiness: self.machine_readiness.get(&machine.id).cloned(),
+        }
+    }
+
+    pub(crate) fn preferred_agent_executable(
         &mut self,
         machine: &Machine,
         agent: AgentKind,
-    ) -> Result<PathBuf, String> {
-        let name = agent_executable_name(agent);
+    ) -> Result<Option<PathBuf>, String> {
+        let name = agent.slug();
         let setting_key = if matches!(&machine.transport, MachineTransport::Local) {
             format!("{name}_executable_path")
         } else {
             format!("machine_{}_{}_executable_path", machine.id, name)
         };
         if matches!(&machine.transport, MachineTransport::Local) {
-            return self
-                .resolve_and_store_executable(name, &setting_key)?
-                .ok_or_else(|| format!("{name} is not installed on Machine {}", machine.name));
+            return self.resolve_and_store_executable(name, &setting_key);
         }
+        Ok(None)
+    }
 
-        let executable = find_agent_executable(machine, name)?;
-        if !executable.is_absolute() {
+    pub(crate) fn store_agent_executable(
+        &mut self,
+        machine: &Machine,
+        agent: AgentKind,
+        executable: &Path,
+    ) -> Result<(), String> {
+        let name = agent.slug();
+        let setting_key = if matches!(&machine.transport, MachineTransport::Local) {
+            format!("{name}_executable_path")
+        } else {
+            format!("machine_{}_{}_executable_path", machine.id, name)
+        };
+        if !matches!(&machine.transport, MachineTransport::Local) && !executable.is_absolute() {
             return Err(format!(
                 "Machine {} returned a non-absolute {name} executable path",
                 machine.name
             ));
         }
         self.store
-            .set_executable_path(&setting_key, &executable)
-            .map_err(|error| error.to_string())?;
-        Ok(executable)
+            .set_executable_path(&setting_key, executable)
+            .map_err(|error| error.to_string())
     }
 
     pub(crate) fn machine_for_item(
@@ -325,13 +351,6 @@ pub(crate) fn current_unix_seconds() -> i64 {
         .unwrap_or_default()
 }
 
-fn agent_executable_name(agent: AgentKind) -> &'static str {
-    match agent {
-        AgentKind::Claude => "claude",
-        AgentKind::Codex => "codex",
-    }
-}
-
 #[tauri::command]
 pub fn list_contexts(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Context>, String> {
     crate::features::structure::list_contexts(state)
@@ -369,7 +388,7 @@ pub fn list_repository_locations(
 }
 
 #[tauri::command]
-pub fn list_machines(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Machine>, String> {
+pub fn list_machines(state: State<'_, Mutex<Runtime>>) -> Result<Vec<MachineSettingsView>, String> {
     crate::features::structure::list_machines(state)
 }
 
@@ -580,7 +599,10 @@ pub fn update_machine(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn check_machine(machine_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Machine, String> {
+pub fn check_machine(
+    machine_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<MachineSettingsView, String> {
     crate::features::structure::check_machine(machine_id, state)
 }
 
