@@ -277,7 +277,10 @@ fn parse_grill_question_group_with_fence_state(
             questions.push(question);
         }
     }
-    (!questions.is_empty()).then_some(GrillQuestionGroup { round: 0, questions })
+    (!questions.is_empty()).then_some(GrillQuestionGroup {
+        round: 0,
+        questions,
+    })
 }
 
 /// Parse only the newly captured portion of a Pane transcript. The Terminal
@@ -313,10 +316,7 @@ fn markdown_code_fence_state(transcript: &str) -> Option<(char, usize)> {
     code_fence
 }
 
-fn skip_markdown_code_fence_line(
-    line: &str,
-    code_fence: &mut Option<(char, usize)>,
-) -> bool {
+fn skip_markdown_code_fence_line(line: &str, code_fence: &mut Option<(char, usize)>) -> bool {
     let trimmed = line.trim_start();
     let mut characters = trimmed.chars();
     let Some(marker @ ('`' | '~')) = characters.next() else {

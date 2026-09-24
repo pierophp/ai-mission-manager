@@ -17,7 +17,7 @@ use crate::{
         ExternalObjectDeletionPlan, ExternalObjectDeletionSummary, ItemDeletionPlan,
         ItemDeletionSummary, Machine, MachineDeletionPlan, ParentDeletionPlan,
         ParentDeletionSummary, Repository, RepositoryDeletionPlan, RepositoryLocation,
-        ResetLocalDataPlan, ResetLocalDataSummary, Worktree,
+        ResetLocalDataPlan, ResetLocalDataSummary, RunPaneStatus, Worktree,
     },
     git::GitCli,
     terminal::kill_pane_with_timeout,
@@ -91,6 +91,17 @@ impl WorktreeRemovalSnapshot {
             report,
         })
     }
+
+    fn remove_physical(&self, report: &WorktreeRemovalReport) -> Result<(), String> {
+        GitCli::system()
+            .remove_worktree_on_machine(
+                &self.machine,
+                &self.checkout_path,
+                &self.worktree_path,
+                report.requires_destructive_confirmation,
+            )
+            .map_err(|error| error.to_string())
+    }
 }
 
 struct WorktreeRemovalObservation {
@@ -121,6 +132,218 @@ pub(crate) async fn prepare_worktree_removal_with_state(
         .pending_worktree_removals
         .insert(worktree_id, observation.report.clone());
     Ok(observation.report)
+}
+
+pub(crate) async fn remove_worktree_with_state(
+    worktree_id: i64,
+    confirmed: bool,
+    destructive_confirmed: bool,
+    state: &Mutex<Runtime>,
+) -> Result<WorktreeRemovalResult, String> {
+    if !confirmed {
+        return Err(
+            "Worktree removal requires explicit confirmation after reviewing its safety report"
+                .into(),
+        );
+    }
+    let (snapshot, pending) = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let pending = runtime
+            .pending_worktree_removals
+            .get(&worktree_id)
+            .cloned()
+            .ok_or_else(|| {
+                "Review the Worktree removal safety report before removing it".to_owned()
+            })?;
+        (runtime.worktree_removal_snapshot(worktree_id)?, pending)
+    };
+    let observation = tauri::async_runtime::spawn_blocking(move || {
+        let observation = snapshot.observe()?;
+        if observation.report != pending {
+            return Err("The Worktree changed after the safety report; review the updated report before removing it".to_owned());
+        }
+        if observation.report.requires_destructive_confirmation && !destructive_confirmed {
+            return Err("Removing a dirty Worktree requires destructive confirmation".to_owned());
+        }
+        observation.snapshot.remove_physical(&observation.report)?;
+        Ok(observation)
+    })
+    .await
+    .map_err(|error| format!("Worktree removal worker failed: {error}"))??;
+    let mut runtime = state
+        .lock()
+        .map_err(|_| {
+            format!(
+                "Worktree {} was removed from disk, but Mission Manager state is unavailable and its application metadata may remain",
+                observation.report.worktree_id
+            )
+        })?;
+    if !runtime.worktree_removal_snapshot_is_current(&observation.snapshot)
+        || runtime.pending_worktree_removals.get(&worktree_id) != Some(&observation.report)
+    {
+        return Err("The Worktree was removed from disk, but its application identity changed before the removal could be recorded; reconcile the Worktree state".into());
+    }
+    let decision = decide(runtime.state.clone(), Event::RemoveWorktree { worktree_id })
+        .map_err(|error| format!("Worktree was removed from disk, but its application metadata could not be updated: {error}"))?;
+    runtime.commit(decision).map_err(|error| {
+        format!("Worktree was removed from disk, but its application metadata could not be persisted: {error}")
+    })?;
+    runtime.pending_worktree_removals.remove(&worktree_id);
+    Ok(WorktreeRemovalResult {
+        worktree_id,
+        branch_preserved: true,
+    })
+}
+
+pub(crate) async fn delete_machine_with_state(
+    machine_id: i64,
+    run_ids: Vec<i64>,
+    worktree_ids: Vec<i64>,
+    repository_location_repository_ids: Vec<i64>,
+    confirmed: bool,
+    state: &Mutex<Runtime>,
+) -> Result<MachineDeletionResult, String> {
+    if !confirmed {
+        return Err(
+            "Machine deletion requires explicit confirmation after reviewing its deletion preview"
+                .into(),
+        );
+    }
+    let (pending, machine, all_runs, runs_to_stop) = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let pending = runtime
+            .pending_machine_deletion
+            .as_ref()
+            .filter(|preview| preview.plan.machine_id == machine_id)
+            .cloned()
+            .ok_or_else(|| "Review the Machine deletion preview before deleting it".to_owned())?;
+        let current = runtime.build_machine_deletion_preview(machine_id)?;
+        if current != pending {
+            return Err("The Machine or its associated records changed after the preview; review the updated deletion preview before deleting it".into());
+        }
+        let mut expected_run_ids = current
+            .plan
+            .runs
+            .iter()
+            .map(|run| run.id)
+            .collect::<Vec<_>>();
+        let mut provided_run_ids = run_ids.clone();
+        let mut expected_worktree_ids = current.plan.worktree_ids.clone();
+        let mut provided_worktree_ids = worktree_ids.clone();
+        let mut expected_repository_location_ids =
+            current.plan.repository_location_repository_ids.clone();
+        let mut provided_repository_location_ids = repository_location_repository_ids.clone();
+        expected_run_ids.sort_unstable();
+        provided_run_ids.sort_unstable();
+        expected_worktree_ids.sort_unstable();
+        provided_worktree_ids.sort_unstable();
+        expected_repository_location_ids.sort_unstable();
+        provided_repository_location_ids.sort_unstable();
+        if expected_run_ids != provided_run_ids
+            || expected_worktree_ids != provided_worktree_ids
+            || expected_repository_location_ids != provided_repository_location_ids
+        {
+            return Err("The reviewed Machine deletion contents do not match the confirmation; review the preview again".into());
+        }
+        let machine = runtime
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
+        let all_runs = runtime
+            .state
+            .runs
+            .iter()
+            .filter(|run| run.machine_id == machine_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let runs_to_stop = all_runs
+            .iter()
+            .filter(|run| run.pane_status != RunPaneStatus::Missing)
+            .cloned()
+            .collect::<Vec<_>>();
+        (pending, machine, all_runs, runs_to_stop)
+    };
+    let worker_machine = machine.clone();
+    let (stop_attempt_count, stop_failure_count) =
+        tauri::async_runtime::spawn_blocking(move || {
+            let attempts = runs_to_stop.len();
+            let failures = runs_to_stop
+                .iter()
+                .filter(|run| {
+                    kill_pane_with_timeout(&worker_machine, &run.pane_id, Duration::from_secs(5))
+                        .is_err()
+                })
+                .count();
+            (attempts, failures)
+        })
+        .await
+        .map_err(|error| format!("Machine Run shutdown worker failed: {error}"))?;
+    let mut runtime = state
+        .lock()
+        .map_err(|_| {
+            format!(
+                "Runs on Machine {machine_id} may have been stopped, but Mission Manager state is unavailable and Machine deletion was not recorded"
+            )
+        })?;
+    let current = runtime.build_machine_deletion_preview(machine_id).map_err(|error| {
+        format!("Runs on Machine {machine_id} may have been stopped, but the deletion plan could not be revalidated: {error}")
+    })?;
+    let machine_is_current = runtime
+        .state
+        .machines
+        .iter()
+        .any(|current| current == &machine);
+    let current_runs = runtime
+        .state
+        .runs
+        .iter()
+        .filter(|run| run.machine_id == machine_id)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !machine_is_current
+        || current_runs != all_runs
+        || current != pending
+        || runtime.pending_machine_deletion.as_ref() != Some(&pending)
+    {
+        return Err(format!(
+            "Machine {machine_id} Run shutdown was attempted, but the Machine or its deletion plan changed; review the preview again"
+        ));
+    }
+    let run_count = current.plan.runs.len();
+    let worktree_count = current.plan.worktree_ids.len();
+    let repository_location_count = current.plan.repository_location_repository_ids.len();
+    let decision = decide(
+        runtime.state.clone(),
+        Event::DeleteMachine {
+            machine_id,
+            run_ids,
+            worktree_ids,
+            repository_location_repository_ids,
+        },
+    )
+    .map_err(|error| {
+        format!("Machine {machine_id} Runs may have been stopped, but deletion could not be applied: {error}")
+    })?;
+    runtime.commit(decision).map_err(|error| {
+        format!("Machine {machine_id} Runs may have been stopped, but deletion could not be persisted: {error}")
+    })?;
+    runtime.machine_readiness.remove(&machine_id);
+    runtime.pending_machine_deletion = None;
+    Ok(MachineDeletionResult {
+        machine_id,
+        run_count,
+        worktree_count,
+        repository_location_count,
+        stop_attempt_count,
+        stop_failure_count,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -438,90 +661,6 @@ impl Runtime {
                 .repository_locations
                 .iter()
                 .any(|current| current == &snapshot.location)
-    }
-
-    fn build_worktree_removal_report(
-        &self,
-        worktree_id: i64,
-    ) -> Result<WorktreeRemovalReport, String> {
-        self.worktree_removal_snapshot(worktree_id)?
-            .observe()
-            .map(|observation| observation.report)
-    }
-
-    pub(crate) fn remove_worktree(
-        &mut self,
-        worktree_id: i64,
-        confirmed: bool,
-        destructive_confirmed: bool,
-    ) -> Result<WorktreeRemovalResult, String> {
-        if !confirmed {
-            return Err(
-                "Worktree removal requires explicit confirmation after reviewing its safety report"
-                    .into(),
-            );
-        }
-        let pending = self
-            .pending_worktree_removals
-            .get(&worktree_id)
-            .cloned()
-            .ok_or_else(|| {
-                "Review the Worktree removal safety report before removing it".to_owned()
-            })?;
-        // Confirmation depends on the latest Git dirty state. Keep its final
-        // check adjacent to physical removal under the Runtime lock so no
-        // app-side Worktree identity change can slip between approval and delete.
-        let current = self.build_worktree_removal_report(worktree_id)?;
-        if current != pending {
-            return Err("The Worktree changed after the safety report; review the updated report before removing it".into());
-        }
-        if current.requires_destructive_confirmation && !destructive_confirmed {
-            return Err("Removing a dirty Worktree requires destructive confirmation".into());
-        }
-        self.remove_worktree_physical(&current)?;
-        let decision = decide(self.state.clone(), Event::RemoveWorktree { worktree_id })
-            .map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        self.pending_worktree_removals.remove(&worktree_id);
-        Ok(WorktreeRemovalResult {
-            worktree_id,
-            branch_preserved: true,
-        })
-    }
-
-    fn remove_worktree_physical(&self, report: &WorktreeRemovalReport) -> Result<(), String> {
-        let worktree = self
-            .state
-            .worktrees
-            .iter()
-            .find(|worktree| worktree.id == report.worktree_id)
-            .ok_or_else(|| format!("Worktree {} does not exist", report.worktree_id))?;
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == worktree.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", worktree.machine_id))?;
-        let location = self
-            .state
-            .repository_locations
-            .iter()
-            .find(|location| {
-                location.repository_id == worktree.repository_id
-                    && location.machine_id == worktree.machine_id
-            })
-            .cloned()
-            .ok_or_else(|| "The Repository checkout location no longer exists".to_owned())?;
-        let machine_home = machine_home_directory(&machine);
-        GitCli::system()
-            .remove_worktree_on_machine(
-                &machine,
-                &resolve_machine_path(&location.checkout_path, &machine_home),
-                &resolve_machine_path(&worktree.path, &machine_home),
-                report.requires_destructive_confirmation,
-            )
-            .map_err(|error| error.to_string())
     }
 
     fn build_item_deletion_preview(&self, item_id: i64) -> Result<ItemDeletionPreview, String> {
@@ -892,103 +1031,6 @@ impl Runtime {
         Ok(RepositoryDeletionResult {
             repository_id,
             workspace_count,
-        })
-    }
-
-    pub(crate) fn delete_machine(
-        &mut self,
-        machine_id: i64,
-        run_ids: Vec<i64>,
-        worktree_ids: Vec<i64>,
-        repository_location_repository_ids: Vec<i64>,
-        confirmed: bool,
-    ) -> Result<MachineDeletionResult, String> {
-        if !confirmed {
-            return Err(
-                "Machine deletion requires explicit confirmation after reviewing its deletion preview".into(),
-            );
-        }
-        let pending = self
-            .pending_machine_deletion
-            .as_ref()
-            .filter(|preview| preview.plan.machine_id == machine_id)
-            .cloned()
-            .ok_or_else(|| "Review the Machine deletion preview before deleting it".to_owned())?;
-        let current = self.build_machine_deletion_preview(machine_id)?;
-        if current != pending {
-            return Err(
-                "The Machine or its associated records changed after the preview; review the updated deletion preview before deleting it".into(),
-            );
-        }
-        let mut expected_run_ids = current
-            .plan
-            .runs
-            .iter()
-            .map(|run| run.id)
-            .collect::<Vec<_>>();
-        let mut provided_run_ids = run_ids.clone();
-        let mut expected_worktree_ids = current.plan.worktree_ids.clone();
-        let mut provided_worktree_ids = worktree_ids.clone();
-        let mut expected_repository_location_ids =
-            current.plan.repository_location_repository_ids.clone();
-        let mut provided_repository_location_ids = repository_location_repository_ids.clone();
-        expected_run_ids.sort_unstable();
-        provided_run_ids.sort_unstable();
-        expected_worktree_ids.sort_unstable();
-        provided_worktree_ids.sort_unstable();
-        expected_repository_location_ids.sort_unstable();
-        provided_repository_location_ids.sort_unstable();
-        if expected_run_ids != provided_run_ids
-            || expected_worktree_ids != provided_worktree_ids
-            || expected_repository_location_ids != provided_repository_location_ids
-        {
-            return Err(
-                "The reviewed Machine deletion contents do not match the confirmation; review the preview again".into(),
-            );
-        }
-
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
-        let mut stop_attempt_count = 0;
-        let mut stop_failure_count = 0;
-        for run in self.state.runs.iter().filter(|run| {
-            run.machine_id == machine_id && run.pane_status != crate::domain::RunPaneStatus::Missing
-        }) {
-            stop_attempt_count += 1;
-            if kill_pane_with_timeout(&machine, &run.pane_id, Duration::from_secs(5)).is_err() {
-                stop_failure_count += 1;
-            }
-        }
-
-        let run_count = current.plan.runs.len();
-        let worktree_count = current.plan.worktree_ids.len();
-        let repository_location_count = current.plan.repository_location_repository_ids.len();
-        let decision = decide(
-            self.state.clone(),
-            Event::DeleteMachine {
-                machine_id,
-                run_ids,
-                worktree_ids,
-                repository_location_repository_ids,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        self.commit(decision)?;
-        self.machine_readiness.remove(&machine_id);
-        self.pending_machine_deletion = None;
-
-        Ok(MachineDeletionResult {
-            machine_id,
-            run_count,
-            worktree_count,
-            repository_location_count,
-            stop_attempt_count,
-            stop_failure_count,
         })
     }
 

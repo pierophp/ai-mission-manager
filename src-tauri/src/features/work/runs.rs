@@ -1,4 +1,659 @@
 use super::*;
+
+#[derive(Clone)]
+struct UntrackedAgentSnapshot {
+    state: DomainState,
+    machine: Machine,
+    machine_home: String,
+    terminal_runtime: Arc<dyn TerminalRuntime>,
+}
+
+struct UntrackedAgentObservation {
+    snapshot: UntrackedAgentSnapshot,
+    canonical: RunSuggestion,
+}
+
+impl UntrackedAgentSnapshot {
+    fn observe(self, suggestion: &RunSuggestion) -> Result<UntrackedAgentObservation, String> {
+        let pane = self
+            .terminal_runtime
+            .list_agent_panes(&self.machine)?
+            .into_iter()
+            .find(|pane| {
+                pane.agent == suggestion.agent
+                    && pane.session_name == suggestion.session_name
+                    && pane.pane_id == suggestion.pane_id
+            })
+            .ok_or_else(|| "The suggested agent is no longer available".to_owned())?;
+        let canonical = suggest_untracked_runs(
+            &self.state,
+            &[AgentPaneObservation {
+                machine_id: self.machine.id,
+                agent: pane.agent,
+                session_name: pane.session_name,
+                pane_id: pane.pane_id,
+                current_path: pane.current_path,
+                machine_home: self.machine_home.clone(),
+            }],
+        )
+        .into_iter()
+        .find(|candidate| candidate == suggestion)
+        .ok_or_else(|| {
+            "The suggested agent no longer matches its registered working location".to_owned()
+        })?;
+        Ok(UntrackedAgentObservation {
+            snapshot: self,
+            canonical,
+        })
+    }
+}
+
+impl UntrackedAgentObservation {
+    fn is_current(&self, runtime: &Runtime) -> bool {
+        runtime
+            .state
+            .machines
+            .iter()
+            .any(|machine| machine == &self.snapshot.machine)
+            && suggest_untracked_runs(
+                &runtime.state,
+                &[AgentPaneObservation {
+                    machine_id: self.canonical.machine_id,
+                    agent: self.canonical.agent,
+                    session_name: self.canonical.session_name.clone(),
+                    pane_id: self.canonical.pane_id.clone(),
+                    current_path: self.canonical.current_path.clone(),
+                    machine_home: self.snapshot.machine_home.clone(),
+                }],
+            )
+            .into_iter()
+            .any(|candidate| candidate == self.canonical)
+    }
+}
+
+fn untracked_agent_snapshot(
+    runtime: &Runtime,
+    suggestion: &RunSuggestion,
+) -> Result<UntrackedAgentSnapshot, String> {
+    let machine = runtime
+        .state
+        .machines
+        .iter()
+        .find(|machine| machine.id == suggestion.machine_id)
+        .cloned()
+        .ok_or_else(|| format!("Machine {} does not exist", suggestion.machine_id))?;
+    Ok(UntrackedAgentSnapshot {
+        state: runtime.state.clone(),
+        machine_home: machine_home_directory(&machine),
+        machine,
+        terminal_runtime: Arc::clone(&runtime.terminal_runtime),
+    })
+}
+
+pub(crate) async fn attach_run_with_state(
+    suggestion: RunSuggestion,
+    state: &Mutex<Runtime>,
+) -> Result<Run, String> {
+    let snapshot = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        untracked_agent_snapshot(&runtime, &suggestion)?
+    };
+    let worker_snapshot = snapshot.clone();
+    let observation =
+        tauri::async_runtime::spawn_blocking(move || worker_snapshot.observe(&suggestion))
+            .await
+            .map_err(|error| format!("Agent attachment observation worker failed: {error}"))??;
+    let mut runtime = state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+    if !observation.is_current(&runtime) {
+        return Err("The suggested agent or its registered working location changed while it was inspected; refresh suggestions".into());
+    }
+    let canonical = observation.canonical;
+    let repository_id = canonical
+        .repository_id
+        .ok_or_else(|| "The suggested Item execution location has no Repository".to_owned())?;
+    let workspace_id = canonical
+        .workspace_id
+        .ok_or_else(|| "The suggested Item execution location has no Workspace".to_owned())?;
+    let decision = decide(
+        runtime.state.clone(),
+        Event::AttachRun {
+            item_id: canonical.item_id,
+            workspace_id,
+            worktree_id: canonical.worktree_id,
+            repository_id,
+            machine_id: canonical.machine_id,
+            agent: canonical.agent,
+            working_directory: canonical
+                .location_path
+                .clone()
+                .unwrap_or(canonical.current_path.clone()),
+            machine_home: observation.snapshot.machine_home,
+            session_name: canonical.session_name,
+            pane_id: canonical.pane_id,
+            attached_at: current_unix_seconds(),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let run = decision
+        .state
+        .runs
+        .last()
+        .cloned()
+        .ok_or_else(|| "Run attachment produced no Run".to_owned())?;
+    runtime.commit(decision)?;
+    Ok(run)
+}
+
+async fn operate_untracked_agent_with_state(
+    suggestion: RunSuggestion,
+    delete: bool,
+    state: &Mutex<Runtime>,
+) -> Result<(), String> {
+    let snapshot = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        untracked_agent_snapshot(&runtime, &suggestion)?
+    };
+    let worker_snapshot = snapshot.clone();
+    let observation =
+        tauri::async_runtime::spawn_blocking(move || worker_snapshot.observe(&suggestion))
+            .await
+            .map_err(|error| format!("Agent observation worker failed: {error}"))??;
+    let terminal_runtime = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        if !observation.is_current(&runtime) {
+            return Err("The suggested agent or its registered working location changed while it was inspected; refresh suggestions".into());
+        }
+        Arc::clone(&runtime.terminal_runtime)
+    };
+    let machine = observation.snapshot.machine.clone();
+    let canonical = observation.canonical.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if delete {
+            terminal_runtime.kill_pane(&machine, &canonical.session_name, &canonical.pane_id)
+        } else {
+            terminal_runtime.interrupt_pane(&machine, &canonical.session_name, &canonical.pane_id)
+        }
+    })
+    .await
+    .map_err(|error| format!("Agent control worker failed: {error}"))?
+    .map_err(|error| {
+        if delete {
+            format!("Could not delete the untracked agent Pane: {error}")
+        } else {
+            format!("Could not stop the untracked agent: {error}")
+        }
+    })?;
+    let runtime = state.lock().map_err(|_| {
+        format!(
+            "The untracked agent Pane was {}, but Mission Manager state is unavailable",
+            if delete { "deleted" } else { "interrupted" }
+        )
+    })?;
+    if !observation.is_current(&runtime) {
+        return Err("The agent Pane was controlled, but its registered working location changed before the operation completed".into());
+    }
+    Ok(())
+}
+
+pub(crate) async fn stop_untracked_agent_with_state(
+    suggestion: RunSuggestion,
+    state: &Mutex<Runtime>,
+) -> Result<(), String> {
+    operate_untracked_agent_with_state(suggestion, false, state).await
+}
+
+pub(crate) async fn delete_untracked_agent_with_state(
+    suggestion: RunSuggestion,
+    state: &Mutex<Runtime>,
+) -> Result<(), String> {
+    operate_untracked_agent_with_state(suggestion, true, state).await
+}
+
+pub(crate) async fn stop_run_with_state(
+    run_id: i64,
+    state: &Mutex<Runtime>,
+) -> Result<Run, String> {
+    let (run, machine, terminal_runtime) = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let run = runtime
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        let machine = runtime
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == run.machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
+        (run, machine, Arc::clone(&runtime.terminal_runtime))
+    };
+    let worker_machine = machine.clone();
+    let session_name = run.session_name.clone();
+    let pane_id = run.pane_id.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        terminal_runtime.kill_pane(&worker_machine, &session_name, &pane_id)
+    })
+    .await
+    .map_err(|error| format!("Run stop worker failed: {error}"))?
+    .map_err(|error| format!("Could not stop Run {run_id}: {error}"))?;
+    let mut runtime = state
+        .lock()
+        .map_err(|_| {
+            format!(
+                "Run {run_id}'s Pane was stopped, but Mission Manager state is unavailable and the Run may still appear active"
+            )
+        })?;
+    let target_is_current = runtime.state.runs.iter().any(|current| {
+        current.id == run.id
+            && current.machine_id == run.machine_id
+            && current.session_name == run.session_name
+            && current.pane_id == run.pane_id
+            && current.agent == run.agent
+    });
+    let machine_is_current = runtime
+        .state
+        .machines
+        .iter()
+        .any(|current| current == &machine);
+    if !target_is_current || !machine_is_current {
+        return Err(format!(
+            "Run {run_id}'s Pane was stopped, but its application identity changed before the stop could be recorded"
+        ));
+    }
+    let decision = decide(
+        runtime.state.clone(),
+        Event::SetRunPaneStatus {
+            run_id,
+            status: RunPaneStatus::Missing,
+        },
+    )
+    .map_err(|error| {
+        format!("Run {run_id}'s Pane was stopped, but its status could not be updated: {error}")
+    })?;
+    let stopped = decision
+        .state
+        .runs
+        .iter()
+        .find(|candidate| candidate.id == run_id)
+        .cloned()
+        .ok_or_else(|| "Run stop produced no Run".to_owned())?;
+    runtime
+        .commit_with_audit(decision, &[AuditAction::RunStopped { run_id }])
+        .map_err(|error| {
+            format!(
+                "Run {run_id}'s Pane was stopped, but its status could not be persisted: {error}"
+            )
+        })?;
+    Ok(stopped)
+}
+
+#[derive(Clone)]
+struct GrillPaneSnapshot {
+    run: Run,
+    machine: Machine,
+}
+
+impl GrillPaneSnapshot {
+    fn is_current(&self, runtime: &Runtime) -> bool {
+        runtime
+            .state
+            .runs
+            .iter()
+            .any(|current| current == &self.run)
+            && runtime
+                .state
+                .machines
+                .iter()
+                .any(|current| current == &self.machine)
+    }
+}
+
+pub(crate) async fn recover_run_states_with_state(state: &Mutex<Runtime>) -> Result<(), String> {
+    let snapshots = {
+        let mut runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        runtime.recover_run_state_records()?;
+        std::mem::take(&mut runtime.pending_grill_transcript_captures)
+            .into_iter()
+            .filter_map(|run_id| {
+                let run = runtime
+                    .state
+                    .runs
+                    .iter()
+                    .find(|run| run.id == run_id)?
+                    .clone();
+                if run.execution_profile != ExecutionProfile::Grill
+                    || !matches!(run.state, RunState::Blocked | RunState::Finished)
+                {
+                    return None;
+                }
+                let machine = runtime
+                    .state
+                    .machines
+                    .iter()
+                    .find(|machine| machine.id == run.machine_id)?
+                    .clone();
+                Some((
+                    GrillPaneSnapshot { run, machine },
+                    Arc::clone(&runtime.terminal_runtime),
+                ))
+            })
+            .collect::<Vec<_>>()
+    };
+    for (snapshot, terminal_runtime) in snapshots {
+        if snapshot.run.execution_profile != ExecutionProfile::Grill {
+            continue;
+        }
+        let worker_snapshot = snapshot.clone();
+        let transcript = tauri::async_runtime::spawn_blocking(move || {
+            terminal_runtime
+                .capture_pane_transcript(&worker_snapshot.machine, &worker_snapshot.run.pane_id)
+                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        })
+        .await
+        .map_err(|error| format!("Grill transcript capture worker failed: {error}"))?;
+        let transcript = match transcript {
+            Ok(transcript) => transcript,
+            Err(error) => {
+                eprintln!(
+                    "Could not retain transcript for waiting Grill Run {}: {error}",
+                    snapshot.run.id
+                );
+                continue;
+            }
+        };
+        let mut runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        if snapshot.is_current(&runtime) {
+            runtime.apply_grill_transcript(snapshot.run.id, transcript)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) async fn list_run_suggestions_with_state(
+    state: &Mutex<Runtime>,
+) -> Result<Vec<RunSuggestion>, String> {
+    recover_run_states_with_state(state).await?;
+    let (snapshot, machines, terminal_runtime) = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let machines = runtime
+            .state
+            .machines
+            .iter()
+            .filter(|machine| {
+                runtime
+                    .state
+                    .contexts
+                    .iter()
+                    .any(|context| context.execution_machine_id == Some(machine.id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        (
+            runtime.state.clone(),
+            machines,
+            Arc::clone(&runtime.terminal_runtime),
+        )
+    };
+    let worker_runtime = Arc::clone(&terminal_runtime);
+    let observations = tauri::async_runtime::spawn_blocking(move || {
+        let mut observations = Vec::new();
+        for machine in machines {
+            match worker_runtime.list_agent_panes(&machine) {
+                Ok(panes) => {
+                    observations.extend(panes.into_iter().map(|pane| AgentPaneObservation {
+                        machine_id: machine.id,
+                        agent: pane.agent,
+                        session_name: pane.session_name,
+                        pane_id: pane.pane_id,
+                        current_path: pane.current_path,
+                        machine_home: machine_home_directory(&machine),
+                    }))
+                }
+                Err(error) => eprintln!(
+                    "Could not inspect Machine {} for agent Panes: {error}",
+                    machine.name
+                ),
+            }
+        }
+        observations
+    })
+    .await
+    .map_err(|error| format!("Run suggestion worker failed: {error}"))?;
+    let suggestions = suggest_untracked_runs(&snapshot, &observations);
+    let runtime = state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+    if runtime.state != snapshot {
+        return Err("Run or Machine state changed while agent Panes were inspected; refresh suggestions again".into());
+    }
+    Ok(suggestions)
+}
+
+pub(crate) async fn submit_grill_answers_with_state(
+    run_id: i64,
+    answers: Vec<GrillAnswer>,
+    state: &Mutex<Runtime>,
+) -> Result<Run, String> {
+    let operation_lock = {
+        let mut runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        runtime.grill_operation_lock(run_id)
+    };
+    let operation_guard = operation_lock.lock_owned().await;
+    let (snapshot, input, response, terminal_runtime) = {
+        let mut runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let run = runtime
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        if run.execution_profile != ExecutionProfile::Grill {
+            return Err(format!("Run {run_id} is not a Grill Run"));
+        }
+        let can_submit_answers = run.state == RunState::Blocked
+            || (run.state == RunState::Finished
+                && run.grill_phase == Some(GrillPhase::WaitingForAnswers));
+        if !can_submit_answers {
+            return Err(format!("Run {run_id} is not waiting for Grill answers"));
+        }
+        let answers_decision = decide(
+            runtime.state.clone(),
+            Event::RecordGrillAnswers { run_id, answers },
+        )
+        .map_err(|error| error.to_string())?;
+        let answered_run = answers_decision
+            .state
+            .runs
+            .iter()
+            .find(|candidate| candidate.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        let response = format_grill_response(&answered_run.grill_answers)
+            .map_err(|error| error.to_string())?;
+        runtime.commit(answers_decision)?;
+        let machine = runtime
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == answered_run.machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", answered_run.machine_id))?;
+        let mut input = response.as_bytes().to_vec();
+        input.push(b'\n');
+        (
+            GrillPaneSnapshot {
+                run: answered_run,
+                machine,
+            },
+            input,
+            response,
+            Arc::clone(&runtime.terminal_runtime),
+        )
+    };
+    let worker_snapshot = snapshot.clone();
+    let (send_result, _operation_guard) = tauri::async_runtime::spawn_blocking(move || {
+        let result = terminal_runtime.send_pane_input(
+            &worker_snapshot.machine,
+            &worker_snapshot.run.pane_id,
+            &input,
+        );
+        (result, operation_guard)
+    })
+    .await
+    .map_err(|error| format!("Grill answer send worker failed: {error}"))?;
+    send_result.map_err(|error| error.to_string())?;
+    let mut runtime = state
+        .lock()
+        .map_err(|_| {
+            format!(
+                "The Grill response for Run {run_id} was sent, but Mission Manager state is unavailable and its Run record may be incomplete"
+            )
+        })?;
+    if !snapshot.is_current(&runtime) {
+        return Err(format!(
+            "Run {run_id} changed while its Grill response was being sent; the response may already have reached the agent"
+        ));
+    }
+    let working = decide(
+        runtime.state.clone(),
+        Event::UpdateRunState {
+            run_id,
+            state: RunState::Working,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    runtime.commit(working).map_err(|error| {
+        format!("The Grill response for Run {run_id} was sent, but its Working state could not be persisted: {error}")
+    })?;
+    let decision = decide(
+        runtime.state.clone(),
+        Event::RecordGrillResponse { run_id, response },
+    )
+    .map_err(|error| error.to_string())?;
+    let submitted_run = decision
+        .state
+        .runs
+        .iter()
+        .find(|candidate| candidate.id == run_id)
+        .cloned()
+        .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+    runtime.commit(decision).map_err(|error| {
+        format!("The Grill response for Run {run_id} was sent, but its response record could not be persisted: {error}")
+    })?;
+    Ok(submitted_run)
+}
+
+pub(crate) async fn continue_grill_with_state(
+    run_id: i64,
+    action: GrillContinuationAction,
+    state: &Mutex<Runtime>,
+) -> Result<Run, String> {
+    let operation_lock = {
+        let mut runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        runtime.grill_operation_lock(run_id)
+    };
+    let operation_guard = operation_lock.lock_owned().await;
+    let (snapshot, prompt, terminal_runtime) = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let run = runtime
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        let prompt = build_grill_continuation_prompt(&runtime.state, run_id, action)
+            .map_err(|error| error.to_string())?;
+        decide(
+            runtime.state.clone(),
+            Event::ContinueGrill { run_id, action },
+        )
+        .map_err(|error| error.to_string())?;
+        let machine = runtime
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == run.machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
+        (
+            GrillPaneSnapshot { run, machine },
+            prompt,
+            Arc::clone(&runtime.terminal_runtime),
+        )
+    };
+    let worker_snapshot = snapshot.clone();
+    let (send_result, _operation_guard) = tauri::async_runtime::spawn_blocking(move || {
+        let mut input = prompt.into_bytes();
+        input.push(b'\n');
+        let result = terminal_runtime.send_pane_input(
+            &worker_snapshot.machine,
+            &worker_snapshot.run.pane_id,
+            &input,
+        );
+        (result, operation_guard)
+    })
+    .await
+    .map_err(|error| format!("Grill continuation send worker failed: {error}"))?;
+    send_result.map_err(|error| error.to_string())?;
+    let mut runtime = state
+        .lock()
+        .map_err(|_| {
+            format!(
+                "The Grill continuation for Run {run_id} was sent, but Mission Manager state is unavailable and its Run record may be incomplete"
+            )
+        })?;
+    if !snapshot.is_current(&runtime) {
+        return Err(format!(
+            "Run {run_id} changed while its Grill continuation was being sent; the continuation may already have reached the agent"
+        ));
+    }
+    let decision = decide(
+        runtime.state.clone(),
+        Event::ContinueGrill { run_id, action },
+    )
+    .map_err(|error| error.to_string())?;
+    let continued = decision
+        .state
+        .runs
+        .iter()
+        .find(|candidate| candidate.id == run_id)
+        .cloned()
+        .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+    runtime.commit(decision).map_err(|error| {
+        format!("The Grill continuation for Run {run_id} was sent, but its state could not be persisted: {error}")
+    })?;
+    Ok(continued)
+}
 use std::sync::Arc;
 
 use crate::terminal::{MachineObservationError, ObservedPane};
@@ -304,20 +959,20 @@ struct TerminalCallbackGateState {
     pending_terminal_events: Vec<DeferredTerminalEvent>,
 }
 
-enum DeferredTerminalEvent {
+pub(crate) enum DeferredTerminalEvent {
     Output(Vec<u8>),
     Exit(Option<i32>),
 }
 
 #[derive(Default)]
-struct TerminalCallbackGate {
+pub(crate) struct TerminalCallbackGate {
     state: Mutex<TerminalCallbackGateState>,
     terminal_event_dispatch: Mutex<()>,
     state_dispatch: Mutex<()>,
 }
 
 impl TerminalCallbackGate {
-    fn dispatch_output_or_queue(&self, data: Vec<u8>, dispatch: impl FnOnce(Vec<u8>)) {
+    pub(crate) fn dispatch_output_or_queue(&self, data: Vec<u8>, dispatch: impl FnOnce(Vec<u8>)) {
         let _dispatch_guard = self.lock_terminal_event_dispatch();
         let dispatch_data = {
             let mut state = self
@@ -342,7 +997,7 @@ impl TerminalCallbackGate {
         // returned pane snapshot. It must not be replayed on top of it.
     }
 
-    fn mark_snapshot_captured(&self) {
+    pub(crate) fn mark_snapshot_captured(&self) {
         let mut state = self
             .state
             .lock()
@@ -393,7 +1048,7 @@ impl TerminalCallbackGate {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    fn lock_terminal_event_dispatch(&self) -> std::sync::MutexGuard<'_, ()> {
+    pub(crate) fn lock_terminal_event_dispatch(&self) -> std::sync::MutexGuard<'_, ()> {
         self.terminal_event_dispatch
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -410,7 +1065,7 @@ impl TerminalCallbackGate {
         }
     }
 
-    fn activate_and_drain(&self) -> (Vec<AgentStateRecord>, Vec<DeferredTerminalEvent>) {
+    pub(crate) fn activate_and_drain(&self) -> (Vec<AgentStateRecord>, Vec<DeferredTerminalEvent>) {
         let mut state = self
             .state
             .lock()
@@ -807,9 +1462,11 @@ pub(crate) async fn open_terminal_with_state(
     }
     let previous = runtime.terminal_connections.insert(
         observation.terminal_id.clone(),
-        connection
-            .take()
-            .expect("new terminal connection should remain owned"),
+        Arc::new(
+            connection
+                .take()
+                .expect("new terminal connection should remain owned"),
+        ),
     );
     runtime
         .terminal_connection_generations
@@ -2075,171 +2732,7 @@ impl Runtime {
         Ok(run)
     }
 
-    pub(crate) fn list_run_suggestions(&mut self) -> Result<Vec<RunSuggestion>, String> {
-        self.recover_run_states()?;
-        let observations = self
-            .state
-            .machines
-            .iter()
-            .filter(|machine| {
-                self.state
-                    .contexts
-                    .iter()
-                    .any(|context| context.execution_machine_id == Some(machine.id))
-            })
-            .flat_map(
-                |machine| match self.terminal_runtime.list_agent_panes(machine) {
-                    Ok(panes) => panes
-                        .into_iter()
-                        .map(|pane| AgentPaneObservation {
-                            machine_id: machine.id,
-                            agent: pane.agent,
-                            session_name: pane.session_name,
-                            pane_id: pane.pane_id,
-                            current_path: pane.current_path,
-                            machine_home: machine_home_directory(machine),
-                        })
-                        .collect::<Vec<_>>(),
-                    Err(error) => {
-                        eprintln!(
-                            "Could not inspect Machine {} for agent Panes: {error}",
-                            machine.name
-                        );
-                        Vec::new()
-                    }
-                },
-            )
-            .collect::<Vec<_>>();
-        Ok(suggest_untracked_runs(&self.state, &observations))
-    }
-
-    pub(crate) fn attach_run(&mut self, suggestion: RunSuggestion) -> Result<Run, String> {
-        let (machine, canonical) = self.canonical_untracked_agent(&suggestion)?;
-        let decision = if let Some(workspace_id) = canonical.workspace_id {
-            let repository_id = canonical.repository_id.ok_or_else(|| {
-                "The suggested Item execution location has no Repository".to_owned()
-            })?;
-            decide(
-                self.state.clone(),
-                Event::AttachRun {
-                    item_id: canonical.item_id,
-                    workspace_id,
-                    worktree_id: canonical.worktree_id,
-                    repository_id,
-                    machine_id: canonical.machine_id,
-                    agent: canonical.agent,
-                    working_directory: canonical
-                        .location_path
-                        .clone()
-                        .unwrap_or(canonical.current_path.clone()),
-                    machine_home: machine_home_directory(&machine),
-                    session_name: canonical.session_name,
-                    pane_id: canonical.pane_id,
-                    attached_at: current_unix_seconds(),
-                },
-            )
-        } else {
-            return Err(
-                "The suggested agent is not in a registered Item execution location".into(),
-            );
-        }
-        .map_err(|error| error.to_string())?;
-        let run = decision
-            .state
-            .runs
-            .last()
-            .cloned()
-            .ok_or_else(|| "Run attachment produced no Run".to_owned())?;
-        self.commit(decision)?;
-        Ok(run)
-    }
-
-    pub(crate) fn stop_untracked_agent(&mut self, suggestion: RunSuggestion) -> Result<(), String> {
-        let (machine, canonical) = self.canonical_untracked_agent(&suggestion)?;
-        self.terminal_runtime
-            .interrupt_pane(&machine, &canonical.session_name, &canonical.pane_id)
-            .map_err(|error| format!("Could not stop the untracked agent: {error}"))
-    }
-
-    pub(crate) fn delete_untracked_agent(
-        &mut self,
-        suggestion: RunSuggestion,
-    ) -> Result<(), String> {
-        let (machine, canonical) = self.canonical_untracked_agent(&suggestion)?;
-        self.terminal_runtime
-            .kill_pane(&machine, &canonical.session_name, &canonical.pane_id)
-            .map_err(|error| format!("Could not delete the untracked agent Pane: {error}"))
-    }
-
-    fn canonical_untracked_agent(
-        &self,
-        suggestion: &RunSuggestion,
-    ) -> Result<(Machine, RunSuggestion), String> {
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == suggestion.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", suggestion.machine_id))?;
-        let observation = self
-            .terminal_runtime
-            .list_agent_panes(&machine)?
-            .into_iter()
-            .find(|pane| {
-                pane.agent == suggestion.agent
-                    && pane.session_name == suggestion.session_name
-                    && pane.pane_id == suggestion.pane_id
-            })
-            .ok_or_else(|| "The suggested agent is no longer available".to_owned())?;
-        let canonical = suggest_untracked_runs(
-            &self.state,
-            &[AgentPaneObservation {
-                machine_id: suggestion.machine_id,
-                agent: observation.agent,
-                session_name: observation.session_name.clone(),
-                pane_id: observation.pane_id.clone(),
-                current_path: observation.current_path,
-                machine_home: machine_home_directory(&machine),
-            }],
-        )
-        .into_iter()
-        .find(|candidate| {
-            candidate.item_id == suggestion.item_id
-                && candidate.machine_id == suggestion.machine_id
-                && candidate.session_name == suggestion.session_name
-                && candidate.pane_id == suggestion.pane_id
-                && candidate.workspace_id == suggestion.workspace_id
-                && candidate.repository_id == suggestion.repository_id
-                && candidate.worktree_id == suggestion.worktree_id
-                && candidate.location_path == suggestion.location_path
-        })
-        .ok_or_else(|| {
-            "The suggested agent no longer matches its registered working location".to_owned()
-        })?;
-
-        Ok((machine, canonical))
-    }
-
-    pub(crate) fn terminal_input(&self, terminal_id: &str, input: Vec<u8>) -> Result<(), String> {
-        self.terminal_connections
-            .get(terminal_id)
-            .ok_or_else(|| "The embedded terminal is not attached".to_owned())?
-            .send_input(&input)
-    }
-
-    pub(crate) fn terminal_resize(
-        &self,
-        terminal_id: &str,
-        columns: u16,
-        rows: u16,
-    ) -> Result<(), String> {
-        self.terminal_connections
-            .get(terminal_id)
-            .ok_or_else(|| "The embedded terminal is not attached".to_owned())?
-            .resize(columns, rows)
-    }
-
+    #[cfg(test)]
     pub(crate) fn capture_grill_transcript(&mut self, run_id: i64) -> Result<bool, String> {
         let run = self
             .state
@@ -2467,121 +2960,7 @@ impl Runtime {
             .map(|_| ())
     }
 
-    pub(crate) fn submit_grill_answers(
-        &mut self,
-        run_id: i64,
-        answers: Vec<GrillAnswer>,
-    ) -> Result<Run, String> {
-        let run = self
-            .state
-            .runs
-            .iter()
-            .find(|run| run.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        if run.execution_profile != ExecutionProfile::Grill {
-            return Err(format!("Run {run_id} is not a Grill Run"));
-        }
-        let can_submit_answers = run.state == RunState::Blocked
-            || (run.state == RunState::Finished
-                && run.grill_phase == Some(GrillPhase::WaitingForAnswers));
-        if !can_submit_answers {
-            return Err(format!("Run {run_id} is not waiting for Grill answers"));
-        }
-        let answers_decision = decide(
-            self.state.clone(),
-            Event::RecordGrillAnswers { run_id, answers },
-        )
-        .map_err(|error| error.to_string())?;
-        let answered_run = answers_decision
-            .state
-            .runs
-            .iter()
-            .find(|candidate| candidate.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        let response = format_grill_response(&answered_run.grill_answers)
-            .map_err(|error| error.to_string())?;
-        self.commit(answers_decision)?;
-
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == answered_run.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", answered_run.machine_id))?;
-        let mut input = response.into_bytes();
-        input.push(b'\n');
-        send_input_to_pane(&machine, &answered_run.pane_id, &input)?;
-
-        let working = decide(
-            self.state.clone(),
-            Event::UpdateRunState {
-                run_id,
-                state: RunState::Working,
-            },
-        )
-        .map_err(|error| error.to_string())?;
-        self.commit(working)?;
-
-        let response = String::from_utf8(input)
-            .map_err(|_| "The grouped Grill response was not valid UTF-8".to_owned())?;
-        let response = response.trim_end_matches('\n').to_owned();
-        let decision = decide(
-            self.state.clone(),
-            Event::RecordGrillResponse { run_id, response },
-        )
-        .map_err(|error| error.to_string())?;
-        let submitted_run = decision
-            .state
-            .runs
-            .iter()
-            .find(|candidate| candidate.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        self.commit(decision)?;
-        Ok(submitted_run)
-    }
-
-    pub(crate) fn continue_grill(
-        &mut self,
-        run_id: i64,
-        action: GrillContinuationAction,
-    ) -> Result<Run, String> {
-        let run = self
-            .state
-            .runs
-            .iter()
-            .find(|run| run.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        let prompt = build_grill_continuation_prompt(&self.state, run_id, action)
-            .map_err(|error| error.to_string())?;
-        let decision = decide(self.state.clone(), Event::ContinueGrill { run_id, action })
-            .map_err(|error| error.to_string())?;
-        let machine = self
-            .state
-            .machines
-            .iter()
-            .find(|machine| machine.id == run.machine_id)
-            .cloned()
-            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-        let mut input = prompt.into_bytes();
-        input.push(b'\n');
-        send_input_to_pane(&machine, &run.pane_id, &input)?;
-
-        let continued = decision
-            .state
-            .runs
-            .iter()
-            .find(|candidate| candidate.id == run_id)
-            .cloned()
-            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        self.commit(decision)?;
-        Ok(continued)
-    }
-
+    #[cfg(test)]
     pub(crate) fn stop_run(&mut self, run_id: i64) -> Result<Run, String> {
         let run = self
             .state
@@ -2676,7 +3055,7 @@ impl Runtime {
         open_pane_in_terminal(&identity)
     }
 
-    pub(crate) fn recover_run_states(&mut self) -> Result<(), String> {
+    pub(crate) fn recover_run_state_records(&mut self) -> Result<(), String> {
         for run in self.state.runs.clone() {
             let machine = self
                 .state
@@ -2696,12 +3075,24 @@ impl Runtime {
             let application = self.apply_agent_state_record(record_run_id, record.clone())?;
             if application.accepted
                 && matches!(record.state, RunState::Blocked | RunState::Finished)
+                && run.execution_profile == ExecutionProfile::Grill
             {
-                if let Err(error) = self.capture_grill_transcript(record_run_id) {
-                    eprintln!(
-                        "Could not retain transcript for waiting Grill Run {record_run_id}: {error}"
-                    );
-                }
+                self.pending_grill_transcript_captures.insert(record_run_id);
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recover_run_states(&mut self) -> Result<(), String> {
+        self.recover_run_state_records()?;
+        let run_ids = std::mem::take(&mut self.pending_grill_transcript_captures);
+        for run_id in run_ids {
+            if let Err(error) = self.capture_grill_transcript(run_id) {
+                eprintln!(
+                    "Could not retain transcript for waiting Grill Run {}: {error}",
+                    run_id
+                );
             }
         }
         Ok(())
@@ -2751,6 +3142,16 @@ impl Runtime {
         )
         .map_err(|error| error.to_string())?;
         self.commit(decision)?;
+        if matches!(record.state, RunState::Blocked | RunState::Finished)
+            && self
+                .state
+                .runs
+                .iter()
+                .find(|run| run.id == run_id)
+                .is_some_and(|run| run.execution_profile == ExecutionProfile::Grill)
+        {
+            self.pending_grill_transcript_captures.insert(run_id);
+        }
         let run_changed = self
             .state
             .runs

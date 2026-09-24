@@ -2125,13 +2125,13 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     RunState::Unknown => run.grill_phase.or(Some(GrillPhase::Starting)),
                     RunState::Working => Some(GrillPhase::Working),
                     RunState::Blocked => Some(GrillPhase::WaitingForAnswers),
-                    RunState::Finished => Some(if run.grill_question_group.is_some()
-                        && run.grill_response.is_none()
-                    {
-                        GrillPhase::WaitingForAnswers
-                    } else {
-                        GrillPhase::AwaitingNextAction
-                    }),
+                    RunState::Finished => Some(
+                        if run.grill_question_group.is_some() && run.grill_response.is_none() {
+                            GrillPhase::WaitingForAnswers
+                        } else {
+                            GrillPhase::AwaitingNextAction
+                        },
+                    ),
                 };
             }
             let run = run.clone();
@@ -2312,9 +2312,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 run.grill_response = None;
                 run.grill_question_group = question_group;
             }
-            if run.state == RunState::Finished
-                && run.grill_phase != Some(GrillPhase::Finished)
-            {
+            if run.state == RunState::Finished && run.grill_phase != Some(GrillPhase::Finished) {
                 run.grill_phase = Some(if has_questions {
                     GrillPhase::WaitingForAnswers
                 } else {

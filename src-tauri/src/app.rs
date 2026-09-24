@@ -5,9 +5,9 @@
 //! for the frontend and for Tauri's generated command wrappers.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
-    sync::{atomic::AtomicBool, Arc, Mutex},
+    sync::{atomic::AtomicBool, Arc, Mutex, Weak},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -52,13 +52,16 @@ pub struct Runtime {
     pub(crate) pending_machine_deletion: Option<MachineDeletionPreview>,
     pub(crate) pending_parent_deletion: Option<ParentDeletionPreview>,
     pub(crate) pending_reset_local_data: Option<ResetLocalDataPreview>,
-    pub(crate) terminal_connections: HashMap<String, TmuxControlPane>,
+    pub(crate) terminal_connections: HashMap<String, Arc<TmuxControlPane>>,
     pub(crate) terminal_open_request_generations: HashMap<String, u64>,
     pub(crate) terminal_connection_generations: HashMap<String, u64>,
+    pub(crate) grill_operation_locks: HashMap<i64, Weak<tauri::async_runtime::Mutex<()>>>,
+    pub(crate) machine_check_request_generations: HashMap<i64, u64>,
     // These in-memory generations distinguish concurrent observations whose
     // Unix-second `fetched_at` values are equal.
     pub(crate) external_snapshot_request_generations: HashMap<i64, u64>,
     pub(crate) external_snapshot_applied_generations: HashMap<i64, u64>,
+    pub(crate) pending_grill_transcript_captures: HashSet<i64>,
     pub(crate) terminal_runtime: Arc<dyn TerminalRuntime>,
     pub(crate) reconciliation_in_progress: Arc<AtomicBool>,
     pub(crate) machine_readiness: HashMap<i64, MachineReadiness>,
@@ -146,15 +149,21 @@ impl Runtime {
             terminal_connections: HashMap::new(),
             terminal_open_request_generations: HashMap::new(),
             terminal_connection_generations: HashMap::new(),
+            grill_operation_locks: HashMap::new(),
+            machine_check_request_generations: HashMap::new(),
             external_snapshot_request_generations: HashMap::new(),
             external_snapshot_applied_generations: HashMap::new(),
+            pending_grill_transcript_captures: HashSet::new(),
             terminal_runtime: Arc::new(terminal_runtime),
             reconciliation_in_progress: Arc::new(AtomicBool::new(false)),
             machine_readiness: HashMap::new(),
             legacy_agent_state_directory,
         };
         runtime.ensure_project_workspaces()?;
-        runtime.recover_run_states()?;
+        // Startup hydrates agent-owned state files synchronously, but tmux
+        // transcript capture belongs to the asynchronous Home/suggestions
+        // recovery path after the shared Runtime is available.
+        runtime.recover_run_state_records()?;
         Ok(runtime)
     }
 
@@ -183,6 +192,23 @@ impl Runtime {
             machine: machine.clone(),
             readiness: self.machine_readiness.get(&machine.id).cloned(),
         }
+    }
+
+    pub(crate) fn grill_operation_lock(
+        &mut self,
+        run_id: i64,
+    ) -> Arc<tauri::async_runtime::Mutex<()>> {
+        if let Some(lock) = self
+            .grill_operation_locks
+            .get(&run_id)
+            .and_then(Weak::upgrade)
+        {
+            return lock;
+        }
+        let lock = Arc::new(tauri::async_runtime::Mutex::new(()));
+        self.grill_operation_locks
+            .insert(run_id, Arc::downgrade(&lock));
+        lock
     }
 
     pub(crate) fn preferred_agent_executable(
@@ -561,34 +587,34 @@ pub fn start_worktree_run(
 }
 
 #[tauri::command]
-pub fn list_run_suggestions(
+pub async fn list_run_suggestions(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Vec<RunSuggestion>, String> {
-    crate::features::work::list_run_suggestions(state)
+    crate::features::work::list_run_suggestions(state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn attach_run(
+pub async fn attach_run(
     suggestion: RunSuggestion,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    crate::features::work::attach_run(suggestion, state)
+    crate::features::work::attach_run(suggestion, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn stop_untracked_agent(
+pub async fn stop_untracked_agent(
     suggestion: RunSuggestion,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
-    crate::features::work::stop_untracked_agent(suggestion, state)
+    crate::features::work::stop_untracked_agent(suggestion, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_untracked_agent(
+pub async fn delete_untracked_agent(
     suggestion: RunSuggestion,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
-    crate::features::work::delete_untracked_agent(suggestion, state)
+    crate::features::work::delete_untracked_agent(suggestion, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -635,45 +661,48 @@ pub async fn open_terminal(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn terminal_input(
+pub async fn terminal_input(
     terminal_id: String,
     input: Vec<u8>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
-    crate::features::work::terminal_input(terminal_id, input, state)
+    crate::features::work::terminal_input(terminal_id, input, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn submit_grill_answers(
+pub async fn submit_grill_answers(
     run_id: i64,
     answers: Vec<GrillAnswer>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    crate::features::work::submit_grill_answers(run_id, answers, state)
+    crate::features::work::submit_grill_answers(run_id, answers, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn continue_grill(
+pub async fn continue_grill(
     run_id: i64,
     action: GrillContinuationAction,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    crate::features::work::continue_grill(run_id, action, state)
+    crate::features::work::continue_grill(run_id, action, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn terminal_resize(
+pub async fn terminal_resize(
     terminal_id: String,
     columns: u16,
     rows: u16,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
-    crate::features::work::terminal_resize(terminal_id, columns, rows, state)
+    crate::features::work::terminal_resize(terminal_id, columns, rows, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn close_terminal(terminal_id: String, state: State<'_, Mutex<Runtime>>) -> Result<(), String> {
-    crate::features::work::close_terminal(terminal_id, state)
+pub async fn close_terminal(
+    terminal_id: String,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    crate::features::work::close_terminal(terminal_id, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -685,8 +714,8 @@ pub async fn open_external_terminal(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn stop_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
-    crate::features::work::stop_run(run_id, state)
+pub async fn stop_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
+    crate::features::work::stop_run(run_id, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -712,12 +741,12 @@ pub fn list_context_attention_defaults(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn get_home(
+pub async fn get_home(
     context_id: Option<i64>,
     now: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<HomeView, String> {
-    crate::features::work::get_home(context_id, now, state)
+    crate::features::work::get_home(context_id, now, state).await
 }
 
 #[tauri::command]
@@ -823,7 +852,7 @@ pub fn update_repository(
 
 #[tauri::command(rename_all = "camelCase")]
 #[allow(clippy::too_many_arguments)]
-pub fn register_repository_at_location(
+pub async fn register_repository_at_location(
     project_id: i64,
     name: String,
     remote_url: Option<String>,
@@ -845,6 +874,7 @@ pub fn register_repository_at_location(
         clone_into_destination,
         state,
     )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -962,7 +992,7 @@ pub fn create_worktree(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn prepare_worktree(
+pub async fn prepare_worktree(
     workspace_id: i64,
     repository_id: i64,
     machine_id: i64,
@@ -978,6 +1008,7 @@ pub fn prepare_worktree(
         confirm_dirty_attachment,
         state,
     )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -989,17 +1020,18 @@ pub async fn prepare_worktree_removal(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn remove_worktree(
+pub async fn remove_worktree(
     worktree_id: i64,
     confirmed: bool,
     destructive_confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<WorktreeRemovalResult, String> {
     crate::features::work::remove_worktree(worktree_id, confirmed, destructive_confirmed, state)
+        .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn attach_worktree(
+pub async fn attach_worktree(
     workspace_id: i64,
     repository_id: i64,
     machine_id: i64,
@@ -1015,6 +1047,7 @@ pub fn attach_worktree(
         confirm_dirty_attachment,
         state,
     )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1044,7 +1077,7 @@ pub fn prepare_machine_deletion(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn delete_machine(
+pub async fn delete_machine(
     machine_id: i64,
     run_ids: Vec<i64>,
     worktree_ids: Vec<i64>,
@@ -1060,6 +1093,7 @@ pub fn delete_machine(
         confirmed,
         state,
     )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]

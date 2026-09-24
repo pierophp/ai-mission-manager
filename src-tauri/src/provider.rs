@@ -386,7 +386,10 @@ mod tests {
         );
         assert_eq!(github_repository_name("ftp://github.com/acme/app"), None);
         assert_eq!(github_repository_name("https://example.com/acme/app"), None);
-        assert_eq!(github_repository_name("https://github.com/acme/app/issues"), None);
+        assert_eq!(
+            github_repository_name("https://github.com/acme/app/issues"),
+            None
+        );
     }
 
     #[test]

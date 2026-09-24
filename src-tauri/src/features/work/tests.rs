@@ -1,6 +1,6 @@
 use super::*;
 
-use std::{process::Command, sync::Mutex};
+use std::{path::Path, process::Command, sync::Mutex};
 
 use tempfile::tempdir;
 
@@ -8,6 +8,107 @@ use crate::domain::{
     attention_entries, ExternalMetadata, ExternalObjectInput, ExternalObjectKind, ExternalProvider,
     ExternalSnapshotData,
 };
+
+fn runtime_with_grill_run(
+    database: &Path,
+    terminal: crate::terminal::FakeTerminalRuntime,
+) -> (Runtime, i64) {
+    use crate::domain::{
+        decide, AgentKind, Event, GrillConfiguration, MachineTransport, WorkspaceRepositoryInput,
+    };
+
+    let mut runtime = Runtime::open_with_terminal_runtime(database, terminal)
+        .expect("runtime should open with the fake Terminal Runtime");
+    let machine = runtime
+        .register_machine(
+            1,
+            "Test Machine".into(),
+            "mission".into(),
+            MachineTransport::Local,
+        )
+        .expect("Machine should register");
+    runtime
+        .set_context_execution_machine(1, Some(machine.id))
+        .expect("Context should use the Machine");
+    let repository = runtime
+        .register_repository(
+            1,
+            "service".into(),
+            "https://example.com/service.git".into(),
+        )
+        .expect("Repository should register");
+    let item = runtime
+        .create_item("Exercise Grill command serialization".into(), 1, 1)
+        .expect("Item should be created");
+    let workspace = runtime
+        .create_workspace(
+            item.id,
+            vec![WorkspaceRepositoryInput {
+                repository_id: repository.id,
+                branch: "feature/grill-lock".into(),
+                base_branch: "main".into(),
+            }],
+        )
+        .expect("Workspace should be created");
+    let configuration = GrillConfiguration {
+        agent: AgentKind::Claude,
+        model: "claude-sonnet-4-5".into(),
+        effort: "high".into(),
+    };
+    let prompt = runtime
+        .compose_grill_prompt(item.id, configuration.clone(), "Test prompt".into())
+        .expect("Grill prompt should compose");
+    let decision = decide(
+        runtime.state.clone(),
+        Event::StartGrillRun {
+            item_id: item.id,
+            workspace_id: workspace.id,
+            repository_id: repository.id,
+            machine_id: machine.id,
+            configuration,
+            prompt,
+            skill_snapshot: crate::domain::GRILL_SKILL_SNAPSHOT.into(),
+            working_directory: "/tmp/grill-lock-test".into(),
+            session_name: "grill-lock-test".into(),
+            pane_id: "%1".into(),
+            started_at: 1,
+            checkouts: vec![crate::domain::RunCheckout {
+                repository_id: repository.id,
+                path: "/tmp/grill-lock-test".into(),
+                branch: "feature/grill-lock".into(),
+                is_dirty: false,
+            }],
+        },
+    )
+    .expect("Grill Run should be created");
+    runtime.commit(decision).expect("Grill Run should persist");
+    let run_id = runtime
+        .state
+        .runs
+        .last()
+        .expect("Grill Run should remain available")
+        .id;
+    (runtime, run_id)
+}
+
+fn wait_for_grill_operation_waiter(state: &std::sync::Arc<Mutex<Runtime>>, run_id: i64) -> bool {
+    use std::{thread, time::Duration};
+
+    let started = std::time::Instant::now();
+    while started.elapsed() < Duration::from_secs(2) {
+        let operation_lock = state
+            .lock()
+            .expect("Runtime should remain available")
+            .grill_operation_lock(run_id);
+        // One owned guard holds the lock for the first request; the queued
+        // request owns another Arc while it awaits the same per-Run lock.
+        if std::sync::Arc::strong_count(&operation_lock) >= 3 {
+            return true;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
+    false
+}
 
 #[test]
 fn item_interface_preserves_lifecycle_notes_reminders_relations_and_status() {
@@ -363,13 +464,76 @@ fn workspace_interface_keeps_repository_selection_and_worktree_identity() {
     assert_eq!(worktree.base_branch, "main");
     assert!(!worktree.is_dirty);
     assert_eq!(
-        runtime.state.workspaces[0].preparation_state,
+        runtime
+            .state
+            .workspaces
+            .iter()
+            .find(|candidate| candidate.id == workspace.id)
+            .expect("created Workspace should remain available")
+            .preparation_state,
         crate::domain::WorkspacePreparationState::Ready
     );
 
     let reopened = Runtime::open(&database).expect("runtime should reopen");
     assert_eq!(reopened.state.workspaces, runtime.state.workspaces);
     assert_eq!(reopened.state.worktrees, runtime.state.worktrees);
+}
+
+#[test]
+fn startup_preserves_workspace_branches_and_defaults_new_repositories() {
+    let directory = tempdir().expect("temporary app directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let mut runtime = Runtime::open(&database).expect("runtime should open");
+    runtime
+        .register_repository(
+            1,
+            "service-a".into(),
+            "https://example.com/service-a.git".into(),
+        )
+        .expect("first Repository should register");
+    runtime
+        .create_item("Preserve selected branches".into(), 1, 1)
+        .expect("Item should be created");
+    let workspace = runtime
+        .create_workspace(
+            1,
+            vec![WorkspaceRepositoryInput {
+                repository_id: 1,
+                branch: "feature/api".into(),
+                base_branch: "release/1".into(),
+            }],
+        )
+        .expect("Workspace should be created");
+    runtime
+        .register_repository(
+            1,
+            "service-b".into(),
+            "https://example.com/service-b.git".into(),
+        )
+        .expect("second Repository should register");
+
+    let reopened = Runtime::open(&database).expect("runtime should reopen");
+    let reopened_workspace = reopened
+        .state
+        .workspaces
+        .iter()
+        .find(|candidate| candidate.id == workspace.id)
+        .expect("Workspace should survive reopening");
+    assert_eq!(
+        reopened_workspace.repositories,
+        vec![
+            crate::domain::WorkspaceRepository {
+                repository_id: 1,
+                branch: "feature/api".into(),
+                base_branch: "release/1".into(),
+            },
+            crate::domain::WorkspaceRepository {
+                repository_id: 2,
+                branch: "mission-MC-1".into(),
+                base_branch: "main".into(),
+            },
+        ]
+    );
 }
 
 #[cfg(unix)]
@@ -650,4 +814,240 @@ fn settings_check_reports_hooks_even_when_tmux_is_unavailable() {
     assert_eq!(readiness.claude_hooks.current, Some(true));
     assert_eq!(readiness.codex_hooks.provisioned, Some(true));
     assert_eq!(readiness.codex_hooks.current, Some(true));
+}
+
+#[test]
+fn run_suggestion_tmux_inspection_does_not_hold_the_runtime_lock() {
+    use crate::{
+        domain::MachineTransport,
+        terminal::{FakeMachineOutcome, FakeTerminalRuntime},
+    };
+    use std::{sync::Arc, thread, time::Duration};
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+    let blocked_observation = fake.block_observations();
+    let mut runtime = Runtime::open_with_terminal_runtime(&database, fake)
+        .expect("runtime should open with the fake Terminal Runtime");
+    runtime
+        .register_machine(
+            1,
+            "Test Machine".into(),
+            "mission".into(),
+            MachineTransport::Local,
+        )
+        .expect("Machine should register");
+    runtime
+        .set_context_execution_machine(1, Some(1))
+        .expect("Context should use the Machine");
+
+    let state = Arc::new(Mutex::new(runtime));
+    let worker_state = Arc::clone(&state);
+    let worker = thread::spawn(move || {
+        tauri::async_runtime::block_on(runs::list_run_suggestions_with_state(&worker_state))
+    });
+
+    assert!(blocked_observation.wait_until_started(Duration::from_secs(2)));
+    state
+        .lock()
+        .expect("Runtime should remain lockable while tmux is blocked")
+        .create_item("Local state change during tmux inspection".into(), 1, 1)
+        .expect("local state change should complete during tmux inspection");
+    blocked_observation.release();
+
+    let error = worker
+        .join()
+        .expect("suggestion worker should finish")
+        .expect_err("stale suggestions should be rejected after local state changes");
+    assert!(error.contains("state changed while agent Panes were inspected"));
+}
+
+#[test]
+fn concurrent_grill_answer_submissions_send_only_once() {
+    use crate::domain::{decide, Event, GrillAnswer, RunState};
+    use crate::terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime};
+    use std::{
+        sync::{mpsc, Arc},
+        thread,
+        time::Duration,
+    };
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+    let blocked_send = fake.block_sends();
+    let commands = fake.command_log();
+    let (mut runtime, run_id) =
+        runtime_with_grill_run(&directory.path().join("mission-manager.sqlite"), fake);
+    let question_group = parse_grill_question_group("❓ Q1: Keep this decision?")
+        .expect("question group should parse");
+    runtime
+        .commit(
+            decide(
+                runtime.state.clone(),
+                Event::RecordRunTranscript {
+                    run_id,
+                    transcript: "❓ Q1: Keep this decision?".into(),
+                    question_group: Some(question_group),
+                },
+            )
+            .expect("question group should be recorded"),
+        )
+        .expect("question group should persist");
+    runtime
+        .commit(
+            decide(
+                runtime.state.clone(),
+                Event::UpdateRunState {
+                    run_id,
+                    state: RunState::Blocked,
+                },
+            )
+            .expect("Run should enter the answer phase"),
+        )
+        .expect("answer phase should persist");
+    let state = Arc::new(Mutex::new(runtime));
+    let first_state = Arc::clone(&state);
+    let answer = GrillAnswer {
+        question_number: 1,
+        answer: "Keep it".into(),
+    };
+    let first = thread::spawn(move || {
+        tauri::async_runtime::block_on(runs::submit_grill_answers_with_state(
+            run_id,
+            vec![answer],
+            &first_state,
+        ))
+    });
+    assert!(blocked_send.wait_until_started(Duration::from_secs(2)));
+
+    let second_state = Arc::clone(&state);
+    let (started_sender, started_receiver) = mpsc::channel();
+    let second = thread::spawn(move || {
+        started_sender
+            .send(())
+            .expect("test should receive the second request start");
+        tauri::async_runtime::block_on(runs::submit_grill_answers_with_state(
+            run_id,
+            vec![GrillAnswer {
+                question_number: 1,
+                answer: "Keep it".into(),
+            }],
+            &second_state,
+        ))
+    });
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("second request should start");
+    assert!(wait_for_grill_operation_waiter(&state, run_id));
+    let send_count = commands
+        .lock()
+        .expect("fake command log should remain available")
+        .iter()
+        .filter(|command| matches!(command, FakeTerminalCommand::SendPaneInput { .. }))
+        .count();
+    assert_eq!(send_count, 1, "queued answer should not be sent early");
+
+    blocked_send.release();
+    first
+        .join()
+        .expect("first request should finish")
+        .expect("first answer submission should succeed");
+    let error = second
+        .join()
+        .expect("second request should finish")
+        .expect_err("second answer submission should observe the completed first request");
+    assert!(error.contains("not waiting for Grill answers"));
+    let send_count = commands
+        .lock()
+        .expect("fake command log should remain available")
+        .iter()
+        .filter(|command| matches!(command, FakeTerminalCommand::SendPaneInput { .. }))
+        .count();
+    assert_eq!(send_count, 1);
+}
+
+#[test]
+fn concurrent_grill_continuations_send_only_once() {
+    use crate::domain::{decide, Event, GrillContinuationAction, RunState};
+    use crate::terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime};
+    use std::{
+        sync::{mpsc, Arc},
+        thread,
+        time::Duration,
+    };
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+    let blocked_send = fake.block_sends();
+    let commands = fake.command_log();
+    let (mut runtime, run_id) =
+        runtime_with_grill_run(&directory.path().join("mission-manager.sqlite"), fake);
+    runtime
+        .commit(
+            decide(
+                runtime.state.clone(),
+                Event::UpdateRunState {
+                    run_id,
+                    state: RunState::Finished,
+                },
+            )
+            .expect("Grill Run should reach its continuation frontier"),
+        )
+        .expect("continuation frontier should persist");
+    let state = Arc::new(Mutex::new(runtime));
+    let first_state = Arc::clone(&state);
+    let first = thread::spawn(move || {
+        tauri::async_runtime::block_on(runs::continue_grill_with_state(
+            run_id,
+            GrillContinuationAction::ToSpec,
+            &first_state,
+        ))
+    });
+    assert!(blocked_send.wait_until_started(Duration::from_secs(2)));
+
+    let second_state = Arc::clone(&state);
+    let (started_sender, started_receiver) = mpsc::channel();
+    let second = thread::spawn(move || {
+        started_sender
+            .send(())
+            .expect("test should receive the second request start");
+        tauri::async_runtime::block_on(runs::continue_grill_with_state(
+            run_id,
+            GrillContinuationAction::ToSpec,
+            &second_state,
+        ))
+    });
+    started_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("second request should start");
+    assert!(wait_for_grill_operation_waiter(&state, run_id));
+    let send_count = commands
+        .lock()
+        .expect("fake command log should remain available")
+        .iter()
+        .filter(|command| matches!(command, FakeTerminalCommand::SendPaneInput { .. }))
+        .count();
+    assert_eq!(send_count, 1, "queued continuation should not send early");
+
+    blocked_send.release();
+    first
+        .join()
+        .expect("first request should finish")
+        .expect("first continuation should succeed");
+    let error = second
+        .join()
+        .expect("second request should finish")
+        .expect_err("second continuation should observe the completed first request");
+    assert!(
+        !error.is_empty(),
+        "queued continuation should be rejected: {error}"
+    );
+    let send_count = commands
+        .lock()
+        .expect("fake command log should remain available")
+        .iter()
+        .filter(|command| matches!(command, FakeTerminalCommand::SendPaneInput { .. }))
+        .count();
+    assert_eq!(send_count, 1);
 }

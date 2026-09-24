@@ -30,18 +30,19 @@ use crate::{
         grill_transcript_extends, home_view, normalize_machine_path, parse_grill_question_group,
         parse_grill_question_group_since, run_is_active, search_items, suggest_untracked_runs,
         worktree_path, AgentKind, AgentPaneObservation, AuditAction, ConfirmedDownstreamIssue,
-        Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView, ExternalObjectInput,
-        ExternalObjectKind, ExternalProvider, ExternalSnapshot, GrillAnswer, GrillConfiguration,
-        GrillContinuationAction, GrillPhase, HomeView, Item, ItemRelation, ItemRelationKind,
-        ItemStatus, ItemView, Machine, MachineObservation, MachineTransport, Repository,
-        RepositoryLocation, Run, RunCheckout, RunPaneStatus, RunPromptSelection, RunState,
-        RunSuggestion, Workspace, WorkspaceRepository, WorkspaceRepositoryInput, Worktree,
+        DomainState, Event, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
+        ExternalObjectInput, ExternalObjectKind, ExternalProvider, ExternalSnapshot, GrillAnswer,
+        GrillConfiguration, GrillContinuationAction, GrillPhase, HomeView, Item, ItemRelation,
+        ItemRelationKind, ItemStatus, ItemView, Machine, MachineObservation, MachineTransport,
+        Repository, RepositoryLocation, Run, RunCheckout, RunPaneStatus, RunPromptSelection,
+        RunState, RunSuggestion, Workspace, WorkspaceRepository, WorkspaceRepositoryInput,
+        Worktree,
     },
     git::GitCli,
     provider::{classify_url, github_repository_name, resolve_gh_executable, GithubCli},
     terminal::{
-        open_pane_in_terminal, send_input_to_pane, terminal_transport, AgentLaunchContext,
-        ExternalPaneIdentity, MachineObservationFailure, RunReconciliationResult, TmuxControlPane,
+        open_pane_in_terminal, terminal_transport, AgentLaunchContext, ExternalPaneIdentity,
+        MachineObservationFailure, RunReconciliationResult, TerminalRuntime, TmuxControlPane,
     },
 };
 
@@ -117,16 +118,13 @@ fn locked<T>(
     operation(&mut runtime)
 }
 
-pub(crate) fn get_home(
+pub(crate) async fn get_home(
     context_id: Option<i64>,
     now: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<HomeView, String> {
+    runs::recover_run_states_with_state(state.inner()).await?;
     locked(state, |runtime| {
-        // Agent-owned state files can change the blocked-run projection between
-        // app launches and Home refreshes. Keep that existing recovery hook at
-        // the work projection seam until the Run slice is extracted.
-        runtime.recover_run_states()?;
         Ok(home_view(&runtime.state, context_id, &now))
     })
 }
@@ -397,7 +395,7 @@ pub(crate) fn create_worktree(
     })
 }
 
-pub(crate) fn prepare_worktree(
+pub(crate) async fn prepare_worktree(
     workspace_id: i64,
     repository_id: i64,
     machine_id: i64,
@@ -405,15 +403,15 @@ pub(crate) fn prepare_worktree(
     confirm_dirty_attachment: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Worktree, String> {
-    locked(state, |runtime| {
-        runtime.prepare_worktree(
-            workspace_id,
-            repository_id,
-            machine_id,
-            reuse_existing_branch,
-            confirm_dirty_attachment,
-        )
-    })
+    workspace::prepare_worktree_with_state(
+        workspace_id,
+        repository_id,
+        machine_id,
+        reuse_existing_branch,
+        confirm_dirty_attachment,
+        state.inner(),
+    )
+    .await
 }
 
 pub(crate) async fn prepare_worktree_removal(
@@ -423,18 +421,22 @@ pub(crate) async fn prepare_worktree_removal(
     crate::features::deletion::prepare_worktree_removal_with_state(worktree_id, state.inner()).await
 }
 
-pub(crate) fn remove_worktree(
+pub(crate) async fn remove_worktree(
     worktree_id: i64,
     confirmed: bool,
     destructive_confirmed: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<WorktreeRemovalResult, String> {
-    locked(state, |runtime| {
-        runtime.remove_worktree(worktree_id, confirmed, destructive_confirmed)
-    })
+    crate::features::deletion::remove_worktree_with_state(
+        worktree_id,
+        confirmed,
+        destructive_confirmed,
+        state.inner(),
+    )
+    .await
 }
 
-pub(crate) fn attach_worktree(
+pub(crate) async fn attach_worktree(
     workspace_id: i64,
     repository_id: i64,
     machine_id: i64,
@@ -442,20 +444,20 @@ pub(crate) fn attach_worktree(
     confirm_dirty_attachment: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Worktree, String> {
-    locked(state, |runtime| {
-        runtime.attach_worktree(
-            workspace_id,
-            repository_id,
-            machine_id,
-            path,
-            confirm_dirty_attachment,
-        )
-    })
+    workspace::attach_worktree_with_state(
+        workspace_id,
+        repository_id,
+        machine_id,
+        path,
+        confirm_dirty_attachment,
+        state.inner(),
+    )
+    .await
 }
 
 mod external;
 mod items;
-mod runs;
+pub(crate) mod runs;
 mod workspace;
 
 #[cfg(test)]
@@ -586,31 +588,31 @@ pub(crate) fn start_worktree_run(
     })
 }
 
-pub(crate) fn list_run_suggestions(
+pub(crate) async fn list_run_suggestions(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Vec<RunSuggestion>, String> {
-    locked(state, |runtime| runtime.list_run_suggestions())
+    runs::list_run_suggestions_with_state(state.inner()).await
 }
 
-pub(crate) fn attach_run(
+pub(crate) async fn attach_run(
     suggestion: RunSuggestion,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    locked(state, |runtime| runtime.attach_run(suggestion))
+    runs::attach_run_with_state(suggestion, state.inner()).await
 }
 
-pub(crate) fn stop_untracked_agent(
+pub(crate) async fn stop_untracked_agent(
     suggestion: RunSuggestion,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
-    locked(state, |runtime| runtime.stop_untracked_agent(suggestion))
+    runs::stop_untracked_agent_with_state(suggestion, state.inner()).await
 }
 
-pub(crate) fn delete_untracked_agent(
+pub(crate) async fn delete_untracked_agent(
     suggestion: RunSuggestion,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
-    locked(state, |runtime| runtime.delete_untracked_agent(suggestion))
+    runs::delete_untracked_agent_with_state(suggestion, state.inner()).await
 }
 
 pub(crate) async fn open_terminal(
@@ -632,48 +634,66 @@ pub(crate) async fn open_terminal(
     .await
 }
 
-pub(crate) fn terminal_input(
+pub(crate) async fn terminal_input(
     terminal_id: String,
     input: Vec<u8>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
-    // A control-mode client is already open; this only serializes one short
-    // write to its input pipe while holding the connection map stable.
-    locked(state, |runtime| runtime.terminal_input(&terminal_id, input))
+    let connection = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        Arc::clone(
+            runtime
+                .terminal_connections
+                .get(&terminal_id)
+                .ok_or_else(|| "The embedded terminal is not attached".to_owned())?,
+        )
+    };
+    tauri::async_runtime::spawn_blocking(move || connection.send_input(&input))
+        .await
+        .map_err(|error| format!("Terminal input worker failed: {error}"))?
 }
 
-pub(crate) fn submit_grill_answers(
+pub(crate) async fn submit_grill_answers(
     run_id: i64,
     answers: Vec<GrillAnswer>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    locked(state, |runtime| {
-        runtime.submit_grill_answers(run_id, answers)
-    })
+    runs::submit_grill_answers_with_state(run_id, answers, state.inner()).await
 }
 
-pub(crate) fn continue_grill(
+pub(crate) async fn continue_grill(
     run_id: i64,
     action: GrillContinuationAction,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    locked(state, |runtime| runtime.continue_grill(run_id, action))
+    runs::continue_grill_with_state(run_id, action, state.inner()).await
 }
 
-pub(crate) fn terminal_resize(
+pub(crate) async fn terminal_resize(
     terminal_id: String,
     columns: u16,
     rows: u16,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
-    // As with terminal input, resizing is one command sent to an existing
-    // control-mode connection; no process or SSH session is started here.
-    locked(state, |runtime| {
-        runtime.terminal_resize(&terminal_id, columns, rows)
-    })
+    let connection = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        Arc::clone(
+            runtime
+                .terminal_connections
+                .get(&terminal_id)
+                .ok_or_else(|| "The embedded terminal is not attached".to_owned())?,
+        )
+    };
+    tauri::async_runtime::spawn_blocking(move || connection.resize(columns, rows))
+        .await
+        .map_err(|error| format!("Terminal resize worker failed: {error}"))?
 }
 
-pub(crate) fn close_terminal(
+pub(crate) async fn close_terminal(
     terminal_id: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<(), String> {
@@ -687,7 +707,9 @@ pub(crate) fn close_terminal(
         runtime.terminal_connections.remove(&terminal_id)
     };
     if let Some(connection) = connection {
-        connection.close()?;
+        tauri::async_runtime::spawn_blocking(move || connection.close())
+            .await
+            .map_err(|error| format!("Terminal close worker failed: {error}"))??;
     }
     Ok(())
 }
@@ -699,8 +721,8 @@ pub(crate) async fn open_external_terminal(
     runs::open_external_terminal_with_state(run_id, state.inner()).await
 }
 
-pub(crate) fn stop_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
-    locked(state, |runtime| runtime.stop_run(run_id))
+pub(crate) async fn stop_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
+    runs::stop_run_with_state(run_id, state.inner()).await
 }
 
 pub(crate) fn finish_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {

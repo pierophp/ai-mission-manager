@@ -48,6 +48,15 @@ pub trait TerminalRuntime: Send + Sync {
 
     fn list_agent_panes(&self, machine: &Machine) -> Result<Vec<AgentPaneSummary>, String>;
 
+    fn send_pane_input(
+        &self,
+        machine: &Machine,
+        pane_id: &str,
+        input: &[u8],
+    ) -> Result<(), String> {
+        send_input_to_pane(machine, pane_id, input)
+    }
+
     fn launch_agent(
         &self,
         machine: &Machine,
@@ -364,6 +373,7 @@ pub struct TmuxControlPane {
     child: Arc<Mutex<Child>>,
     pending_responses: Arc<Mutex<VecDeque<PendingControlCommand>>>,
     next_response_id: AtomicU64,
+    operation: Mutex<bool>,
     pane_id: String,
 }
 
@@ -592,6 +602,7 @@ impl TmuxControlPane {
             child,
             pending_responses,
             next_response_id: AtomicU64::new(0),
+            operation: Mutex::new(false),
             pane_id: pane_id.to_owned(),
         };
         pane.send_command("list-panes")?;
@@ -646,6 +657,11 @@ impl TmuxControlPane {
     }
 
     pub fn close(&self) -> Result<(), String> {
+        let mut closed = self
+            .operation
+            .lock()
+            .map_err(|_| "tmux control client is unavailable".to_owned())?;
+        *closed = true;
         let mut child = self
             .child
             .lock()
@@ -684,6 +700,13 @@ impl TmuxControlPane {
         response_sender: Option<mpsc::SyncSender<Result<Vec<u8>, String>>>,
         after_end: Option<Box<dyn FnOnce() + Send>>,
     ) -> Result<(), String> {
+        let closed = self
+            .operation
+            .lock()
+            .map_err(|_| "tmux control client is unavailable".to_owned())?;
+        if *closed {
+            return Err("tmux control client is closed".to_owned());
+        }
         let mut input = self
             .input
             .lock()
@@ -845,6 +868,11 @@ pub(crate) enum FakeTerminalCommand {
         session_name: String,
         pane_id: String,
     },
+    SendPaneInput {
+        machine_id: i64,
+        pane_id: String,
+        input: Vec<u8>,
+    },
     InterruptPane {
         machine_id: i64,
         session_name: String,
@@ -864,6 +892,7 @@ pub(crate) struct FakeTerminalRuntime {
     observed_panes: Arc<Mutex<std::collections::HashMap<i64, Vec<ObservedPane>>>>,
     transcript_captures: FakeTranscriptCaptures,
     observation_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
+    send_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
 }
 
 #[cfg(test)]
@@ -926,11 +955,23 @@ impl FakeTerminalRuntime {
                 Mutex::new(FakeObservationGateState::default()),
                 Condvar::new(),
             )),
+            send_gate: Arc::new((
+                Mutex::new(FakeObservationGateState::default()),
+                Condvar::new(),
+            )),
         }
     }
 
     pub(crate) fn block_observations(&self) -> FakeObservationBlock {
-        let gate = Arc::clone(&self.observation_gate);
+        Self::block_gate(&self.observation_gate)
+    }
+
+    pub(crate) fn block_sends(&self) -> FakeObservationBlock {
+        Self::block_gate(&self.send_gate)
+    }
+
+    fn block_gate(gate: &Arc<(Mutex<FakeObservationGateState>, Condvar)>) -> FakeObservationBlock {
+        let gate = Arc::clone(gate);
         let (state, _) = &*gate;
         let mut state = state
             .lock()
@@ -940,6 +981,20 @@ impl FakeTerminalRuntime {
         state.released = false;
         drop(state);
         FakeObservationBlock { gate }
+    }
+
+    fn wait_for_gate(gate: &Arc<(Mutex<FakeObservationGateState>, Condvar)>) {
+        let (state, changed) = &**gate;
+        let mut state = state
+            .lock()
+            .expect("fake operation gate should remain available");
+        if state.enabled {
+            state.started = true;
+            changed.notify_all();
+            let _state = changed
+                .wait_while(state, |state| !state.released)
+                .expect("fake operation gate should remain available");
+        }
     }
 
     pub(crate) fn set_observed_panes(&self, machine_id: i64, panes: Vec<ObservedPane>) {
@@ -1188,6 +1243,18 @@ impl TerminalRuntime for FakeTerminalRuntime {
         self.record(FakeTerminalCommand::ListAgentPanes {
             machine_id: machine.id,
         });
+        let (state, changed) = &*self.observation_gate;
+        let mut state = state
+            .lock()
+            .expect("fake observation gate should remain available");
+        if state.enabled {
+            state.started = true;
+            changed.notify_all();
+            state = changed
+                .wait_while(state, |state| !state.released)
+                .expect("fake observation gate should remain available");
+        }
+        drop(state);
         match self.outcome(machine) {
             FakeMachineOutcome::Available
             | FakeMachineOutcome::AgentUnavailable
@@ -1201,6 +1268,21 @@ impl TerminalRuntime for FakeTerminalRuntime {
                 machine.name
             )),
         }
+    }
+
+    fn send_pane_input(
+        &self,
+        machine: &Machine,
+        pane_id: &str,
+        input: &[u8],
+    ) -> Result<(), String> {
+        self.record(FakeTerminalCommand::SendPaneInput {
+            machine_id: machine.id,
+            pane_id: pane_id.into(),
+            input: input.into(),
+        });
+        Self::wait_for_gate(&self.send_gate);
+        Ok(())
     }
 
     fn launch_agent(
@@ -2654,6 +2736,69 @@ mod tests {
         assert_eq!(
             *events.lock().expect("event log should remain available"),
             vec!["output:before\r", "snapshot barrier", "output:after\r"]
+        );
+    }
+
+    #[test]
+    fn control_snapshot_barrier_routes_post_sample_output_through_the_terminal_gate() {
+        use crate::features::work::runs::{DeferredTerminalEvent, TerminalCallbackGate};
+
+        let gate = Arc::new(TerminalCallbackGate::default());
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let (response_sender, response_receiver) = mpsc::sync_channel(1);
+        let barrier_gate = Arc::clone(&gate);
+        let pending_responses = Arc::new(Mutex::new(VecDeque::from([PendingControlCommand {
+            id: 1,
+            response_sender: Some(response_sender),
+            after_end: Some(Box::new(move || barrier_gate.mark_snapshot_captured())),
+        }])));
+        let (ready_sender, _ready_receiver) = mpsc::sync_channel(1);
+        let output_gate = Arc::clone(&gate);
+        let output_events = Arc::clone(&events);
+        let mut reader = TmuxControlReader::new(
+            "%1".to_owned(),
+            pending_responses,
+            ready_sender,
+            move |output| {
+                output_gate.dispatch_output_or_queue(output, |output| {
+                    output_events
+                        .lock()
+                        .expect("event log should remain available")
+                        .push(format!("output:{}", String::from_utf8_lossy(&output)));
+                });
+            },
+            |_| {},
+        );
+
+        reader.handle_line(b"%output %1 before-sample\\015\n");
+        reader.handle_line(b"%begin 123 4 0\n");
+        reader.handle_line(b"snapshot contains before-sample\n");
+        reader.handle_line(b"%end 123 4 0\n");
+        reader.handle_line(b"%output %1 after-sample\\015\n");
+
+        let snapshot = response_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("snapshot response should arrive")
+            .expect("snapshot capture should succeed");
+        assert_eq!(snapshot, b"snapshot contains before-sample\n");
+        let _event_dispatch_guard = gate.lock_terminal_event_dispatch();
+        let (state_records, pending_events) = gate.activate_and_drain();
+        assert!(state_records.is_empty());
+        for event in pending_events {
+            match event {
+                DeferredTerminalEvent::Output(output) => events
+                    .lock()
+                    .expect("event log should remain available")
+                    .push(format!("output:{}", String::from_utf8_lossy(&output))),
+                DeferredTerminalEvent::Exit(code) => events
+                    .lock()
+                    .expect("event log should remain available")
+                    .push(format!("exit:{code:?}")),
+            }
+        }
+        assert_eq!(
+            *events.lock().expect("event log should remain available"),
+            vec!["output:after-sample\r"]
         );
     }
 
