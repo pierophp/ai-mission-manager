@@ -1,7 +1,15 @@
-import { type FormEvent, useEffect, useMemo, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearch } from "@tanstack/react-router";
 import { Plus } from "lucide-react";
+import { toast } from "sonner";
 
 import { Button } from "../../components/ui/button";
 import {
@@ -40,6 +48,18 @@ import {
   RunSuggestionCard,
   SearchResult,
 } from "./components";
+import { ItemDetailPanel } from "./item-detail/ItemDetailPanel";
+import type { GrillAnswerDrafts } from "./item-detail/RunsTab";
+import {
+  type ItemDetailTab,
+  type ItemForm,
+  type ItemIntent,
+  defaultItemTab,
+  displayItemIdentifier,
+  grillQuestionKey,
+  isGrillWaitingForAnswers,
+  tabForForm,
+} from "./item-signals";
 import type { WorkSearch } from "./work-search";
 import { parseWorkSearch } from "./work-search";
 import { flattenHome, uniqueItems } from "./work-utils";
@@ -86,7 +106,13 @@ export function WorkPage() {
   const [isCreateItemOpen, setIsCreateItemOpen] = useState(false);
   const [untrackedAgentAction, setUntrackedAgentAction] =
     useState<UntrackedAgentAction>();
+  const [itemIntent, setItemIntent] = useState<ItemIntent>();
+  const [grillDrafts, setGrillDrafts] = useState<GrillAnswerDrafts>({});
+  const [pendingDiscard, setPendingDiscard] = useState<() => void>();
+  const notesDirtyRef = useRef(false);
+  const intentNonce = useRef(0);
   const isSaving = workCommand.isPending || structureCommand.isPending;
+  const selectedItemId = normalizedSearch.item;
 
   const captureProjects = projects.filter(
     (project) => project.context_id === captureContextId,
@@ -95,6 +121,13 @@ export function WorkPage() {
     () => uniqueItems(home ? flattenHome(home) : []),
     [home],
   );
+  const selectedView =
+    selectedItemId === undefined
+      ? undefined
+      : (allItems.find((candidate) => candidate.item.id === selectedItemId) ??
+        searchResults.find((candidate) => candidate.item.id === selectedItemId));
+  const selectedTab: ItemDetailTab =
+    normalizedSearch.tab ?? (selectedView ? defaultItemTab(selectedView) : "overview");
   const visibleSuggestions = runSuggestions.filter(
     (suggestion) =>
       contextFilterId === undefined || suggestion.contextId === contextFilterId,
@@ -103,7 +136,9 @@ export function WorkPage() {
   useEffect(() => {
     if (
       search.contextId === normalizedSearch.contextId &&
-      search.q === normalizedSearch.q
+      search.q === normalizedSearch.q &&
+      search.item === normalizedSearch.item &&
+      search.tab === normalizedSearch.tab
     ) {
       return;
     }
@@ -112,9 +147,36 @@ export function WorkPage() {
     navigate,
     normalizedSearch.contextId,
     normalizedSearch.q,
+    normalizedSearch.item,
+    normalizedSearch.tab,
     search.contextId,
     search.q,
+    search.item,
+    search.tab,
   ]);
+
+  // A link that names an Item but no tab settles on the default tab once, so
+  // the tab never switches by itself while the Item stays open.
+  useEffect(() => {
+    if (!selectedView || normalizedSearch.tab !== undefined) return;
+    void navigate({
+      search: (current) => ({ ...current, tab: defaultItemTab(selectedView) }),
+      replace: true,
+    });
+  }, [navigate, normalizedSearch.tab, selectedView]);
+
+  // Close the panel when its Item is gone (deleted, or never existed).
+  const searchSettled =
+    !searchQuery.trim() ||
+    (debouncedSearchQuery === searchQuery && !searchResultsQuery.isFetching);
+  useEffect(() => {
+    if (selectedItemId === undefined || selectedView) return;
+    if (!home || homeQuery.isFetching || !searchSettled) return;
+    void navigate({
+      search: (current) => ({ ...current, item: undefined, tab: undefined }),
+      replace: true,
+    });
+  }, [home, homeQuery.isFetching, navigate, searchSettled, selectedItemId, selectedView]);
 
   useEffect(() => {
     const timer = window.setTimeout(
@@ -148,12 +210,114 @@ export function WorkPage() {
     if (nextProjectId !== captureProjectId) setCaptureProjectId(nextProjectId);
   }, [captureContextId, captureProjectId, contexts, projects]);
 
+  const refreshWork = useCallback(
+    () => invalidateWorkQueries(queryClient),
+    [queryClient],
+  );
+
   function updateSearch(updates: Partial<WorkSearch>) {
     void navigate({
       search: (current) => ({ ...current, ...updates }),
       replace: true,
     });
   }
+
+  /** Run a navigation that would drop unsaved Notes only after confirming. */
+  function guardNotes(proceed: () => void) {
+    if (notesDirtyRef.current) {
+      setPendingDiscard(() => proceed);
+      return;
+    }
+    proceed();
+  }
+
+  function openItem(itemId: number, form?: ItemForm, tab?: ItemDetailTab) {
+    const view =
+      allItems.find((candidate) => candidate.item.id === itemId) ??
+      searchResults.find((candidate) => candidate.item.id === itemId);
+    const formTab = form ? tabForForm(form) : undefined;
+    const nextTab =
+      tab ??
+      formTab ??
+      (itemId === selectedItemId
+        ? selectedTab
+        : view
+          ? defaultItemTab(view)
+          : undefined);
+    const show = () => {
+      intentNonce.current += 1;
+      setItemIntent(form ? { itemId, form, nonce: intentNonce.current } : undefined);
+      void navigate({
+        search: (current) => ({ ...current, item: itemId, tab: nextTab }),
+      });
+    };
+    if (itemId === selectedItemId) show();
+    else guardNotes(show);
+  }
+
+  function closeItem() {
+    guardNotes(() => {
+      setItemIntent(undefined);
+      void navigate({
+        search: (current) => ({ ...current, item: undefined, tab: undefined }),
+      });
+    });
+  }
+
+  function changeTab(tab: ItemDetailTab) {
+    void navigate({
+      search: (current) => ({ ...current, tab }),
+      replace: true,
+    });
+  }
+
+  // Tell the user when a Grill starts waiting on them, without taking focus.
+  // What is already waiting when the view loads is shown by the card badges.
+  const openItemRef = useRef(openItem);
+  openItemRef.current = openItem;
+  const openPanelRef = useRef({ itemId: selectedItemId, tab: selectedTab });
+  openPanelRef.current = { itemId: selectedItemId, tab: selectedTab };
+  const seenGrillQuestions = useRef<{ contextId?: number; keys: Set<string> }>(
+    undefined,
+  );
+  useEffect(() => {
+    if (!home) return;
+    const waiting = allItems.flatMap((view) =>
+      view.runs
+        .filter(isGrillWaitingForAnswers)
+        .map((run) => ({ view, run, key: grillQuestionKey(run) })),
+    );
+    const seen = seenGrillQuestions.current;
+    const isBaseline = !seen || seen.contextId !== contextFilterId;
+    seenGrillQuestions.current = {
+      contextId: contextFilterId,
+      keys: new Set([
+        ...(isBaseline ? [] : seen.keys),
+        ...waiting.map(({ key }) => key),
+      ]),
+    };
+    if (isBaseline) return;
+    for (const { view, run, key } of waiting) {
+      if (seen.keys.has(key)) continue;
+      const open = openPanelRef.current;
+      if (open.itemId === view.item.id && open.tab === "runs") continue;
+      toast(
+        `Grill questions for ${displayItemIdentifier(view.item.human_identifier)}`,
+        {
+          description: `Run #${run.id} · ${view.item.title}`,
+          duration: 15_000,
+          action: {
+            label: "Answer",
+            onClick: () => openItemRef.current(view.item.id, undefined, "runs"),
+          },
+        },
+      );
+    }
+  }, [allItems, contextFilterId, home]);
+
+  const handleNotesDirtyChange = useCallback((dirty: boolean) => {
+    notesDirtyRef.current = dirty;
+  }, []);
 
   function handleContextChange(value: string) {
     updateSearch({
@@ -321,7 +485,13 @@ export function WorkPage() {
                 <EmptyDescription>No Items match that search.</EmptyDescription>
               </Empty>
             ) : (
-              searchResults.map((view) => <SearchResult key={view.item.id} view={view} />)
+              searchResults.map((view) => (
+                <SearchResult
+                  key={view.item.id}
+                  view={view}
+                  onOpen={() => openItem(view.item.id)}
+                />
+              ))
             )}
           </CardContent>
         </Card>
@@ -376,61 +546,36 @@ export function WorkPage() {
                 title="Needs Attention"
                 hint="Unstarted or due"
                 items={home.needs_attention}
-                allItems={allItems}
-                repositories={repositories}
-                machines={machines}
-                contexts={contexts}
-                grillModelCatalog={grillModelCatalog}
-                onChanged={() => invalidateWorkQueries(queryClient)}
-                onOpenTerminal={onOpenTerminal}
+                onOpenItem={openItem}
+                onChanged={refreshWork}
               />
               <HomeColumn
                 title="Running"
                 hint="Active"
                 items={home.running}
-                allItems={allItems}
-                repositories={repositories}
-                machines={machines}
-                contexts={contexts}
-                grillModelCatalog={grillModelCatalog}
-                onChanged={() => invalidateWorkQueries(queryClient)}
-                onOpenTerminal={onOpenTerminal}
+                onOpenItem={openItem}
+                onChanged={refreshWork}
               />
               <HomeColumn
                 title="Waiting"
                 hint="Waiting"
                 items={home.waiting}
-                allItems={allItems}
-                repositories={repositories}
-                machines={machines}
-                contexts={contexts}
-                grillModelCatalog={grillModelCatalog}
-                onChanged={() => invalidateWorkQueries(queryClient)}
-                onOpenTerminal={onOpenTerminal}
+                onOpenItem={openItem}
+                onChanged={refreshWork}
               />
               <HomeColumn
                 title="Due"
                 hint="Reminder reached"
                 items={home.due}
-                allItems={allItems}
-                repositories={repositories}
-                machines={machines}
-                contexts={contexts}
-                grillModelCatalog={grillModelCatalog}
-                onChanged={() => invalidateWorkQueries(queryClient)}
-                onOpenTerminal={onOpenTerminal}
+                onOpenItem={openItem}
+                onChanged={refreshWork}
               />
               <HomeColumn
                 title="Completed"
                 hint="Done"
                 items={home.completed}
-                allItems={allItems}
-                repositories={repositories}
-                machines={machines}
-                contexts={contexts}
-                grillModelCatalog={grillModelCatalog}
-                onChanged={() => invalidateWorkQueries(queryClient)}
-                onOpenTerminal={onOpenTerminal}
+                onOpenItem={openItem}
+                onChanged={refreshWork}
               />
             </div>
           </CardContent>
@@ -506,6 +651,55 @@ export function WorkPage() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <Dialog
+        open={Boolean(selectedView)}
+        onOpenChange={(open) => {
+          if (!open) closeItem();
+        }}
+      >
+        {selectedView && (
+          <ItemDetailPanel
+            key={selectedView.item.id}
+            view={selectedView}
+            allItems={allItems}
+            repositories={repositories}
+            machines={machines}
+            contexts={contexts}
+            grillModelCatalog={grillModelCatalog}
+            tab={selectedTab}
+            intent={
+              itemIntent?.itemId === selectedView.item.id ? itemIntent : undefined
+            }
+            grillDrafts={grillDrafts}
+            onGrillDraftsChange={setGrillDrafts}
+            onTabChange={changeTab}
+            onOpenForm={(form) => openItem(selectedView.item.id, form)}
+            onClose={closeItem}
+            onChanged={refreshWork}
+            onOpenTerminal={onOpenTerminal}
+            onNotesDirtyChange={handleNotesDirtyChange}
+          />
+        )}
+      </Dialog>
+
+      {pendingDiscard && (
+        <ConfirmationDialog
+          open
+          title="Discard unsaved Notes?"
+          description="The Notes you changed on this Item have not been saved."
+          confirmLabel="Discard changes"
+          onOpenChange={(open) => {
+            if (!open) setPendingDiscard(undefined);
+          }}
+          onConfirm={() => {
+            const proceed = pendingDiscard;
+            setPendingDiscard(undefined);
+            notesDirtyRef.current = false;
+            proceed();
+          }}
+        />
+      )}
     </div>
   );
 }

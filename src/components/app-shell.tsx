@@ -35,6 +35,7 @@ import {
   DialogTitle,
 } from "./ui/dialog";
 import { Input } from "./ui/input";
+import { Toaster } from "./ui/sonner";
 import { appShellLayoutClassName } from "./app-shell-layout";
 
 type AppShellContextValue = {
@@ -272,6 +273,8 @@ export function AppShell() {
       >
         <Outlet />
       </AppShellContext.Provider>
+      {/* Modal dialogs disable pointer events outside them; toasts stay usable. */}
+      <Toaster theme={theme} position="bottom-right" className="pointer-events-auto" />
     </main>
   );
 }

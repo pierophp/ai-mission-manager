@@ -74,7 +74,8 @@ const workRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/work",
   validateSearch: parseWorkSearch,
-  loaderDeps: ({ search }) => search,
+  // The open Item and its tab are view state; they must not rerun the loader.
+  loaderDeps: ({ search }) => ({ contextId: search.contextId, q: search.q }),
   loader: ({ context, deps }) => {
     void context.queryClient.prefetchQuery(homeQueryOptions(deps.contextId));
     void context.queryClient.prefetchQuery(runSuggestionsQueryOptions());
