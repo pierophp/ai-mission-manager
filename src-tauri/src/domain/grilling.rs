@@ -62,16 +62,31 @@ impl GrillContinuationAction {
     }
 }
 
-/// A downstream action normally follows a finished Grill. to-spec may also cut
-/// a Grill short while it waits for answers: the agent is idle, and the open
-/// questions go into the spec instead of being answered.
+/// The step that follows `previous` in a Grill Run: the Grill itself, then
+/// to-spec, to-tickets, and implement.
+pub fn next_grill_action(
+    previous: Option<GrillContinuationAction>,
+) -> Option<GrillContinuationAction> {
+    match previous {
+        None => Some(GrillContinuationAction::ToSpec),
+        Some(GrillContinuationAction::ToSpec) => Some(GrillContinuationAction::ToTickets),
+        Some(GrillContinuationAction::ToTickets) => Some(GrillContinuationAction::Implement),
+        Some(GrillContinuationAction::Implement) => None,
+    }
+}
+
+/// A downstream action normally follows a finished step. While a step waits
+/// for answers the agent is idle, so the user may also skip its questions and
+/// move on to the next step: to-spec during the Grill, to-tickets once to-spec
+/// asked something, and so on.
 pub fn grill_continuation_available(
     phase: Option<GrillPhase>,
+    previous: Option<GrillContinuationAction>,
     action: GrillContinuationAction,
 ) -> bool {
     match phase {
         Some(GrillPhase::AwaitingNextAction) => true,
-        Some(GrillPhase::WaitingForAnswers) => action == GrillContinuationAction::ToSpec,
+        Some(GrillPhase::WaitingForAnswers) => next_grill_action(previous) == Some(action),
         _ => false,
     }
 }

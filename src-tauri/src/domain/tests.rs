@@ -1770,6 +1770,90 @@ https://example.com/unrelated"#,
         }
     }
 
+    /// A Grill whose to-spec step asked its own confirmation questions.
+    fn to_spec_waiting_for_answers_state() -> DomainState {
+        let continued = decide(
+            waiting_for_answers_state(),
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToSpec,
+                started_at: 500,
+            },
+        )
+        .expect("to-spec should continue the Grill");
+        let transcript = "❓ Q1 - **Next step**: Close the spec step?\n➡️ Close it";
+        let recorded = decide(
+            continued.state,
+            Event::RecordRunTranscript {
+                run_id: 1,
+                transcript: transcript.into(),
+                question_group: parse_grill_question_group(transcript),
+            },
+        )
+        .expect("the to-spec questions should be recorded");
+        let waiting = decide(
+            recorded.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("to-spec should wait for answers");
+        assert_eq!(
+            waiting.state.runs[0].grill_phase,
+            Some(GrillPhase::WaitingForAnswers)
+        );
+        waiting.state
+    }
+
+    #[test]
+    fn to_tickets_can_skip_the_questions_of_to_spec() {
+        let waiting = to_spec_waiting_for_answers_state();
+
+        let prompt =
+            compose_grill_continuation_prompt(&waiting, 1, GrillContinuationAction::ToTickets)
+                .expect("the to-tickets prompt should compose");
+        assert!(!prompt.contains("stopped the Grill early"));
+        assert!(prompt.contains("moved on from to-spec"));
+        assert!(prompt.contains("Q1: Next step Close the spec step? (recommended: Close it)"));
+
+        let continued = decide(
+            waiting,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                started_at: 600,
+            },
+        )
+        .expect("to-tickets should follow a to-spec that waits for answers");
+        assert_eq!(
+            continued.state.runs[0].grill_action,
+            Some(GrillContinuationAction::ToTickets)
+        );
+    }
+
+    #[test]
+    fn only_the_next_action_can_skip_the_questions_of_a_downstream_action() {
+        for action in [
+            GrillContinuationAction::ToSpec,
+            GrillContinuationAction::Implement,
+        ] {
+            let error = decide(
+                to_spec_waiting_for_answers_state(),
+                Event::ContinueGrill {
+                    run_id: 1,
+                    action,
+                    started_at: 600,
+                },
+            )
+            .expect_err("only to-tickets follows to-spec");
+            assert!(matches!(
+                error,
+                DomainError::GrillContinuationNotAvailable { run_id: 1, .. }
+            ));
+        }
+    }
+
     #[test]
     fn to_tickets_receives_the_spec_created_earlier_in_the_run() {
         let started = decide(state(), start_event(GrillConfiguration::default()))

@@ -44,6 +44,7 @@ import {
   grillQuestionKey,
   isGrillWaitingForAnswers,
   isRunFinished,
+  nextGrillAction,
   runStateLabel,
 } from "../item-signals";
 import type { ItemCommands } from "../use-item-commands";
@@ -896,6 +897,11 @@ export function RunsTab({
           run.grill_answers.map((answer) => [answer.questionNumber, answer.answer]),
         );
         const answers = grillDrafts[questionKey] ?? persistedAnswers;
+        const skipAction = nextGrillAction(run.grill_action);
+        // A step that already ran is not offered again as the next action.
+        const nextActions = (["to-spec", "to-tickets", "implement"] as const).filter(
+          (action) => !(action === "to-spec" && run.grill_action === "to-spec"),
+        );
         return (
           <Card size="sm" className="bg-muted/20" key={run.id}>
             <CardContent className="grid gap-2 pt-4">
@@ -958,16 +964,22 @@ export function RunsTab({
                         one numbered response to the same Pane.
                       </span>
                     </div>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="sm"
-                      title="Stop grilling and write the spec now; the open questions go into the spec."
-                      disabled={isSaving || run.pane_status !== "available"}
-                      onClick={() => void handleContinueGrill(run, "to-spec")}
-                    >
-                      Skip to to-spec
-                    </Button>
+                    {skipAction && (
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        title={
+                          skipAction === "to-spec"
+                            ? "Stop grilling and write the spec now; the open questions go into the spec."
+                            : `Leave these questions to their recommendations and continue with ${skipAction}.`
+                        }
+                        disabled={isSaving || run.pane_status !== "available"}
+                        onClick={() => void handleContinueGrill(run, skipAction)}
+                      >
+                        Skip to {skipAction}
+                      </Button>
+                    )}
                   </div>
                   <GrillQuestionFlow
                     key={questionKey}
@@ -1025,7 +1037,7 @@ export function RunsTab({
                       </span>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      {(["to-spec", "to-tickets", "implement"] as const).map(
+                      {nextActions.map(
                         (action) => (
                           <Button
                             key={action}

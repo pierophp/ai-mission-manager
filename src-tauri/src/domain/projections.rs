@@ -649,9 +649,15 @@ pub fn compose_grill_continuation_prompt(
         format!("Recorded Grill decisions:\n{decisions}"),
     ];
     if let Some(open_questions) = open_grill_questions(run) {
-        sections.push(format!(
-            "The user stopped the Grill early, before answering these questions. Do not answer them yourself and do not ask them again: record each one in the spec as an open question, with your recommendation.\n{open_questions}"
-        ));
+        sections.push(match run.grill_action {
+            None => format!(
+                "The user stopped the Grill early, before answering these questions. Do not answer them yourself and do not ask them again: record each one in the spec as an open question, with your recommendation.\n{open_questions}"
+            ),
+            Some(previous) => format!(
+                "The user moved on from {} without answering its last questions. Do not ask them again: treat each one as settled by its recommendation.\n{open_questions}",
+                previous.as_str()
+            ),
+        });
     }
     if action == GrillContinuationAction::ToTickets {
         let specs = downstream_issue_urls(state, run.id, GrillContinuationAction::ToSpec);
@@ -678,7 +684,7 @@ pub fn compose_grill_continuation_prompt(
     Ok(sections.join("\n\n"))
 }
 
-/// The pending question group when the Grill was cut short by to-spec.
+/// The pending question group of a step the user moved on from.
 fn open_grill_questions(run: &Run) -> Option<String> {
     if run.grill_phase != Some(GrillPhase::WaitingForAnswers) {
         return None;

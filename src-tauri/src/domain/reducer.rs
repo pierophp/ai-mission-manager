@@ -2232,7 +2232,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .find(|run| run.id == run_id)
                 .ok_or(DomainError::RunNotFound { run_id })?;
             if run.execution_profile != ExecutionProfile::Grill
-                || !grill_continuation_available(run.grill_phase, action)
+                || !grill_continuation_available(run.grill_phase, run.grill_action, action)
                 || run.pane_status != RunPaneStatus::Available
             {
                 return Err(DomainError::GrillContinuationNotAvailable {

@@ -1,4 +1,5 @@
 import { currentMinute } from "../../runtime/time";
+import type { GrillContinuationAction } from "../../runtime/execution-types";
 import type { ItemView, Run } from "../../runtime/types";
 
 export const itemDetailTabs = ["overview", "runs", "repositories", "links"] as const;
@@ -82,4 +83,17 @@ export function runStateLabel(state: Run["state"], isGrill = false): string {
   if (state === "blocked") return isGrill ? "Waiting for answers" : "Blocked";
   if (state === "finished") return "Finished";
   return "Unknown";
+}
+
+/**
+ * The step that follows `previous` in a Grill Run, mirroring the backend:
+ * the Grill itself, then to-spec, to-tickets, and implement.
+ */
+export function nextGrillAction(
+  previous: GrillContinuationAction | null | undefined,
+): GrillContinuationAction | undefined {
+  if (!previous) return "to-spec";
+  if (previous === "to-spec") return "to-tickets";
+  if (previous === "to-tickets") return "implement";
+  return undefined;
 }
