@@ -22,7 +22,7 @@ fn strip_skill_frontmatter(source: &'static str) -> &'static str {
     let Some(end) = body_start.find("\n---\n") else {
         return source;
     };
-    body_start[end + "\n---\n".len()..]
+    &body_start[end + "\n---\n".len()..]
 }
 
 /// How Mission Manager reads questions out of the Pane. Agents render
