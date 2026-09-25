@@ -690,6 +690,7 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
         Event::ContinueGrill {
             run_id: 1,
             action: GrillContinuationAction::ToTickets,
+            started_at: 100,
         },
     );
     let object = crate::provider::classify_url("https://github.com/acme/app/issues/7")

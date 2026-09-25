@@ -12,7 +12,7 @@ use crate::domain::{
     ExternalSnapshotData,
 };
 
-const GH_JSON_FIELDS: &str = "number,title,state,author,labels,milestone,updatedAt";
+const GH_JSON_FIELDS: &str = "number,title,state,author,labels,milestone,createdAt,updatedAt";
 
 #[derive(Debug, Error)]
 pub enum ProviderError {
@@ -266,6 +266,8 @@ struct GithubResponse {
     #[serde(default)]
     labels: Vec<GithubLabel>,
     milestone: Option<GithubMilestone>,
+    #[serde(rename = "createdAt", default)]
+    created_at: Option<String>,
     #[serde(rename = "updatedAt")]
     updated_at: Option<String>,
     number: u64,
@@ -304,6 +306,12 @@ impl GithubResponse {
             metadata.push(ExternalMetadata {
                 key: "milestone".into(),
                 value: milestone.title,
+            });
+        }
+        if let Some(created_at) = self.created_at {
+            metadata.push(ExternalMetadata {
+                key: "created".into(),
+                value: created_at,
             });
         }
         if let Some(updated_at) = self.updated_at {

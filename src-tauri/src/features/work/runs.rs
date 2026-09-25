@@ -580,6 +580,9 @@ pub(crate) async fn continue_grill_with_state(
         runtime.grill_operation_lock(run_id)
     };
     let operation_guard = operation_lock.lock_owned().await;
+    // Taken before the prompt is sent, so every Issue the action creates is
+    // newer than it.
+    let started_at = crate::app::current_unix_seconds();
     let (snapshot, prompt, terminal_runtime) = {
         let runtime = state
             .lock()
@@ -595,7 +598,11 @@ pub(crate) async fn continue_grill_with_state(
             .map_err(|error| error.to_string())?;
         decide(
             runtime.state.clone(),
-            Event::ContinueGrill { run_id, action },
+            Event::ContinueGrill {
+                run_id,
+                action,
+                started_at,
+            },
         )
         .map_err(|error| error.to_string())?;
         let machine = runtime
@@ -639,7 +646,11 @@ pub(crate) async fn continue_grill_with_state(
     }
     let decision = decide(
         runtime.state.clone(),
-        Event::ContinueGrill { run_id, action },
+        Event::ContinueGrill {
+            run_id,
+            action,
+            started_at,
+        },
     )
     .map_err(|error| error.to_string())?;
     let continued = decision
@@ -680,6 +691,7 @@ fn read_run_state_record(
 fn confirm_downstream_issues(
     run_id: i64,
     action: GrillContinuationAction,
+    action_started_at: Option<i64>,
     transcript: &str,
     executable: impl FnOnce() -> Option<PathBuf>,
 ) -> Vec<ConfirmedDownstreamIssue> {
@@ -728,6 +740,9 @@ fn confirm_downstream_issues(
                 continue;
             }
         };
+        if !downstream_issue_is_new(&snapshot, action_started_at) {
+            continue;
+        }
         if confirmed.iter().any(|issue: &ConfirmedDownstreamIssue| {
             issue.object.external_key == object.external_key
         }) {
@@ -793,6 +808,7 @@ struct ReconciliationRunIdentity {
     session_name: String,
     pane_id: String,
     grill_action: Option<GrillContinuationAction>,
+    grill_action_started_at: Option<i64>,
     transcript: String,
 }
 
@@ -862,14 +878,18 @@ impl ReconciliationSnapshot {
                     downstream_confirmation_transcript(transcript.as_ref(), &run.transcript);
                 let confirmed_downstream_issues = match (run.grill_action, confirmation_transcript)
                 {
-                    (Some(action), Some(transcript)) => {
-                        confirm_downstream_issues(run.id, action, transcript, || {
+                    (Some(action), Some(transcript)) => confirm_downstream_issues(
+                        run.id,
+                        action,
+                        run.grill_action_started_at,
+                        transcript,
+                        || {
                             self.gh_executable_path
                                 .as_deref()
                                 .map(PathBuf::from)
                                 .or_else(|| resolve_gh_executable(None).ok())
-                        })
-                    }
+                        },
+                    ),
                     _ => Vec::new(),
                 };
                 RunReconciliationObservation {
@@ -2947,6 +2967,7 @@ impl Runtime {
                 session_name: run.session_name.clone(),
                 pane_id: run.pane_id.clone(),
                 grill_action: run.grill_action,
+                grill_action_started_at: run.grill_action_started_at,
                 transcript: run.transcript.clone(),
             })
             .collect::<Vec<_>>();
@@ -3348,8 +3369,12 @@ impl Runtime {
             return Ok(());
         }
 
-        let confirmed = confirm_downstream_issues(run_id, action, transcript, || {
-            match self.gh_executable_path() {
+        let confirmed = confirm_downstream_issues(
+            run_id,
+            action,
+            run.grill_action_started_at,
+            transcript,
+            || match self.gh_executable_path() {
                 Ok(executable) => Some(executable),
                 Err(error) => {
                     eprintln!(
@@ -3357,8 +3382,8 @@ impl Runtime {
                     );
                     None
                 }
-            }
-        });
+            },
+        );
         self.apply_confirmed_downstream_issues(run_id, Some(action), confirmed)
             .map(|_| ())
     }

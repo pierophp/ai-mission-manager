@@ -1668,6 +1668,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 grill_response: None,
                 grill_phase: None,
                 grill_action: None,
+                grill_action_started_at: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -1806,6 +1807,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 grill_response: None,
                 grill_phase: None,
                 grill_action: None,
+                grill_action_started_at: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -1970,6 +1972,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 grill_response: None,
                 grill_phase: Some(GrillPhase::Starting),
                 grill_action: None,
+                grill_action_started_at: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -2102,6 +2105,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 grill_response: None,
                 grill_phase: None,
                 grill_action: None,
+                grill_action_started_at: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -2217,14 +2221,18 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::PersistRunState { run }],
             })
         }
-        Event::ContinueGrill { run_id, action } => {
+        Event::ContinueGrill {
+            run_id,
+            action,
+            started_at,
+        } => {
             let run = state
                 .runs
                 .iter_mut()
                 .find(|run| run.id == run_id)
                 .ok_or(DomainError::RunNotFound { run_id })?;
             if run.execution_profile != ExecutionProfile::Grill
-                || run.grill_phase != Some(GrillPhase::AwaitingNextAction)
+                || !grill_continuation_available(run.grill_phase, action)
                 || run.pane_status != RunPaneStatus::Available
             {
                 return Err(DomainError::GrillContinuationNotAvailable {
@@ -2238,6 +2246,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             run.grill_answers.clear();
             run.grill_response = None;
             run.grill_action = Some(action);
+            run.grill_action_started_at = Some(started_at);
             let run = run.clone();
 
             Ok(Decision {

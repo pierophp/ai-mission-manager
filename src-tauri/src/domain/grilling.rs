@@ -9,6 +9,17 @@ pub const TO_TICKETS_SKILL_SNAPSHOT: &str =
 pub const IMPLEMENT_SKILL_SNAPSHOT: &str =
     include_str!("../../../.agents/skills/implement/SKILL.md");
 
+/// How Mission Manager reads questions out of the Pane. Agents render
+/// Markdown differently (Codex drops bold, rewrites `---`, wraps lines), so the
+/// contract only relies on line-leading markers.
+pub const GRILL_OUTPUT_CONTRACT: &str = "Mission Manager output contract (it reads your questions from the terminal and shows them to the user as a form):
+- Start every question on its own line with `❓ **Q<n>** - **<title>**: <question>`. Number questions 1, 2, 3… within the round.
+- Put the recommendation on the line that starts with `➡️`. Do not add prose after the recommendation other than lettered options (`A) …`).
+- Separate questions with a line containing only `---`.
+- Print each round exactly once, at the end of your turn. If a sub-agent you are waiting on changes a question, print only the revised full round; Mission Manager shows only the last round printed in a turn.
+- Keep status notes (what you are checking, what you found) before the first `❓`, never between or after the questions.
+- The user answers every question of the round at once, with one numbered reply (`1. …`, `2. …`). An answer of `ok` accepts your recommendation.";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GrillContinuationAction {
@@ -32,6 +43,20 @@ impl GrillContinuationAction {
             Self::ToTickets => TO_TICKETS_SKILL_SNAPSHOT,
             Self::Implement => IMPLEMENT_SKILL_SNAPSHOT,
         }
+    }
+}
+
+/// A downstream action normally follows a finished Grill. to-spec may also cut
+/// a Grill short while it waits for answers: the agent is idle, and the open
+/// questions go into the spec instead of being answered.
+pub fn grill_continuation_available(
+    phase: Option<GrillPhase>,
+    action: GrillContinuationAction,
+) -> bool {
+    match phase {
+        Some(GrillPhase::AwaitingNextAction) => true,
+        Some(GrillPhase::WaitingForAnswers) => action == GrillContinuationAction::ToSpec,
+        _ => false,
     }
 }
 
@@ -97,46 +122,86 @@ pub fn discover_downstream_issue_candidates(output: &str) -> Vec<DownstreamIssue
             })
         })
         .collect::<Vec<_>>();
-    if !structured.is_empty() {
-        return unique_issue_candidates(structured);
-    }
-
-    unique_issue_candidates(
-        output
-            .split_whitespace()
-            .filter_map(|token| {
-                let url = token
-                    .trim_matches(|character: char| {
-                        matches!(
-                            character,
-                            '(' | ')'
-                                | '['
-                                | ']'
-                                | '{'
-                                | '}'
-                                | '<'
-                                | '>'
-                                | '"'
-                                | '\''
-                                | '`'
-                                | '.'
-                                | ','
-                                | ';'
-                                | ':'
-                                | '!'
-                                | '?'
-                        )
-                    })
-                    .trim_end_matches('/');
-                is_github_issue_url(url).then_some(DownstreamIssueCandidate {
-                    url: url.to_owned(),
-                    discovery: DownstreamIssueDiscovery::OutputUrl,
-                    run_id: None,
-                    action: None,
-                })
+    // Structured events come first so their Run and action provenance wins,
+    // but plain URLs still count: a wrapped or forgotten event line must not
+    // hide an Issue. Only Issues created after the action started are kept.
+    let urls = output.split_whitespace().filter_map(|token| {
+        let url = token
+            .trim_matches(|character: char| {
+                matches!(
+                    character,
+                    '(' | ')'
+                        | '['
+                        | ']'
+                        | '{'
+                        | '}'
+                        | '<'
+                        | '>'
+                        | '"'
+                        | '\''
+                        | '`'
+                        | '.'
+                        | ','
+                        | ';'
+                        | ':'
+                        | '!'
+                        | '?'
+                )
             })
-            .collect(),
-    )
+            .trim_end_matches('/');
+        is_github_issue_url(url).then_some(DownstreamIssueCandidate {
+            url: url.to_owned(),
+            discovery: DownstreamIssueDiscovery::OutputUrl,
+            run_id: None,
+            action: None,
+        })
+    });
+    unique_issue_candidates(structured.into_iter().chain(urls).collect())
+}
+
+/// Clock skew allowed between this Mac and GitHub when comparing an Issue's
+/// creation time with the moment a downstream action was sent.
+const DOWNSTREAM_CLOCK_SKEW_SECONDS: i64 = 120;
+
+/// Whether a confirmed Issue was created by the current downstream action,
+/// rather than merely mentioned in the transcript (the Item's own source, an
+/// Issue the agent read, a spec created by an earlier action).
+pub fn downstream_issue_is_new(
+    snapshot: &ExternalSnapshotData,
+    action_started_at: Option<i64>,
+) -> bool {
+    let Some(started_at) = action_started_at else {
+        return true;
+    };
+    snapshot
+        .metadata
+        .iter()
+        .find(|metadata| metadata.key == "created")
+        .and_then(|metadata| parse_github_timestamp(&metadata.value))
+        .is_some_and(|created_at| created_at + DOWNSTREAM_CLOCK_SKEW_SECONDS >= started_at)
+}
+
+/// Parse GitHub's `YYYY-MM-DDTHH:MM:SSZ` timestamps into Unix seconds.
+pub fn parse_github_timestamp(value: &str) -> Option<i64> {
+    let value = value.trim().strip_suffix('Z')?;
+    let (date, time) = value.split_once('T')?;
+    let mut date = date.splitn(3, '-').map(|part| part.parse::<i64>().ok());
+    let (year, month, day) = (date.next()??, date.next()??, date.next()??);
+    let time = time.split('.').next()?;
+    let mut time = time.splitn(3, ':').map(|part| part.parse::<i64>().ok());
+    let (hour, minute, second) = (time.next()??, time.next()??, time.next()??);
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    // Days from civil, proleptic Gregorian (Howard Hinnant's algorithm).
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year.div_euclid(400);
+    let year_of_era = year - era * 400;
+    let month_index = (month + 9) % 12;
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    let days = era * 146_097 + day_of_era - 719_468;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second)
 }
 
 fn unique_issue_candidates(
@@ -217,70 +282,186 @@ fn parse_grill_question_group_with_fence_state(
     transcript: &str,
     mut code_fence: Option<(char, usize)>,
 ) -> Option<GrillQuestionGroup> {
-    let mut questions = Vec::new();
-    let mut current: Option<GrillQuestion> = None;
+    let mut questions: Vec<GrillQuestion> = Vec::new();
+    let mut current: Option<QuestionDraft> = None;
 
     for line in transcript.lines() {
         if skip_markdown_code_fence_line(line, &mut code_fence) {
             continue;
         }
-        let line = line.trim_end();
-        let line = line.trim_start();
-        let line = line.strip_prefix('•').map(str::trim_start).unwrap_or(line);
-        if let Some(header) = line.strip_prefix("❓") {
-            if let Some(question) = current.take() {
-                if !question.prompt.is_empty() {
-                    questions.push(question);
-                }
+        let line = line.trim();
+        let (line, starts_agent_block) = strip_agent_block_marker(line);
+        if let Some(header) = line.strip_prefix('❓') {
+            if let Some(question) = current.take().and_then(QuestionDraft::finish) {
+                questions.push(question);
             }
             let (number, title, prompt) = parse_question_header(header, questions.len() as u32 + 1);
-            current = Some(GrillQuestion {
-                number,
-                title,
-                prompt,
-                recommendation: None,
-                options: Vec::new(),
-            });
+            // Agents sometimes print a round, keep exploring, and print the
+            // revised round again in the same turn. A number that does not
+            // advance starts that newer round, so it supersedes the old one.
+            if questions.last().is_some_and(|last| number <= last.number) {
+                questions.clear();
+            }
+            current = Some(QuestionDraft::new(number, title, prompt));
             continue;
         }
 
         let Some(question) = current.as_mut() else {
             continue;
         };
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed == "---" {
+        if starts_agent_block || is_separator_line(line) || line.starts_with('#') {
+            question.section = DraftSection::Closed;
             continue;
         }
-        if let Some(recommendation) = trimmed
-            .strip_prefix("➡️")
-            .or_else(|| trimmed.strip_prefix("➡"))
-        {
-            let recommendation = clean_markup(recommendation);
-            if !recommendation.is_empty() {
-                question.recommendation = Some(recommendation);
-            }
-            continue;
-        }
-        if let Some((key, label)) = parse_grill_option(trimmed) {
-            question.options.push(GrillOption { key, label });
-            continue;
-        }
-
-        if !question.prompt.is_empty() {
-            question.prompt.push('\n');
-        }
-        question.prompt.push_str(trimmed);
+        question.push_line(line);
     }
 
-    if let Some(question) = current {
-        if !question.prompt.is_empty() {
-            questions.push(question);
-        }
+    if let Some(question) = current.and_then(QuestionDraft::finish) {
+        questions.push(question);
     }
     (!questions.is_empty()).then_some(GrillQuestionGroup {
         round: 0,
         questions,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DraftSection {
+    /// Question body before the recommendation.
+    Prompt,
+    /// Wrapped continuation lines of the `➡️` recommendation.
+    Recommendation,
+    /// After the recommendation: options still attach, prose does not.
+    Options,
+    /// After a separator or a new agent block: nothing attaches.
+    Closed,
+}
+
+struct QuestionDraft {
+    question: GrillQuestion,
+    section: DraftSection,
+    paragraph_break: bool,
+}
+
+impl QuestionDraft {
+    fn new(number: u32, title: Option<String>, prompt: String) -> Self {
+        Self {
+            question: GrillQuestion {
+                number,
+                title,
+                prompt,
+                recommendation: None,
+                options: Vec::new(),
+            },
+            section: DraftSection::Prompt,
+            paragraph_break: false,
+        }
+    }
+
+    fn push_line(&mut self, line: &str) {
+        if self.section == DraftSection::Closed {
+            return;
+        }
+        if line.is_empty() {
+            match self.section {
+                DraftSection::Prompt => self.paragraph_break = true,
+                DraftSection::Recommendation => self.section = DraftSection::Options,
+                DraftSection::Options | DraftSection::Closed => {}
+            }
+            return;
+        }
+        if let Some(recommendation) = line.strip_prefix("➡️").or_else(|| line.strip_prefix('➡'))
+        {
+            let recommendation = clean_markup(recommendation);
+            if !recommendation.is_empty() {
+                self.question.recommendation = Some(recommendation);
+                self.section = DraftSection::Recommendation;
+            }
+            return;
+        }
+        if let Some((key, label)) = parse_grill_option(line) {
+            self.question.options.push(GrillOption { key, label });
+            if self.section == DraftSection::Recommendation {
+                self.section = DraftSection::Options;
+            }
+            return;
+        }
+        match self.section {
+            DraftSection::Prompt => {
+                let prompt = &mut self.question.prompt;
+                if !prompt.is_empty() {
+                    let separator = if self.paragraph_break {
+                        "\n\n"
+                    } else if starts_list_item(line) {
+                        "\n"
+                    } else {
+                        " "
+                    };
+                    prompt.push_str(separator);
+                }
+                prompt.push_str(&clean_markup(line));
+                self.paragraph_break = false;
+            }
+            DraftSection::Recommendation => {
+                if let Some(recommendation) = self.question.recommendation.as_mut() {
+                    recommendation.push(' ');
+                    recommendation.push_str(&clean_markup(line));
+                }
+            }
+            DraftSection::Options | DraftSection::Closed => {}
+        }
+    }
+
+    fn finish(self) -> Option<GrillQuestion> {
+        let mut question = self.question;
+        if question.prompt.is_empty() {
+            return None;
+        }
+        if question.title.is_none() {
+            if let Some((title, prompt)) = split_leading_question(&question.prompt) {
+                question.title = Some(title);
+                question.prompt = prompt;
+            }
+        }
+        Some(question)
+    }
+}
+
+/// Terminal agents prefix each message or tool block with a marker (`•` in
+/// Codex, `⏺` in Claude Code). Such a line starts a new block, which ends any
+/// question that was being read.
+fn strip_agent_block_marker(line: &str) -> (&str, bool) {
+    ['•', '⏺', '●', '└']
+        .iter()
+        .find_map(|marker| line.strip_prefix(*marker))
+        .map_or((line, false), |rest| (rest.trim_start(), true))
+}
+
+/// Markdown `---` rendered by terminal agents as `———`, `───`, and similar.
+fn is_separator_line(line: &str) -> bool {
+    line.chars().count() >= 3
+        && line
+            .chars()
+            .all(|character| matches!(character, '-' | '—' | '–' | '─' | '━' | '_' | '*' | ' '))
+}
+
+fn starts_list_item(line: &str) -> bool {
+    line.starts_with("- ")
+        || line.starts_with("* ")
+        || line.starts_with("• ")
+        || line.split_once(". ").is_some_and(|(number, _)| {
+            !number.is_empty() && number.chars().all(|c| c.is_ascii_digit())
+        })
+}
+
+/// When an agent's renderer drops the bold title, use the leading question
+/// sentence as the title so the dialog still reads as "title + detail".
+fn split_leading_question(prompt: &str) -> Option<(String, String)> {
+    let end = prompt.find('?')? + '?'.len_utf8();
+    let (title, rest) = prompt.split_at(end);
+    let rest = rest.trim();
+    (title.chars().count() <= 120 && !title.contains('\n') && !rest.is_empty())
+        .then(|| (title.trim().to_owned(), rest.to_owned()))
 }
 
 /// Parse only the newly captured portion of a Pane transcript. The Terminal
@@ -380,22 +561,22 @@ pub fn format_grill_response(answers: &[GrillAnswer]) -> Result<String, DomainEr
         .join("\n"))
 }
 
+const HEADER_SEPARATORS: [char; 6] = ['-', '—', '–', ':', ')', '.'];
+
 fn parse_question_header(header: &str, fallback_number: u32) -> (u32, Option<String>, String) {
-    let header = header.replace("**", "");
-    let header = header.trim().trim_start_matches(['-', ':']).trim();
+    let header = header.trim_start_matches('\u{fe0f}').replace("**", "");
+    let header = header.trim().trim_start_matches(HEADER_SEPARATORS).trim();
     let (number, rest) = parse_question_number(header).unwrap_or((fallback_number, header));
-    let rest = rest.trim();
-    let rest = rest
-        .strip_prefix('-')
-        .or_else(|| rest.strip_prefix(':'))
-        .or_else(|| rest.strip_prefix(')'))
-        .or_else(|| rest.strip_prefix('.'))
-        .unwrap_or(rest)
-        .trim();
+    let rest = rest.trim().trim_start_matches(HEADER_SEPARATORS).trim();
     let (title, prompt) = rest
         .split_once(':')
         .map(|(title, prompt)| (clean_markup(title), clean_markup(prompt)))
-        .filter(|(title, prompt)| !title.is_empty() && !prompt.is_empty())
+        .filter(|(title, prompt)| {
+            !title.is_empty()
+                && !prompt.is_empty()
+                && !title.contains('?')
+                && title.chars().count() <= 80
+        })
         .unwrap_or((String::new(), clean_markup(rest)));
     (number, (!title.is_empty()).then_some(title), prompt)
 }
@@ -462,12 +643,27 @@ fn strip_terminal_escape_sequences(value: &str) -> String {
             output.push(character);
             continue;
         }
-        if characters.next() == Some('[') {
-            for character in characters.by_ref() {
-                if character.is_ascii_alphabetic() {
-                    break;
+        match characters.next() {
+            Some('[') => {
+                for character in characters.by_ref() {
+                    if character.is_ascii_alphabetic() {
+                        break;
+                    }
                 }
             }
+            // OSC (hyperlinks, titles) ends with BEL or ESC \.
+            Some(']') => {
+                while let Some(character) = characters.next() {
+                    if character == '\u{7}' {
+                        break;
+                    }
+                    if character == '\u{1b}' {
+                        characters.next();
+                        break;
+                    }
+                }
+            }
+            _ => {}
         }
     }
     output

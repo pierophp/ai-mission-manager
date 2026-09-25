@@ -271,7 +271,7 @@ impl SqliteStore {
                         last_applied_agent_state_sequence, pane_status,
                         direct_checkouts_json, transcript,
                         grill_question_group_json, grill_answers_json, grill_decisions_json,
-                        grill_response, grill_phase, grill_action
+                        grill_response, grill_phase, grill_action, grill_action_started_at
                  FROM runs
                  ORDER BY id",
             )?;
@@ -397,6 +397,7 @@ impl SqliteStore {
                     grill_response: row.get(24)?,
                     grill_phase,
                     grill_action,
+                    grill_action_started_at: row.get(27)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?

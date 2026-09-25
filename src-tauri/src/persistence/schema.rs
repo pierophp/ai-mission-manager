@@ -205,7 +205,8 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              grill_decisions_json TEXT NOT NULL DEFAULT '[]',
              grill_response TEXT,
              grill_phase TEXT,
-             grill_action TEXT
+             grill_action TEXT,
+             grill_action_started_at INTEGER
          );
          CREATE INDEX IF NOT EXISTS runs_by_item
              ON runs (item_id, id);
@@ -405,6 +406,16 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
     }
     if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "grill_action") {
         connection.execute("ALTER TABLE runs ADD COLUMN grill_action TEXT", [])?;
+    }
+    if !run_columns.is_empty()
+        && !run_columns
+            .iter()
+            .any(|column| column == "grill_action_started_at")
+    {
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN grill_action_started_at INTEGER",
+            [],
+        )?;
     }
     if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "repository_id") {
         connection.execute("ALTER TABLE runs ADD COLUMN repository_id INTEGER", [])?;

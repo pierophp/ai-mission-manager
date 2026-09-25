@@ -577,11 +577,12 @@ pub fn compose_grill_prompt(
         }
     }
     Ok(format!(
-        "You are starting a Grill Run.\n\nGrill configuration: agent={}, model={}, effort={}.\n\nGrilling skill snapshot:\n{}\n\nRelevant Item context:\n{}\n\nUser's initial prompt:\n{}",
+        "You are starting a Grill Run.\n\nGrill configuration: agent={}, model={}, effort={}.\n\nGrilling skill snapshot:\n{}\n\n{}\n\nRelevant Item context:\n{}\n\nUser's initial prompt:\n{}",
         serde_json::to_string(&configuration.agent).unwrap_or_else(|_| "unknown".into()),
         configuration.model,
         configuration.effort,
         GRILL_SKILL_SNAPSHOT,
+        GRILL_OUTPUT_CONTRACT,
         context.join("\n\n"),
         initial_prompt,
     ))
@@ -637,21 +638,93 @@ pub fn compose_grill_continuation_prompt(
         format_recorded_grill_decisions(&run.grill_decisions)
     };
 
-    Ok(format!(
-        "Continue the existing Grill Run in the same Run and Pane.\n\nSelected downstream action: {}\n\nDownstream skill snapshot (inject this content explicitly; do not rely on the agent having the skill installed):\n{}\n\nRelevant Item context:\n{}\n\nGrill transcript:\n{}\n\nRecorded Grill decisions:\n{}\n\nContinuation instruction:\nApply the selected {} skill to the Item using the transcript and decisions above. Keep working in the same working directory. Ask any confirmation questions using the same ❓ and ➡️ markers as one grouped frontier. Wait for an explicit user decision to finish or stop; never mark the Item Done automatically.\n\nWhen to-spec or to-tickets creates a GitHub Issue, emit one machine-readable line with the confirmed Issue URL: AI_MISSION_MANAGER_EVENT {{\"event\":\"github.issue.created\",\"url\":\"<canonical URL>\",\"run_id\":{},\"action\":\"{}\"}}",
-        action.as_str(),
-        action.skill_snapshot(),
-        context.join("\n\n"),
-        if run.transcript.trim().is_empty() {
-            "No transcript was captured yet."
-        } else {
-            run.transcript.as_str()
-        },
-        decisions,
-        action.as_str(),
+    let mut sections = vec![
+        "Continue the existing Grill Run in the same Run and Pane. The Grill conversation is already in your context; use it as the primary source.".to_owned(),
+        format!("Selected downstream action: {}", action.as_str()),
+        format!(
+            "Downstream skill snapshot (inject this content explicitly; do not rely on the agent having the skill installed):\n{}",
+            action.skill_snapshot()
+        ),
+        format!("Relevant Item context:\n{}", context.join("\n\n")),
+        format!("Recorded Grill decisions:\n{decisions}"),
+    ];
+    if let Some(open_questions) = open_grill_questions(run) {
+        sections.push(format!(
+            "The user stopped the Grill early, before answering these questions. Do not answer them yourself and do not ask them again: record each one in the spec as an open question, with your recommendation.\n{open_questions}"
+        ));
+    }
+    if action == GrillContinuationAction::ToTickets {
+        let specs = downstream_issue_urls(state, run.id, GrillContinuationAction::ToSpec);
+        if !specs.is_empty() {
+            sections.push(format!(
+                "Spec created earlier in this Run (the reference for to-tickets: fetch it and read its full body and comments, and use it as the tickets' parent):\n{}",
+                specs.join("\n")
+            ));
+        }
+    }
+    sections.push(
+        "Issue tracker configuration: read the repository's AGENTS.md or CLAUDE.md and the files they point to (such as docs/agents/issue-tracker.md and docs/agents/triage-labels.md). Only ask the user to run /setup-matt-pocock-skills when none of them configure a tracker.".to_owned(),
+    );
+    sections.push(format!(
+        "Continuation instruction:\nApply the selected {} skill to the Item using the conversation and decisions above. Keep working in the same working directory. Ask any confirmation questions as one grouped frontier that follows the output contract below. Wait for an explicit user decision to finish or stop; never mark the Item Done automatically.",
+        action.as_str()
+    ));
+    sections.push(GRILL_OUTPUT_CONTRACT.to_owned());
+    sections.push(format!(
+        "Mission Manager links the Issues you create to the Item. Right after creating each GitHub Issue, print one line on its own with its canonical URL (one line per Issue, no line breaks inside it):\nAI_MISSION_MANAGER_EVENT {{\"event\":\"github.issue.created\",\"url\":\"https://github.com/<owner>/<repo>/issues/<number>\",\"run_id\":{},\"action\":\"{}\"}}",
         run.id,
         action.as_str(),
-    ))
+    ));
+    Ok(sections.join("\n\n"))
+}
+
+/// The pending question group when the Grill was cut short by to-spec.
+fn open_grill_questions(run: &Run) -> Option<String> {
+    if run.grill_phase != Some(GrillPhase::WaitingForAnswers) {
+        return None;
+    }
+    let group = run.grill_question_group.as_ref()?;
+    let questions = group
+        .questions
+        .iter()
+        .map(|question| {
+            let mut line = format!("Q{}: ", question.number);
+            if let Some(title) = &question.title {
+                line.push_str(title);
+                line.push(' ');
+            }
+            line.push_str(&question.prompt.replace('\n', " "));
+            if let Some(recommendation) = &question.recommendation {
+                line.push_str(&format!(" (recommended: {recommendation})"));
+            }
+            line
+        })
+        .collect::<Vec<_>>();
+    (!questions.is_empty()).then(|| questions.join("\n"))
+}
+
+/// Issues a downstream action of this Run already linked to its Item.
+fn downstream_issue_urls(
+    state: &DomainState,
+    run_id: i64,
+    action: GrillContinuationAction,
+) -> Vec<String> {
+    state
+        .links
+        .iter()
+        .filter(|link| {
+            link.provenance.as_ref().is_some_and(|provenance| {
+                provenance.run_id == run_id && provenance.action == action
+            })
+        })
+        .filter_map(|link| {
+            state
+                .external_objects
+                .iter()
+                .find(|object| object.id == link.external_object_id)
+                .map(|object| object.canonical_url.clone())
+        })
+        .collect()
 }
 
 fn format_recorded_grill_decisions(decisions: &[GrillAnswer]) -> String {

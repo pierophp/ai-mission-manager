@@ -416,6 +416,7 @@ fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
         grill_response: None,
         grill_phase: None,
         grill_action: None,
+        grill_action_started_at: None,
     });
 
     let legacy_file = directory.path().join("agent-state/run-7.json");

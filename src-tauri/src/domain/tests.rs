@@ -217,6 +217,7 @@ mod machine_deletion_tests {
                 grill_response: None,
                 grill_phase: None,
                 grill_action: None,
+                grill_action_started_at: None,
             }],
             relationships: Vec::new(),
             external_objects: Vec::new(),
@@ -913,6 +914,95 @@ mod grill_contract_tests {
     }
 
     #[test]
+    fn a_round_reprinted_after_a_sub_agent_replaces_the_first_one() {
+        let transcript = "\
+• Started `/root/inspect_devtools`
+
+• ## Rodada 1 — decisões que já posso perguntar
+
+  ❓ Q1 — Onde a variável deve funcionar? Você quer que ela abra o DevTools
+  apenas no desenvolvimento local?
+
+  ➡️ Recomendo limitar ao desenvolvimento local.
+
+  ———
+
+  ❓ Q2 — Como a variável deve ativar o DevTools? Deve abrir quando estiver
+  definida com o valor true?
+
+  ➡️ Recomendo exigir exatamente true, para valores como false não ativarem o
+  DevTools por engano.
+
+  ———
+
+  Estou conferindo os scripts e o ponto de abertura do DevTools.
+
+• Waiting for agents
+
+• Finished waiting
+  └ No agents completed yet
+
+• Completed `/root/inspect_devtools`
+
+• ## Rodada 1
+
+  ❓ Q1 — Em quais ambientes a variável deve abrir o DevTools? O DevTools já
+  está restrito a builds de debug.
+
+  ➡️ Recomendo limitar ao desenvolvimento local.
+
+  ———
+
+  ❓ Q2 — Que valor deve ativar a variável? Deve abrir o DevTools somente quando
+  a variável tiver o valor true, ou sempre que ela estiver definida?
+
+  ➡️ Recomendo exigir exatamente true, para valores como false não ativarem o
+  DevTools por engano.
+
+  ———
+
+  A causa está em src-tauri/src/lib.rs:66. Aguardo suas respostas.
+
+  Worked for 1m 26s · done 2:40 PM
+";
+
+        let group = parse_grill_question_group(transcript).expect("the round should parse");
+
+        assert_eq!(group.questions.len(), 2);
+        assert_eq!(group.questions[0].number, 1);
+        assert_eq!(
+            group.questions[0].title.as_deref(),
+            Some("Em quais ambientes a variável deve abrir o DevTools?")
+        );
+        assert_eq!(
+            group.questions[0].prompt,
+            "O DevTools já está restrito a builds de debug."
+        );
+        assert_eq!(group.questions[1].number, 2);
+        assert_eq!(
+            group.questions[1].prompt,
+            "Deve abrir o DevTools somente quando a variável tiver o valor true, ou sempre que ela estiver definida?"
+        );
+        assert_eq!(
+            group.questions[1].recommendation.as_deref(),
+            Some("Recomendo exigir exatamente true, para valores como false não ativarem o DevTools por engano.")
+        );
+    }
+
+    #[test]
+    fn continuing_question_numbers_stay_in_the_same_round() {
+        let group = parse_grill_question_group(
+            "❓ Q1: First?\n➡️ A\n---\n❓ Q2: Second?\n➡️ B\n---\n❓ Q3: Third?\n➡️ C",
+        )
+        .expect("the round should parse");
+
+        assert_eq!(
+            group.questions.iter().map(|q| q.number).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+    }
+
+    #[test]
     fn malformed_grill_text_does_not_become_a_question_group() {
         assert!(parse_grill_question_group("❓\n➡️\n---").is_none());
         assert!(parse_grill_question_group("The agent is still working").is_none());
@@ -1242,7 +1332,7 @@ mod grill_contract_tests {
     }
 
     #[test]
-    fn downstream_prompt_contains_the_selected_skill_item_context_transcript_and_decisions() {
+    fn downstream_prompt_contains_the_selected_skill_item_context_and_decisions() {
         let started = decide(state(), start_event(GrillConfiguration::default()))
             .expect("the Grill should start");
         let transcript = decide(
@@ -1292,8 +1382,13 @@ mod grill_contract_tests {
             assert!(prompt.contains(action.skill_snapshot()));
             assert!(prompt.contains("Decide the next architecture"));
             assert!(prompt.contains("The decision must stay reversible."));
-            assert!(prompt.contains("❓ Q1: Which decision should we keep?"));
+            assert!(
+                !prompt.contains("❓ Q1: Which decision should we keep?"),
+                "the Pane transcript is already in the agent's context"
+            );
             assert!(prompt.contains("Q1: Keep the reversible design"));
+            assert!(prompt.contains("docs/agents/issue-tracker.md"));
+            assert!(prompt.contains(GRILL_OUTPUT_CONTRACT));
             assert!(prompt.contains(action.as_str()));
             assert!(prompt.contains("same Run and Pane"));
             assert!(prompt.contains("AI_MISSION_MANAGER_EVENT"));
@@ -1319,6 +1414,7 @@ mod grill_contract_tests {
             Event::ContinueGrill {
                 run_id: 1,
                 action: GrillContinuationAction::ToSpec,
+                started_at: 100,
             },
         )
         .expect("to-spec should continue the existing Run");
@@ -1431,6 +1527,7 @@ mod grill_contract_tests {
             Event::ContinueGrill {
                 run_id: 1,
                 action: GrillContinuationAction::ToSpec,
+                started_at: 100,
             },
         )
         .expect("to-spec should reuse the Run");
@@ -1458,6 +1555,7 @@ mod grill_contract_tests {
             Event::ContinueGrill {
                 run_id: 1,
                 action: GrillContinuationAction::ToTickets,
+                started_at: 100,
             },
         )
         .expect("to-tickets should reuse the same Run");
@@ -1525,6 +1623,7 @@ mod grill_contract_tests {
             Event::ContinueGrill {
                 run_id: 1,
                 action: GrillContinuationAction::Implement,
+                started_at: 100,
             },
         )
         .expect_err("a Grill still asking questions cannot jump downstream");
@@ -1556,6 +1655,7 @@ mod grill_contract_tests {
             Event::ContinueGrill {
                 run_id: 1,
                 action: GrillContinuationAction::Implement,
+                started_at: 100,
             },
         )
         .expect_err("a missing Pane cannot receive a continuation");
@@ -1566,13 +1666,13 @@ mod grill_contract_tests {
     }
 
     #[test]
-    fn downstream_issue_discovery_prefers_structured_events_and_falls_back_to_issue_urls() {
+    fn downstream_issue_discovery_keeps_structured_provenance_and_plain_issue_urls() {
         let structured = discover_downstream_issue_candidates(
             r#"AI_MISSION_MANAGER_EVENT {"event":"github.issue.created","url":"https://github.com/acme/app/issues/7","run_id":1,"action":"to-tickets"}
 https://github.com/acme/app/issues/8
 https://example.com/unrelated"#,
         );
-        assert_eq!(structured.len(), 1);
+        assert_eq!(structured.len(), 2);
         assert_eq!(structured[0].url, "https://github.com/acme/app/issues/7");
         assert_eq!(
             structured[0].discovery,
@@ -1583,6 +1683,8 @@ https://example.com/unrelated"#,
             structured[0].action,
             Some(GrillContinuationAction::ToTickets)
         );
+        assert_eq!(structured[1].url, "https://github.com/acme/app/issues/8");
+        assert_eq!(structured[1].discovery, DownstreamIssueDiscovery::OutputUrl);
 
         let fallback = discover_downstream_issue_candidates(
             "Created issues: https://github.com/acme/app/issues/8/ and https://github.com/acme/app/issues/8/).",
@@ -1590,6 +1692,162 @@ https://example.com/unrelated"#,
         assert_eq!(fallback.len(), 1);
         assert_eq!(fallback[0].url, "https://github.com/acme/app/issues/8");
         assert_eq!(fallback[0].discovery, DownstreamIssueDiscovery::OutputUrl);
+    }
+
+    fn waiting_for_answers_state() -> DomainState {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let transcript = "❓ Q1 - **Storage**: Where do drafts live?\n➡️ Keep them local";
+        let recorded = decide(
+            started.state,
+            Event::RecordRunTranscript {
+                run_id: 1,
+                transcript: transcript.into(),
+                question_group: parse_grill_question_group(transcript),
+            },
+        )
+        .expect("the question group should be recorded");
+        let waiting = decide(
+            recorded.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the Grill should wait for answers");
+        assert_eq!(
+            waiting.state.runs[0].grill_phase,
+            Some(GrillPhase::WaitingForAnswers)
+        );
+        waiting.state
+    }
+
+    #[test]
+    fn to_spec_can_cut_a_grill_short_while_it_waits_for_answers() {
+        let waiting = waiting_for_answers_state();
+
+        let prompt =
+            compose_grill_continuation_prompt(&waiting, 1, GrillContinuationAction::ToSpec)
+                .expect("the early to-spec prompt should compose");
+        assert!(prompt.contains("stopped the Grill early"));
+        assert!(prompt.contains("Q1: Storage Where do drafts live? (recommended: Keep them local)"));
+
+        let continued = decide(
+            waiting,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToSpec,
+                started_at: 500,
+            },
+        )
+        .expect("to-spec should continue a Grill that waits for answers");
+        let run = &continued.state.runs[0];
+        assert_eq!(run.grill_phase, Some(GrillPhase::Working));
+        assert_eq!(run.grill_action, Some(GrillContinuationAction::ToSpec));
+        assert_eq!(run.grill_action_started_at, Some(500));
+        assert!(run.grill_question_group.is_none());
+    }
+
+    #[test]
+    fn only_to_spec_can_start_before_the_grill_is_complete() {
+        for action in [
+            GrillContinuationAction::ToTickets,
+            GrillContinuationAction::Implement,
+        ] {
+            let error = decide(
+                waiting_for_answers_state(),
+                Event::ContinueGrill {
+                    run_id: 1,
+                    action,
+                    started_at: 500,
+                },
+            )
+            .expect_err("only to-spec may cut the Grill short");
+            assert!(matches!(
+                error,
+                DomainError::GrillContinuationNotAvailable { run_id: 1, .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn to_tickets_receives_the_spec_created_earlier_in_the_run() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let awaiting = decide(
+            started.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the Grill should finish");
+        let spec = decide(
+            awaiting.state,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToSpec,
+                started_at: 100,
+            },
+        )
+        .expect("to-spec should continue the Run");
+        let captured = decide(
+            spec.state,
+            Event::CaptureDownstreamIssues {
+                run_id: 1,
+                action: GrillContinuationAction::ToSpec,
+                issues: vec![confirmed_downstream_issue(
+                    "https://github.com/acme/app/issues/9",
+                )],
+            },
+        )
+        .expect("the spec Issue should be captured");
+
+        let prompt = compose_grill_continuation_prompt(
+            &captured.state,
+            1,
+            GrillContinuationAction::ToTickets,
+        )
+        .expect("the to-tickets prompt should compose");
+        assert!(prompt.contains("Spec created earlier in this Run"));
+        assert!(prompt.contains("https://github.com/acme/app/issues/9"));
+    }
+
+    #[test]
+    fn only_issues_created_after_the_action_started_are_downstream_output() {
+        let snapshot = |created: Option<&str>| ExternalSnapshotData {
+            title: "Issue".into(),
+            state: "OPEN".into(),
+            metadata: created
+                .map(|value| ExternalMetadata {
+                    key: "created".into(),
+                    value: value.into(),
+                })
+                .into_iter()
+                .collect(),
+            fetched_at: 0,
+        };
+        let started_at = parse_github_timestamp("2026-09-25T12:00:00Z");
+        assert_eq!(started_at, Some(1_790_337_600));
+        assert_eq!(
+            parse_github_timestamp("2024-02-29T23:59:59Z"),
+            Some(1_709_251_199)
+        );
+
+        assert!(downstream_issue_is_new(
+            &snapshot(Some("2026-09-25T12:03:00Z")),
+            started_at
+        ));
+        assert!(
+            downstream_issue_is_new(&snapshot(Some("2026-09-25T11:59:00Z")), started_at),
+            "a small clock skew is tolerated"
+        );
+        assert!(!downstream_issue_is_new(
+            &snapshot(Some("2026-09-01T09:00:00Z")),
+            started_at
+        ));
+        assert!(!downstream_issue_is_new(&snapshot(None), started_at));
+        assert!(downstream_issue_is_new(&snapshot(None), None));
     }
 
     #[test]
@@ -1609,6 +1867,7 @@ https://example.com/unrelated"#,
             Event::ContinueGrill {
                 run_id: 1,
                 action: GrillContinuationAction::ToTickets,
+                started_at: 100,
             },
         )
         .expect("to-tickets should continue the Run");
@@ -1689,6 +1948,7 @@ https://example.com/unrelated"#,
             Event::ContinueGrill {
                 run_id: 1,
                 action: GrillContinuationAction::ToTickets,
+                started_at: 100,
             },
         )
         .expect("to-tickets should continue the Run");

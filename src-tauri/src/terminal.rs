@@ -2631,6 +2631,9 @@ pub fn capture_pane_transcript(machine: &Machine, pane_id: &str) -> Result<Vec<u
         &[
             "capture-pane".into(),
             "-p".into(),
+            // Join lines the terminal wrapped, so long event lines and URLs
+            // stay whole.
+            "-J".into(),
             "-S".into(),
             "-".into(),
             "-t".into(),

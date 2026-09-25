@@ -214,6 +214,7 @@ pub enum Event {
     ContinueGrill {
         run_id: i64,
         action: GrillContinuationAction,
+        started_at: i64,
     },
     CaptureDownstreamIssues {
         run_id: i64,

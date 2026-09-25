@@ -412,8 +412,8 @@ impl SqliteStore {
                             started_at, state, pane_status, direct_checkouts_json,
                             transcript, grill_question_group_json, grill_answers_json,
                             grill_decisions_json, grill_response, grill_phase, grill_action,
-                            last_applied_agent_state_sequence)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+                            last_applied_agent_state_sequence, grill_action_started_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
                         params![
                             run.id,
                             run.item_id,
@@ -454,6 +454,7 @@ impl SqliteStore {
                             run.grill_phase.map(grill_phase_as_str),
                             run.grill_action.map(grill_continuation_action_as_str),
                             run.last_applied_agent_state_sequence,
+                            run.grill_action_started_at,
                         ],
                     )?;
                     transaction.execute(
@@ -464,12 +465,14 @@ impl SqliteStore {
                 Effect::PersistRunState { run } => {
                     transaction.execute(
                         "UPDATE runs SET state = ?1, grill_phase = ?2, grill_action = ?3,
-                         last_applied_agent_state_sequence = ?4 WHERE id = ?5",
+                         last_applied_agent_state_sequence = ?4, grill_action_started_at = ?5
+                         WHERE id = ?6",
                         params![
                             run_state_as_str(run.state),
                             run.grill_phase.map(grill_phase_as_str),
                             run.grill_action.map(grill_continuation_action_as_str),
                             run.last_applied_agent_state_sequence,
+                            run.grill_action_started_at,
                             run.id
                         ],
                     )?;

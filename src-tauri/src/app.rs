@@ -1397,6 +1397,7 @@ mod tests {
             grill_response: None,
             grill_phase: None,
             grill_action: None,
+            grill_action_started_at: None,
         });
         runtime
     }
@@ -1568,6 +1569,7 @@ mod tests {
             grill_response: None,
             grill_phase: None,
             grill_action: None,
+            grill_action_started_at: None,
         });
 
         let item = runtime
@@ -1668,6 +1670,7 @@ mod tests {
             grill_response: None,
             grill_phase: None,
             grill_action: None,
+            grill_action_started_at: None,
         });
 
         let stopped = runtime
@@ -1725,6 +1728,7 @@ mod tests {
             grill_response: None,
             grill_phase: None,
             grill_action: None,
+            grill_action_started_at: None,
         });
 
         let error = runtime
@@ -1806,6 +1810,7 @@ mod tests {
                 grill_response: None,
                 grill_phase: None,
                 grill_action: None,
+                grill_action_started_at: None,
             },
             Run {
                 id: 2,
@@ -1835,6 +1840,7 @@ mod tests {
                 grill_response: None,
                 grill_phase: None,
                 grill_action: None,
+                grill_action_started_at: None,
             },
             Run {
                 id: 3,
@@ -1864,6 +1870,7 @@ mod tests {
                 grill_response: None,
                 grill_phase: None,
                 grill_action: None,
+                grill_action_started_at: None,
             },
         ]);
 
@@ -1937,6 +1944,7 @@ mod tests {
             grill_response: None,
             grill_phase: None,
             grill_action: None,
+            grill_action_started_at: None,
         };
         runtime.state.runs.extend([
             make_run(1, 1, "%1"),
@@ -2181,6 +2189,7 @@ mod tests {
             grill_response: None,
             grill_phase: None,
             grill_action: None,
+            grill_action_started_at: None,
         };
         runtime
             .store
@@ -2572,6 +2581,7 @@ mod tests {
             grill_response: Some("1. Keep it".into()),
             grill_phase: Some(GrillPhase::Working),
             grill_action: None,
+            grill_action_started_at: None,
         });
 
         runtime
@@ -2835,7 +2845,7 @@ fi
         let executable = directory.path().join("gh");
         let script = r#"#!/bin/sh
 if [ "$1" = issue ] && [ "$2" = view ] && [ "$3" = "https://github.com/acme/app/issues/7" ]; then
-  printf '%s' '{"number":7,"title":"Captured downstream Issue","state":"OPEN","author":null,"labels":[],"milestone":null,"updatedAt":null}'
+  printf '%s' '{"number":7,"title":"Captured downstream Issue","state":"OPEN","author":null,"labels":[],"milestone":null,"createdAt":"2026-09-25T12:00:00Z","updatedAt":null}'
   exit 0
 fi
 exit 1
@@ -2881,6 +2891,7 @@ exit 1
             grill_response: None,
             grill_phase: Some(GrillPhase::Working),
             grill_action: Some(GrillContinuationAction::ToTickets),
+            grill_action_started_at: Some(0),
         });
 
         let output = r#"AI_MISSION_MANAGER_EVENT {"event":"github.issue.created","url":"https://github.com/acme/app/issues/7","run_id":1,"action":"to-tickets"}

@@ -262,6 +262,7 @@ exit 1
             grill_response: None,
             grill_phase: None,
             grill_action: None,
+            grill_action_started_at: None,
         });
         runtime
             .register_repository(

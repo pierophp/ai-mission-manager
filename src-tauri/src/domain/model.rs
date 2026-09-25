@@ -296,6 +296,10 @@ pub struct Run {
     pub grill_phase: Option<GrillPhase>,
     #[serde(default)]
     pub grill_action: Option<GrillContinuationAction>,
+    /// When the current downstream action was sent. Only GitHub Issues created
+    /// after it can be captured as that action's output.
+    #[serde(default)]
+    pub grill_action_started_at: Option<i64>,
 }
 
 pub fn run_is_active(run: &Run) -> bool {
