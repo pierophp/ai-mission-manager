@@ -8,7 +8,7 @@ use crate::domain::{
     compose_grill_prompt, decide, format_grill_response, parse_grill_question_group, AgentKind,
     AuditAction, ConfirmedDownstreamIssue, DownstreamIssueDiscovery, Event, GrillAnswer,
     GrillConfiguration, GrillContinuationAction, GrillPhase, LinkProvenance, MachineTransport,
-    RunCheckout, WorkspaceRepositoryInput, GRILL_SKILL_SNAPSHOT,
+    RunCheckout, WorkspaceRepositoryInput, grill_skill_snapshot,
 };
 
 use super::{
@@ -555,7 +555,7 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
             machine_id: 1,
             configuration,
             prompt,
-            skill_snapshot: GRILL_SKILL_SNAPSHOT.into(),
+            skill_snapshot: grill_skill_snapshot().into(),
             working_directory: "/tmp/mission-manager".into(),
             session_name: "mission-item-1-grill-1".into(),
             pane_id: "%1".into(),
@@ -649,7 +649,7 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
     assert_eq!(reloaded.runs[0].effort.as_deref(), Some("xhigh"));
     assert_eq!(
         reloaded.runs[0].skill_snapshot.as_deref(),
-        Some(GRILL_SKILL_SNAPSHOT)
+        Some(grill_skill_snapshot())
     );
     assert_eq!(reloaded.runs[0].transcript, "raw Grill transcript");
     assert_eq!(reloaded.runs[0].grill_answers.len(), 2);

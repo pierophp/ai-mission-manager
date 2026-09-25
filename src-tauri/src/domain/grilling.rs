@@ -2,12 +2,28 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
-pub const GRILL_SKILL_SNAPSHOT: &str = include_str!("../../../.agents/skills/grilling/SKILL.md");
-pub const TO_SPEC_SKILL_SNAPSHOT: &str = include_str!("../../../.agents/skills/to-spec/SKILL.md");
-pub const TO_TICKETS_SKILL_SNAPSHOT: &str =
+const GRILL_SKILL_SOURCE: &str = include_str!("../../../.agents/skills/grilling/SKILL.md");
+const TO_SPEC_SKILL_SOURCE: &str = include_str!("../../../.agents/skills/to-spec/SKILL.md");
+const TO_TICKETS_SKILL_SOURCE: &str =
     include_str!("../../../.agents/skills/to-tickets/SKILL.md");
-pub const IMPLEMENT_SKILL_SNAPSHOT: &str =
+const IMPLEMENT_SKILL_SOURCE: &str =
     include_str!("../../../.agents/skills/implement/SKILL.md");
+
+/// Return skill instructions without YAML metadata, which is for skill discovery
+/// and should not be sent to an agent as prompt content.
+pub fn grill_skill_snapshot() -> &'static str {
+    strip_skill_frontmatter(GRILL_SKILL_SOURCE)
+}
+
+fn strip_skill_frontmatter(source: &'static str) -> &'static str {
+    let Some(body_start) = source.strip_prefix("---\n") else {
+        return source;
+    };
+    let Some(end) = body_start.find("\n---\n") else {
+        return source;
+    };
+    body_start[end + "\n---\n".len()..]
+}
 
 /// How Mission Manager reads questions out of the Pane. Agents render
 /// Markdown differently (Codex drops bold, rewrites `---`, wraps lines), so the
@@ -39,9 +55,9 @@ impl GrillContinuationAction {
 
     pub fn skill_snapshot(self) -> &'static str {
         match self {
-            Self::ToSpec => TO_SPEC_SKILL_SNAPSHOT,
-            Self::ToTickets => TO_TICKETS_SKILL_SNAPSHOT,
-            Self::Implement => IMPLEMENT_SKILL_SNAPSHOT,
+            Self::ToSpec => strip_skill_frontmatter(TO_SPEC_SKILL_SOURCE),
+            Self::ToTickets => strip_skill_frontmatter(TO_TICKETS_SKILL_SOURCE),
+            Self::Implement => strip_skill_frontmatter(IMPLEMENT_SKILL_SOURCE),
         }
     }
 }

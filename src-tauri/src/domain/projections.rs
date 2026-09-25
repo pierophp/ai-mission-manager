@@ -581,7 +581,7 @@ pub fn compose_grill_prompt(
         serde_json::to_string(&configuration.agent).unwrap_or_else(|_| "unknown".into()),
         configuration.model,
         configuration.effort,
-        GRILL_SKILL_SNAPSHOT,
+        grill_skill_snapshot(),
         GRILL_OUTPUT_CONTRACT,
         context.join("\n\n"),
         initial_prompt,

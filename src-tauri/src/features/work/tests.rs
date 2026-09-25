@@ -67,7 +67,7 @@ fn runtime_with_grill_run(
             machine_id: machine.id,
             configuration,
             prompt,
-            skill_snapshot: crate::domain::GRILL_SKILL_SNAPSHOT.into(),
+            skill_snapshot: crate::domain::grill_skill_snapshot().into(),
             working_directory: "/tmp/grill-lock-test".into(),
             session_name: "grill-lock-test".into(),
             pane_id: "%1".into(),

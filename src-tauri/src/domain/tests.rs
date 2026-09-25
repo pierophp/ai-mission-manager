@@ -724,7 +724,7 @@ mod grill_contract_tests {
             machine_id: 1,
             configuration,
             prompt,
-            skill_snapshot: GRILL_SKILL_SNAPSHOT.into(),
+            skill_snapshot: grill_skill_snapshot().into(),
             working_directory: "/tmp/mission-manager".into(),
             session_name: "mission-item-1-run-1".into(),
             pane_id: "%1".into(),
@@ -773,13 +773,13 @@ mod grill_contract_tests {
         assert_eq!(run.working_directory, "/tmp/mission-manager");
         assert_eq!(run.model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(run.effort.as_deref(), Some("xhigh"));
-        assert_eq!(run.skill_snapshot.as_deref(), Some(GRILL_SKILL_SNAPSHOT));
+        assert_eq!(run.skill_snapshot.as_deref(), Some(grill_skill_snapshot()));
         assert!(run
             .prompt
             .contains("Stress-test this architecture decision."));
         assert!(run.prompt.contains("Decide the next architecture"));
         assert!(run.prompt.contains("The decision must stay reversible."));
-        assert!(run.prompt.contains(GRILL_SKILL_SNAPSHOT));
+        assert!(run.prompt.contains(grill_skill_snapshot()));
     }
 
     #[test]

@@ -1339,7 +1339,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         parse_grill_question_group, search_items, AuditAction, GrillPhase, MachineObservation,
-        ProjectDefaults, RunPaneStatus, GRILL_SKILL_SNAPSHOT,
+        ProjectDefaults, RunPaneStatus, grill_skill_snapshot,
     };
     use crate::features::deletion::RESET_CONFIRMATION_PHRASE;
     use crate::persistence::SqliteStore;
@@ -2550,7 +2550,7 @@ mod tests {
             execution_profile: ExecutionProfile::Grill,
             model: Some("claude-sonnet-4-5".into()),
             effort: Some("high".into()),
-            skill_snapshot: Some(GRILL_SKILL_SNAPSHOT.into()),
+            skill_snapshot: Some(grill_skill_snapshot().into()),
             prompt: "Recover this Grill".into(),
             working_directory: directory.path().to_string_lossy().into_owned(),
             session_name: session.clone(),

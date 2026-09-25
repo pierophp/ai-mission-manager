@@ -2189,7 +2189,7 @@ impl RunLaunchSnapshot {
                     machine_id: self.machine.id,
                     configuration: configuration.clone(),
                     prompt: self.prompt.clone(),
-                    skill_snapshot: crate::domain::GRILL_SKILL_SNAPSHOT.into(),
+                    skill_snapshot: crate::domain::grill_skill_snapshot().into(),
                     working_directory,
                     session_name,
                     pane_id,
