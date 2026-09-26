@@ -23,6 +23,93 @@ mod implementation_queue_tests {
         assert!(!prompt.contains("name: implement"));
     }
 
+    #[test]
+    fn context_can_disable_dirty_checkout_checks() {
+        let decision = decide(
+            state(),
+            Event::SetContextDirtyCheckoutCheck {
+                context_id: 1,
+                enabled: false,
+            },
+        )
+        .expect("a Context can update its dirty checkout check setting");
+
+        assert!(!decision.state.contexts[0].check_dirty_checkouts);
+        assert!(matches!(
+            decision.effects.as_slice(),
+            [Effect::UpdateContext { context }] if !context.check_dirty_checkouts
+        ));
+    }
+
+    #[test]
+    fn new_contexts_check_dirty_checkouts_by_default() {
+        let decision = decide(
+            state(),
+            Event::CreateContext {
+                name: "Another context".into(),
+            },
+        )
+        .expect("a new Context should be created");
+
+        assert!(decision.state.contexts[1].check_dirty_checkouts);
+    }
+
+    #[test]
+    fn disabled_context_setting_allows_a_direct_run_with_dirty_checkout() {
+        let setting = decide(
+            state(),
+            Event::SetContextDirtyCheckoutCheck {
+                context_id: 1,
+                enabled: false,
+            },
+        )
+        .unwrap();
+        let mut dirty_run = event("open");
+        if let Event::StartDirectRun { checkouts, .. } = &mut dirty_run {
+            checkouts[0].is_dirty = true;
+        }
+
+        assert!(decide(setting.state, dirty_run).is_ok());
+    }
+
+    #[test]
+    fn disabled_context_setting_allows_queue_advancement_with_dirty_checkout() {
+        let started = decide(state(), event("open")).unwrap();
+        let finished = decide(
+            started.state,
+            Event::ApplyAgentStateReport {
+                run_id: 1,
+                state: RunState::Finished,
+                sequence: Some(1),
+            },
+        )
+        .unwrap();
+        let setting = decide(
+            finished.state,
+            Event::SetContextDirtyCheckoutCheck {
+                context_id: 1,
+                enabled: false,
+            },
+        )
+        .unwrap();
+        let advanced = decide(
+            setting.state,
+            Event::AdvanceImplementationQueue {
+                queue_id: 1,
+                run_id: 1,
+                ticket_closed: true,
+                checkout_clean: false,
+            },
+        )
+        .unwrap();
+
+        assert!(advanced.state.implementation_queues[0].entries[0].done);
+        assert!(advanced.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::LaunchImplementationQueueEntry { position: 1, .. }
+        )));
+    }
+
     fn state() -> DomainState {
         DomainState {
             next_context_id: 2,
@@ -42,6 +129,7 @@ mod implementation_queue_tests {
                 id: 1,
                 name: "Context".into(),
                 execution_machine_id: Some(1),
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
             }],
@@ -559,6 +647,7 @@ mod context_execution_machine_tests {
                     id: 1,
                     name: "Unconfigured".into(),
                     execution_machine_id: None,
+                    check_dirty_checkouts: true,
                     grill_defaults: GrillConfiguration::default(),
                     implement_defaults: GrillConfiguration::default(),
                 },
@@ -566,6 +655,7 @@ mod context_execution_machine_tests {
                     id: 2,
                     name: "Other".into(),
                     execution_machine_id: None,
+                    check_dirty_checkouts: true,
                     grill_defaults: GrillConfiguration::default(),
                     implement_defaults: GrillConfiguration::default(),
                 },
@@ -669,6 +759,7 @@ mod machine_deletion_tests {
                 id: 1,
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
             }],
@@ -892,6 +983,7 @@ mod workspace_contract_tests {
                 id: 1,
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
             }],
@@ -1043,6 +1135,7 @@ mod workspace_contract_tests {
                 id: 1,
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
             }],
@@ -1194,6 +1287,7 @@ mod grill_contract_tests {
                 id: 1,
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
             }],

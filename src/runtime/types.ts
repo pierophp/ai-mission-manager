@@ -11,6 +11,7 @@ export type Context = {
   id: number;
   name: string;
   execution_machine_id: number | null;
+  check_dirty_checkouts: boolean;
   grill_defaults: GrillConfiguration;
   implement_defaults: GrillConfiguration;
 };

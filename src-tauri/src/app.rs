@@ -424,6 +424,15 @@ pub fn set_context_implement_defaults(
     crate::features::structure::set_context_implement_defaults(context_id, defaults, state)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_context_dirty_checkout_check(
+    context_id: i64,
+    enabled: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    crate::features::structure::set_context_dirty_checkout_check(context_id, enabled, state)
+}
+
 #[tauri::command]
 pub fn list_projects(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Project>, String> {
     crate::features::structure::list_projects(state)

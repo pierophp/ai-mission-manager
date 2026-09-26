@@ -24,6 +24,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 id,
                 name,
                 execution_machine_id: None,
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
             };
@@ -120,6 +121,22 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .find(|context| context.id == context_id)
                 .expect("the Context was checked above");
             context.execution_machine_id = machine_id;
+            let context = context.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::UpdateContext { context }],
+            })
+        }
+        Event::SetContextDirtyCheckoutCheck {
+            context_id,
+            enabled,
+        } => {
+            let context = state
+                .contexts
+                .iter_mut()
+                .find(|context| context.id == context_id)
+                .ok_or(DomainError::ContextNotFound { context_id })?;
+            context.check_dirty_checkouts = enabled;
             let context = context.clone();
             Ok(Decision {
                 state,
@@ -553,6 +570,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 id: context_id,
                 name: "Personal".into(),
                 execution_machine_id: None,
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
             };
@@ -1602,7 +1620,13 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .filter(|checkout| checkout.is_dirty)
                 .map(|checkout| checkout.repository_id)
                 .collect::<Vec<_>>();
-            if !allow_dirty && !dirty_repository_ids.is_empty() {
+            let check_dirty_checkouts = state
+                .contexts
+                .iter()
+                .find(|context| context.id == context_id)
+                .ok_or(DomainError::ContextNotFound { context_id })?
+                .check_dirty_checkouts;
+            if check_dirty_checkouts && !allow_dirty && !dirty_repository_ids.is_empty() {
                 return Err(DomainError::DirectRunDirtyCheckouts {
                     repository_ids: dirty_repository_ids,
                 });
@@ -2299,6 +2323,20 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             ticket_closed,
             checkout_clean,
         } => {
+            let queue_item_id = state
+                .implementation_queues
+                .iter()
+                .find(|queue| queue.id == queue_id)
+                .map(|queue| queue.item_id)
+                .ok_or(DomainError::ImplementationQueueNotFound { queue_id })?;
+            let context_id = item_context_id(&state, queue_item_id)?;
+            let check_dirty_checkouts = state
+                .contexts
+                .iter()
+                .find(|context| context.id == context_id)
+                .ok_or(DomainError::ContextNotFound { context_id })?
+                .check_dirty_checkouts;
+            let checkout_clean = checkout_clean || !check_dirty_checkouts;
             let queue = state
                 .implementation_queues
                 .iter_mut()

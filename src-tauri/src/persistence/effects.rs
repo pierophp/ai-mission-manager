@@ -27,12 +27,13 @@ impl SqliteStore {
                 } => {
                     transaction.execute(
                         "INSERT INTO contexts
-                            (id, name, execution_machine_id, grill_agent, grill_model, grill_effort, implement_agent, implement_model, implement_effort)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                            (id, name, execution_machine_id, check_dirty_checkouts, grill_agent, grill_model, grill_effort, implement_agent, implement_model, implement_effort)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                         params![
                             context.id,
                             context.name,
                             context.execution_machine_id,
+                            bool_as_i64(context.check_dirty_checkouts),
                             agent_kind_as_str(context.grill_defaults.agent),
                             context.grill_defaults.model,
                             context.grill_defaults.effort,
@@ -49,9 +50,14 @@ impl SqliteStore {
                 Effect::UpdateContext { context } => {
                     transaction.execute(
                         "UPDATE contexts
-                         SET name = ?1, execution_machine_id = ?2
-                         WHERE id = ?3",
-                        params![context.name, context.execution_machine_id, context.id],
+                         SET name = ?1, execution_machine_id = ?2, check_dirty_checkouts = ?3
+                         WHERE id = ?4",
+                        params![
+                            context.name,
+                            context.execution_machine_id,
+                            bool_as_i64(context.check_dirty_checkouts),
+                            context.id
+                        ],
                     )?;
                 }
                 Effect::PersistContextGrillDefaults { context } => {
@@ -210,12 +216,13 @@ impl SqliteStore {
                     )?;
                     transaction.execute(
                         "INSERT INTO contexts
-                            (id, name, execution_machine_id, grill_agent, grill_model, grill_effort, implement_agent, implement_model, implement_effort)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                            (id, name, execution_machine_id, check_dirty_checkouts, grill_agent, grill_model, grill_effort, implement_agent, implement_model, implement_effort)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                         params![
                             context.id,
                             context.name,
                             context.execution_machine_id,
+                            bool_as_i64(context.check_dirty_checkouts),
                             agent_kind_as_str(context.grill_defaults.agent),
                             context.grill_defaults.model,
                             context.grill_defaults.effort,

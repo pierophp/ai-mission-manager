@@ -12,6 +12,10 @@ pub enum Event {
         context_id: i64,
         machine_id: Option<i64>,
     },
+    SetContextDirtyCheckoutCheck {
+        context_id: i64,
+        enabled: bool,
+    },
     SetContextGrillDefaults {
         context_id: i64,
         defaults: GrillConfiguration,

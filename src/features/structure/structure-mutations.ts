@@ -105,6 +105,8 @@ export const structureActions = {
   ) => () => structureAdapter.setContextGrillDefaults(contextId, defaults),
   setContextImplementDefaults: (contextId: number, defaults: Parameters<typeof structureAdapter.setContextImplementDefaults>[1]) =>
     () => structureAdapter.setContextImplementDefaults(contextId, defaults),
+  setContextDirtyCheckoutCheck: (contextId: number, enabled: boolean) =>
+    () => structureAdapter.setContextDirtyCheckoutCheck(contextId, enabled),
   createItem: (title: string, contextId: number, projectId: number) =>
     () => structureAdapter.createItem(title, contextId, projectId),
   prepareReset: () => () => structureAdapter.prepareReset(),

@@ -626,6 +626,7 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
     let database_path = directory.path().join("mission-manager.sqlite");
     let mut store = SqliteStore::open(&database_path).expect("database should open");
     let mut state = store.load_state().expect("initial state should load");
+    assert!(state.contexts[0].check_dirty_checkouts);
 
     state = apply_event(
         &mut store,
@@ -710,6 +711,14 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
                 model: "gpt-6-sol".into(),
                 effort: "medium".into(),
             },
+        },
+    );
+    state = apply_event(
+        &mut store,
+        state,
+        Event::SetContextDirtyCheckoutCheck {
+            context_id: 1,
+            enabled: false,
         },
     );
     let prompt = compose_grill_prompt(
@@ -817,6 +826,7 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
     assert_eq!(reloaded.contexts[0].grill_defaults.effort, "xhigh");
     assert_eq!(reloaded.contexts[0].implement_defaults.model, "gpt-6-sol");
     assert_eq!(reloaded.contexts[0].implement_defaults.effort, "medium");
+    assert!(!reloaded.contexts[0].check_dirty_checkouts);
     assert_eq!(
         reloaded.runs[0].execution_profile,
         crate::domain::ExecutionProfile::Grill

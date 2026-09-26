@@ -461,7 +461,7 @@ pub(crate) async fn advance_finished_implementation_queue(
         Arc::clone(&runtime.implementation_queue_lock)
     };
     let _serial_guard = serial.lock().await;
-    let (queue, entry, run, machine, terminal, gh_path) = {
+    let (queue, entry, run, machine, terminal, gh_path, check_dirty_checkouts) = {
         let runtime = state
             .lock()
             .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
@@ -503,6 +503,14 @@ pub(crate) async fn advance_finished_implementation_queue(
         else {
             return Ok(());
         };
+        let context_id = runtime.item_context_id(queue.item_id)?;
+        let context = runtime
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+        let check_dirty_checkouts = context.check_dirty_checkouts;
         (
             queue,
             entry,
@@ -510,6 +518,7 @@ pub(crate) async fn advance_finished_implementation_queue(
             machine,
             Arc::clone(&runtime.terminal_runtime),
             runtime.gh_executable_path.clone(),
+            check_dirty_checkouts,
         )
     };
     let ticket_url = entry.ticket_url.clone();
@@ -527,48 +536,59 @@ pub(crate) async fn advance_finished_implementation_queue(
                 .fetch(&object, current_unix_seconds())
                 .map_err(|error| error.to_string())?;
             let ticket_closed = ticket.state.eq_ignore_ascii_case("closed");
-            let git = GitCli::system();
             let mut clean = true;
-            for checkout in checkouts {
-                let inspection = git
-                    .inspect_checkout_on_machine(&worker_machine, Path::new(&checkout.path))
-                    .map_err(|error| error.to_string())?;
-                clean &= !inspection.is_dirty;
+            if check_dirty_checkouts {
+                let git = GitCli::system();
+                for checkout in checkouts {
+                    let inspection = git
+                        .inspect_checkout_on_machine(&worker_machine, Path::new(&checkout.path))
+                        .map_err(|error| error.to_string())?;
+                    clean &= !inspection.is_dirty;
+                }
             }
             Ok((ticket_closed, clean))
         })
         .await
         .map_err(|error| format!("Implementation Queue inspection worker failed: {error}"))??;
-    let decision = decide(
-        state
-            .lock()
-            .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-            .state
-            .clone(),
-        Event::AdvanceImplementationQueue {
-            queue_id: queue.id,
-            run_id,
-            ticket_closed,
-            checkout_clean,
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    let should_close = decision.effects.iter().any(|effect| {
-        matches!(
-            effect,
-            crate::domain::Effect::CloseImplementationRunSession { .. }
-        )
-    });
-    let next_position = decision.effects.iter().find_map(|effect| match effect {
-        crate::domain::Effect::LaunchImplementationQueueEntry { position, .. } => Some(*position),
-        _ => None,
-    });
-    {
+    let (should_close, next_position) = {
         let mut runtime = state
             .lock()
             .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let context_id = runtime.item_context_id(queue.item_id)?;
+        let current_context = runtime
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+        if current_context.check_dirty_checkouts != check_dirty_checkouts {
+            return Err("Context dirty checkout setting changed while the queue was checked; check it again".into());
+        }
+        let decision = decide(
+            runtime.state.clone(),
+            Event::AdvanceImplementationQueue {
+                queue_id: queue.id,
+                run_id,
+                ticket_closed,
+                checkout_clean,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let should_close = decision.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                crate::domain::Effect::CloseImplementationRunSession { .. }
+            )
+        });
+        let next_position = decision.effects.iter().find_map(|effect| match effect {
+            crate::domain::Effect::LaunchImplementationQueueEntry { position, .. } => {
+                Some(*position)
+            }
+            _ => None,
+        });
         runtime.commit(decision)?;
-    }
+        (should_close, next_position)
+    };
     if should_close {
         let worker_terminal = Arc::clone(&terminal);
         let close_machine = machine.clone();
@@ -2271,6 +2291,7 @@ struct DirectCheckoutSnapshot {
     workspace: Workspace,
     machine_id_request: Option<i64>,
     machine: Machine,
+    check_dirty_checkouts: bool,
     repositories: Vec<(Repository, RepositoryLocation, PathBuf)>,
 }
 
@@ -2388,12 +2409,21 @@ fn direct_checkout_snapshot(
         };
         inputs.push((repository, location, path));
     }
+    let context_id = runtime.item_context_id(item_id)?;
+    let context = runtime
+        .state
+        .contexts
+        .iter()
+        .find(|context| context.id == context_id)
+        .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+    let check_dirty_checkouts = context.check_dirty_checkouts;
     Ok(DirectCheckoutSnapshot {
         item_id,
         item_project_id: item.project_id,
         workspace,
         machine_id_request: machine_id,
         machine,
+        check_dirty_checkouts,
         repositories: inputs,
     })
 }
@@ -2433,6 +2463,7 @@ impl Runtime {
             return false;
         };
         if context.execution_machine_id != Some(snapshot.machine.id)
+            || context.check_dirty_checkouts != snapshot.check_dirty_checkouts
             || snapshot
                 .machine_id_request
                 .is_some_and(|requested| requested != snapshot.machine.id)
@@ -2471,6 +2502,7 @@ impl Runtime {
             &self.state,
             observation.snapshot.workspace.id,
             observation.snapshot.machine,
+            observation.snapshot.check_dirty_checkouts,
             observation.checkouts,
         )
     }
@@ -2480,6 +2512,7 @@ fn build_direct_run_preview(
     state: &crate::domain::DomainState,
     workspace_id: i64,
     machine: Machine,
+    check_dirty_checkouts: bool,
     checkout_details: Vec<DirectRunCheckoutPreview>,
 ) -> Result<DirectRunPreview, String> {
     let checkouts = checkout_details
@@ -2491,11 +2524,15 @@ fn build_direct_run_preview(
             is_dirty: checkout.is_dirty,
         })
         .collect::<Vec<_>>();
-    let dirty_repository_ids = checkouts
-        .iter()
-        .filter(|checkout| checkout.is_dirty)
-        .map(|checkout| checkout.repository_id)
-        .collect::<Vec<_>>();
+    let dirty_repository_ids = if check_dirty_checkouts {
+        checkouts
+            .iter()
+            .filter(|checkout| checkout.is_dirty)
+            .map(|checkout| checkout.repository_id)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let mut shared_runs = Vec::new();
     let mut shared_paths = Vec::new();
     for run in state.runs.iter().filter(|run| {
@@ -2707,7 +2744,7 @@ impl RunLaunchSnapshot {
                     prompt_selection: prompt_selection.clone(),
                     checkouts,
                     repository_id: *primary_repository_id,
-                    allow_dirty: *allow_dirty,
+                    allow_dirty: *allow_dirty || !self.context.check_dirty_checkouts,
                     allow_shared_checkouts: *allow_shared_checkouts,
                 }
             }
@@ -2848,7 +2885,11 @@ impl RunLaunchSnapshot {
                         is_dirty: checkout.is_dirty,
                     })
                     .collect::<Vec<_>>();
-                if &checkouts != expected_checkouts {
+                if !run_checkout_previews_match(
+                    expected_checkouts,
+                    &checkouts,
+                    self.context.check_dirty_checkouts,
+                ) {
                     return Err(match &self.input {
                         RunLaunchInput::Direct { .. } => "A Direct checkout changed after the preview (branch or dirty state); review the Direct Run preview again before starting".into(),
                         _ => "A Grill checkout changed after the preview (branch or dirty state); review the Grill preview again before starting".into(),
@@ -2920,6 +2961,7 @@ impl RunLaunchSnapshot {
                 &self.state,
                 self.machine.id,
                 &checkouts,
+                self.context.check_dirty_checkouts,
                 *allow_dirty,
                 *allow_shared_checkouts,
             )?;
@@ -2941,14 +2983,29 @@ fn machine_execution_identity_matches(current: &Machine, expected: &Machine) -> 
         && current.transport == expected.transport
 }
 
+fn run_checkout_previews_match(
+    expected: &[RunCheckout],
+    observed: &[RunCheckout],
+    check_dirty_checkouts: bool,
+) -> bool {
+    expected.len() == observed.len()
+        && expected.iter().zip(observed).all(|(expected, observed)| {
+            expected.repository_id == observed.repository_id
+                && expected.path == observed.path
+                && expected.branch == observed.branch
+                && (!check_dirty_checkouts || expected.is_dirty == observed.is_dirty)
+        })
+}
+
 fn validate_grill_launch_approvals(
     state: &DomainState,
     machine_id: i64,
     checkouts: &[RunCheckout],
+    check_dirty_checkouts: bool,
     allow_dirty: bool,
     allow_shared_checkouts: bool,
 ) -> Result<(), String> {
-    if !allow_dirty {
+    if check_dirty_checkouts && !allow_dirty {
         let dirty_repository_ids = checkouts
             .iter()
             .filter(|checkout| checkout.is_dirty)
@@ -3175,6 +3232,7 @@ fn run_launch_snapshot(
             &runtime.state,
             snapshot.machine.id,
             &checkout_values,
+            snapshot.context.check_dirty_checkouts,
             *allow_dirty,
             *allow_shared_checkouts,
         )?;
@@ -3357,6 +3415,7 @@ async fn start_run_with_state(
                         &runtime.state,
                         observation.snapshot.machine.id,
                         &observation.checkouts,
+                        observation.snapshot.context.check_dirty_checkouts,
                         *allow_dirty,
                         *allow_shared_checkouts,
                     ),

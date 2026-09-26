@@ -18,25 +18,27 @@ impl SqliteStore {
         let next_reminder_id = self.sequence("next_reminder_id")?;
         let contexts = {
             let mut statement = self.connection.prepare(
-                "SELECT id, name, execution_machine_id, grill_agent, grill_model, grill_effort,
+                "SELECT id, name, execution_machine_id, check_dirty_checkouts,
+                        grill_agent, grill_model, grill_effort,
                         implement_agent, implement_model, implement_effort
                      FROM contexts ORDER BY id",
             )?;
             let rows = statement.query_map([], |row| {
-                let agent: String = row.get(3)?;
-                let model: String = row.get(4)?;
-                let effort: String = row.get(5)?;
-                let implement_agent: String = row.get(6)?;
-                let implement_model: String = row.get(7)?;
-                let implement_effort: String = row.get(8)?;
+                let agent: String = row.get(4)?;
+                let model: String = row.get(5)?;
+                let effort: String = row.get(6)?;
+                let implement_agent: String = row.get(7)?;
+                let implement_model: String = row.get(8)?;
+                let implement_effort: String = row.get(9)?;
                 Ok(Context {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     execution_machine_id: row.get(2)?,
+                    check_dirty_checkouts: row.get::<_, i64>(3)? != 0,
                     grill_defaults: GrillConfiguration {
                         agent: parse_agent_kind(&agent).map_err(|error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                3,
+                                4,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
@@ -47,7 +49,7 @@ impl SqliteStore {
                     implement_defaults: GrillConfiguration {
                         agent: parse_agent_kind(&implement_agent).map_err(|error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                6,
+                                7,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )

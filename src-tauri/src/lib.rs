@@ -114,6 +114,7 @@ pub fn run() {
             app::list_grill_model_catalog,
             app::set_context_grill_defaults,
             app::set_context_implement_defaults,
+            app::set_context_dirty_checkout_check,
             app::list_projects,
             app::list_repositories,
             app::list_repository_locations,

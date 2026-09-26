@@ -150,6 +150,16 @@ pub(crate) fn set_context_implement_defaults(
     })
 }
 
+pub(crate) fn set_context_dirty_checkout_check(
+    context_id: i64,
+    enabled: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    locked(state, |runtime| {
+        runtime.set_context_dirty_checkout_check(context_id, enabled)
+    })
+}
+
 pub(crate) fn create_project(
     name: String,
     context_id: i64,
@@ -796,6 +806,30 @@ impl Runtime {
             Event::SetContextImplementDefaults {
                 context_id,
                 defaults,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let context = decision
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .cloned()
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+        self.commit(decision)?;
+        Ok(context)
+    }
+
+    pub(crate) fn set_context_dirty_checkout_check(
+        &mut self,
+        context_id: i64,
+        enabled: bool,
+    ) -> Result<Context, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::SetContextDirtyCheckoutCheck {
+                context_id,
+                enabled,
             },
         )
         .map_err(|error| error.to_string())?;

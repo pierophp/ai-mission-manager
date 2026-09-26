@@ -16,6 +16,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              id INTEGER PRIMARY KEY NOT NULL,
              name TEXT NOT NULL UNIQUE,
              execution_machine_id INTEGER,
+             check_dirty_checkouts INTEGER NOT NULL DEFAULT 1,
              grill_agent TEXT NOT NULL DEFAULT 'claude',
              grill_model TEXT NOT NULL DEFAULT 'claude-sonnet-4-5',
              grill_effort TEXT NOT NULL DEFAULT 'high',
@@ -83,6 +84,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
         )?;
     }
     for (column, definition) in [
+        ("check_dirty_checkouts", "INTEGER NOT NULL DEFAULT 1"),
         ("implement_agent", "TEXT NOT NULL DEFAULT 'claude'"),
         (
             "implement_model",

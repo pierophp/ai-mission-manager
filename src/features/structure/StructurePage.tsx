@@ -216,6 +216,7 @@ export function StructurePage({ section }: { section: SettingsSection }) {
   const [implementAgent, setImplementAgent] = useState<GrillConfiguration["agent"]>("claude");
   const [implementModel, setImplementModel] = useState("claude-sonnet-4-5");
   const [implementEffort, setImplementEffort] = useState("high");
+  const [checkDirtyCheckouts, setCheckDirtyCheckouts] = useState(true);
   const [repositoryDeletionPreview, setRepositoryDeletionPreview] =
     useState<RepositoryDeletionPreview>();
   const [parentDeletionPreview, setParentDeletionPreview] =
@@ -288,6 +289,7 @@ export function StructurePage({ section }: { section: SettingsSection }) {
     setImplementAgent(context.implement_defaults.agent);
     setImplementModel(context.implement_defaults.model);
     setImplementEffort(context.implement_defaults.effort);
+    setCheckDirtyCheckouts(context.check_dirty_checkouts);
   }, [contexts, selectedContextId]);
 
   async function refreshAfterEdit() {
@@ -908,6 +910,26 @@ export function StructurePage({ section }: { section: SettingsSection }) {
     finally { setIsSaving(false); }
   }
 
+  async function saveDirtyCheckoutCheck(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedContextId) return;
+    setIsSaving(true);
+    try {
+      await structureCommand.execute(
+        structureActions.setContextDirtyCheckoutCheck(
+          selectedContextId,
+          checkDirtyCheckouts,
+        ),
+      );
+      await refreshAfterEdit();
+      setError(undefined);
+    } catch (saveError) {
+      setError(errorMessage(saveError));
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   const selectedGrillCatalog = grillModelCatalog.find(
     (catalog) => catalog.agent === grillAgent,
   );
@@ -1062,6 +1084,35 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                     </EntityRow>
                   ))}
                 </EntityList>
+                <form
+                  className="mt-5 grid gap-4 border-t border-border/70 pt-4 sm:grid-cols-[minmax(12rem,1fr)_auto] sm:items-end"
+                  onSubmit={saveDirtyCheckoutCheck}
+                >
+                  <div className="grid gap-3">
+                    <ContextSelect
+                      contexts={contexts}
+                      value={selectedContextId}
+                      onChange={handleContextChange}
+                      disabled={isSaving}
+                    />
+                    <label className="flex items-start gap-2 text-sm">
+                      <Checkbox
+                        checked={checkDirtyCheckouts}
+                        onCheckedChange={(checked) =>
+                          setCheckDirtyCheckouts(checked === true)
+                        }
+                        disabled={isSaving || !selectedContextId}
+                      />
+                      <span>
+                        Check for dirty checkouts before Direct and Grill Runs and
+                        when advancing an Implementation Queue.
+                      </span>
+                    </label>
+                  </div>
+                  <Button type="submit" disabled={isSaving || !selectedContextId}>
+                    Save setting
+                  </Button>
+                </form>
               </CardContent>
             </Card>
           )}

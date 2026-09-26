@@ -208,6 +208,8 @@ export const structureAdapter = {
     command<Context>("set_context_grill_defaults", { contextId, defaults }),
   setContextImplementDefaults: (contextId: number, defaults: GrillConfiguration) =>
     command<Context>("set_context_implement_defaults", { contextId, defaults }),
+  setContextDirtyCheckoutCheck: (contextId: number, enabled: boolean) =>
+    command<Context>("set_context_dirty_checkout_check", { contextId, enabled }),
   createItem: (title: string, contextId: number, projectId: number) =>
     command<Item>("create_item", { title, contextId, projectId }),
 };

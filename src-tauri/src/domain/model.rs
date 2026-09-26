@@ -10,9 +10,15 @@ pub struct Context {
     pub name: String,
     #[serde(default)]
     pub execution_machine_id: Option<i64>,
+    #[serde(default = "dirty_checkout_check_default")]
+    pub check_dirty_checkouts: bool,
     pub grill_defaults: GrillConfiguration,
     #[serde(default)]
     pub implement_defaults: GrillConfiguration,
+}
+
+fn dirty_checkout_check_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
