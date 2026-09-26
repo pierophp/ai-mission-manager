@@ -584,8 +584,10 @@ pub fn compose_run_prompt(
                 .to_owned()
         }
         ExecutionProfile::Implement => {
-            "Implement this work using the Repositories configured for its Project or a registered Worktree, run the relevant checks, and leave the changes ready for review."
-                .to_owned()
+            format!(
+                "{}\n\nImplement this work using the Repositories configured for its Project or a registered Worktree, run the relevant checks, and leave the changes ready for review.",
+                implementation_skill_snapshot()
+            )
         }
         ExecutionProfile::Review => {
             "Review the current changes for this Item for correctness, regressions, and missing test coverage."

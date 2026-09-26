@@ -1,5 +1,16 @@
 use super::*;
 
+fn implementation_queue_entry_prompt(
+    entry: &crate::domain::ImplementationQueueEntry,
+    spec_url: &str,
+) -> String {
+    crate::domain::compose_implementation_queue_prompt(
+        entry.ticket_number,
+        &entry.ticket_url,
+        spec_url,
+    )
+}
+
 #[derive(Clone)]
 struct UntrackedAgentSnapshot {
     state: DomainState,
@@ -594,12 +605,7 @@ pub(crate) async fn advance_finished_implementation_queue(
         Some(queue.configuration.clone()),
         None,
         ExecutionProfile::Implement,
-        crate::domain::compose_implementation_prompt(
-            include_str!("../../../../.agents/skills/implement/SKILL.md"),
-            next.ticket_number,
-            &next.ticket_url,
-            &queue.spec_url,
-        ),
+        implementation_queue_entry_prompt(&next, &queue.spec_url),
         RunPromptSelection {
             include_objective: true,
             include_notes: false,
@@ -738,12 +744,7 @@ async fn launch_implementation_queue_entry_with_state(
         Some(queue.configuration.clone()),
         None,
         ExecutionProfile::Implement,
-        crate::domain::compose_implementation_prompt(
-            include_str!("../../../../.agents/skills/implement/SKILL.md"),
-            entry.ticket_number,
-            &entry.ticket_url,
-            &queue.spec_url,
-        ),
+        implementation_queue_entry_prompt(&entry, &queue.spec_url),
         RunPromptSelection {
             include_objective: true,
             include_notes: false,
@@ -3134,12 +3135,7 @@ fn run_launch_snapshot(
                 .entries
                 .first()
                 .ok_or_else(|| "Implementation Queue has no tickets".to_owned())?;
-            crate::domain::compose_implementation_prompt(
-                include_str!("../../../../.agents/skills/implement/SKILL.md"),
-                ticket.ticket_number,
-                &ticket.ticket_url,
-                &queue.spec_url,
-            )
+            implementation_queue_entry_prompt(ticket, &queue.spec_url)
         }
         RunLaunchInput::Direct { prompt, .. } | RunLaunchInput::Worktree { prompt, .. } => {
             prompt.clone()
@@ -4226,9 +4222,10 @@ fn agent_display_name(agent: AgentKind) -> &'static str {
 mod identity_tests {
     use super::{
         direct_repository_identity_set_matches, downstream_confirmation_transcript,
-        grill_transcript_identity_matches, DeferredTerminalEvent, TerminalCallbackGate,
+        grill_transcript_identity_matches, implementation_queue_entry_prompt,
+        DeferredTerminalEvent, TerminalCallbackGate,
     };
-    use crate::domain::{Repository, RepositoryLocation};
+    use crate::domain::{ImplementationQueueEntry, Repository, RepositoryLocation};
     use crate::{
         agent_state::AgentStateRecord,
         app::Runtime,
@@ -4238,6 +4235,44 @@ mod identity_tests {
         path::PathBuf,
         sync::{Arc, Mutex},
     };
+
+    #[test]
+    fn first_and_advanced_queue_runs_receive_the_local_implement_skill() {
+        let entries = [
+            ImplementationQueueEntry {
+                position: 0,
+                ticket_number: 42,
+                ticket_title: "First issue".into(),
+                ticket_url: "https://github.com/o/r/issues/42".into(),
+                ticket_state: "open".into(),
+                run_id: None,
+                done: false,
+                skipped: false,
+            },
+            ImplementationQueueEntry {
+                position: 1,
+                ticket_number: 43,
+                ticket_title: "Next issue".into(),
+                ticket_url: "https://github.com/o/r/issues/43".into(),
+                ticket_state: "open".into(),
+                run_id: None,
+                done: false,
+                skipped: false,
+            },
+        ];
+
+        for entry in entries {
+            let prompt =
+                implementation_queue_entry_prompt(&entry, "https://github.com/o/r/issues/87");
+
+            assert!(
+                prompt.contains("Implement the work described by the user in the spec or tickets.")
+            );
+            assert!(prompt.contains("Run typechecking regularly, single test files regularly"));
+            assert!(prompt.contains(&entry.ticket_url));
+            assert!(!prompt.contains("name: implement"));
+        }
+    }
 
     #[test]
     fn direct_checkout_snapshot_rejects_a_new_project_repository() {

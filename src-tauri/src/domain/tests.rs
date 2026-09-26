@@ -3,6 +3,26 @@ use super::*;
 mod implementation_queue_tests {
     use super::*;
 
+    #[test]
+    fn direct_implementation_prompt_contains_the_local_skill_without_metadata() {
+        let prompt = compose_run_prompt(
+            &state(),
+            1,
+            ExecutionProfile::Implement,
+            &RunPromptSelection {
+                include_objective: true,
+                include_notes: false,
+                external_object_ids: vec![],
+            },
+            None,
+        )
+        .expect("the direct Implement prompt should compose");
+
+        assert!(prompt.contains("Implement the work described by the user in the spec or tickets."));
+        assert!(prompt.contains("Run typechecking regularly, single test files regularly"));
+        assert!(!prompt.contains("name: implement"));
+    }
+
     fn state() -> DomainState {
         DomainState {
             next_context_id: 2,
@@ -1307,6 +1327,10 @@ mod grill_contract_tests {
         assert!(run.prompt.contains("Decide the next architecture"));
         assert!(run.prompt.contains("The decision must stay reversible."));
         assert!(run.prompt.contains(grill_skill_snapshot()));
+        assert!(run
+            .prompt
+            .contains("Interview the user relentlessly until you reach a shared understanding."));
+        assert!(!run.prompt.contains("name: grilling"));
     }
 
     #[test]
@@ -1907,6 +1931,19 @@ mod grill_contract_tests {
             let prompt = compose_grill_continuation_prompt(&awaiting.state, 1, action)
                 .expect("the downstream prompt should compose");
             assert!(prompt.contains(action.skill_snapshot()));
+            let expected_instruction = match action {
+                GrillContinuationAction::ToSpec => {
+                    "This skill takes the current conversation context and codebase understanding"
+                }
+                GrillContinuationAction::ToTickets => {
+                    "Break a plan, spec, or conversation into a set of **tickets**"
+                }
+                GrillContinuationAction::Implement => {
+                    "Implement the work described by the user in the spec or tickets."
+                }
+            };
+            assert!(prompt.contains(expected_instruction));
+            assert!(!prompt.contains(&format!("name: {}", action.as_str())));
             assert!(prompt.contains("Decide the next architecture"));
             assert!(prompt.contains("The decision must stay reversible."));
             assert!(

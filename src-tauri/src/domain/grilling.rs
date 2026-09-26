@@ -2,15 +2,20 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
-const GRILL_SKILL_SOURCE: &str = include_str!("../../../.agents/skills/grilling/SKILL.md");
-const TO_SPEC_SKILL_SOURCE: &str = include_str!("../../../.agents/skills/to-spec/SKILL.md");
-const TO_TICKETS_SKILL_SOURCE: &str = include_str!("../../../.agents/skills/to-tickets/SKILL.md");
-const IMPLEMENT_SKILL_SOURCE: &str = include_str!("../../../.agents/skills/implement/SKILL.md");
+const GRILL_SKILL_SOURCE: &str = include_str!("../../../agents/skills/grilling/SKILL.md");
+const TO_SPEC_SKILL_SOURCE: &str = include_str!("../../../agents/skills/to-spec/SKILL.md");
+const TO_TICKETS_SKILL_SOURCE: &str = include_str!("../../../agents/skills/to-tickets/SKILL.md");
+const IMPLEMENT_SKILL_SOURCE: &str = include_str!("../../../agents/skills/implement/SKILL.md");
 
 /// Return skill instructions without YAML metadata, which is for skill discovery
 /// and should not be sent to an agent as prompt content.
 pub fn grill_skill_snapshot() -> &'static str {
     strip_skill_frontmatter(GRILL_SKILL_SOURCE)
+}
+
+/// Return the app-owned Implement instructions without YAML metadata.
+pub fn implementation_skill_snapshot() -> &'static str {
+    strip_skill_frontmatter(IMPLEMENT_SKILL_SOURCE)
 }
 
 fn strip_skill_frontmatter(source: &'static str) -> &'static str {

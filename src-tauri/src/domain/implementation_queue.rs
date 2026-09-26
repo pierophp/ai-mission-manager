@@ -15,6 +15,20 @@ pub fn compose_implementation_prompt(
     )
 }
 
+/// Build the prompt shared by each Implementation Queue entry.
+pub fn compose_implementation_queue_prompt(
+    ticket_number: i64,
+    ticket_url: &str,
+    spec_url: &str,
+) -> String {
+    compose_implementation_prompt(
+        crate::domain::implementation_skill_snapshot(),
+        ticket_number,
+        ticket_url,
+        spec_url,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -31,6 +45,21 @@ mod tests {
         assert!(!prompt.contains("name: implement"));
         assert!(prompt.contains("gh issue view 42 --comments"));
         assert!(prompt.contains("Never close the parent spec or any other issue."));
+    }
+
+    #[test]
+    fn implementation_prompt_contains_the_local_implement_instructions_without_metadata() {
+        let prompt = compose_implementation_queue_prompt(
+            42,
+            "https://github.com/o/r/issues/42",
+            "https://github.com/o/r/issues/87",
+        );
+
+        assert!(
+            prompt.starts_with("Implement the work described by the user in the spec or tickets.")
+        );
+        assert!(!prompt.contains("name: implement"));
+        assert!(prompt.contains("Run typechecking regularly, single test files regularly"));
     }
 }
 use super::{
