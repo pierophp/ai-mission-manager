@@ -16,6 +16,11 @@ use std::{
 
 use tauri::Manager;
 
+#[cfg(debug_assertions)]
+fn should_open_devtools(value: Option<&str>) -> bool {
+    value == Some("true")
+}
+
 fn sqlite_sidecar(path: &Path, suffix: &str) -> PathBuf {
     let mut sidecar = path.as_os_str().to_os_string();
     sidecar.push(suffix);
@@ -59,13 +64,38 @@ fn database_path(home_dir: &Path, legacy_data_dir: &Path) -> std::io::Result<Pat
     Ok(database_path)
 }
 
+#[cfg(test)]
+mod devtools_tests {
+    #[cfg(debug_assertions)]
+    #[test]
+    fn devtools_opt_in_requires_exact_true() {
+        for value in [
+            None,
+            Some(""),
+            Some("false"),
+            Some("TRUE"),
+            Some("true "),
+            Some("1"),
+        ] {
+            assert!(!super::should_open_devtools(value));
+        }
+        assert!(super::should_open_devtools(Some("true")));
+    }
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             #[cfg(debug_assertions)]
-            if let Some(window) = app.get_webview_window("main") {
-                window.open_devtools();
+            if should_open_devtools(
+                std::env::var("AI_MISSION_MANAGER_OPEN_DEVTOOLS")
+                    .ok()
+                    .as_deref(),
+            ) {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.open_devtools();
+                }
             }
 
             let database_path =

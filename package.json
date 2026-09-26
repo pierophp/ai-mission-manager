@@ -11,6 +11,7 @@
     "dev": "vp dev --host 127.0.0.1",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
+    "tauri:dev:devtools": "AI_MISSION_MANAGER_OPEN_DEVTOOLS=true tauri dev",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && npm run build"
   },
