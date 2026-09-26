@@ -276,9 +276,9 @@ export function ExternalLinkCard({
               value="to-spec"
               disabled={object.provider !== "github" || object.kind !== "issue"}
             >
-              To spec
+              Spec
             </NativeSelectOption>
-            <NativeSelectOption value="to-tickets">To tickets</NativeSelectOption>
+            <NativeSelectOption value="to-tickets">Tickets</NativeSelectOption>
             <NativeSelectOption value="others">Others</NativeSelectOption>
           </NativeSelect>
         </label>
