@@ -148,10 +148,22 @@ fn provision_hooks(home: &Path) -> Result<(), String> {
 }
 
 pub fn provision_agent_hooks_for(home: &Path, agent: AgentKind) -> Result<(), String> {
-    let script = install_agent_state_hook(home)?;
+    let provider_directory = home.join(match agent {
+        AgentKind::Claude => ".claude",
+        AgentKind::Codex => ".codex",
+    });
+    provision_agent_hooks_in_directory(home, &provider_directory, agent)
+}
+
+pub fn provision_agent_hooks_in_directory(
+    machine_home: &Path,
+    provider_directory: &Path,
+    agent: AgentKind,
+) -> Result<(), String> {
+    let script = install_agent_state_hook(machine_home)?;
     let path = match agent {
-        AgentKind::Claude => home.join(".claude/settings.json"),
-        AgentKind::Codex => home.join(".codex/hooks.json"),
+        AgentKind::Claude => provider_directory.join("settings.json"),
+        AgentKind::Codex => provider_directory.join("hooks.json"),
     };
     provision_provider_hooks(&path, &script, agent, agent_hook_events(agent))
 }
@@ -644,6 +656,34 @@ mod tests {
                 RunState::Blocked
             )
         );
+    }
+
+    #[test]
+    fn selected_profile_hooks_live_in_the_profile_while_script_stays_machine_scoped() {
+        let home = tempdir().expect("machine home should exist");
+        let claude_profile = tempdir().expect("Claude profile directory should exist");
+        let codex_profile = tempdir().expect("Codex profile directory should exist");
+        fs::create_dir_all(claude_profile.path()).expect("provider settings dir should exist");
+        fs::write(
+            claude_profile.path().join("settings.json"),
+            r#"{"model":"keep-me"}"#,
+        )
+        .expect("unrelated provider settings should exist");
+
+        provision_agent_hooks_in_directory(home.path(), claude_profile.path(), AgentKind::Claude)
+            .expect("selected Claude profile hooks should be provisioned");
+        provision_agent_hooks_in_directory(home.path(), codex_profile.path(), AgentKind::Codex)
+            .expect("selected Codex profile hooks should be provisioned");
+
+        assert!(home.path().join(AGENT_STATE_HOOK_RELATIVE_PATH).is_file());
+        assert!(claude_profile.path().join("settings.json").is_file());
+        assert!(codex_profile.path().join("hooks.json").is_file());
+        let settings = fs::read_to_string(claude_profile.path().join("settings.json"))
+            .expect("merged profile settings should remain readable");
+        assert!(settings.contains("keep-me"));
+        assert!(!home.path().join(".claude/settings.json").exists());
+        assert!(!claude_profile.path().join("hooks.json").exists());
+        assert!(!codex_profile.path().join("settings.json").exists());
     }
 
     #[test]

@@ -6,6 +6,27 @@ use super::projections::{
 };
 use super::*;
 
+fn selected_cli_configuration_profile(
+    state: &DomainState,
+    context_id: i64,
+    provider: AgentKind,
+) -> Option<CliConfigurationProfileIdentity> {
+    let context = state
+        .contexts
+        .iter()
+        .find(|context| context.id == context_id)?;
+    let profile_id = context.cli_configuration_profile_id(provider)?;
+    let profile = state
+        .cli_configuration_profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)?;
+    Some(CliConfigurationProfileIdentity {
+        profile_id: profile.id,
+        provider: profile.provider,
+        name: profile.name.clone(),
+    })
+}
+
 pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainError> {
     match event {
         Event::CreateContext { name } => {
@@ -1845,6 +1866,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 worktree_id: None,
                 machine_id,
                 agent,
+                cli_configuration_profile: selected_cli_configuration_profile(
+                    &state, context_id, agent,
+                ),
                 execution_profile,
                 model: configuration
                     .as_ref()
@@ -1995,6 +2019,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 worktree_id: Some(worktree_id),
                 machine_id,
                 agent,
+                cli_configuration_profile: selected_cli_configuration_profile(
+                    &state, context_id, agent,
+                ),
                 execution_profile,
                 model: None,
                 effort: None,
@@ -2160,6 +2187,11 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 worktree_id: None,
                 machine_id,
                 agent: configuration.agent,
+                cli_configuration_profile: selected_cli_configuration_profile(
+                    &state,
+                    context_id,
+                    configuration.agent,
+                ),
                 execution_profile: ExecutionProfile::Grill,
                 model: Some(configuration.model),
                 effort: Some(configuration.effort),
@@ -2293,6 +2325,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 worktree_id,
                 machine_id,
                 agent,
+                cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::CustomPrompt,
                 model: None,
                 effort: None,

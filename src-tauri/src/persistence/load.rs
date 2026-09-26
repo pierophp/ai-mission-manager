@@ -317,7 +317,8 @@ impl SqliteStore {
                         last_applied_agent_state_sequence, pane_status,
                         direct_checkouts_json, transcript,
                         grill_question_group_json, grill_answers_json, grill_decisions_json,
-                        grill_response, grill_phase, grill_action, grill_action_started_at
+                        grill_response, grill_phase, grill_action, grill_action_started_at,
+                        cli_configuration_profile_json
                  FROM runs
                  ORDER BY id",
             )?;
@@ -330,6 +331,7 @@ impl SqliteStore {
                 let grill_decisions_json: String = row.get(23)?;
                 let grill_phase: Option<String> = row.get(25)?;
                 let grill_action: Option<String> = row.get(26)?;
+                let cli_configuration_profile_json: Option<String> = row.get(28)?;
                 let grill_question_group = grill_question_group_json
                     .map(|json| {
                         serde_json::from_str::<GrillQuestionGroup>(&json).map_err(|error| {
@@ -393,6 +395,16 @@ impl SqliteStore {
                             Box::new(error),
                         )
                     })?,
+                    cli_configuration_profile: cli_configuration_profile_json
+                        .map(|json| serde_json::from_str(&json))
+                        .transpose()
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                28,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
                     execution_profile: parse_execution_profile(&execution_profile).map_err(
                         |error| {
                             rusqlite::Error::FromSqlConversionFailure(

@@ -468,8 +468,9 @@ impl SqliteStore {
                             started_at, state, pane_status, direct_checkouts_json,
                             transcript, grill_question_group_json, grill_answers_json,
                             grill_decisions_json, grill_response, grill_phase, grill_action,
-                            last_applied_agent_state_sequence, grill_action_started_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
+                            last_applied_agent_state_sequence, grill_action_started_at,
+                            cli_configuration_profile_json)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
                         params![
                             run.id,
                             run.item_id,
@@ -511,6 +512,13 @@ impl SqliteStore {
                             run.grill_action.map(grill_continuation_action_as_str),
                             run.last_applied_agent_state_sequence,
                             run.grill_action_started_at,
+                            run.cli_configuration_profile
+                                .as_ref()
+                                .map(serde_json::to_string)
+                                .transpose()
+                                .map_err(|error| {
+                                    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                                })?,
                         ],
                     )?;
                     transaction.execute(

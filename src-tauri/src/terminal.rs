@@ -22,7 +22,7 @@ use crate::{
         self, AgentStateRecord, AGENT_STATE_HOOK_RELATIVE_PATH, AGENT_STATE_OPTION,
         AGENT_STATE_RUNS_RELATIVE_PATH,
     },
-    domain::{AgentKind, Machine, MachineTransport},
+    domain::{AgentKind, CliConfigurationProfile, Machine, MachineTransport},
 };
 
 pub trait TerminalRuntime: Send + Sync {
@@ -32,6 +32,7 @@ pub trait TerminalRuntime: Send + Sync {
         agent: AgentKind,
         run_id: i64,
         preferred_executable: Option<&Path>,
+        profile: Option<&CliConfigurationProfile>,
     ) -> MachineRunPreflight;
 
     fn check_machine(&self, machine: &Machine) -> MachineReadiness;
@@ -87,6 +88,7 @@ pub struct AgentLaunchContext<'a> {
     pub agent: AgentKind,
     pub model: Option<&'a str>,
     pub effort: Option<&'a str>,
+    pub profile_directory: Option<&'a Path>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -186,6 +188,7 @@ pub struct MachineRunPreflight {
     pub readiness: MachineReadiness,
     pub executable: Option<PathBuf>,
     pub state_file: Option<PathBuf>,
+    pub profile_directory: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -783,12 +786,18 @@ impl TerminalRuntime for TmuxRuntime {
         agent: AgentKind,
         run_id: i64,
         preferred_executable: Option<&Path>,
+        profile: Option<&CliConfigurationProfile>,
     ) -> MachineRunPreflight {
-        prepare_machine_for_run(machine, Some((agent, run_id)), preferred_executable)
+        prepare_machine_for_run(
+            machine,
+            Some((agent, run_id)),
+            preferred_executable,
+            profile,
+        )
     }
 
     fn check_machine(&self, machine: &Machine) -> MachineReadiness {
-        prepare_machine_for_run(machine, None, None).readiness
+        prepare_machine_for_run(machine, None, None, None).readiness
     }
 
     fn observe_machine(&self, machine: &Machine, state_run_ids: &[i64]) -> ObservedMachine {
@@ -879,6 +888,7 @@ pub(crate) enum FakeTerminalCommand {
         machine_id: i64,
         agent: AgentKind,
         run_id: i64,
+        profile: Option<CliConfigurationProfile>,
     },
     CheckMachine {
         machine_id: i64,
@@ -906,6 +916,7 @@ pub(crate) enum FakeTerminalCommand {
         session_name: String,
         gate_channel: String,
         run_id: i64,
+        profile_directory: Option<PathBuf>,
     },
     ReleaseAgentLaunch {
         machine_id: i64,
@@ -1243,14 +1254,17 @@ impl TerminalRuntime for FakeTerminalRuntime {
         agent: AgentKind,
         run_id: i64,
         _preferred_executable: Option<&Path>,
+        profile: Option<&CliConfigurationProfile>,
     ) -> MachineRunPreflight {
         self.record(FakeTerminalCommand::PreflightAgentRun {
             machine_id: machine.id,
             agent,
             run_id,
+            profile: profile.cloned(),
         });
         let mut preflight =
             fake_machine_preflight(machine, self.outcome(machine), Some((agent, run_id)));
+        preflight.profile_directory = profile.map(|profile| PathBuf::from(&profile.directory));
         self.simulate_hook_provisioning(machine, &mut preflight.readiness, Some((agent, run_id)));
         preflight
     }
@@ -1461,6 +1475,7 @@ impl TerminalRuntime for FakeTerminalRuntime {
             session_name: session_name.into(),
             gate_channel: gate_channel.into(),
             run_id: launch.run_id,
+            profile_directory: launch.profile_directory.map(Path::to_path_buf),
         });
         let dirty_after_launch = *self
             .dirty_checkout_on_launch
@@ -1637,6 +1652,7 @@ fn fake_machine_preflight(
         readiness,
         executable,
         state_file,
+        profile_directory: None,
     }
 }
 
@@ -1713,6 +1729,7 @@ pub(crate) fn kill_pane_with_timeout(
             }
         }
     }
+
     let output = child.wait_with_output().map_err(|error| {
         format!(
             "Could not read the Run pane stop result from Machine {}: {error}",
@@ -2084,6 +2101,7 @@ fn prepare_machine_for_run(
     machine: &Machine,
     run: Option<(AgentKind, i64)>,
     preferred_executable: Option<&Path>,
+    profile: Option<&CliConfigurationProfile>,
 ) -> MachineRunPreflight {
     let mut readiness = MachineReadiness::default();
     let home = match &machine.transport {
@@ -2124,6 +2142,17 @@ fn prepare_machine_for_run(
     };
     readiness.reachable = Some(true);
 
+    if let (Some(profile), MachineTransport::Ssh { .. }) = (profile, &machine.transport) {
+        readiness.error = Some(format!(
+            "Selected CLI configuration profile {} is not supported for SSH Runs yet",
+            profile.directory
+        ));
+        return MachineRunPreflight {
+            readiness,
+            ..MachineRunPreflight::default()
+        };
+    }
+
     if let Err(error) = probe_machine(machine) {
         readiness.tmux_available = Some(false);
         readiness.error = Some(format!(
@@ -2158,6 +2187,52 @@ fn prepare_machine_for_run(
         }
     }
 
+    let profile_directory = match profile {
+        Some(profile) => {
+            if run.is_some_and(|(agent, _)| agent != profile.provider) {
+                readiness.error =
+                    Some("Selected CLI configuration profile belongs to another provider".into());
+                return MachineRunPreflight {
+                    readiness,
+                    ..MachineRunPreflight::default()
+                };
+            }
+            match resolve_cli_profile_directory(&home, profile) {
+                Ok(directory) if directory.is_dir() => {
+                    if let (Some((agent, _)), Some(executable)) = (run, executable.as_deref()) {
+                        if let Err(error) = validate_profile_sign_in(agent, executable, &directory)
+                        {
+                            readiness.error = Some(error);
+                            return MachineRunPreflight {
+                                readiness,
+                                ..MachineRunPreflight::default()
+                            };
+                        }
+                    }
+                    Some(directory)
+                }
+                Ok(directory) => {
+                    readiness.error = Some(format!(
+                        "Selected CLI configuration profile directory is unavailable: {}",
+                        directory.display()
+                    ));
+                    return MachineRunPreflight {
+                        readiness,
+                        ..MachineRunPreflight::default()
+                    };
+                }
+                Err(error) => {
+                    readiness.error = Some(error);
+                    return MachineRunPreflight {
+                        readiness,
+                        ..MachineRunPreflight::default()
+                    };
+                }
+            }
+        }
+        None => None,
+    };
+
     let state_directory = match &machine.transport {
         MachineTransport::Local => agent_state::ensure_state_runs_directory(&home),
         MachineTransport::Ssh { .. } => {
@@ -2184,9 +2259,33 @@ fn prepare_machine_for_run(
         }
     }
 
-    let (claude_hooks, codex_hooks) = match &machine.transport {
-        MachineTransport::Local => provision_local_agent_hooks(&home),
-        MachineTransport::Ssh { .. } => provision_remote_agent_hooks(machine, &home),
+    let (claude_hooks, codex_hooks) = match (
+        run.map(|(agent, _)| agent),
+        profile,
+        profile_directory.as_deref(),
+        &machine.transport,
+    ) {
+        (Some(_), Some(profile), Some(directory), MachineTransport::Local) => {
+            provision_local_profile_agent_hooks(&home, directory, profile.provider)
+        }
+        (Some(_), Some(profile), None, MachineTransport::Local) => {
+            let error = format!(
+                "Selected CLI configuration profile directory is unavailable: {}",
+                profile.directory
+            );
+            let failure = hook_provisioning_failure(error);
+            match profile.provider {
+                AgentKind::Claude => (failure, AgentHookReadiness::default()),
+                AgentKind::Codex => (AgentHookReadiness::default(), failure),
+            }
+        }
+        (Some(agent), None, _, MachineTransport::Local) => {
+            provision_local_agent_hooks(&home, Some(agent))
+        }
+        (Some(_), _, _, MachineTransport::Ssh { .. }) => {
+            provision_remote_agent_hooks(machine, &home)
+        }
+        (None, _, _, _) => (AgentHookReadiness::default(), AgentHookReadiness::default()),
     };
     readiness.claude_hooks = claude_hooks;
     readiness.codex_hooks = codex_hooks;
@@ -2214,7 +2313,108 @@ fn prepare_machine_for_run(
         readiness,
         executable,
         state_file,
+        profile_directory,
     }
+}
+
+fn resolve_cli_profile_directory(
+    home: &Path,
+    profile: &CliConfigurationProfile,
+) -> Result<PathBuf, String> {
+    let path = if let Some(relative) = profile.directory.strip_prefix("~/") {
+        home.join(relative)
+    } else {
+        PathBuf::from(&profile.directory)
+    };
+    if !path.is_absolute() {
+        return Err(format!(
+            "Selected CLI configuration profile path must be absolute: {}",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
+fn validate_profile_sign_in(
+    agent: AgentKind,
+    executable: &Path,
+    directory: &Path,
+) -> Result<(), String> {
+    let provider = cli_profile_provider_configuration(agent);
+    let mut command = Command::new(executable);
+    command.args(provider.auth_status_arguments);
+    command.env(provider.home_environment, directory);
+    for name in provider.inherited_credentials {
+        command.env_remove(name);
+    }
+    let output = command.output().map_err(|error| {
+        format!(
+            "Could not validate selected CLI profile at {}: {error}",
+            directory.display()
+        )
+    })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Selected CLI profile is not signed in or usable at {}: {}",
+            directory.display(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+    }
+}
+
+struct CliProfileProviderConfiguration {
+    home_environment: &'static str,
+    auth_status_arguments: &'static [&'static str],
+    inherited_credentials: &'static [&'static str],
+}
+
+fn cli_profile_provider_configuration(agent: AgentKind) -> CliProfileProviderConfiguration {
+    match agent {
+        AgentKind::Claude => CliProfileProviderConfiguration {
+            home_environment: "CLAUDE_CONFIG_DIR",
+            auth_status_arguments: &["auth", "status"],
+            inherited_credentials: &[
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_AUTH_TOKEN",
+                "CLAUDE_CODE_OAUTH_TOKEN",
+                "CLAUDE_CODE_USE_BEDROCK",
+                "CLAUDE_CODE_USE_VERTEX",
+            ],
+        },
+        AgentKind::Codex => CliProfileProviderConfiguration {
+            home_environment: "CODEX_HOME",
+            auth_status_arguments: &["login", "status"],
+            inherited_credentials: &[
+                "OPENAI_API_KEY",
+                "CODEX_API_KEY",
+                "CODEX_ACCESS_TOKEN",
+                "OPENAI_FEDERATION_RULE_ID",
+                "OPENAI_IDENTITY_TOKEN_FILE",
+                "OPENAI_WORKLOAD_IDENTITY_CONTEXT",
+            ],
+        },
+    }
+}
+
+fn provision_local_profile_agent_hooks(
+    home: &Path,
+    directory: &Path,
+    agent: AgentKind,
+) -> (AgentHookReadiness, AgentHookReadiness) {
+    let result = agent_state::provision_agent_hooks_in_directory(home, directory, agent);
+    let mut claude = AgentHookReadiness::default();
+    let mut codex = AgentHookReadiness::default();
+    let readiness = match result {
+        Ok(()) => hook_provisioning_success(),
+        Err(error) => hook_provisioning_failure(error),
+    };
+    match agent {
+        AgentKind::Claude => claude = readiness,
+        AgentKind::Codex => codex = readiness,
+    }
+    (claude, codex)
 }
 
 fn resolve_run_executable(
@@ -2246,16 +2446,27 @@ fn resolve_run_executable(
     })
 }
 
-fn provision_local_agent_hooks(home: &Path) -> (AgentHookReadiness, AgentHookReadiness) {
+fn provision_local_agent_hooks(
+    home: &Path,
+    selected_agent: Option<AgentKind>,
+) -> (AgentHookReadiness, AgentHookReadiness) {
     let script = agent_state::install_agent_state_hook(home);
-    let mut claude = match &script {
-        Ok(_) => provision_local_provider_hooks(home, AgentKind::Claude),
-        Err(error) => hook_provisioning_failure(error.clone()),
-    };
-    let mut codex = match &script {
-        Ok(_) => provision_local_provider_hooks(home, AgentKind::Codex),
-        Err(error) => hook_provisioning_failure(error.clone()),
-    };
+    let agents = selected_agent.map_or_else(
+        || vec![AgentKind::Claude, AgentKind::Codex],
+        |agent| vec![agent],
+    );
+    let mut claude = AgentHookReadiness::default();
+    let mut codex = AgentHookReadiness::default();
+    for agent in agents {
+        let readiness = match &script {
+            Ok(_) => provision_local_provider_hooks(home, agent),
+            Err(error) => hook_provisioning_failure(error.clone()),
+        };
+        match agent {
+            AgentKind::Claude => claude = readiness,
+            AgentKind::Codex => codex = readiness,
+        }
+    }
     if script.is_err() {
         claude.current = Some(false);
         codex.current = Some(false);
@@ -2993,6 +3204,18 @@ fn build_gated_agent_command(
         command.push_str(" && ");
         command.push_str(&assignment);
     }
+    if let Some(directory) = launch.profile_directory {
+        let provider = cli_profile_provider_configuration(launch.agent);
+        command.push_str(" && unset");
+        for variable in provider.inherited_credentials {
+            command.push(' ');
+            command.push_str(variable);
+        }
+        command.push_str(" && export ");
+        command.push_str(provider.home_environment);
+        command.push('=');
+        command.push_str(&shell_quote(&directory.to_string_lossy()));
+    }
     command.push_str(" && exec ");
     command.push_str(&shell_quote(&executable.to_string_lossy()));
     for argument in agent_cli_arguments(launch.agent, launch.model, launch.effort)? {
@@ -3178,6 +3401,7 @@ mod tests {
             agent: AgentKind::Codex,
             model: Some("gpt-6-luna"),
             effort: Some("xhigh"),
+            profile_directory: None,
         };
         let command = build_gated_agent_command(
             "mission-socket",
@@ -3194,6 +3418,7 @@ mod tests {
         assert!(command.starts_with(title));
         assert!(command.find(title).unwrap() < command.find(gate).unwrap());
         assert!(command.find(gate).unwrap() < command.find(first_export).unwrap());
+        assert!(!command.contains("CODEX_HOME"));
         assert!(command.ends_with(agent));
 
         let release = build_tmux_wait_for_command(
@@ -3207,6 +3432,87 @@ mod tests {
             release,
             "'tmux' '-f' '/dev/null' '-L' 'mission-socket' 'wait-for' '-S' 'mission-launch-23-session-4'"
         );
+    }
+
+    #[test]
+    fn selected_provider_profile_is_exported_after_the_launch_gate() {
+        let state_file = Path::new("/tmp/run-state.json");
+        for (agent, directory, environment) in [
+            (
+                AgentKind::Claude,
+                "/tmp/claude profile",
+                "CLAUDE_CONFIG_DIR",
+            ),
+            (AgentKind::Codex, "/tmp/codex profile", "CODEX_HOME"),
+        ] {
+            let launch = AgentLaunchContext {
+                run_id: 23,
+                state_file,
+                agent,
+                model: None,
+                effort: None,
+                profile_directory: Some(Path::new(directory)),
+            };
+            let command = build_gated_agent_command(
+                "mission-socket",
+                "mission-launch-23-session",
+                Path::new("/usr/local/bin/agent"),
+                "do work",
+                &launch,
+            )
+            .expect("the gated command should include the selected profile");
+
+            assert!(command.contains(&format!("export {environment}='{}'", directory)));
+            assert!(
+                command.find("wait-for").unwrap()
+                    < command.find(&format!("export {environment}")).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn profile_preflight_requires_the_selected_cli_to_report_a_usable_login() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        let directory = tempdir().expect("temporary directory should exist");
+        let executable = directory.path().join("provider-cli");
+        fs::write(
+            &executable,
+            "#!/bin/sh\ncase \"$1 $2\" in 'auth status'|'login status') exit 0;; esac\nexit 2\n",
+        )
+        .expect("fake provider CLI should be written");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("fake provider CLI should be executable");
+        let profile_directory = directory.path().join("profile");
+        fs::create_dir(&profile_directory).expect("profile directory should exist");
+
+        for provider in [AgentKind::Claude, AgentKind::Codex] {
+            validate_profile_sign_in(provider, &executable, &profile_directory)
+                .expect("a successful provider CLI status should accept the profile");
+        }
+
+        fs::write(&executable, "#!/bin/sh\necho 'not signed in' >&2\nexit 1\n")
+            .expect("fake provider CLI should report an unusable login");
+        let error = validate_profile_sign_in(AgentKind::Codex, &executable, &profile_directory)
+            .expect_err("an unusable profile must block launch");
+        assert!(error.contains("not signed in or usable"));
+        assert!(error.contains(&profile_directory.to_string_lossy().to_string()));
+    }
+
+    #[test]
+    fn default_run_provisions_only_the_selected_provider_in_the_standard_directory() {
+        use std::fs;
+
+        let home = tempdir().expect("machine home should exist");
+        let (claude, codex) = provision_local_agent_hooks(home.path(), Some(AgentKind::Claude));
+
+        assert_eq!(claude.current, Some(true));
+        assert_eq!(codex.current, None);
+        assert!(home.path().join(".claude/settings.json").is_file());
+        assert!(!home.path().join(".codex/hooks.json").exists());
+        let installed_script = fs::read_to_string(home.path().join(AGENT_STATE_HOOK_RELATIVE_PATH))
+            .expect("state hook script should use the stable Machine path");
+        assert!(installed_script.contains("AI_MISSION_MANAGER"));
     }
 
     #[test]
@@ -3362,6 +3668,7 @@ mod tests {
                     agent: AgentKind::Claude,
                     model: None,
                     effort: None,
+                    profile_directory: None,
                 },
             )
             .expect("tmux should launch the test process");
@@ -3764,7 +4071,7 @@ mod tests {
             r#"{"model":"gpt-5","hooks":{"PermissionRequest":[{"hooks":[{"type":"command","command":"user-codex-hook"}]}]}}"#,
         );
 
-        let first = fake.preflight_agent_run(&machine, AgentKind::Claude, 23, None);
+        let first = fake.preflight_agent_run(&machine, AgentKind::Claude, 23, None, None);
         assert_eq!(first.readiness.claude_hooks.current, Some(true));
         assert_eq!(first.readiness.codex_hooks.current, Some(true));
         assert_eq!(
@@ -3780,7 +4087,7 @@ mod tests {
             .agent_hook_config(machine.id, AgentKind::Codex)
             .unwrap();
 
-        let second = fake.preflight_agent_run(&machine, AgentKind::Claude, 23, None);
+        let second = fake.preflight_agent_run(&machine, AgentKind::Claude, 23, None, None);
         assert_eq!(second.readiness.claude_hooks.current, Some(true));
         assert_eq!(second.readiness.codex_hooks.current, Some(true));
         assert_eq!(

@@ -42,6 +42,49 @@ mod implementation_queue_tests {
     }
 
     #[test]
+    fn direct_run_records_the_context_selected_cli_profile_identity() {
+        let mut initial = state();
+        initial.contexts[0].claude_profile_id = Some(7);
+        initial
+            .cli_configuration_profiles
+            .push(CliConfigurationProfile {
+                id: 7,
+                machine_id: 1,
+                provider: AgentKind::Claude,
+                name: "Personal Claude".into(),
+                directory: "/profiles/claude-personal".into(),
+                app_managed: false,
+            });
+
+        let started = decide(initial, event("open"))
+            .expect("a Run can start with the Context's selected profile");
+
+        let expected_identity = CliConfigurationProfileIdentity {
+            profile_id: 7,
+            provider: AgentKind::Claude,
+            name: "Personal Claude".into(),
+        };
+        assert_eq!(
+            started.state.runs[0].cli_configuration_profile,
+            Some(expected_identity.clone())
+        );
+
+        let reassigned = decide(
+            started.state,
+            Event::SetContextCliConfigurationProfile {
+                context_id: 1,
+                provider: AgentKind::Claude,
+                profile_id: None,
+            },
+        )
+        .expect("the Context can later clear its profile selection");
+        assert_eq!(
+            reassigned.state.runs[0].cli_configuration_profile,
+            Some(expected_identity)
+        );
+    }
+
+    #[test]
     fn new_contexts_check_dirty_checkouts_by_default() {
         let decision = decide(
             state(),
@@ -1033,6 +1076,7 @@ mod machine_deletion_tests {
                 worktree_id: Some(1),
                 machine_id: 1,
                 agent: AgentKind::Claude,
+                cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::Implement,
                 model: None,
                 effort: None,

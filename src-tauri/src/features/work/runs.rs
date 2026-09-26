@@ -2689,6 +2689,7 @@ struct RunLaunchSnapshot {
     context: Context,
     workspace: Workspace,
     machine: Machine,
+    cli_configuration_profile: Option<crate::domain::CliConfigurationProfile>,
     terminal_runtime: Arc<dyn TerminalRuntime>,
     preferred_executable: Option<PathBuf>,
     input: RunLaunchInput,
@@ -3159,6 +3160,28 @@ fn run_launch_snapshot(
         .find(|context| context.id == project.context_id)
         .cloned()
         .ok_or_else(|| format!("Context {} does not exist", project.context_id))?;
+    let profile_id = context.cli_configuration_profile_id(input.agent());
+    let cli_configuration_profile = profile_id
+        .map(|profile_id| {
+            runtime
+                .state
+                .cli_configuration_profiles
+                .iter()
+                .find(|profile| {
+                    profile.id == profile_id
+                        && profile.machine_id == machine.id
+                        && profile.provider == input.agent()
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "Selected {} configuration profile {profile_id} is unavailable on Machine {}",
+                        agent_display_name(input.agent()),
+                        machine.name
+                    )
+                })
+        })
+        .transpose()?;
     let workspace = direct_checkout
         .as_ref()
         .map(|snapshot| snapshot.workspace.clone())
@@ -3206,6 +3229,7 @@ fn run_launch_snapshot(
         context,
         workspace,
         machine: machine.clone(),
+        cli_configuration_profile,
         terminal_runtime: Arc::clone(&runtime.terminal_runtime),
         preferred_executable,
         input,
@@ -3272,11 +3296,13 @@ async fn start_run_with_state(
         let terminal_runtime = Arc::clone(&preflight_snapshot.terminal_runtime);
         let machine = preflight_snapshot.machine.clone();
         let preferred_executable = preflight_snapshot.preferred_executable.clone();
+        let profile = preflight_snapshot.cli_configuration_profile.clone();
         terminal_runtime.preflight_agent_run(
             &machine,
             preflight_snapshot.input.agent(),
             preflight_snapshot.run_id,
             preferred_executable.as_deref(),
+            profile.as_ref(),
         )
     })
     .await
@@ -3349,6 +3375,7 @@ async fn start_run_with_state(
         )?;
     }
     let (executable, state_file) = preflight_values?;
+    let profile_directory = preflight_result.profile_directory.clone();
     {
         let runtime = state
             .lock()
@@ -3387,6 +3414,7 @@ async fn start_run_with_state(
             agent,
             model: model.as_deref(),
             effort: effort.as_deref(),
+            profile_directory: profile_directory.as_deref(),
         };
         terminal_runtime.launch_agent(
             &machine,

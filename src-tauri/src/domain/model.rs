@@ -21,6 +21,15 @@ pub struct Context {
     pub implement_defaults: GrillConfiguration,
 }
 
+impl Context {
+    pub fn cli_configuration_profile_id(&self, provider: AgentKind) -> Option<i64> {
+        match provider {
+            AgentKind::Claude => self.claude_profile_id,
+            AgentKind::Codex => self.codex_profile_id,
+        }
+    }
+}
+
 fn dirty_checkout_check_default() -> bool {
     true
 }
@@ -250,6 +259,14 @@ pub struct CliConfigurationProfile {
     pub app_managed: bool,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliConfigurationProfileIdentity {
+    pub profile_id: i64,
+    pub provider: AgentKind,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentKind {
     #[serde(rename = "claude")]
@@ -331,6 +348,8 @@ pub struct Run {
     pub worktree_id: Option<i64>,
     pub machine_id: i64,
     pub agent: AgentKind,
+    #[serde(default)]
+    pub cli_configuration_profile: Option<CliConfigurationProfileIdentity>,
     pub execution_profile: ExecutionProfile,
     #[serde(default)]
     pub model: Option<String>,

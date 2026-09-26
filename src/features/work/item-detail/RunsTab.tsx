@@ -935,6 +935,7 @@ export function RunsTab({
               <div>
                 <strong className="block text-sm">
                   Run #{run.id} · {run.agent === "claude" ? "Claude Code" : "Codex"}
+                  {run.cli_configuration_profile && ` · ${run.cli_configuration_profile.name}`}
                 </strong>
                 <span className="text-xs text-muted-foreground">
                   {run.execution_profile} ·{" "}

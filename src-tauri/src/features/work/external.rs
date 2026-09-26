@@ -239,6 +239,7 @@ exit 1
             item_id: 1,
             machine_id: 1,
             agent: crate::domain::AgentKind::Claude,
+            cli_configuration_profile: None,
             execution_profile: crate::domain::ExecutionProfile::Implement,
             model: None,
             effort: None,

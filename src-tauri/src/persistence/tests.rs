@@ -6,11 +6,11 @@ use tempfile::tempdir;
 
 use crate::domain::{
     compose_grill_prompt, decide, format_grill_response, grill_skill_snapshot,
-    parse_grill_question_group, AgentKind, AuditAction, ConfirmedDownstreamIssue,
-    DownstreamIssueDiscovery, Effect, Event, GrillAnswer, GrillConfiguration,
-    GrillContinuationAction, GrillPhase, ImplementationQueue, ImplementationQueueEntry,
-    ImplementationQueuePauseReason, LinkProvenance, MachineTransport, RunCheckout,
-    WorkspaceRepositoryInput,
+    parse_grill_question_group, AgentKind, AuditAction, CliConfigurationProfile,
+    CliConfigurationProfileIdentity, ConfirmedDownstreamIssue, DownstreamIssueDiscovery, Effect,
+    Event, GrillAnswer, GrillConfiguration, GrillContinuationAction, GrillPhase,
+    ImplementationQueue, ImplementationQueueEntry, ImplementationQueuePauseReason, LinkProvenance,
+    MachineTransport, RunCheckout, WorkspaceRepositoryInput,
 };
 
 use super::{
@@ -771,6 +771,17 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
         },
     );
 
+    state
+        .cli_configuration_profiles
+        .push(CliConfigurationProfile {
+            id: 1,
+            machine_id: 1,
+            provider: AgentKind::Codex,
+            name: "Build identity".into(),
+            directory: "/profiles/codex-build".into(),
+            app_managed: false,
+        });
+    state.contexts[0].codex_profile_id = Some(1);
     let configuration = GrillConfiguration {
         agent: AgentKind::Codex,
         model: "gpt-6-luna".into(),
@@ -846,6 +857,14 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
         .expect("the database should add the nullable sequence column");
     state = store.load_state().expect("legacy Run should load");
     assert_eq!(state.runs[0].last_applied_agent_state_sequence, None);
+    assert_eq!(
+        state.runs[0].cli_configuration_profile,
+        Some(CliConfigurationProfileIdentity {
+            profile_id: 1,
+            provider: AgentKind::Codex,
+            name: "Build identity".into(),
+        })
+    );
     let question_group = parse_grill_question_group(
             "❓ Q1: Which direction?\n➡️ Keep the current design\nA) Keep it\nB) Replace it\n❓ Q2: What should we document?",
         )

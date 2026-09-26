@@ -220,6 +220,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              worktree_id INTEGER REFERENCES worktrees(id),
              machine_id INTEGER NOT NULL REFERENCES machines(id),
              agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
+             cli_configuration_profile_json TEXT,
              execution_profile TEXT NOT NULL
                  CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom', 'grill')),
              model TEXT,
@@ -427,6 +428,16 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
     {
         connection.execute(
             "ALTER TABLE runs ADD COLUMN last_applied_agent_state_sequence INTEGER",
+            [],
+        )?;
+    }
+    if !run_columns.is_empty()
+        && !run_columns
+            .iter()
+            .any(|column| column == "cli_configuration_profile_json")
+    {
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN cli_configuration_profile_json TEXT",
             [],
         )?;
     }
