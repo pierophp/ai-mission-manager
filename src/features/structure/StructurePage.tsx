@@ -2,6 +2,7 @@ import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { open } from "@tauri-apps/plugin-dialog";
+import { Monitor, Moon, Sun } from "lucide-react";
 
 import { Alert, AlertDescription } from "../../components/ui/alert";
 import { useAppShell } from "../../components/app-shell";
@@ -27,6 +28,7 @@ import {
 } from "../../components/ui/dialog";
 import { EmptyDescription } from "../../components/ui/empty";
 import { Input } from "../../components/ui/input";
+import { ToggleGroup, ToggleGroupItem } from "../../components/ui/toggle-group";
 import {
   NativeSelect,
   NativeSelectOption,
@@ -68,6 +70,7 @@ import type {
   RepositoryDeletionPreview,
   ResetLocalDataPreview,
 } from "../../runtime/types";
+import type { ThemePreference } from "../../theme";
 import {
   externalObjectKindLabel,
   flattenHome,
@@ -125,6 +128,7 @@ type SettingsSection =
   | "attention"
   | "grill"
   | "implement"
+  | "appearance"
   | "reset";
 
 type AddDialog = "context" | "project" | "repository" | "machine";
@@ -142,12 +146,19 @@ const settingsSections = [
   { id: "attention", label: "Attention defaults", path: "/settings/attention" },
   { id: "grill", label: "Grill defaults", path: "/settings/grill" },
   { id: "implement", label: "Implement defaults", path: "/settings/implement" },
+  { id: "appearance", label: "Appearance", path: "/settings/appearance" },
   { id: "reset", label: "Reset local data", path: "/settings/reset" },
 ] as const;
 
+const themeOptions: { value: ThemePreference; label: string; Icon: typeof Sun }[] = [
+  { value: "light", label: "Light", Icon: Sun },
+  { value: "dark", label: "Dark", Icon: Moon },
+  { value: "system", label: "System", Icon: Monitor },
+];
+
 export function StructurePage({ section }: { section: SettingsSection }) {
   const activeSection = section;
-  const { closeTerminal } = useAppShell();
+  const { closeTerminal, themePreference, setThemePreference } = useAppShell();
   const queryClient = useQueryClient();
   const structureCommand = useStructureCommand();
   const structure = useStructureData().data;
@@ -1218,6 +1229,38 @@ export function StructurePage({ section }: { section: SettingsSection }) {
           {activeSection === "grill" && <Card><CardHeader className="border-b border-border/70"><CardTitle>Grill defaults</CardTitle><CardDescription>Context-scoped agent, model, and effort defaults for starting a Grill Run from an Item.</CardDescription></CardHeader><CardContent className="space-y-4 p-4"><form className="grid gap-4 lg:grid-cols-[1fr_1fr_1fr_1fr_auto] lg:items-end" onSubmit={saveGrillDefaults}><ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} /><Field label="Agent"><NativeSelect value={grillAgent} onChange={(event) => { const nextAgent = event.target.value as GrillConfiguration["agent"]; const nextCatalog = grillModelCatalog.find((catalog) => catalog.agent === nextAgent); const nextModel = nextCatalog?.models[0]; setGrillAgent(nextAgent); setGrillModel(nextModel?.id ?? ""); setGrillEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || grillModelCatalog.length === 0}>{grillModelCatalog.map((catalog) => <NativeSelectOption value={catalog.agent} key={catalog.agent}>{catalog.agent === "claude" ? "Claude Code" : "Codex"}</NativeSelectOption>)}</NativeSelect></Field><Field label="Model"><NativeSelect value={grillModel} onChange={(event) => { const nextModel = selectedGrillCatalog?.models.find((model) => model.id === event.target.value); setGrillModel(event.target.value); setGrillEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || !selectedGrillCatalog}>{selectedGrillCatalog?.models.map((model) => <NativeSelectOption value={model.id} key={model.id}>{model.label} ({model.id})</NativeSelectOption>)}</NativeSelect></Field><Field label="Effort"><NativeSelect value={grillEffort} onChange={(event) => setGrillEffort(event.target.value)} disabled={isSaving || !selectedGrillModel}>{selectedGrillModel?.efforts.map((effort) => <NativeSelectOption value={effort.id} key={effort.id}>{effort.label} ({effort.id})</NativeSelectOption>)}</NativeSelect></Field><Button type="submit" disabled={isSaving || !selectedContextId || !selectedGrillModel}>Save defaults</Button></form></CardContent></Card>}
 
           {activeSection === "implement" && <Card><CardHeader className="border-b border-border/70"><CardTitle>Implement defaults</CardTitle><CardDescription>Context-scoped agent, model, and effort defaults for Direct Implement Runs.</CardDescription></CardHeader><CardContent className="space-y-4 p-4"><form className="grid gap-4 lg:grid-cols-[1fr_1fr_1fr_1fr_auto] lg:items-end" onSubmit={saveImplementDefaults}><ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} /><Field label="Agent"><NativeSelect value={implementAgent} onChange={(event) => { const nextAgent = event.target.value as GrillConfiguration["agent"]; const nextCatalog = grillModelCatalog.find((catalog) => catalog.agent === nextAgent); const nextModel = nextCatalog?.models[0]; setImplementAgent(nextAgent); setImplementModel(nextModel?.id ?? ""); setImplementEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || grillModelCatalog.length === 0}>{grillModelCatalog.map((catalog) => <NativeSelectOption value={catalog.agent} key={catalog.agent}>{catalog.agent === "claude" ? "Claude Code" : "Codex"}</NativeSelectOption>)}</NativeSelect></Field><Field label="Model"><NativeSelect value={implementModel} onChange={(event) => { const nextModel = selectedImplementCatalog?.models.find((model) => model.id === event.target.value); setImplementModel(event.target.value); setImplementEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || !selectedImplementCatalog}>{selectedImplementCatalog?.models.map((model) => <NativeSelectOption value={model.id} key={model.id}>{model.label} ({model.id})</NativeSelectOption>)}</NativeSelect></Field><Field label="Effort"><NativeSelect value={implementEffort} onChange={(event) => setImplementEffort(event.target.value)} disabled={isSaving || !selectedImplementModel}>{selectedImplementModel?.efforts.map((effort) => <NativeSelectOption value={effort.id} key={effort.id}>{effort.label} ({effort.id})</NativeSelectOption>)}</NativeSelect></Field><Button type="submit" disabled={isSaving || !selectedContextId || !selectedImplementModel}>Save defaults</Button></form></CardContent></Card>}
+
+          {activeSection === "appearance" && (
+            <Card>
+              <CardHeader className="border-b border-border/70">
+                <CardTitle>Appearance</CardTitle>
+                <CardDescription>Choose a color theme. System follows your operating system.</CardDescription>
+              </CardHeader>
+              <CardContent className="p-4">
+                <ToggleGroup
+                  type="single"
+                  variant="outline"
+                  spacing={0}
+                  aria-label="Theme"
+                  value={themePreference}
+                  onValueChange={(value) => {
+                    if (value) setThemePreference(value as ThemePreference);
+                  }}
+                >
+                  {themeOptions.map(({ value, label, Icon }) => (
+                    <ToggleGroupItem
+                      key={value}
+                      value={value}
+                      className="gap-1.5 px-3 data-[state=on]:bg-primary data-[state=on]:text-primary-foreground data-[state=on]:hover:bg-primary/90"
+                    >
+                      <Icon aria-hidden="true" />
+                      {label}
+                    </ToggleGroupItem>
+                  ))}
+                </ToggleGroup>
+              </CardContent>
+            </Card>
+          )}
 
           {activeSection === "reset" && <Card className="border-destructive/30 bg-destructive/5"><CardHeader><CardTitle>Reset all local data</CardTitle><CardDescription>Remove Mission Manager&apos;s local working model, cached External Objects, and Activity history. Provider-owned Issues and pull requests are never deleted.</CardDescription></CardHeader><CardContent className="space-y-4"><Button type="button" variant="destructive" disabled={isSaving} onClick={() => void handlePrepareReset()}>Review reset impact</Button>{resetLocalDataPreview && <ResetLocalDataPreviewCard preview={resetLocalDataPreview} disabled={isSaving} onConfirm={() => void handleReset()} onCancel={() => setResetLocalDataPreview(undefined)} />}</CardContent></Card>}
         </div>

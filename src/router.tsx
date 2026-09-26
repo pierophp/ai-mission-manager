@@ -144,6 +144,12 @@ const settingsImplementRoute = createRoute({
   component: () => <StructurePage section="implement" />,
 });
 
+const settingsAppearanceRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/appearance",
+  component: () => <StructurePage section="appearance" />,
+});
+
 const settingsResetRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings/reset",
@@ -171,6 +177,7 @@ const routeTree = rootRoute.addChildren([
   settingsAttentionRoute,
   settingsGrillRoute,
   settingsImplementRoute,
+  settingsAppearanceRoute,
   settingsResetRoute,
   activityRoute,
 ]);
