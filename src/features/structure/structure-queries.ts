@@ -3,6 +3,7 @@ import { queryOptions, useQuery } from "@tanstack/react-query";
 import { structureAdapter } from "../../runtime/adapters";
 import type {
   Context,
+  CliProfileSettingsView,
   ContextAttentionDefault,
   GrillAgentCatalog,
   Machine,
@@ -17,6 +18,7 @@ export type StructureData = {
   repositories: Repository[];
   repositoryLocations: RepositoryLocation[];
   machines: Machine[];
+  cliConfigurationProfiles: CliProfileSettingsView[];
   attentionDefaults: ContextAttentionDefault[];
   grillModelCatalog: GrillAgentCatalog[];
 };
@@ -28,6 +30,7 @@ export const structureKeys = {
   repositories: () => [...structureKeys.all, "repositories"] as const,
   repositoryLocations: () => [...structureKeys.all, "repositoryLocations"] as const,
   machines: () => [...structureKeys.all, "machines"] as const,
+  cliConfigurationProfiles: () => [...structureKeys.all, "cliConfigurationProfiles"] as const,
   attentionDefaults: () => [...structureKeys.all, "attentionDefaults"] as const,
   grillModelCatalog: () => [...structureKeys.all, "grillModelCatalog"] as const,
 };
@@ -65,6 +68,8 @@ export const structureQueryOptions = {
       queryFn: structureAdapter.listMachines,
       staleTime: structureStaleTime,
     }),
+  cliConfigurationProfiles: () =>
+    queryOptions({ queryKey: structureKeys.cliConfigurationProfiles(), queryFn: structureAdapter.listCliConfigurationProfiles, staleTime: structureStaleTime }),
   attentionDefaults: () =>
     queryOptions({
       queryKey: structureKeys.attentionDefaults(),
@@ -85,6 +90,7 @@ export function useStructureData() {
   const repositories = useQuery(structureQueryOptions.repositories());
   const repositoryLocations = useQuery(structureQueryOptions.repositoryLocations());
   const machines = useQuery(structureQueryOptions.machines());
+  const cliConfigurationProfiles = useQuery(structureQueryOptions.cliConfigurationProfiles());
   const attentionDefaults = useQuery(structureQueryOptions.attentionDefaults());
   const grillModelCatalog = useQuery(structureQueryOptions.grillModelCatalog());
 
@@ -95,10 +101,11 @@ export function useStructureData() {
       repositories: repositories.data ?? [],
       repositoryLocations: repositoryLocations.data ?? [],
       machines: machines.data ?? [],
+      cliConfigurationProfiles: cliConfigurationProfiles.data ?? [],
       attentionDefaults: attentionDefaults.data ?? [],
       grillModelCatalog: grillModelCatalog.data ?? [],
     } satisfies StructureData,
-    isPending: [contexts, projects, repositories, repositoryLocations, machines, attentionDefaults, grillModelCatalog].some(
+    isPending: [contexts, projects, repositories, repositoryLocations, machines, cliConfigurationProfiles, attentionDefaults, grillModelCatalog].some(
       (query) => query.isPending,
     ),
     error:
@@ -107,6 +114,7 @@ export function useStructureData() {
       repositories.error ??
       repositoryLocations.error ??
       machines.error ??
+      cliConfigurationProfiles.error ??
       attentionDefaults.error ??
       grillModelCatalog.error,
   };

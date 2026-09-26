@@ -111,6 +111,8 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
             Effect::PersistContextGrillDefaults { .. }
             | Effect::PersistContextImplementDefaults { .. }
             | Effect::UpdateContext { .. }
+            | Effect::PersistCliConfigurationProfile { .. }
+            | Effect::RemoveCliConfigurationProfile { .. }
             | Effect::UpdateProject { .. } => None,
             Effect::PersistProject { project, .. } => Some(AuditAction::ProjectCreated {
                 project_id: project.id,
@@ -343,6 +345,7 @@ mod tests {
             next_workspace_id: 1,
             next_worktree_id: 1,
             next_machine_id: 1,
+            next_cli_profile_id: 1,
             next_run_id: 1,
             next_external_object_id: 3,
             next_link_id: 1,
@@ -356,6 +359,7 @@ mod tests {
             workspaces: Vec::new(),
             worktrees: Vec::new(),
             machines: Vec::new(),
+            cli_configuration_profiles: Vec::new(),
             runs: Vec::new(),
             implementation_queues: Vec::new(),
             relationships: Vec::new(),

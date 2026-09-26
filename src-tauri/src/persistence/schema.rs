@@ -22,7 +22,9 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              grill_effort TEXT NOT NULL DEFAULT 'high',
              implement_agent TEXT NOT NULL DEFAULT 'claude',
              implement_model TEXT NOT NULL DEFAULT 'claude-sonnet-4-5',
-             implement_effort TEXT NOT NULL DEFAULT 'high'
+             implement_effort TEXT NOT NULL DEFAULT 'high',
+             claude_profile_id INTEGER,
+             codex_profile_id INTEGER
          );
          CREATE TABLE IF NOT EXISTS projects (
              id INTEGER PRIMARY KEY NOT NULL,
@@ -42,6 +44,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_workspace_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_worktree_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_machine_id', 1);
+         INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_cli_profile_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_run_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_external_object_id', 1);
          INSERT OR IGNORE INTO metadata (key, value) VALUES ('next_link_id', 1);
@@ -91,6 +94,8 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
             "TEXT NOT NULL DEFAULT 'claude-sonnet-4-5'",
         ),
         ("implement_effort", "TEXT NOT NULL DEFAULT 'high'"),
+        ("claude_profile_id", "INTEGER"),
+        ("codex_profile_id", "INTEGER"),
     ] {
         if !context_columns.is_empty() && !context_columns.iter().any(|existing| existing == column)
         {
@@ -159,6 +164,15 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
          );
          CREATE INDEX IF NOT EXISTS machines_by_context
              ON machines (context_id, id);
+         CREATE TABLE IF NOT EXISTS cli_configuration_profiles (
+             id INTEGER PRIMARY KEY NOT NULL,
+             machine_id INTEGER NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+             provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex')),
+             name TEXT NOT NULL,
+             directory TEXT NOT NULL,
+             app_managed INTEGER NOT NULL,
+             UNIQUE (machine_id, provider, name)
+         );
          CREATE TABLE IF NOT EXISTS repository_locations (
              repository_id INTEGER NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
              machine_id INTEGER NOT NULL REFERENCES machines(id) ON DELETE CASCADE,

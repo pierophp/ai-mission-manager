@@ -11,6 +11,8 @@ export type Context = {
   id: number;
   name: string;
   execution_machine_id: number | null;
+  claude_profile_id: number | null;
+  codex_profile_id: number | null;
   check_dirty_checkouts: boolean;
   grill_defaults: GrillConfiguration;
   implement_defaults: GrillConfiguration;
@@ -185,6 +187,20 @@ export type Machine = {
   last_observed: "unknown" | "available" | "offline";
   last_observed_at: number | null;
   readiness?: MachineReadiness | null;
+};
+
+export type CliConfigurationProfile = {
+  id: number;
+  machineId: number;
+  provider: AgentKind;
+  name: string;
+  directory: string;
+  appManaged: boolean;
+};
+
+export type CliProfileSettingsView = {
+  profile: CliConfigurationProfile;
+  signInCommand: string | null;
 };
 
 export type AgentHookReadiness = {

@@ -10,6 +10,10 @@ pub struct Context {
     pub name: String,
     #[serde(default)]
     pub execution_machine_id: Option<i64>,
+    #[serde(default)]
+    pub claude_profile_id: Option<i64>,
+    #[serde(default)]
+    pub codex_profile_id: Option<i64>,
     #[serde(default = "dirty_checkout_check_default")]
     pub check_dirty_checkouts: bool,
     pub grill_defaults: GrillConfiguration,
@@ -233,6 +237,17 @@ pub struct Machine {
     pub transport: MachineTransport,
     pub last_observed: MachineObservation,
     pub last_observed_at: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliConfigurationProfile {
+    pub id: i64,
+    pub machine_id: i64,
+    pub provider: AgentKind,
+    pub name: String,
+    pub directory: String,
+    pub app_managed: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1098,6 +1113,7 @@ pub struct DomainState {
     pub next_workspace_id: i64,
     pub next_worktree_id: i64,
     pub next_machine_id: i64,
+    pub next_cli_profile_id: i64,
     pub next_run_id: i64,
     pub next_external_object_id: i64,
     pub next_link_id: i64,
@@ -1111,6 +1127,8 @@ pub struct DomainState {
     pub workspaces: Vec<Workspace>,
     pub worktrees: Vec<Worktree>,
     pub machines: Vec<Machine>,
+    #[serde(default)]
+    pub cli_configuration_profiles: Vec<CliConfigurationProfile>,
     pub runs: Vec<Run>,
     #[serde(default)]
     pub implementation_queues: Vec<ImplementationQueue>,

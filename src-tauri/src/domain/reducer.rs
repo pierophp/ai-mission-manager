@@ -24,6 +24,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 id,
                 name,
                 execution_machine_id: None,
+                claude_profile_id: None,
+                codex_profile_id: None,
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
@@ -103,17 +105,17 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 }
             }
             if let Some(machine_id) = machine_id {
-                let machine = state
+                state
                     .machines
                     .iter()
                     .find(|machine| machine.id == machine_id)
                     .ok_or(DomainError::MachineNotFound { machine_id })?;
-                if machine.context_id != context_id {
-                    return Err(DomainError::MachineContextMismatch {
-                        machine_id,
-                        context_id,
-                    });
-                }
+            }
+            if let Some(profile_id) = context.claude_profile_id {
+                validate_context_profile(&state, machine_id, AgentKind::Claude, profile_id)?;
+            }
+            if let Some(profile_id) = context.codex_profile_id {
+                validate_context_profile(&state, machine_id, AgentKind::Codex, profile_id)?;
             }
             let context = state
                 .contexts
@@ -125,6 +127,105 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             Ok(Decision {
                 state,
                 effects: vec![Effect::UpdateContext { context }],
+            })
+        }
+        Event::CreateCliConfigurationProfile {
+            machine_id,
+            provider,
+            name,
+            directory,
+            app_managed,
+        } => {
+            let name = clean_name(name, DomainError::EmptyCliConfigurationProfileName)?;
+            let directory = clean_name(
+                directory,
+                DomainError::EmptyCliConfigurationProfileDirectory,
+            )?;
+            if !state
+                .machines
+                .iter()
+                .any(|machine| machine.id == machine_id)
+            {
+                return Err(DomainError::CliConfigurationProfileMachineNotFound { machine_id });
+            }
+            if state.cli_configuration_profiles.iter().any(|profile| {
+                profile.machine_id == machine_id
+                    && profile.provider == provider
+                    && profile.name == name
+            }) {
+                return Err(DomainError::CliConfigurationProfileAlreadyExists { machine_id, name });
+            }
+            let id = state.next_cli_profile_id;
+            let next_cli_profile_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let profile = CliConfigurationProfile {
+                id,
+                machine_id,
+                provider,
+                name,
+                directory,
+                app_managed,
+            };
+            state.next_cli_profile_id = next_cli_profile_id;
+            state.cli_configuration_profiles.push(profile.clone());
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistCliConfigurationProfile {
+                    profile,
+                    next_cli_profile_id,
+                }],
+            })
+        }
+        Event::SetContextCliConfigurationProfile {
+            context_id,
+            provider,
+            profile_id,
+        } => {
+            let execution_machine_id = state
+                .contexts
+                .iter()
+                .find(|context| context.id == context_id)
+                .ok_or(DomainError::ContextNotFound { context_id })?
+                .execution_machine_id;
+            if let Some(profile_id) = profile_id {
+                validate_context_profile(&state, execution_machine_id, provider, profile_id)?;
+            }
+            let context = state
+                .contexts
+                .iter_mut()
+                .find(|context| context.id == context_id)
+                .expect("the Context was checked above");
+            match provider {
+                AgentKind::Claude => context.claude_profile_id = profile_id,
+                AgentKind::Codex => context.codex_profile_id = profile_id,
+            }
+            let context = context.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::UpdateContext { context }],
+            })
+        }
+        Event::DeleteCliConfigurationProfile { profile_id } => {
+            let profile_position = state
+                .cli_configuration_profiles
+                .iter()
+                .position(|profile| profile.id == profile_id)
+                .ok_or(DomainError::CliConfigurationProfileNotFound { profile_id })?;
+            let contexts = state
+                .contexts
+                .iter()
+                .filter(|context| {
+                    context.claude_profile_id == Some(profile_id)
+                        || context.codex_profile_id == Some(profile_id)
+                })
+                .map(|context| context.name.clone())
+                .collect::<Vec<_>>();
+            if !contexts.is_empty() {
+                return Err(DomainError::CliConfigurationProfileInUse { contexts });
+            }
+            state.cli_configuration_profiles.remove(profile_position);
+            Ok(Decision {
+                state,
+                effects: vec![Effect::RemoveCliConfigurationProfile { profile_id }],
             })
         }
         Event::SetContextDirtyCheckoutCheck {
@@ -570,6 +671,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 id: context_id,
                 name: "Personal".into(),
                 execution_machine_id: None,
+                claude_profile_id: None,
+                codex_profile_id: None,
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
@@ -901,6 +1004,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             state
                 .machines
                 .retain(|machine| !machine_ids.contains(&machine.id));
+            state
+                .cli_configuration_profiles
+                .retain(|profile| !machine_ids.contains(&profile.machine_id));
             state.relationships.retain(|relation| {
                 !item_ids.contains(&relation.from_item_id)
                     && !item_ids.contains(&relation.to_item_id)
@@ -990,11 +1096,17 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             for context in &mut state.contexts {
                 if context.execution_machine_id == Some(machine_id) {
                     context.execution_machine_id = None;
+                    context.claude_profile_id = None;
+                    context.codex_profile_id = None;
                     effects.push(Effect::UpdateContext {
                         context: context.clone(),
                     });
                 }
             }
+
+            state
+                .cli_configuration_profiles
+                .retain(|profile| profile.machine_id != machine_id);
 
             state.runs.retain(|run| run.machine_id != machine_id);
             effects.extend(
@@ -3051,6 +3163,43 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             })
         }
     }
+}
+
+fn validate_context_profile(
+    state: &DomainState,
+    execution_machine_id: Option<i64>,
+    provider: AgentKind,
+    profile_id: i64,
+) -> Result<(), DomainError> {
+    let profile = state
+        .cli_configuration_profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or(DomainError::CliConfigurationProfileNotFound { profile_id })?;
+    if profile.provider != provider {
+        return Err(DomainError::CliConfigurationProfileProviderMismatch {
+            profile_id,
+            profile_provider: profile.provider,
+            requested_provider: provider,
+        });
+    }
+    let machine_id =
+        execution_machine_id.ok_or(DomainError::CliConfigurationProfileMachineMismatch {
+            profile_id,
+            machine_id: profile.machine_id,
+        })?;
+    state
+        .machines
+        .iter()
+        .find(|machine| machine.id == machine_id)
+        .ok_or(DomainError::MachineNotFound { machine_id })?;
+    if profile.machine_id != machine_id {
+        return Err(DomainError::CliConfigurationProfileMachineMismatch {
+            profile_id,
+            machine_id,
+        });
+    }
+    Ok(())
 }
 
 fn queue_finish_observation_effects(state: &DomainState, run: &Run) -> Vec<Effect> {

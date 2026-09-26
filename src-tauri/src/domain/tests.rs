@@ -52,6 +52,8 @@ mod implementation_queue_tests {
         .expect("a new Context should be created");
 
         assert!(decision.state.contexts[1].check_dirty_checkouts);
+        assert_eq!(decision.state.contexts[1].claude_profile_id, None);
+        assert_eq!(decision.state.contexts[1].codex_profile_id, None);
     }
 
     #[test]
@@ -110,7 +112,7 @@ mod implementation_queue_tests {
         )));
     }
 
-    fn state() -> DomainState {
+    pub(super) fn state() -> DomainState {
         DomainState {
             next_context_id: 2,
             next_project_id: 2,
@@ -120,6 +122,7 @@ mod implementation_queue_tests {
             next_workspace_id: 2,
             next_worktree_id: 1,
             next_machine_id: 2,
+            next_cli_profile_id: 1,
             next_run_id: 1,
             next_external_object_id: 2,
             next_link_id: 2,
@@ -129,6 +132,8 @@ mod implementation_queue_tests {
                 id: 1,
                 name: "Context".into(),
                 execution_machine_id: Some(1),
+                claude_profile_id: None,
+                codex_profile_id: None,
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
@@ -176,6 +181,7 @@ mod implementation_queue_tests {
                 last_observed: MachineObservation::Available,
                 last_observed_at: None,
             }],
+            cli_configuration_profiles: vec![],
             runs: vec![],
             implementation_queues: vec![],
             relationships: vec![],
@@ -624,6 +630,195 @@ mod implementation_queue_tests {
     }
 }
 
+mod cli_configuration_profile_tests {
+    use super::*;
+
+    fn state() -> DomainState {
+        implementation_queue_tests::state()
+    }
+
+    #[test]
+    fn profiles_are_machine_scoped_and_context_selections_are_independent() {
+        let state = state();
+        let state = decide(
+            state,
+            Event::CreateCliConfigurationProfile {
+                machine_id: 1,
+                provider: AgentKind::Claude,
+                name: "Personal Claude".into(),
+                directory: "/profiles/claude-personal".into(),
+                app_managed: true,
+            },
+        )
+        .unwrap()
+        .state;
+        let state = decide(
+            state,
+            Event::CreateCliConfigurationProfile {
+                machine_id: 1,
+                provider: AgentKind::Codex,
+                name: "Work Codex".into(),
+                directory: "/profiles/codex-work".into(),
+                app_managed: false,
+            },
+        )
+        .unwrap()
+        .state;
+        let selected_claude = decide(
+            state,
+            Event::SetContextCliConfigurationProfile {
+                context_id: 1,
+                provider: AgentKind::Claude,
+                profile_id: Some(1),
+            },
+        )
+        .unwrap()
+        .state;
+        let selected_both = decide(
+            selected_claude,
+            Event::SetContextCliConfigurationProfile {
+                context_id: 1,
+                provider: AgentKind::Codex,
+                profile_id: Some(2),
+            },
+        )
+        .unwrap()
+        .state;
+
+        assert_eq!(selected_both.contexts[0].claude_profile_id, Some(1));
+        assert_eq!(selected_both.contexts[0].codex_profile_id, Some(2));
+        assert!(matches!(
+            decide(selected_both, Event::DeleteCliConfigurationProfile { profile_id: 1 }),
+            Err(DomainError::CliConfigurationProfileInUse { contexts }) if contexts == vec!["Context".to_owned()]
+        ));
+    }
+
+    #[test]
+    fn context_cannot_select_a_profile_from_another_machine_or_provider() {
+        let state = state();
+        let state = decide(
+            state,
+            Event::CreateCliConfigurationProfile {
+                machine_id: 1,
+                provider: AgentKind::Claude,
+                name: "Claude".into(),
+                directory: "/profiles/claude".into(),
+                app_managed: false,
+            },
+        )
+        .unwrap()
+        .state;
+
+        assert!(matches!(
+            decide(
+                state.clone(),
+                Event::SetContextCliConfigurationProfile {
+                    context_id: 1,
+                    provider: AgentKind::Codex,
+                    profile_id: Some(1),
+                }
+            ),
+            Err(DomainError::CliConfigurationProfileProviderMismatch { .. })
+        ));
+        let other_context = decide(
+            state,
+            Event::CreateContext {
+                name: "Other".into(),
+            },
+        )
+        .unwrap()
+        .state;
+        let other_context = decide(
+            other_context,
+            Event::RegisterMachine {
+                context_id: 2,
+                name: "Other Machine".into(),
+                socket_name: "other".into(),
+                transport: MachineTransport::Local,
+            },
+        )
+        .unwrap()
+        .state;
+        let other_context = decide(
+            other_context,
+            Event::SetContextExecutionMachine {
+                context_id: 2,
+                machine_id: Some(2),
+            },
+        )
+        .unwrap()
+        .state;
+        assert!(matches!(
+            decide(
+                other_context,
+                Event::SetContextCliConfigurationProfile {
+                    context_id: 2,
+                    provider: AgentKind::Claude,
+                    profile_id: Some(1),
+                }
+            ),
+            Err(DomainError::CliConfigurationProfileMachineMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn contexts_assigned_to_the_same_machine_can_reuse_its_profile() {
+        let state = state();
+        let state = decide(
+            state,
+            Event::CreateContext {
+                name: "Shared".into(),
+            },
+        )
+        .unwrap()
+        .state;
+        let state = decide(
+            state,
+            Event::SetContextExecutionMachine {
+                context_id: 2,
+                machine_id: Some(1),
+            },
+        )
+        .expect("a Context can share an execution Machine")
+        .state;
+        let state = decide(
+            state,
+            Event::CreateCliConfigurationProfile {
+                machine_id: 1,
+                provider: AgentKind::Claude,
+                name: "Shared Claude".into(),
+                directory: "/profiles/claude".into(),
+                app_managed: true,
+            },
+        )
+        .unwrap()
+        .state;
+        let state = decide(
+            state,
+            Event::SetContextCliConfigurationProfile {
+                context_id: 1,
+                provider: AgentKind::Claude,
+                profile_id: Some(1),
+            },
+        )
+        .unwrap()
+        .state;
+        let state = decide(
+            state,
+            Event::SetContextCliConfigurationProfile {
+                context_id: 2,
+                provider: AgentKind::Claude,
+                profile_id: Some(1),
+            },
+        )
+        .unwrap()
+        .state;
+
+        assert_eq!(state.contexts[0].claude_profile_id, Some(1));
+        assert_eq!(state.contexts[1].claude_profile_id, Some(1));
+    }
+}
+
 mod context_execution_machine_tests {
     use super::*;
 
@@ -637,6 +832,7 @@ mod context_execution_machine_tests {
             next_workspace_id: 1,
             next_worktree_id: 1,
             next_machine_id: 3,
+            next_cli_profile_id: 1,
             next_run_id: 1,
             next_external_object_id: 1,
             next_link_id: 1,
@@ -647,6 +843,8 @@ mod context_execution_machine_tests {
                     id: 1,
                     name: "Unconfigured".into(),
                     execution_machine_id: None,
+                    claude_profile_id: None,
+                    codex_profile_id: None,
                     check_dirty_checkouts: true,
                     grill_defaults: GrillConfiguration::default(),
                     implement_defaults: GrillConfiguration::default(),
@@ -655,6 +853,8 @@ mod context_execution_machine_tests {
                     id: 2,
                     name: "Other".into(),
                     execution_machine_id: None,
+                    claude_profile_id: None,
+                    codex_profile_id: None,
                     check_dirty_checkouts: true,
                     grill_defaults: GrillConfiguration::default(),
                     implement_defaults: GrillConfiguration::default(),
@@ -686,6 +886,7 @@ mod context_execution_machine_tests {
                     last_observed_at: None,
                 },
             ],
+            cli_configuration_profiles: Vec::new(),
             runs: Vec::new(),
             implementation_queues: Vec::new(),
             relationships: Vec::new(),
@@ -723,17 +924,17 @@ mod context_execution_machine_tests {
     }
 
     #[test]
-    fn a_context_cannot_select_a_machine_owned_by_another_context() {
-        let error = decide(
+    fn a_context_can_share_an_execution_machine_registered_by_another_context() {
+        let decision = decide(
             state(),
             Event::SetContextExecutionMachine {
                 context_id: 1,
                 machine_id: Some(2),
             },
         )
-        .expect_err("execution Machines must belong to their Context");
+        .expect("Contexts can share execution Machines");
 
-        assert!(matches!(error, DomainError::MachineContextMismatch { .. }));
+        assert_eq!(decision.state.contexts[0].execution_machine_id, Some(2));
     }
 }
 
@@ -750,6 +951,7 @@ mod machine_deletion_tests {
             next_workspace_id: 2,
             next_worktree_id: 2,
             next_machine_id: 2,
+            next_cli_profile_id: 1,
             next_run_id: 2,
             next_external_object_id: 1,
             next_link_id: 1,
@@ -759,6 +961,8 @@ mod machine_deletion_tests {
                 id: 1,
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
+                claude_profile_id: None,
+                codex_profile_id: None,
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
@@ -820,6 +1024,7 @@ mod machine_deletion_tests {
                 last_observed: MachineObservation::Available,
                 last_observed_at: None,
             }],
+            cli_configuration_profiles: vec![],
             runs: vec![Run {
                 id: 1,
                 item_id: 1,
@@ -974,6 +1179,7 @@ mod workspace_contract_tests {
             next_workspace_id: 1,
             next_worktree_id: 1,
             next_machine_id: 2,
+            next_cli_profile_id: 1,
             next_run_id: 1,
             next_external_object_id: 1,
             next_link_id: 1,
@@ -983,6 +1189,8 @@ mod workspace_contract_tests {
                 id: 1,
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
+                claude_profile_id: None,
+                codex_profile_id: None,
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
@@ -1021,6 +1229,7 @@ mod workspace_contract_tests {
                 last_observed: MachineObservation::Available,
                 last_observed_at: None,
             }],
+            cli_configuration_profiles: Vec::new(),
             runs: Vec::new(),
             implementation_queues: Vec::new(),
             relationships: Vec::new(),
@@ -1126,6 +1335,7 @@ mod workspace_contract_tests {
             next_workspace_id: 2,
             next_worktree_id: 1,
             next_machine_id: 3,
+            next_cli_profile_id: 1,
             next_run_id: 1,
             next_external_object_id: 1,
             next_link_id: 1,
@@ -1135,6 +1345,8 @@ mod workspace_contract_tests {
                 id: 1,
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
+                claude_profile_id: None,
+                codex_profile_id: None,
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
@@ -1206,6 +1418,7 @@ mod workspace_contract_tests {
                     last_observed_at: None,
                 },
             ],
+            cli_configuration_profiles: Vec::new(),
             runs: Vec::new(),
             implementation_queues: Vec::new(),
             relationships: Vec::new(),
@@ -1278,6 +1491,7 @@ mod grill_contract_tests {
             next_workspace_id: 2,
             next_worktree_id: 1,
             next_machine_id: 2,
+            next_cli_profile_id: 1,
             next_run_id: 1,
             next_external_object_id: 1,
             next_link_id: 1,
@@ -1287,6 +1501,8 @@ mod grill_contract_tests {
                 id: 1,
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
+                claude_profile_id: None,
+                codex_profile_id: None,
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
@@ -1339,6 +1555,7 @@ mod grill_contract_tests {
                 last_observed: MachineObservation::Available,
                 last_observed_at: None,
             }],
+            cli_configuration_profiles: Vec::new(),
             runs: Vec::new(),
             implementation_queues: Vec::new(),
             relationships: Vec::new(),

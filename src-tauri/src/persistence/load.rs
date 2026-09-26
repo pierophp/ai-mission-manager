@@ -1,5 +1,6 @@
 use super::codecs::*;
 use super::*;
+use crate::domain::CliConfigurationProfile;
 
 impl SqliteStore {
     pub fn load_state(&self) -> Result<DomainState, StoreError> {
@@ -11,6 +12,7 @@ impl SqliteStore {
         let next_workspace_id = self.sequence("next_workspace_id")?;
         let next_worktree_id = self.sequence("next_worktree_id")?;
         let next_machine_id = self.sequence("next_machine_id")?;
+        let next_cli_profile_id = self.sequence("next_cli_profile_id")?;
         let next_run_id = self.sequence("next_run_id")?;
         let next_external_object_id = self.sequence("next_external_object_id")?;
         let next_link_id = self.sequence("next_link_id")?;
@@ -20,7 +22,8 @@ impl SqliteStore {
             let mut statement = self.connection.prepare(
                 "SELECT id, name, execution_machine_id, check_dirty_checkouts,
                         grill_agent, grill_model, grill_effort,
-                        implement_agent, implement_model, implement_effort
+                        implement_agent, implement_model, implement_effort,
+                        claude_profile_id, codex_profile_id
                      FROM contexts ORDER BY id",
             )?;
             let rows = statement.query_map([], |row| {
@@ -35,6 +38,8 @@ impl SqliteStore {
                     name: row.get(1)?,
                     execution_machine_id: row.get(2)?,
                     check_dirty_checkouts: row.get::<_, i64>(3)? != 0,
+                    claude_profile_id: row.get(10)?,
+                    codex_profile_id: row.get(11)?,
                     grill_defaults: GrillConfiguration {
                         agent: parse_agent_kind(&agent).map_err(|error| {
                             rusqlite::Error::FromSqlConversionFailure(
@@ -157,6 +162,30 @@ impl SqliteStore {
                         )
                     })?,
                     last_observed_at: row.get(6)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let cli_configuration_profiles = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, machine_id, provider, name, directory, app_managed
+                 FROM cli_configuration_profiles ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let provider: String = row.get(2)?;
+                Ok(CliConfigurationProfile {
+                    id: row.get(0)?,
+                    machine_id: row.get(1)?,
+                    provider: parse_agent_kind(&provider).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    name: row.get(3)?,
+                    directory: row.get(4)?,
+                    app_managed: row.get::<_, i64>(5)? != 0,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -634,6 +663,7 @@ impl SqliteStore {
             next_workspace_id,
             next_worktree_id,
             next_machine_id,
+            next_cli_profile_id,
             next_run_id,
             next_external_object_id,
             next_link_id,
@@ -647,6 +677,7 @@ impl SqliteStore {
             workspaces,
             worktrees,
             machines,
+            cli_configuration_profiles,
             runs,
             implementation_queues,
             relationships,

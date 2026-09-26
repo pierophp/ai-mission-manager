@@ -170,6 +170,7 @@ export function StructurePage({ section }: { section: SettingsSection }) {
     repositories,
     repositoryLocations,
     machines,
+    cliConfigurationProfiles,
     attentionDefaults,
     grillModelCatalog,
   } = structure;
@@ -217,6 +218,11 @@ export function StructurePage({ section }: { section: SettingsSection }) {
   const [implementModel, setImplementModel] = useState("claude-sonnet-4-5");
   const [implementEffort, setImplementEffort] = useState("high");
   const [checkDirtyCheckouts, setCheckDirtyCheckouts] = useState(true);
+  const [cliProfileProvider, setCliProfileProvider] = useState<"claude" | "codex">("claude");
+  const [cliProfileName, setCliProfileName] = useState("");
+  const [cliProfileAppManaged, setCliProfileAppManaged] = useState(true);
+  const [cliProfileDirectory, setCliProfileDirectory] = useState("");
+  const [cliProfileMachineId, setCliProfileMachineId] = useState<number>();
   const [repositoryDeletionPreview, setRepositoryDeletionPreview] =
     useState<RepositoryDeletionPreview>();
   const [parentDeletionPreview, setParentDeletionPreview] =
@@ -246,6 +252,9 @@ export function StructurePage({ section }: { section: SettingsSection }) {
   const selectedExecutionMachine = machines.find(
     (machine) => machine.id === selectedContext?.execution_machine_id,
   );
+  const selectedProfileMachine = selectedMachines.find((machine) => machine.id === cliProfileMachineId)
+    ?? selectedExecutionMachine
+    ?? selectedMachines[0];
 
   useEffect(() => {
     const nextContextId =
@@ -801,6 +810,47 @@ export function StructurePage({ section }: { section: SettingsSection }) {
     }
   }
 
+  async function handleSetCliProfile(provider: "claude" | "codex", profileId: number | null) {
+    if (!selectedContextId) return;
+    setIsSaving(true);
+    try {
+      await structureCommand.execute(structureActions.setContextCliConfigurationProfile(selectedContextId, provider, profileId));
+      await refreshAfterEdit();
+      setError(undefined);
+    } catch (saveError) { setError(errorMessage(saveError)); }
+    finally { setIsSaving(false); }
+  }
+
+  async function handleCreateCliProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedProfileMachine || !cliProfileName.trim()) return;
+    setIsSaving(true);
+    try {
+      await structureCommand.execute(structureActions.createCliConfigurationProfile({
+        machineId: selectedProfileMachine.id,
+        provider: cliProfileProvider,
+        name: cliProfileName,
+        appManaged: cliProfileAppManaged,
+        existingDirectory: cliProfileAppManaged ? null : cliProfileDirectory,
+      }));
+      setCliProfileName("");
+      setCliProfileDirectory("");
+      await refreshAfterEdit();
+      setError(undefined);
+    } catch (saveError) { setError(errorMessage(saveError)); }
+    finally { setIsSaving(false); }
+  }
+
+  async function handleDeleteCliProfile(profileId: number) {
+    setIsSaving(true);
+    try {
+      await structureCommand.execute(structureActions.deleteCliConfigurationProfile(profileId));
+      await refreshAfterEdit();
+      setError(undefined);
+    } catch (deleteError) { setError(errorMessage(deleteError)); }
+    finally { setIsSaving(false); }
+  }
+
   async function handlePrepareMachineDeletion(machineId: number) {
     setIsSaving(true);
     try {
@@ -1113,6 +1163,25 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                     Save setting
                   </Button>
                 </form>
+                <div className="mt-5 grid gap-3 border-t border-border/70 pt-4 sm:grid-cols-2">
+                  {(["claude", "codex"] as const).map((provider) => {
+                    const providerProfiles = cliConfigurationProfiles
+                      .filter(({ profile }) => profile.machineId === selectedExecutionMachine?.id && profile.provider === provider)
+                      .map(({ profile }) => profile);
+                    const selectedProfileId = provider === "claude" ? selectedContext?.claude_profile_id : selectedContext?.codex_profile_id;
+                    return <Field key={provider} label={`${provider === "claude" ? "Claude Code" : "Codex"} configuration profile`}>
+                      <NativeSelect
+                        value={selectedProfileId ?? ""}
+                        onChange={(event) => void handleSetCliProfile(provider, Number(event.target.value) || null)}
+                        disabled={isSaving || !selectedContextId || !selectedExecutionMachine}
+                      >
+                        <NativeSelectOption value="">Use standard CLI configuration</NativeSelectOption>
+                        {providerProfiles.map((profile) => <NativeSelectOption value={profile.id} key={profile.id}>{profile.name}</NativeSelectOption>)}
+                      </NativeSelect>
+                    </Field>;
+                  })}
+                </div>
+                {!selectedExecutionMachine && <p className="m-0 text-xs text-muted-foreground">Choose an execution Machine before selecting CLI profiles.</p>}
               </CardContent>
             </Card>
           )}
@@ -1162,6 +1231,23 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                     </EntityRow>
                   ))}
                 </EntityList>
+                <section className="mt-5 grid gap-4 border-t border-border/70 pt-4" aria-label="CLI configuration profiles">
+                  <div><h3 className="m-0 text-sm font-semibold">CLI configuration profiles</h3><p className="mb-0 mt-1 text-xs text-muted-foreground">Profiles stay on their owning Machine. App-managed profiles get a dedicated directory and a copyable sign-in command.</p></div>
+                  <Field label="Machine"><NativeSelect value={selectedProfileMachine?.id ?? ""} onChange={(event) => setCliProfileMachineId(Number(event.target.value) || undefined)} disabled={isSaving || selectedMachines.length === 0}><NativeSelectOption value="">Choose a Machine</NativeSelectOption>{selectedMachines.map((machine) => <NativeSelectOption value={machine.id} key={machine.id}>{machine.name}</NativeSelectOption>)}</NativeSelect></Field>
+                  <EntityList>
+                    {cliConfigurationProfiles.filter(({ profile }) => profile.machineId === selectedProfileMachine?.id).map(({ profile, signInCommand }) => <EntityRow key={profile.id} title={`${profile.name} · ${profile.provider === "claude" ? "Claude Code" : "Codex"}`} detail={`${profile.appManaged ? "App-managed" : "Existing directory"} · ${profile.directory}`}>
+                      {signInCommand && <Button type="button" size="sm" variant="ghost" disabled={isSaving} onClick={() => void navigator.clipboard.writeText(signInCommand).catch((copyError) => setError(errorMessage(copyError)))}>Copy sign-in command</Button>}
+                      <Button type="button" size="sm" variant="outline" disabled={isSaving} onClick={() => void handleDeleteCliProfile(profile.id)}>Delete</Button>
+                    </EntityRow>)}
+                  </EntityList>
+                  {selectedProfileMachine && <form className="grid gap-3 sm:grid-cols-2" onSubmit={(event) => void handleCreateCliProfile(event)}>
+                    <Field label="Provider"><NativeSelect value={cliProfileProvider} onChange={(event) => setCliProfileProvider(event.target.value as "claude" | "codex")} disabled={isSaving}><NativeSelectOption value="claude">Claude Code</NativeSelectOption><NativeSelectOption value="codex">Codex</NativeSelectOption></NativeSelect></Field>
+                    <Field label="Profile name"><Input value={cliProfileName} onChange={(event) => setCliProfileName(event.target.value)} placeholder="Work" disabled={isSaving} /></Field>
+                    <Field label="Directory"><NativeSelect value={cliProfileAppManaged ? "managed" : "existing"} onChange={(event) => setCliProfileAppManaged(event.target.value === "managed")} disabled={isSaving}><NativeSelectOption value="managed">Create an app-managed directory</NativeSelectOption><NativeSelectOption value="existing">Use an existing directory</NativeSelectOption></NativeSelect></Field>
+                    {!cliProfileAppManaged && <Field label="Existing configuration directory"><Input value={cliProfileDirectory} onChange={(event) => setCliProfileDirectory(event.target.value)} placeholder="~/.claude-work" disabled={isSaving} /></Field>}
+                    <div className="sm:col-span-2"><Button type="submit" disabled={isSaving || !cliProfileName.trim() || (!cliProfileAppManaged && !cliProfileDirectory.trim())}>Create profile</Button></div>
+                  </form>}
+                </section>
               </CardContent>
             </Card>
           )}
@@ -1253,9 +1339,9 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                       disabled={isSaving || !selectedContextId}
                     >
                       <NativeSelectOption value="">No Machine configured</NativeSelectOption>
-                      {selectedMachines.map((machine) => (
+                      {machines.map((machine) => (
                         <NativeSelectOption value={machine.id} key={machine.id}>
-                          {machine.name} · {machine.last_observed}
+                          {machine.name} · {contexts.find((context) => context.id === machine.context_id)?.name ?? "Context"} · {machine.last_observed}
                         </NativeSelectOption>
                       ))}
                     </NativeSelect>

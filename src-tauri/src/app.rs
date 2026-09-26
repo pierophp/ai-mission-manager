@@ -456,6 +456,52 @@ pub fn list_machines(state: State<'_, Mutex<Runtime>>) -> Result<Vec<MachineSett
 }
 
 #[tauri::command]
+pub fn list_cli_configuration_profiles(
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Vec<crate::features::structure::CliProfileSettingsView>, String> {
+    crate::features::structure::list_cli_configuration_profiles(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn create_cli_configuration_profile(
+    machine_id: i64,
+    provider: AgentKind,
+    name: String,
+    app_managed: bool,
+    existing_directory: Option<String>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<crate::features::structure::CliProfileSettingsView, String> {
+    crate::features::structure::create_cli_configuration_profile(
+        machine_id,
+        provider,
+        name,
+        app_managed,
+        existing_directory,
+        state,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_context_cli_configuration_profile(
+    context_id: i64,
+    provider: AgentKind,
+    profile_id: Option<i64>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    crate::features::structure::set_context_cli_configuration_profile(
+        context_id, provider, profile_id, state,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_cli_configuration_profile(
+    profile_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    crate::features::structure::delete_cli_configuration_profile(profile_id, state)
+}
+
+#[tauri::command]
 pub fn get_setup_state(state: State<'_, Mutex<Runtime>>) -> Result<SetupState, String> {
     crate::features::setup::get_setup_state(state)
 }

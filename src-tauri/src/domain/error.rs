@@ -154,6 +154,26 @@ pub enum DomainError {
     MachineNameTaken { context_id: i64, name: String },
     #[error("Machine {machine_id} does not exist")]
     MachineNotFound { machine_id: i64 },
+    #[error("CLI configuration profile name cannot be blank")]
+    EmptyCliConfigurationProfileName,
+    #[error("CLI configuration profile directory cannot be blank")]
+    EmptyCliConfigurationProfileDirectory,
+    #[error("Machine {machine_id} does not exist")]
+    CliConfigurationProfileMachineNotFound { machine_id: i64 },
+    #[error("CLI configuration profile {profile_id} does not exist")]
+    CliConfigurationProfileNotFound { profile_id: i64 },
+    #[error("CLI configuration profile {profile_id} belongs to another Machine")]
+    CliConfigurationProfileMachineMismatch { profile_id: i64, machine_id: i64 },
+    #[error("CLI configuration profile {profile_id} is for {profile_provider:?}, not {requested_provider:?}")]
+    CliConfigurationProfileProviderMismatch {
+        profile_id: i64,
+        profile_provider: AgentKind,
+        requested_provider: AgentKind,
+    },
+    #[error("CLI configuration profile is selected by Contexts: {contexts:?}")]
+    CliConfigurationProfileInUse { contexts: Vec<String> },
+    #[error("CLI configuration profile name already exists on Machine {machine_id}: {name}")]
+    CliConfigurationProfileAlreadyExists { machine_id: i64, name: String },
     #[error("Machine {machine_id} belongs to another Context")]
     MachineContextMismatch { machine_id: i64, context_id: i64 },
     #[error("Context {context_id} has no execution Machine configured")]

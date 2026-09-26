@@ -11,6 +11,12 @@ export const structureActions = {
     () => structureAdapter.updateContext(contextId, name),
   setContextExecutionMachine: (contextId: number, machineId: number | null) =>
     () => structureAdapter.setContextExecutionMachine(contextId, machineId),
+  createCliConfigurationProfile: (input: Parameters<typeof structureAdapter.createCliConfigurationProfile>[0]) =>
+    () => structureAdapter.createCliConfigurationProfile(input),
+  setContextCliConfigurationProfile: (contextId: number, provider: Parameters<typeof structureAdapter.setContextCliConfigurationProfile>[1], profileId: number | null) =>
+    () => structureAdapter.setContextCliConfigurationProfile(contextId, provider, profileId),
+  deleteCliConfigurationProfile: (profileId: number) =>
+    () => structureAdapter.deleteCliConfigurationProfile(profileId),
   createProject: (
     name: string,
     contextId: number,

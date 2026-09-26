@@ -50,14 +50,45 @@ impl SqliteStore {
                 Effect::UpdateContext { context } => {
                     transaction.execute(
                         "UPDATE contexts
-                         SET name = ?1, execution_machine_id = ?2, check_dirty_checkouts = ?3
-                         WHERE id = ?4",
+                         SET name = ?1, execution_machine_id = ?2, check_dirty_checkouts = ?3,
+                             claude_profile_id = ?4, codex_profile_id = ?5
+                         WHERE id = ?6",
                         params![
                             context.name,
                             context.execution_machine_id,
                             bool_as_i64(context.check_dirty_checkouts),
+                            context.claude_profile_id,
+                            context.codex_profile_id,
                             context.id
                         ],
+                    )?;
+                }
+                Effect::PersistCliConfigurationProfile {
+                    profile,
+                    next_cli_profile_id,
+                } => {
+                    transaction.execute(
+                        "INSERT INTO cli_configuration_profiles
+                            (id, machine_id, provider, name, directory, app_managed)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            profile.id,
+                            profile.machine_id,
+                            agent_kind_as_str(profile.provider),
+                            profile.name,
+                            profile.directory,
+                            bool_as_i64(profile.app_managed)
+                        ],
+                    )?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_cli_profile_id'",
+                        params![next_cli_profile_id],
+                    )?;
+                }
+                Effect::RemoveCliConfigurationProfile { profile_id } => {
+                    transaction.execute(
+                        "DELETE FROM cli_configuration_profiles WHERE id = ?1",
+                        params![profile_id],
                     )?;
                 }
                 Effect::PersistContextGrillDefaults { context } => {

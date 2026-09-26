@@ -1,5 +1,6 @@
 import type {
   Context,
+  CliProfileSettingsView,
   ContextAttentionDefault,
   Machine,
   MachineDeletionPreview,
@@ -22,6 +23,7 @@ import type {
   GrillAgentCatalog,
   GrillConfiguration,
 } from "../types";
+import type { AgentKind } from "../execution-types";
 import { command } from "./tauri";
 
 export const structureAdapter = {
@@ -30,6 +32,7 @@ export const structureAdapter = {
   listRepositories: () => command<Repository[]>("list_repositories"),
   listRepositoryLocations: () => command<RepositoryLocation[]>("list_repository_locations"),
   listMachines: () => command<Machine[]>("list_machines"),
+  listCliConfigurationProfiles: () => command<CliProfileSettingsView[]>("list_cli_configuration_profiles"),
   listAttentionDefaults: () =>
     command<ContextAttentionDefault[]>("list_context_attention_defaults"),
   listGrillModelCatalog: () =>
@@ -39,6 +42,12 @@ export const structureAdapter = {
     command<Context>("update_context", { contextId, name }),
   setContextExecutionMachine: (contextId: number, machineId: number | null) =>
     command<Context>("set_context_execution_machine", { contextId, machineId }),
+  createCliConfigurationProfile: (input: { machineId: number; provider: AgentKind; name: string; appManaged: boolean; existingDirectory: string | null }) =>
+    command<CliProfileSettingsView>("create_cli_configuration_profile", input),
+  setContextCliConfigurationProfile: (contextId: number, provider: AgentKind, profileId: number | null) =>
+    command<Context>("set_context_cli_configuration_profile", { contextId, provider, profileId }),
+  deleteCliConfigurationProfile: (profileId: number) =>
+    command<void>("delete_cli_configuration_profile", { profileId }),
   createProject: (
     name: string,
     contextId: number,

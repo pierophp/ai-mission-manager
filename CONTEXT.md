@@ -7,7 +7,7 @@ A personal control plane for work that is done by the user, delegated to AI codi
 ### Organising work
 
 **Context**:
-A top-level boundary isolating one area of work, along with its providers, repositories and Machines. A Context may have no execution Machine while being configured; once one is assigned, every Run and Worktree in that Context uses it. An Item belongs to exactly one Context.
+A top-level boundary isolating one area of work, along with its providers and repositories. A Context may have no execution Machine while being configured; once one is assigned, every Run and Worktree in that Context uses it. An Item belongs to exactly one Context.
 _Avoid_: workspace, tenant, account, area
 
 **Project**:
@@ -43,8 +43,12 @@ The external program that owns terminal processes, sessions and Panes and keeps 
 _Avoid_: multiplexer, terminal, tmux
 
 **Machine**:
-An execution target reachable through the Terminal Runtime, whether the local Mac or a remote host.
+An execution target reachable through the Terminal Runtime, whether the local Mac or a remote host. A Machine is registered under one Context and may be assigned as the execution Machine for multiple Contexts.
 _Avoid_: host, server, node
+
+**Agent CLI Configuration Profile**:
+A named configuration directory for Claude Code or Codex on one Machine. Contexts assigned to that Machine can reuse its profiles independently for each provider.
+_Avoid_: Execution Profile, account
 
 **Run**:
 One attempt at doing work on an Item by a single agent, using a Repository checkout configured for the Item's Project, either directly or through one physical Worktree. Runs are historical records while they are retained, but finished Runs may be explicitly deleted as part of local cleanup; an active Run blocks deletion of its Item, Machine, Project, or Context.

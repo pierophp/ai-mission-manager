@@ -297,6 +297,89 @@ fn context_execution_machine_round_trips() {
 }
 
 #[test]
+fn cli_profiles_and_independent_context_selections_round_trip() {
+    let directory = tempdir().expect("temporary directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let mut store = SqliteStore::open(&database).expect("database should open");
+    let state = store.load_state().expect("initial state should load");
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::RegisterMachine {
+            context_id: 1,
+            name: "Build Mac".into(),
+            socket_name: "mission".into(),
+            transport: MachineTransport::Local,
+        },
+    );
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::SetContextExecutionMachine {
+            context_id: 1,
+            machine_id: Some(1),
+        },
+    );
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::CreateCliConfigurationProfile {
+            machine_id: 1,
+            provider: AgentKind::Claude,
+            name: "Personal Claude".into(),
+            directory: "/profiles/claude".into(),
+            app_managed: true,
+        },
+    );
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::CreateCliConfigurationProfile {
+            machine_id: 1,
+            provider: AgentKind::Codex,
+            name: "Work Codex".into(),
+            directory: "/profiles/codex".into(),
+            app_managed: false,
+        },
+    );
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::SetContextCliConfigurationProfile {
+            context_id: 1,
+            provider: AgentKind::Claude,
+            profile_id: Some(1),
+        },
+    );
+    let _state = apply_event(
+        &mut store,
+        state,
+        Event::SetContextCliConfigurationProfile {
+            context_id: 1,
+            provider: AgentKind::Codex,
+            profile_id: Some(2),
+        },
+    );
+
+    let reloaded = SqliteStore::open(&database)
+        .expect("database should reopen")
+        .load_state()
+        .expect("profiles and selections should reload");
+    assert_eq!(reloaded.cli_configuration_profiles.len(), 2);
+    assert_eq!(
+        reloaded.cli_configuration_profiles[0].directory,
+        "/profiles/claude"
+    );
+    assert!(reloaded.cli_configuration_profiles[0].app_managed);
+    assert_eq!(
+        reloaded.cli_configuration_profiles[1].provider,
+        AgentKind::Codex
+    );
+    assert_eq!(reloaded.contexts[0].claude_profile_id, Some(1));
+    assert_eq!(reloaded.contexts[0].codex_profile_id, Some(2));
+}
+
+#[test]
 fn machine_deletion_removes_metadata_but_leaves_checkout_and_worktree_files() {
     let directory = tempdir().expect("temporary directory should exist");
     let database = directory.path().join("mission-manager.sqlite");

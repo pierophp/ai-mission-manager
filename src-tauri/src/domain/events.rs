@@ -12,6 +12,21 @@ pub enum Event {
         context_id: i64,
         machine_id: Option<i64>,
     },
+    CreateCliConfigurationProfile {
+        machine_id: i64,
+        provider: AgentKind,
+        name: String,
+        directory: String,
+        app_managed: bool,
+    },
+    SetContextCliConfigurationProfile {
+        context_id: i64,
+        provider: AgentKind,
+        profile_id: Option<i64>,
+    },
+    DeleteCliConfigurationProfile {
+        profile_id: i64,
+    },
     SetContextDirtyCheckoutCheck {
         context_id: i64,
         enabled: bool,
@@ -349,6 +364,13 @@ pub enum Effect {
     },
     UpdateContext {
         context: Context,
+    },
+    PersistCliConfigurationProfile {
+        profile: CliConfigurationProfile,
+        next_cli_profile_id: i64,
+    },
+    RemoveCliConfigurationProfile {
+        profile_id: i64,
     },
     PersistContextGrillDefaults {
         context: Context,
