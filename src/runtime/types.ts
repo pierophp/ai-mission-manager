@@ -340,13 +340,15 @@ export type ExternalLink = {
   attention_policy: ExternalChangePolicy | null;
   watch_until: string | null;
   review_at: string | null;
-  is_spec: boolean;
+  purpose: LinkPurpose;
   provenance: {
     run_id: number;
     action: GrillContinuationAction;
     discovery: "structured-event" | "output-url";
   } | null;
 };
+
+export type LinkPurpose = "to-spec" | "to-tickets" | "others";
 
 export type ExternalLinkView = {
   link: ExternalLink;

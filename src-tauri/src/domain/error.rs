@@ -272,7 +272,7 @@ pub enum DomainError {
     LinkAlreadyExists,
     #[error("Link {link_id} does not exist")]
     LinkNotFound { link_id: i64 },
-    #[error("Only a GitHub Issue can be marked as a Spec")]
+    #[error("Only a GitHub Issue can have the Spec Link purpose")]
     LinkCannotBeSpec,
     #[error("Reminder {reminder_id} does not exist on Item {item_id}")]
     ReminderNotFound { item_id: i64, reminder_id: i64 },

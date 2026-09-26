@@ -104,8 +104,10 @@ export const workActions = {
     linkId: number,
     policy: Parameters<typeof workAdapter.setLinkAttentionPolicy>[1],
   ) => () => workAdapter.setLinkAttentionPolicy(linkId, policy),
-  setLinkSpec: (linkId: number, isSpec: boolean) =>
-    () => workAdapter.setLinkSpec(linkId, isSpec),
+  setLinkPurpose: (
+    linkId: number,
+    purpose: Parameters<typeof workAdapter.setLinkPurpose>[1],
+  ) => () => workAdapter.setLinkPurpose(linkId, purpose),
   markLinkReviewed: (linkId: number) => () => workAdapter.markLinkReviewed(linkId),
   setLinkWatchUntil: (linkId: number, watchUntil: string | null) =>
     () => workAdapter.setLinkWatchUntil(linkId, watchUntil),

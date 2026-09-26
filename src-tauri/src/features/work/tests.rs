@@ -375,7 +375,7 @@ fn attention_interface_preserves_policy_watch_and_review_watermark() {
 }
 
 #[test]
-fn link_spec_setting_persists_and_round_trips_through_runtime() {
+fn link_purpose_setting_persists_and_round_trips_through_runtime() {
     let directory = tempdir().expect("temporary app directory should exist");
     let database = directory.path().join("mission-manager.sqlite");
     let mut runtime = Runtime::open(&database).expect("runtime should open");
@@ -400,17 +400,24 @@ fn link_spec_setting_persists_and_round_trips_through_runtime() {
     runtime.commit(link).expect("the Link should persist");
 
     let marked = runtime
-        .set_link_spec(1, true)
+        .set_link_purpose(1, crate::domain::LinkPurpose::ToSpec)
         .expect("the Link can be marked as a Spec");
-    assert!(marked.link.is_spec);
+    assert_eq!(marked.link.purpose, crate::domain::LinkPurpose::ToSpec);
     drop(runtime);
 
     let mut reopened = Runtime::open(&database).expect("runtime should reload");
-    assert!(reopened.state.links[0].is_spec);
+    assert_eq!(
+        reopened.state.links[0].purpose,
+        crate::domain::LinkPurpose::ToSpec
+    );
     let unmarked = reopened
-        .set_link_spec(1, false)
-        .expect("the Spec classification can be cleared");
-    assert!(!unmarked.link.is_spec);
+        .set_link_purpose(1, crate::domain::LinkPurpose::ToTickets)
+        .expect("the Link type can change to tickets");
+    assert_eq!(unmarked.link.purpose, crate::domain::LinkPurpose::ToTickets);
+    let other = reopened
+        .set_link_purpose(1, crate::domain::LinkPurpose::Others)
+        .expect("the Link type can change to others");
+    assert_eq!(other.link.purpose, crate::domain::LinkPurpose::Others);
 }
 
 #[test]

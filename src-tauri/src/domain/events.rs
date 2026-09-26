@@ -295,9 +295,9 @@ pub enum Event {
         link_id: i64,
         watch_until: Option<String>,
     },
-    SetLinkSpec {
+    SetLinkPurpose {
         link_id: i64,
-        is_spec: bool,
+        purpose: LinkPurpose,
     },
     SetLinkReviewAt {
         link_id: i64,

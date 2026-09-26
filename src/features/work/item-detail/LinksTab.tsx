@@ -337,9 +337,9 @@ export function LinksTab({
           onPrepareDeleteObject={() =>
             handlePrepareExternalObjectDeletion(externalLink.object.id)
           }
-          onSetSpec={async (isSpec) => {
+          onSetPurpose={async (purpose) => {
             await saveItem(
-              workActions.setLinkSpec(externalLink.link.id, isSpec),
+              workActions.setLinkPurpose(externalLink.link.id, purpose),
             );
           }}
           onSavePolicy={async (policy) => {

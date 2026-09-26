@@ -2832,14 +2832,14 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::PersistLinkState { link }],
             })
         }
-        Event::SetLinkSpec { link_id, is_spec } => {
+        Event::SetLinkPurpose { link_id, purpose } => {
             let external_object_id = state
                 .links
                 .iter()
                 .find(|link| link.id == link_id)
                 .map(|link| link.external_object_id)
                 .ok_or(DomainError::LinkNotFound { link_id })?;
-            if is_spec {
+            if purpose == LinkPurpose::ToSpec {
                 let object = state
                     .external_objects
                     .iter()
@@ -2856,7 +2856,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .iter_mut()
                 .find(|link| link.id == link_id)
                 .ok_or(DomainError::LinkNotFound { link_id })?;
-            link.is_spec = is_spec;
+            link.purpose = purpose;
             let link = link.clone();
 
             Ok(Decision {

@@ -34,9 +34,10 @@ use crate::{
         ExternalChangePolicy, ExternalLinkView, ExternalObjectInput, ExternalObjectKind,
         ExternalProvider, ExternalSnapshot, GrillAnswer, GrillConfiguration,
         GrillContinuationAction, GrillPhase, HomeView, Item, ItemRelation, ItemRelationKind,
-        ItemStatus, ItemView, Machine, MachineObservation, MachineTransport, Project, Repository,
-        RepositoryLocation, Run, RunCheckout, RunPaneStatus, RunPromptSelection, RunState,
-        RunSuggestion, Workspace, WorkspaceRepository, WorkspaceRepositoryInput, Worktree,
+        ItemStatus, ItemView, LinkPurpose, Machine, MachineObservation, MachineTransport, Project,
+        Repository, RepositoryLocation, Run, RunCheckout, RunPaneStatus, RunPromptSelection,
+        RunState, RunSuggestion, Workspace, WorkspaceRepository, WorkspaceRepositoryInput,
+        Worktree,
     },
     git::GitCli,
     provider::{
@@ -257,12 +258,12 @@ pub(crate) fn set_link_attention_policy(
     })
 }
 
-pub(crate) fn set_link_spec(
+pub(crate) fn set_link_purpose(
     link_id: i64,
-    is_spec: bool,
+    purpose: LinkPurpose,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkView, String> {
-    locked(state, |runtime| runtime.set_link_spec(link_id, is_spec))
+    locked(state, |runtime| runtime.set_link_purpose(link_id, purpose))
 }
 
 pub(crate) fn set_link_watch_until(

@@ -480,7 +480,7 @@ impl SqliteStore {
                         link_attention_state.watch_until,
                         link_attention_state.review_at,
                         link_attention_state.provenance_json,
-                        external_links.is_spec
+                        external_links.purpose
                  FROM external_links
                  LEFT JOIN link_attention_state
                    ON link_attention_state.link_id = external_links.id
@@ -491,6 +491,7 @@ impl SqliteStore {
                 let state_attention: Option<i64> = row.get(5)?;
                 let metadata_attention: Option<i64> = row.get(6)?;
                 let provenance_json: Option<String> = row.get(9)?;
+                let purpose: String = row.get(10)?;
                 let attention_policy = match (title_attention, state_attention, metadata_attention)
                 {
                     (Some(title), Some(state), Some(metadata)) => Some(ExternalChangePolicy {
@@ -518,7 +519,13 @@ impl SqliteStore {
                     attention_policy,
                     watch_until: row.get(7)?,
                     review_at: row.get(8)?,
-                    is_spec: row.get::<_, i64>(10)? != 0,
+                    purpose: parse_link_purpose(&purpose).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            10,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
                     provenance,
                 })
             })?;

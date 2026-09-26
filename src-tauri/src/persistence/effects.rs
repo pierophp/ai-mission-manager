@@ -903,13 +903,13 @@ impl SqliteStore {
                 }
                 Effect::PersistLink { link, next_link_id } => {
                     transaction.execute(
-                        "INSERT INTO external_links (id, item_id, external_object_id, is_spec)
+                        "INSERT INTO external_links (id, item_id, external_object_id, purpose)
                          VALUES (?1, ?2, ?3, ?4)",
                         params![
                             link.id,
                             link.item_id,
                             link.external_object_id,
-                            bool_as_i64(link.is_spec)
+                            link_purpose_as_str(link.purpose)
                         ],
                     )?;
                     persist_link_state(&transaction, link)?;
@@ -1000,8 +1000,8 @@ fn persist_link_state(
     link: &Link,
 ) -> Result<(), rusqlite::Error> {
     transaction.execute(
-        "UPDATE external_links SET is_spec = ?1 WHERE id = ?2",
-        params![bool_as_i64(link.is_spec), link.id],
+        "UPDATE external_links SET purpose = ?1 WHERE id = ?2",
+        params![link_purpose_as_str(link.purpose), link.id],
     )?;
     let (title_attention, state_attention, metadata_attention) = link
         .attention_policy
