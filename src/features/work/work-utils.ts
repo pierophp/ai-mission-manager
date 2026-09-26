@@ -105,3 +105,30 @@ export function paneTabForRun(run: Run): PaneTab {
 export function uniqueItems(items: ItemView[]): ItemView[] {
   return Array.from(new Map(items.map((item) => [item.item.id, item])).values());
 }
+
+export function orderHomeColumnItems(
+  items: ItemView[],
+  savedItemIds: number[],
+): ItemView[] {
+  const byId = new Map(items.map((view) => [view.item.id, view]));
+  const savedIds = [...new Set(savedItemIds)].filter((id) => byId.has(id));
+  const savedIdSet = new Set(savedIds);
+  const newItems = items
+    .filter((view) => !savedIdSet.has(view.item.id))
+    .sort((left, right) => right.item.id - left.item.id);
+
+  return [...newItems, ...savedIds.flatMap((id) => {
+    const item = byId.get(id);
+    return item ? [item] : [];
+  })];
+}
+
+export function parseHomeColumnOrder(value: string | null): number[] {
+  if (!value) return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return Array.isArray(parsed) && parsed.every(Number.isSafeInteger) ? parsed : [];
+  } catch {
+    return [];
+  }
+}

@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useState } from "react";
+import { type DragEvent, type FormEvent, useEffect, useMemo, useState } from "react";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -27,22 +27,73 @@ import type {
 import { ItemCard } from "./item-card";
 import type { ItemForm } from "./item-signals";
 import { displayItemIdentifier } from "./item-signals";
-import { externalObjectKindLabel, formatSnapshotAge } from "./work-utils";
+import {
+  externalObjectKindLabel,
+  formatSnapshotAge,
+  orderHomeColumnItems,
+  parseHomeColumnOrder,
+} from "./work-utils";
 import { useWorkCommand, workActions } from "./work-mutations";
 
 export function HomeColumn({
   title,
   hint,
   items,
+  orderKey,
   onOpenItem,
   onChanged,
 }: {
   title: string;
   hint: string;
   items: ItemView[];
+  orderKey: string;
   onOpenItem: (itemId: number, form?: ItemForm) => void;
   onChanged: () => Promise<void>;
 }) {
+  const [savedItemIds, setSavedItemIds] = useState<number[]>(() => {
+    try {
+      return parseHomeColumnOrder(window.localStorage.getItem(orderKey));
+    } catch {
+      return [];
+    }
+  });
+  const orderedItems = useMemo(
+    () => orderHomeColumnItems(items, savedItemIds),
+    [items, savedItemIds],
+  );
+
+  useEffect(() => {
+    try {
+      const nextSavedIds = parseHomeColumnOrder(window.localStorage.getItem(orderKey));
+      const orderedIds = orderHomeColumnItems(items, nextSavedIds).map((view) => view.item.id);
+      setSavedItemIds(orderedIds);
+      window.localStorage.setItem(orderKey, JSON.stringify(orderedIds));
+    } catch {
+      // Keep the newest-first in-memory order if local storage is unavailable.
+    }
+  }, [items, orderKey]);
+
+  function moveItem(draggedItemId: number, targetItemId: number) {
+    const nextItemIds = orderedItems.map((view) => view.item.id);
+    const fromIndex = nextItemIds.indexOf(draggedItemId);
+    const targetIndex = nextItemIds.indexOf(targetItemId);
+    if (fromIndex === -1 || targetIndex === -1 || fromIndex === targetIndex) return;
+    nextItemIds.splice(fromIndex, 1);
+    nextItemIds.splice(targetIndex, 0, draggedItemId);
+    setSavedItemIds(nextItemIds);
+    try {
+      window.localStorage.setItem(orderKey, JSON.stringify(nextItemIds));
+    } catch {
+      // The cards stay in the requested order until the view is reloaded.
+    }
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>, targetItemId: number) {
+    event.preventDefault();
+    const draggedItemId = Number(event.dataTransfer.getData("text/plain"));
+    if (Number.isFinite(draggedItemId)) moveItem(draggedItemId, targetItemId);
+  }
+
   return (
     <section className="min-w-0 space-y-3" aria-labelledby={`${title}-heading`}>
       <div className="flex items-start justify-between gap-3">
@@ -57,19 +108,31 @@ export function HomeColumn({
         </div>
         <Badge variant="secondary">{items.length}</Badge>
       </div>
+      <p className="sr-only">Drag cards to change their order.</p>
       {items.length === 0 ? (
         <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
           Nothing here.
         </p>
       ) : (
-        <div className="grid gap-3">
-          {items.map((view) => (
-            <ItemCard
+        <div className="grid gap-3" role="list">
+          {orderedItems.map((view) => (
+            <div
               key={view.item.id}
-              view={view}
-              onOpen={(form) => onOpenItem(view.item.id, form)}
-              onChanged={onChanged}
-            />
+              role="listitem"
+              draggable
+              onDragStart={(event) => event.dataTransfer.setData("text/plain", String(view.item.id))}
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => handleDrop(event, view.item.id)}
+              className="cursor-grab active:cursor-grabbing"
+              aria-label={`Reorder ${view.item.title}`}
+              title="Drag to reorder"
+            >
+              <ItemCard
+                view={view}
+                onOpen={(form) => onOpenItem(view.item.id, form)}
+                onChanged={onChanged}
+              />
+            </div>
           ))}
         </div>
       )}

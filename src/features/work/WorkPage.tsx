@@ -546,6 +546,7 @@ export function WorkPage() {
                 title="Needs Attention"
                 hint="Unstarted or due"
                 items={home.needs_attention}
+                orderKey={`home-item-order:${contextFilterId ?? "all"}:needs-attention`}
                 onOpenItem={openItem}
                 onChanged={refreshWork}
               />
@@ -553,6 +554,7 @@ export function WorkPage() {
                 title="Running"
                 hint="Active"
                 items={home.running}
+                orderKey={`home-item-order:${contextFilterId ?? "all"}:running`}
                 onOpenItem={openItem}
                 onChanged={refreshWork}
               />
@@ -560,6 +562,7 @@ export function WorkPage() {
                 title="Waiting"
                 hint="Waiting"
                 items={home.waiting}
+                orderKey={`home-item-order:${contextFilterId ?? "all"}:waiting`}
                 onOpenItem={openItem}
                 onChanged={refreshWork}
               />
@@ -567,6 +570,7 @@ export function WorkPage() {
                 title="Due"
                 hint="Reminder reached"
                 items={home.due}
+                orderKey={`home-item-order:${contextFilterId ?? "all"}:due`}
                 onOpenItem={openItem}
                 onChanged={refreshWork}
               />
@@ -574,6 +578,7 @@ export function WorkPage() {
                 title="Completed"
                 hint="Done"
                 items={home.completed}
+                orderKey={`home-item-order:${contextFilterId ?? "all"}:completed`}
                 onOpenItem={openItem}
                 onChanged={refreshWork}
               />
