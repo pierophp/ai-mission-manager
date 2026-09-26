@@ -102,6 +102,25 @@ impl Runtime {
             .ok_or_else(|| "Link policy update produced no External Object".to_owned())
     }
 
+    pub(crate) fn set_link_spec(
+        &mut self,
+        link_id: i64,
+        is_spec: bool,
+    ) -> Result<ExternalLinkView, String> {
+        let decision = decide(self.state.clone(), Event::SetLinkSpec { link_id, is_spec })
+            .map_err(|error| error.to_string())?;
+        let link = decision
+            .state
+            .links
+            .iter()
+            .find(|link| link.id == link_id)
+            .cloned()
+            .ok_or_else(|| "Link Spec update produced no Link".to_owned())?;
+        self.commit(decision)?;
+        external_link_view(&self.state, &link)
+            .ok_or_else(|| "Link Spec update produced no External Object".to_owned())
+    }
+
     pub(crate) fn set_link_schedule(
         &mut self,
         event: Event,

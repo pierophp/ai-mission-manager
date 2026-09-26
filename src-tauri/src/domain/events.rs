@@ -295,6 +295,10 @@ pub enum Event {
         link_id: i64,
         watch_until: Option<String>,
     },
+    SetLinkSpec {
+        link_id: i64,
+        is_spec: bool,
+    },
     SetLinkReviewAt {
         link_id: i64,
         review_at: Option<String>,

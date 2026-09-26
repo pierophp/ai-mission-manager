@@ -265,6 +265,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              id INTEGER PRIMARY KEY NOT NULL,
              item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
              external_object_id INTEGER NOT NULL REFERENCES external_objects(id) ON DELETE CASCADE,
+             is_spec INTEGER NOT NULL DEFAULT 0,
              UNIQUE (item_id, external_object_id)
          );
          CREATE TABLE IF NOT EXISTS external_snapshots (
@@ -312,6 +313,28 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
          CREATE INDEX IF NOT EXISTS audit_entries_by_recorded_at
              ON audit_entries (recorded_at, id);",
     )?;
+
+    let external_link_columns = table_columns(connection, "external_links")?;
+    if !external_link_columns
+        .iter()
+        .any(|column| column == "is_spec")
+    {
+        connection.execute(
+            "ALTER TABLE external_links ADD COLUMN is_spec INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        connection.execute(
+            "UPDATE external_links
+             SET is_spec = 1
+             WHERE EXISTS (
+                 SELECT 1
+                 FROM link_attention_state
+                 WHERE link_attention_state.link_id = external_links.id
+                   AND json_extract(link_attention_state.provenance_json, '$.action') = 'to-spec'
+             )",
+            [],
+        )?;
+    }
 
     let context_columns = table_columns(connection, "contexts")?;
     if !context_columns

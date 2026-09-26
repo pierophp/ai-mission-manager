@@ -105,14 +105,14 @@ export function nextGrillAction(
 }
 
 /**
- * The Item's specs: GitHub Issues a Grill's to-spec step created, newest
- * first. A spec linked by hand has no provenance and is not recognised.
+ * The Item's Specs: GitHub Issues explicitly marked on their Link, newest
+ * first.
  */
 export function itemSpecs(view: ItemView): ExternalLinkView[] {
   return view.links
     .filter(
       (link) =>
-        link.link.provenance?.action === "to-spec" &&
+        link.link.is_spec &&
         link.object.provider === "github" &&
         link.object.kind === "issue",
     )

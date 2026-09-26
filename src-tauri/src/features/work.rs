@@ -257,6 +257,14 @@ pub(crate) fn set_link_attention_policy(
     })
 }
 
+pub(crate) fn set_link_spec(
+    link_id: i64,
+    is_spec: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ExternalLinkView, String> {
+    locked(state, |runtime| runtime.set_link_spec(link_id, is_spec))
+}
+
 pub(crate) fn set_link_watch_until(
     link_id: i64,
     watch_until: Option<String>,

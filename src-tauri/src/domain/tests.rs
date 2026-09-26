@@ -86,6 +86,7 @@ mod implementation_queue_tests {
                 attention_policy: None,
                 watch_until: None,
                 review_at: None,
+                is_spec: false,
                 provenance: None,
             }],
             snapshots: vec![],
@@ -2119,6 +2120,13 @@ mod grill_contract_tests {
         assert_eq!(
             item.links
                 .iter()
+                .map(|link| link.link.is_spec)
+                .collect::<Vec<_>>(),
+            vec![true, false]
+        );
+        assert_eq!(
+            item.links
+                .iter()
                 .map(|link| link
                     .link
                     .provenance
@@ -2218,6 +2226,96 @@ https://example.com/unrelated"#,
         assert_eq!(fallback.len(), 1);
         assert_eq!(fallback[0].url, "https://github.com/acme/app/issues/8");
         assert_eq!(fallback[0].discovery, DownstreamIssueDiscovery::OutputUrl);
+    }
+
+    #[test]
+    fn downstream_issue_discovery_keeps_structured_provenance_with_a_transcript_bullet() {
+        let candidates = discover_downstream_issue_candidates(
+            "• AI_MISSION_MANAGER_EVENT {\"event\":\"github.issue.created\",\"url\":\"https://github.com/acme/app/issues/92\",\"run_id\":18,\"action\":\"to-spec\"}\nhttps://github.com/acme/app/issues/92",
+        );
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].discovery,
+            DownstreamIssueDiscovery::StructuredEvent
+        );
+        assert_eq!(candidates[0].run_id, Some(18));
+        assert_eq!(candidates[0].action, Some(GrillContinuationAction::ToSpec));
+    }
+
+    #[test]
+    fn setting_a_link_as_spec_updates_the_item_link() {
+        let mut initial_state = state();
+        initial_state.external_objects.push(ExternalObject {
+            id: 1,
+            provider: ExternalProvider::GitHub,
+            kind: ExternalObjectKind::Issue,
+            external_key: "acme/app#92".into(),
+            canonical_url: "https://github.com/acme/app/issues/92".into(),
+        });
+        initial_state.links.push(Link {
+            id: 1,
+            item_id: 1,
+            external_object_id: 1,
+            reviewed_activity_id: 0,
+            attention_policy: None,
+            watch_until: None,
+            review_at: None,
+            is_spec: false,
+            provenance: None,
+        });
+        let marked = decide(
+            initial_state,
+            Event::SetLinkSpec {
+                link_id: 1,
+                is_spec: true,
+            },
+        )
+        .expect("an Item's linked GitHub Issue can be marked as a Spec");
+        assert!(marked.state.links[0].is_spec);
+
+        let unmarked = decide(
+            marked.state,
+            Event::SetLinkSpec {
+                link_id: 1,
+                is_spec: false,
+            },
+        )
+        .expect("the Spec classification can be cleared");
+        assert!(!unmarked.state.links[0].is_spec);
+    }
+
+    #[test]
+    fn only_a_github_issue_can_be_marked_as_spec() {
+        let mut initial_state = state();
+        initial_state.external_objects.push(ExternalObject {
+            id: 1,
+            provider: ExternalProvider::GitHub,
+            kind: ExternalObjectKind::PullRequest,
+            external_key: "acme/app#92".into(),
+            canonical_url: "https://github.com/acme/app/pull/92".into(),
+        });
+        initial_state.links.push(Link {
+            id: 1,
+            item_id: 1,
+            external_object_id: 1,
+            reviewed_activity_id: 0,
+            attention_policy: None,
+            watch_until: None,
+            review_at: None,
+            is_spec: false,
+            provenance: None,
+        });
+
+        let error = decide(
+            initial_state,
+            Event::SetLinkSpec {
+                link_id: 1,
+                is_spec: true,
+            },
+        )
+        .expect_err("a pull request cannot be an Issue Spec");
+        assert_eq!(error, DomainError::LinkCannotBeSpec);
     }
 
     fn waiting_for_answers_state() -> DomainState {
@@ -2412,6 +2510,7 @@ https://example.com/unrelated"#,
             },
         )
         .expect("the spec Issue should be captured");
+        assert!(captured.state.links[0].is_spec);
 
         let prompt = compose_grill_continuation_prompt(
             &captured.state,

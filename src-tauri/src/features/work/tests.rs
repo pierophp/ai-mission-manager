@@ -375,6 +375,45 @@ fn attention_interface_preserves_policy_watch_and_review_watermark() {
 }
 
 #[test]
+fn link_spec_setting_persists_and_round_trips_through_runtime() {
+    let directory = tempdir().expect("temporary app directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let mut runtime = Runtime::open(&database).expect("runtime should open");
+    runtime
+        .create_item("Capture a Spec link".into(), 1, 1)
+        .expect("the Item should be created");
+
+    let link = decide(
+        runtime.state.clone(),
+        Event::LinkExternalObject {
+            item_id: 1,
+            object: ExternalObjectInput {
+                provider: ExternalProvider::GitHub,
+                kind: ExternalObjectKind::Issue,
+                external_key: "acme/app#92".into(),
+                canonical_url: "https://github.com/acme/app/issues/92".into(),
+            },
+            snapshot: None,
+        },
+    )
+    .expect("the GitHub Issue should be linkable");
+    runtime.commit(link).expect("the Link should persist");
+
+    let marked = runtime
+        .set_link_spec(1, true)
+        .expect("the Link can be marked as a Spec");
+    assert!(marked.link.is_spec);
+    drop(runtime);
+
+    let mut reopened = Runtime::open(&database).expect("runtime should reload");
+    assert!(reopened.state.links[0].is_spec);
+    let unmarked = reopened
+        .set_link_spec(1, false)
+        .expect("the Spec classification can be cleared");
+    assert!(!unmarked.link.is_spec);
+}
+
+#[test]
 fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
     let directory = tempdir().expect("temporary app directory should exist");
     let database = directory.path().join("mission-manager.sqlite");

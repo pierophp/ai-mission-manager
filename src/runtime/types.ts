@@ -340,6 +340,7 @@ export type ExternalLink = {
   attention_policy: ExternalChangePolicy | null;
   watch_until: string | null;
   review_at: string | null;
+  is_spec: boolean;
   provenance: {
     run_id: number;
     action: GrillContinuationAction;

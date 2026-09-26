@@ -1322,6 +1322,15 @@ pub fn set_link_attention_policy(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn set_link_spec(
+    link_id: i64,
+    is_spec: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<ExternalLinkView, String> {
+    crate::features::work::set_link_spec(link_id, is_spec, state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn set_link_watch_until(
     link_id: i64,
     watch_until: Option<String>,

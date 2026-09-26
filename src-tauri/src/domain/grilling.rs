@@ -138,7 +138,7 @@ pub fn discover_downstream_issue_candidates(output: &str) -> Vec<DownstreamIssue
     let structured = output
         .lines()
         .filter_map(|line| {
-            let trimmed = line.trim();
+            let trimmed = strip_transcript_list_marker(line.trim());
             let json = trimmed
                 .strip_prefix(DOWNSTREAM_EVENT_PREFIX)
                 .or_else(|| trimmed.starts_with('{').then_some(trimmed))?;
@@ -186,6 +186,17 @@ pub fn discover_downstream_issue_candidates(output: &str) -> Vec<DownstreamIssue
         })
     });
     unique_issue_candidates(structured.into_iter().chain(urls).collect())
+}
+
+fn strip_transcript_list_marker(line: &str) -> &str {
+    for marker in ["•", "-", "*", "+"] {
+        if let Some(rest) = line.strip_prefix(marker) {
+            if rest.starts_with(char::is_whitespace) {
+                return rest.trim_start();
+            }
+        }
+    }
+    line
 }
 
 /// Clock skew allowed between this Mac and GitHub when comparing an Issue's

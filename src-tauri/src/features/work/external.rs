@@ -362,6 +362,7 @@ exit 1
             attention_policy: None,
             watch_until: None,
             review_at: None,
+            is_spec: false,
             provenance: None,
         });
         let current = ExternalSnapshot {

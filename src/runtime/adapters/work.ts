@@ -304,6 +304,8 @@ export const workAdapter = {
     linkId: number,
     policy: ExternalLinkView["link"]["attention_policy"],
   ) => command<ExternalLinkView>("set_link_attention_policy", { linkId, policy }),
+  setLinkSpec: (linkId: number, isSpec: boolean) =>
+    command<ExternalLinkView>("set_link_spec", { linkId, isSpec }),
   markLinkReviewed: (linkId: number) =>
     command<ExternalLinkView>("mark_link_reviewed", { linkId }),
   setLinkWatchUntil: (linkId: number, watchUntil: string | null) =>

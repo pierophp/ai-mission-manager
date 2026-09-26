@@ -537,6 +537,8 @@ pub struct Link {
     pub watch_until: Option<String>,
     pub review_at: Option<String>,
     #[serde(default)]
+    pub is_spec: bool,
+    #[serde(default)]
     pub provenance: Option<LinkProvenance>,
 }
 

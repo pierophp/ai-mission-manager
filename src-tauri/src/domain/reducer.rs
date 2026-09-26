@@ -2832,6 +2832,38 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::PersistLinkState { link }],
             })
         }
+        Event::SetLinkSpec { link_id, is_spec } => {
+            let external_object_id = state
+                .links
+                .iter()
+                .find(|link| link.id == link_id)
+                .map(|link| link.external_object_id)
+                .ok_or(DomainError::LinkNotFound { link_id })?;
+            if is_spec {
+                let object = state
+                    .external_objects
+                    .iter()
+                    .find(|object| object.id == external_object_id)
+                    .ok_or(DomainError::ExternalObjectNotFound { external_object_id })?;
+                if object.provider != ExternalProvider::GitHub
+                    || object.kind != ExternalObjectKind::Issue
+                {
+                    return Err(DomainError::LinkCannotBeSpec);
+                }
+            }
+            let link = state
+                .links
+                .iter_mut()
+                .find(|link| link.id == link_id)
+                .ok_or(DomainError::LinkNotFound { link_id })?;
+            link.is_spec = is_spec;
+            let link = link.clone();
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistLinkState { link }],
+            })
+        }
         Event::SetLinkReviewAt { link_id, review_at } => {
             let link = state
                 .links

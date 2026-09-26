@@ -80,6 +80,70 @@ fn implementation_queue_and_first_run_link_round_trip() {
 }
 
 #[test]
+fn schema_upgrade_backfills_spec_classification_from_link_provenance() {
+    let directory = tempdir().expect("temporary directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let store = SqliteStore::open(&database).expect("database should open");
+    store
+        .connection
+        .execute(
+            "INSERT INTO items (id, human_identifier, title, project_id, status, notes)
+             VALUES (1, 'MC-1', 'Spec migration', 1, 'Inbox', '')",
+            [],
+        )
+        .expect("fixture Item should be inserted");
+    for (id, key, number, action) in [
+        (1, "acme/app#92", 92, "to-spec"),
+        (2, "acme/app#93", 93, "to-tickets"),
+    ] {
+        store
+            .connection
+            .execute(
+                "INSERT INTO external_objects (id, provider, kind, external_key, canonical_url)
+                 VALUES (?1, 'github', 'issue', ?2, ?3)",
+                rusqlite::params![
+                    id,
+                    key,
+                    format!("https://github.com/acme/app/issues/{number}")
+                ],
+            )
+            .expect("fixture External Object should be inserted");
+        store
+            .connection
+            .execute(
+                "INSERT INTO external_links (id, item_id, external_object_id) VALUES (?1, 1, ?2)",
+                rusqlite::params![id, id],
+            )
+            .expect("fixture Link should be inserted");
+        store
+            .connection
+            .execute(
+                "INSERT INTO link_attention_state (link_id, provenance_json)
+                 VALUES (?1, ?2)",
+                rusqlite::params![
+                    id,
+                    format!(r#"{{"run_id":18,"action":"{action}","discovery":"output-url"}}"#)
+                ],
+            )
+            .expect("fixture Link provenance should be inserted");
+    }
+    drop(store);
+
+    let connection = Connection::open(&database).expect("database should reopen directly");
+    connection
+        .execute("ALTER TABLE external_links DROP COLUMN is_spec", [])
+        .expect("legacy Link schema should be restored");
+    drop(connection);
+
+    let reloaded = SqliteStore::open(&database)
+        .expect("the schema should migrate")
+        .load_state()
+        .expect("the migrated Links should load");
+    assert!(reloaded.links[0].is_spec);
+    assert!(!reloaded.links[1].is_spec);
+}
+
+#[test]
 fn deleted_personal_context_stays_deleted_after_reopen() {
     let directory = tempdir().expect("temporary directory should exist");
     let database = directory.path().join("mission-manager.sqlite");

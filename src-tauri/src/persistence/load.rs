@@ -479,7 +479,8 @@ impl SqliteStore {
                         link_attention_state.metadata_attention,
                         link_attention_state.watch_until,
                         link_attention_state.review_at,
-                        link_attention_state.provenance_json
+                        link_attention_state.provenance_json,
+                        external_links.is_spec
                  FROM external_links
                  LEFT JOIN link_attention_state
                    ON link_attention_state.link_id = external_links.id
@@ -517,6 +518,7 @@ impl SqliteStore {
                     attention_policy,
                     watch_until: row.get(7)?,
                     review_at: row.get(8)?,
+                    is_spec: row.get::<_, i64>(10)? != 0,
                     provenance,
                 })
             })?;
