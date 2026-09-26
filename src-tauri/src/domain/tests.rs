@@ -1771,17 +1771,32 @@ mod grill_contract_tests {
     }
 
     #[test]
-    fn an_item_cannot_start_a_second_active_grill_run() {
+    fn an_item_can_start_a_second_active_grill_run() {
         let configuration = GrillConfiguration::default();
         let first = decide(state(), start_event(configuration.clone()))
             .expect("the first Grill should start");
-        let error = decide(first.state, start_event(configuration))
-            .expect_err("a second active Grill must be rejected");
+        let mut second_event = start_event(configuration);
+        if let Event::StartGrillRun {
+            session_name,
+            pane_id,
+            started_at,
+            ..
+        } = &mut second_event
+        {
+            *session_name = "mission-item-1-run-2".into();
+            *pane_id = "%2".into();
+            *started_at = 124;
+        }
 
-        assert!(matches!(
-            error,
-            DomainError::ActiveGrillRun { item_id: 1, .. }
-        ));
+        let second = decide(first.state, second_event)
+            .expect("another Grill can start while the first is active");
+
+        assert_eq!(second.state.runs.len(), 2);
+        assert!(second
+            .state
+            .runs
+            .iter()
+            .all(|run| run.execution_profile == ExecutionProfile::Grill));
     }
 
     #[test]
@@ -2212,7 +2227,7 @@ mod grill_contract_tests {
     }
 
     #[test]
-    fn a_completed_grill_stays_active_until_the_user_finishes_it() {
+    fn a_completed_grill_can_coexist_with_a_new_grill_until_finished() {
         let started = decide(state(), start_event(GrillConfiguration::default()))
             .expect("the Grill should start");
         let awaiting = decide(
@@ -2229,12 +2244,22 @@ mod grill_contract_tests {
             awaiting.state.runs[0].grill_phase,
             Some(GrillPhase::AwaitingNextAction)
         );
-        let error = decide(awaiting.state, start_event(GrillConfiguration::default()))
-            .expect_err("an awaiting Grill still occupies the Item");
-        assert!(matches!(
-            error,
-            DomainError::ActiveGrillRun { item_id: 1, .. }
-        ));
+        let mut second_event = start_event(GrillConfiguration::default());
+        if let Event::StartGrillRun {
+            session_name,
+            pane_id,
+            started_at,
+            ..
+        } = &mut second_event
+        {
+            *session_name = "mission-item-1-run-2".into();
+            *pane_id = "%2".into();
+            *started_at = 124;
+        }
+        let second = decide(awaiting.state, second_event)
+            .expect("another Grill can start while this one awaits its next action");
+
+        assert_eq!(second.state.runs.len(), 2);
     }
 
     #[test]

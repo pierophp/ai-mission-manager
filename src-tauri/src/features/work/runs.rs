@@ -2622,7 +2622,7 @@ enum RunLaunchInput {
         machine_id: Option<i64>,
         primary_repository_id: i64,
         configuration: GrillConfiguration,
-        initial_prompt: String,
+        prompt: String,
         expected_checkouts: Vec<RunCheckout>,
         allow_dirty: bool,
         allow_shared_checkouts: bool,
@@ -3196,17 +3196,10 @@ fn run_launch_snapshot(
     );
     let gate_channel = format!("mission-launch-{run_id}-{session_name}");
     let prompt = match &input {
-        RunLaunchInput::Grill {
-            configuration,
-            initial_prompt,
-            ..
-        } => build_grill_prompt(
-            &runtime.state,
-            input.item_id(),
-            configuration,
-            initial_prompt,
-        )
-        .map_err(|error| error.to_string())?,
+        RunLaunchInput::Grill { prompt, .. } => {
+            crate::domain::clean_name(prompt.clone(), crate::domain::DomainError::EmptyRunPrompt)
+                .map_err(|error| error.to_string())?
+        }
         RunLaunchInput::Direct {
             implementation_queue: Some(queue),
             ..
@@ -3609,7 +3602,7 @@ pub(crate) async fn start_grill_run_with_state(
     machine_id: Option<i64>,
     primary_repository_id: i64,
     configuration: GrillConfiguration,
-    initial_prompt: String,
+    prompt: String,
     expected_checkouts: Vec<RunCheckout>,
     allow_dirty: bool,
     allow_shared_checkouts: bool,
@@ -3622,7 +3615,7 @@ pub(crate) async fn start_grill_run_with_state(
             machine_id,
             primary_repository_id,
             configuration,
-            initial_prompt,
+            prompt,
             expected_checkouts,
             allow_dirty,
             allow_shared_checkouts,

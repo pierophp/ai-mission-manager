@@ -59,7 +59,7 @@ A single terminal owned by the Terminal Runtime. A Pane running an agent is what
 _Avoid_: terminal, tab, window
 
 **Execution Profile**:
-The kind of instruction prepared for an agent when a Run starts — investigate, implement, review, or a custom prompt.
+The kind of instruction prepared for an agent when a Run starts — investigate, implement, review, grill, or a custom prompt.
 _Avoid_: mode, template, preset
 
 **Implementation Queue**:

@@ -1331,6 +1331,7 @@ fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
         include_notes: false,
         external_object_ids: Vec::new(),
     };
+    let edited_grill_prompt = "Edited composed Grill prompt\nUse the revised assumptions.";
 
     for flow in [Flow::Direct, Flow::Grill, Flow::Worktree] {
         let directory = tempdir().expect("temporary app directory should exist");
@@ -1385,7 +1386,7 @@ fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
                             model: "claude-sonnet-4-5".into(),
                             effort: "high".into(),
                         },
-                        "Check the launch flow".into(),
+                        edited_grill_prompt.into(),
                         vec![expected_checkout.clone()],
                         false,
                         false,
@@ -1411,6 +1412,9 @@ fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
         .unwrap_or_else(|error| panic!("flow={flow:?}: {error}"));
 
         assert_eq!(state.lock().unwrap().state.runs[0].id, run.id);
+        if matches!(flow, Flow::Grill) {
+            assert_eq!(run.prompt, edited_grill_prompt);
+        }
         match flow {
             Flow::Direct | Flow::Grill => {
                 assert!(checkout.join(".fake-terminal-launch-dirt").exists());

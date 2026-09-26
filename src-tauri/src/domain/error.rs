@@ -223,8 +223,6 @@ pub enum DomainError {
         model: String,
         effort: String,
     },
-    #[error("Item {item_id} already has an active Grill Run {run_id}")]
-    ActiveGrillRun { item_id: i64, run_id: i64 },
     #[error("a Grill skill snapshot cannot be blank")]
     EmptyGrillSkillSnapshot,
     #[error("a Grill answer cannot be blank")]

@@ -12,13 +12,7 @@ export const itemDetailTabs = [
 export type ItemDetailTab = (typeof itemDetailTabs)[number];
 
 /** Forms an Item action opens inside the Item detail panel. */
-export type ItemForm =
-  | "grill"
-  | "direct-run"
-  | "rename"
-  | "reminder"
-  | "link"
-  | "issue";
+export type ItemForm = "run" | "rename" | "reminder" | "link" | "issue";
 
 /**
  * A request to open a form, carried to the panel once. The nonce lets the same
@@ -27,7 +21,7 @@ export type ItemForm =
 export type ItemIntent = { itemId: number; form: ItemForm; nonce: number };
 
 export function tabForForm(form: ItemForm): ItemDetailTab | undefined {
-  if (form === "grill" || form === "direct-run") return "runs";
+  if (form === "run") return "runs";
   if (form === "reminder") return "overview";
   if (form === "link" || form === "issue") return "links";
   return undefined;

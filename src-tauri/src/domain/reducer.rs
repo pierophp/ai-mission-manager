@@ -2115,16 +2115,6 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 });
             }
             ensure_context_execution_machine(&state, context_id, machine_id)?;
-            if let Some(run) = state.runs.iter().find(|run| {
-                run.item_id == item_id
-                    && run.execution_profile == ExecutionProfile::Grill
-                    && run_is_active(run)
-            }) {
-                return Err(DomainError::ActiveGrillRun {
-                    item_id,
-                    run_id: run.id,
-                });
-            }
             let prompt = clean_name(prompt, DomainError::EmptyRunPrompt)?;
             if skill_snapshot.trim().is_empty() {
                 return Err(DomainError::EmptyGrillSkillSnapshot);

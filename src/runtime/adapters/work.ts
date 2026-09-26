@@ -237,7 +237,7 @@ export const workAdapter = {
     primaryRepositoryId,
     machineId,
     configuration,
-    initialPrompt,
+    prompt,
     expectedCheckouts,
     allowDirty,
     allowSharedCheckouts,
@@ -247,7 +247,7 @@ export const workAdapter = {
     primaryRepositoryId: number;
     machineId: number | null;
     configuration: GrillConfiguration;
-    initialPrompt: string;
+    prompt: string;
     expectedCheckouts: RunCheckout[];
     allowDirty: boolean;
     allowSharedCheckouts: boolean;
@@ -258,7 +258,7 @@ export const workAdapter = {
       primaryRepositoryId,
       machineId,
       configuration,
-      initialPrompt,
+      prompt,
       expectedCheckouts,
       allowDirty,
       allowSharedCheckouts,
