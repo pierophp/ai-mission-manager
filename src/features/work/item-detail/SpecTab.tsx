@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { RefreshCwIcon } from "lucide-react";
+import { ExternalUrlLink } from "../../../components/ExternalUrlLink";
 import {
   Alert,
   AlertDescription,
@@ -177,15 +178,13 @@ function SpecDocument({
     <article className="grid gap-5">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="grid gap-1">
-          <a
+          <ExternalUrlLink
             href={spec.object.canonical_url}
-            target="_blank"
-            rel="noreferrer"
             className="font-heading text-base font-medium underline-offset-4 hover:underline"
           >
             {number ? `#${number} · ` : ""}
             {spec.snapshot?.title ?? spec.object.canonical_url}
-          </a>
+          </ExternalUrlLink>
           <span className="text-xs text-muted-foreground">
             {spec.snapshot?.state ?? "Not fetched"}
             {spec.link.provenance && ` · Created by Run #${spec.link.provenance.run_id}`}
@@ -281,15 +280,13 @@ function SpecDocument({
                     <Badge variant={ticket.state === "open" ? "secondary" : "outline"}>
                       {ticket.state === "open" ? "Open" : "Closed"}
                     </Badge>
-                    <a
+                    <ExternalUrlLink
                       href={ticket.url}
-                      target="_blank"
-                      rel="noreferrer"
                       className="min-w-0 flex-1 underline-offset-4 hover:underline"
                     >
                       <span className="text-muted-foreground">#{ticket.number}</span>{" "}
                       {ticket.title}
-                    </a>
+                    </ExternalUrlLink>
                     {!linkedUrls.has(ticket.url) && (
                       <span className="text-xs text-muted-foreground">
                         Not linked to this Item
@@ -309,9 +306,12 @@ function SpecDocument({
                 <Markdown
                   remarkPlugins={[remarkGfm]}
                   components={{
-                    a: ({ node: _node, ...props }) => (
-                      <a {...props} target="_blank" rel="noreferrer" />
-                    ),
+                    a: ({ node: _node, ...props }) =>
+                      props.href ? (
+                        <ExternalUrlLink {...props} href={props.href} />
+                      ) : (
+                        <a {...props} />
+                      ),
                   }}
                 >
                   {document.data.body}

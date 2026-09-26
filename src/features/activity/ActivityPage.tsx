@@ -1,4 +1,5 @@
 import { Badge } from "../../components/ui/badge";
+import { ExternalUrlLink } from "../../components/ExternalUrlLink";
 import {
   Card,
   CardContent,
@@ -135,14 +136,12 @@ function ObservedActivityCard({ entry }: { entry: ObservedActivity }) {
         </time>
       </summary>
       <div className="grid gap-3 pb-3 pl-6 text-xs text-muted-foreground">
-        <a
+        <ExternalUrlLink
           className="break-all text-primary underline-offset-4 hover:underline"
           href={entry.object.canonical_url}
-          target="_blank"
-          rel="noreferrer"
         >
           {entry.object.canonical_url}
-        </a>
+        </ExternalUrlLink>
         <ul className="grid list-disc gap-1.5 pl-4">
           {entry.activity.changes.map((change, index) => (
             <li key={`${change.kind}-${change.key ?? ""}-${index}`}>

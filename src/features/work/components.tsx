@@ -15,6 +15,7 @@ import { NativeSelect, NativeSelectOption } from "../../components/ui/native-sel
 import { Textarea } from "../../components/ui/textarea";
 import { currentMinute } from "../../runtime/time";
 import { errorMessage } from "../../runtime/errors";
+import { ExternalUrlLink } from "../../components/ExternalUrlLink";
 import type {
   AttentionEntry,
   ExternalChangePolicy,
@@ -145,7 +146,12 @@ export function ExternalLinkCard({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <CardTitle className="text-sm">
-              {snapshot?.title ?? object.canonical_url}
+              <ExternalUrlLink
+                href={object.canonical_url}
+                className="underline-offset-4 hover:underline"
+              >
+                {snapshot?.title ?? object.canonical_url}
+              </ExternalUrlLink>
             </CardTitle>
             <CardDescription className="mt-1">
               {externalObjectKindLabel(object.kind)} ·{" "}
@@ -187,14 +193,12 @@ export function ExternalLinkCard({
         </div>
       </CardHeader>
       <CardContent className="grid gap-3 pt-4">
-        <a
+        <ExternalUrlLink
           href={object.canonical_url}
-          target="_blank"
-          rel="noreferrer"
           className="break-all text-sm text-primary underline-offset-4 hover:underline"
         >
           {object.canonical_url}
-        </a>
+        </ExternalUrlLink>
         <label className="grid grid-cols-[max-content_minmax(0,1fr)] items-center gap-2 text-sm">
           <span>Link type</span>
           <NativeSelect
