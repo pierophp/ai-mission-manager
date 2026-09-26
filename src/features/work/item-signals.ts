@@ -112,7 +112,7 @@ export function itemSpecs(view: ItemView): ExternalLinkView[] {
   return view.links
     .filter(
       (link) =>
-        link.link.is_spec &&
+        link.link.purpose === "to-spec" &&
         link.object.provider === "github" &&
         link.object.kind === "issue",
     )

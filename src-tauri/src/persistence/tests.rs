@@ -80,9 +80,68 @@ fn implementation_queue_and_first_run_link_round_trip() {
 }
 
 #[test]
-fn schema_upgrade_backfills_spec_classification_from_link_provenance() {
+fn schema_upgrade_preserves_link_purpose_from_legacy_spec_and_provenance() {
     let directory = tempdir().expect("temporary directory should exist");
     let database = directory.path().join("mission-manager.sqlite");
+    seed_link_purpose_migration_fixture(&database);
+    let connection = Connection::open(&database).expect("database should reopen directly");
+    connection
+        .execute_batch(
+            "ALTER TABLE external_links ADD COLUMN is_spec INTEGER NOT NULL DEFAULT 0;
+             UPDATE external_links SET is_spec = 1 WHERE id = 1;
+             ALTER TABLE external_links DROP COLUMN purpose;",
+        )
+        .expect("the previous Spec-only Link schema should be restored");
+    drop(connection);
+
+    let reloaded = SqliteStore::open(&database)
+        .expect("the schema should migrate")
+        .load_state()
+        .expect("the migrated Links should load");
+    assert_eq!(
+        reloaded.links[0].purpose,
+        crate::domain::LinkPurpose::ToSpec
+    );
+    assert_eq!(
+        reloaded.links[1].purpose,
+        crate::domain::LinkPurpose::ToTickets
+    );
+    assert_eq!(
+        reloaded.links[2].purpose,
+        crate::domain::LinkPurpose::Others
+    );
+}
+
+#[test]
+fn schema_upgrade_backfills_link_purpose_from_provenance_without_legacy_flag() {
+    let directory = tempdir().expect("temporary directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    seed_link_purpose_migration_fixture(&database);
+    let connection = Connection::open(&database).expect("database should reopen directly");
+    connection
+        .execute("ALTER TABLE external_links DROP COLUMN purpose", [])
+        .expect("the original Link schema should be restored");
+    drop(connection);
+
+    let reloaded = SqliteStore::open(&database)
+        .expect("the schema should migrate")
+        .load_state()
+        .expect("the migrated Links should load");
+    assert_eq!(
+        reloaded.links[0].purpose,
+        crate::domain::LinkPurpose::ToSpec
+    );
+    assert_eq!(
+        reloaded.links[1].purpose,
+        crate::domain::LinkPurpose::ToTickets
+    );
+    assert_eq!(
+        reloaded.links[2].purpose,
+        crate::domain::LinkPurpose::ToSpec
+    );
+}
+
+fn seed_link_purpose_migration_fixture(database: &Path) {
     let store = SqliteStore::open(&database).expect("database should open");
     store
         .connection
@@ -95,6 +154,7 @@ fn schema_upgrade_backfills_spec_classification_from_link_provenance() {
     for (id, key, number, action) in [
         (1, "acme/app#92", 92, "to-spec"),
         (2, "acme/app#93", 93, "to-tickets"),
+        (3, "acme/app#94", 94, "to-spec"),
     ] {
         store
             .connection
@@ -128,19 +188,6 @@ fn schema_upgrade_backfills_spec_classification_from_link_provenance() {
             .expect("fixture Link provenance should be inserted");
     }
     drop(store);
-
-    let connection = Connection::open(&database).expect("database should reopen directly");
-    connection
-        .execute("ALTER TABLE external_links DROP COLUMN is_spec", [])
-        .expect("legacy Link schema should be restored");
-    drop(connection);
-
-    let reloaded = SqliteStore::open(&database)
-        .expect("the schema should migrate")
-        .load_state()
-        .expect("the migrated Links should load");
-    assert!(reloaded.links[0].is_spec);
-    assert!(!reloaded.links[1].is_spec);
 }
 
 #[test]

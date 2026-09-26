@@ -1057,18 +1057,8 @@ pub(crate) fn link_external_object(
         if !allow_existing_link {
             return Err(DomainError::LinkAlreadyExists);
         }
-        let mark_as_spec = provenance
-            .as_ref()
-            .is_some_and(|provenance| provenance.action == GrillContinuationAction::ToSpec);
-        let provenance_changed = link.provenance != provenance;
-        let spec_changed = mark_as_spec && !link.is_spec;
-        if provenance_changed {
+        if link.provenance != provenance {
             link.provenance = provenance;
-        }
-        if spec_changed {
-            link.is_spec = true;
-        }
-        if provenance_changed || spec_changed {
             effects.push(Effect::PersistLinkState { link: link.clone() });
         }
     } else {
@@ -1091,9 +1081,10 @@ pub(crate) fn link_external_object(
             attention_policy: None,
             watch_until: None,
             review_at: None,
-            is_spec: provenance
+            purpose: provenance
                 .as_ref()
-                .is_some_and(|provenance| provenance.action == GrillContinuationAction::ToSpec),
+                .map(|provenance| LinkPurpose::from(provenance.action))
+                .unwrap_or_default(),
             provenance,
         };
         state.next_link_id = next_link_id;

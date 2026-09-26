@@ -11,6 +11,7 @@ import {
 } from "../../components/ui/card";
 import { Checkbox } from "../../components/ui/checkbox";
 import { Input } from "../../components/ui/input";
+import { NativeSelect, NativeSelectOption } from "../../components/ui/native-select";
 import { Textarea } from "../../components/ui/textarea";
 import { currentMinute } from "../../runtime/time";
 import { errorMessage } from "../../runtime/errors";
@@ -19,6 +20,7 @@ import type {
   ExternalChangePolicy,
   ExternalLinkView,
   ItemView,
+  LinkPurpose,
   RunSuggestion,
 } from "../../runtime/types";
 import { ItemCard } from "./item-card";
@@ -80,7 +82,7 @@ export function ExternalLinkCard({
   onRefresh,
   onUnlink,
   onPrepareDeleteObject,
-  onSetSpec,
+  onSetPurpose,
   onSavePolicy,
   onMarkReviewed,
   onSaveWatchUntil,
@@ -93,7 +95,7 @@ export function ExternalLinkCard({
   onRefresh: () => Promise<void>;
   onUnlink: () => void | Promise<void>;
   onPrepareDeleteObject: () => Promise<void>;
-  onSetSpec: (isSpec: boolean) => Promise<void>;
+  onSetPurpose: (purpose: LinkPurpose) => Promise<void>;
   onSavePolicy: (policy: ExternalChangePolicy | null) => Promise<void>;
   onMarkReviewed: () => Promise<void>;
   onSaveWatchUntil: (watchUntil: string | null) => Promise<void>;
@@ -193,16 +195,26 @@ export function ExternalLinkCard({
         >
           {object.canonical_url}
         </a>
-        {object.provider === "github" && object.kind === "issue" && (
-          <label className="flex items-center gap-2 text-sm">
-            <Checkbox
-              checked={externalLink.link.is_spec}
-              disabled={isSaving}
-              onCheckedChange={(checked) => void onSetSpec(checked === true)}
-            />
-            Use as Spec for this Item
-          </label>
-        )}
+        <label className="grid grid-cols-[max-content_minmax(0,1fr)] items-center gap-2 text-sm">
+          <span>Link type</span>
+          <NativeSelect
+            aria-label="Link type"
+            value={externalLink.link.purpose}
+            disabled={isSaving}
+            onChange={(event) =>
+              void onSetPurpose(event.target.value as LinkPurpose)
+            }
+          >
+            <NativeSelectOption
+              value="to-spec"
+              disabled={object.provider !== "github" || object.kind !== "issue"}
+            >
+              To spec
+            </NativeSelectOption>
+            <NativeSelectOption value="to-tickets">To tickets</NativeSelectOption>
+            <NativeSelectOption value="others">Others</NativeSelectOption>
+          </NativeSelect>
+        </label>
         {externalLink.link.provenance && (
           <p className="m-0 text-xs text-muted-foreground">
             Discovered by Run #{externalLink.link.provenance.run_id} via{" "}

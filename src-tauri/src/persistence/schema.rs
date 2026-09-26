@@ -265,7 +265,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              id INTEGER PRIMARY KEY NOT NULL,
              item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
              external_object_id INTEGER NOT NULL REFERENCES external_objects(id) ON DELETE CASCADE,
-             is_spec INTEGER NOT NULL DEFAULT 0,
+             purpose TEXT NOT NULL DEFAULT 'others',
              UNIQUE (item_id, external_object_id)
          );
          CREATE TABLE IF NOT EXISTS external_snapshots (
@@ -317,21 +317,40 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
     let external_link_columns = table_columns(connection, "external_links")?;
     if !external_link_columns
         .iter()
-        .any(|column| column == "is_spec")
+        .any(|column| column == "purpose")
     {
         connection.execute(
-            "ALTER TABLE external_links ADD COLUMN is_spec INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE external_links ADD COLUMN purpose TEXT NOT NULL DEFAULT 'others'",
             [],
         )?;
+        let legacy_action = "json_extract(
+            (SELECT provenance_json FROM link_attention_state
+             WHERE link_attention_state.link_id = external_links.id), '$.action')";
+        let purpose_backfill = if external_link_columns
+            .iter()
+            .any(|column| column == "is_spec")
+        {
+            format!(
+                "CASE
+                     WHEN external_links.is_spec != 0 THEN 'to-spec'
+                     WHEN {legacy_action} = 'to-tickets' THEN 'to-tickets'
+                     ELSE 'others'
+                 END"
+            )
+        } else {
+            format!(
+                "CASE {legacy_action}
+                     WHEN 'to-spec' THEN 'to-spec'
+                     WHEN 'to-tickets' THEN 'to-tickets'
+                     ELSE 'others'
+                 END"
+            )
+        };
         connection.execute(
-            "UPDATE external_links
-             SET is_spec = 1
-             WHERE EXISTS (
-                 SELECT 1
-                 FROM link_attention_state
-                 WHERE link_attention_state.link_id = external_links.id
-                   AND json_extract(link_attention_state.provenance_json, '$.action') = 'to-spec'
-             )",
+            &format!(
+                "UPDATE external_links
+                 SET purpose = ({purpose_backfill})"
+            ),
             [],
         )?;
     }

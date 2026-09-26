@@ -106,7 +106,7 @@ mod implementation_queue_tests {
                 attention_policy: None,
                 watch_until: None,
                 review_at: None,
-                is_spec: false,
+                purpose: LinkPurpose::Others,
                 provenance: None,
             }],
             snapshots: vec![],
@@ -2157,9 +2157,9 @@ mod grill_contract_tests {
         assert_eq!(
             item.links
                 .iter()
-                .map(|link| link.link.is_spec)
+                .map(|link| link.link.purpose)
                 .collect::<Vec<_>>(),
-            vec![true, false]
+            vec![LinkPurpose::ToSpec, LinkPurpose::ToTickets]
         );
         assert_eq!(
             item.links
@@ -2281,7 +2281,7 @@ https://example.com/unrelated"#,
     }
 
     #[test]
-    fn setting_a_link_as_spec_updates_the_item_link() {
+    fn setting_a_link_purpose_updates_the_item_link() {
         let mut initial_state = state();
         initial_state.external_objects.push(ExternalObject {
             id: 1,
@@ -2298,28 +2298,28 @@ https://example.com/unrelated"#,
             attention_policy: None,
             watch_until: None,
             review_at: None,
-            is_spec: false,
+            purpose: LinkPurpose::Others,
             provenance: None,
         });
         let marked = decide(
             initial_state,
-            Event::SetLinkSpec {
+            Event::SetLinkPurpose {
                 link_id: 1,
-                is_spec: true,
+                purpose: LinkPurpose::ToSpec,
             },
         )
         .expect("an Item's linked GitHub Issue can be marked as a Spec");
-        assert!(marked.state.links[0].is_spec);
+        assert_eq!(marked.state.links[0].purpose, LinkPurpose::ToSpec);
 
         let unmarked = decide(
             marked.state,
-            Event::SetLinkSpec {
+            Event::SetLinkPurpose {
                 link_id: 1,
-                is_spec: false,
+                purpose: LinkPurpose::Others,
             },
         )
-        .expect("the Spec classification can be cleared");
-        assert!(!unmarked.state.links[0].is_spec);
+        .expect("the Link purpose can change to others");
+        assert_eq!(unmarked.state.links[0].purpose, LinkPurpose::Others);
     }
 
     #[test]
@@ -2340,15 +2340,15 @@ https://example.com/unrelated"#,
             attention_policy: None,
             watch_until: None,
             review_at: None,
-            is_spec: false,
+            purpose: LinkPurpose::Others,
             provenance: None,
         });
 
         let error = decide(
             initial_state,
-            Event::SetLinkSpec {
+            Event::SetLinkPurpose {
                 link_id: 1,
-                is_spec: true,
+                purpose: LinkPurpose::ToSpec,
             },
         )
         .expect_err("a pull request cannot be an Issue Spec");
@@ -2547,7 +2547,7 @@ https://example.com/unrelated"#,
             },
         )
         .expect("the spec Issue should be captured");
-        assert!(captured.state.links[0].is_spec);
+        assert_eq!(captured.state.links[0].purpose, LinkPurpose::ToSpec);
 
         let prompt = compose_grill_continuation_prompt(
             &captured.state,

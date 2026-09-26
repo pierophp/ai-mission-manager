@@ -197,7 +197,7 @@ pub fn run() {
             app::refresh_external_object,
             app::poll_external_objects,
             app::set_link_attention_policy,
-            app::set_link_spec,
+            app::set_link_purpose,
             app::set_link_watch_until,
             app::set_link_review_at,
             app::clear_link_review_at,

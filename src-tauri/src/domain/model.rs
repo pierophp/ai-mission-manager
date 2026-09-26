@@ -429,6 +429,25 @@ pub enum ExternalObjectKind {
     Generic,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinkPurpose {
+    ToSpec,
+    ToTickets,
+    #[default]
+    Others,
+}
+
+impl From<GrillContinuationAction> for LinkPurpose {
+    fn from(action: GrillContinuationAction) -> Self {
+        match action {
+            GrillContinuationAction::ToSpec => Self::ToSpec,
+            GrillContinuationAction::ToTickets => Self::ToTickets,
+            GrillContinuationAction::Implement => Self::Others,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExternalObjectInput {
     pub provider: ExternalProvider,
@@ -537,7 +556,7 @@ pub struct Link {
     pub watch_until: Option<String>,
     pub review_at: Option<String>,
     #[serde(default)]
-    pub is_spec: bool,
+    pub purpose: LinkPurpose,
     #[serde(default)]
     pub provenance: Option<LinkProvenance>,
 }

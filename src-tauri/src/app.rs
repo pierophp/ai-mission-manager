@@ -23,7 +23,7 @@ use crate::{
         ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
         ExternalObjectKind, ExternalSnapshot, GrillAnswer, GrillConfiguration,
         GrillContinuationAction, HomeView, Item, ItemRelation, ItemRelationKind, ItemStatus,
-        ItemView, Machine, MachineTransport, Project, Repository, Run, RunCheckout,
+        ItemView, LinkPurpose, Machine, MachineTransport, Project, Repository, Run, RunCheckout,
         RunPromptSelection, RunState, RunSuggestion, Worktree,
     },
     persistence::SqliteStore,
@@ -1322,12 +1322,12 @@ pub fn set_link_attention_policy(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn set_link_spec(
+pub fn set_link_purpose(
     link_id: i64,
-    is_spec: bool,
+    purpose: LinkPurpose,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkView, String> {
-    crate::features::work::set_link_spec(link_id, is_spec, state)
+    crate::features::work::set_link_purpose(link_id, purpose, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]

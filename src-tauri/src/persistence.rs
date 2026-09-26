@@ -16,7 +16,7 @@ use crate::domain::{
     ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, GrillAnswer,
     GrillConfiguration, GrillContinuationAction, GrillPhase, GrillQuestionGroup,
     ImplementationQueue, Item, ItemRelation, ItemRelationKind, ItemStatus, Link, LinkProvenance,
-    Machine, MachineObservation, Project, ProjectDefaults, Reminder, Repository,
+    LinkPurpose, Machine, MachineObservation, Project, ProjectDefaults, Reminder, Repository,
     RepositoryLocation, Run, RunPaneStatus, RunState, Workspace, WorkspacePreparationState,
     WorkspaceRepository, Worktree,
 };
@@ -35,6 +35,8 @@ pub enum StoreError {
     InvalidExternalProvider(String),
     #[error("invalid External Object kind in database: {0}")]
     InvalidExternalObjectKind(String),
+    #[error("invalid Link purpose in database: {0}")]
+    InvalidLinkPurpose(String),
     #[error("invalid External Object metadata in database: {0}")]
     InvalidExternalMetadata(String),
     #[error("invalid Activity changes in database: {0}")]

@@ -224,6 +224,23 @@ pub(super) fn external_object_kind_as_str(kind: ExternalObjectKind) -> &'static 
     }
 }
 
+pub(super) fn link_purpose_as_str(purpose: LinkPurpose) -> &'static str {
+    match purpose {
+        LinkPurpose::ToSpec => "to-spec",
+        LinkPurpose::ToTickets => "to-tickets",
+        LinkPurpose::Others => "others",
+    }
+}
+
+pub(super) fn parse_link_purpose(purpose: &str) -> Result<LinkPurpose, StoreError> {
+    match purpose {
+        "to-spec" => Ok(LinkPurpose::ToSpec),
+        "to-tickets" => Ok(LinkPurpose::ToTickets),
+        "others" => Ok(LinkPurpose::Others),
+        other => Err(StoreError::InvalidLinkPurpose(other.into())),
+    }
+}
+
 pub(super) fn parse_external_object_kind(kind: &str) -> Result<ExternalObjectKind, StoreError> {
     match kind {
         "issue" => Ok(ExternalObjectKind::Issue),
