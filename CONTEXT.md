@@ -58,6 +58,10 @@ _Avoid_: terminal, tab, window
 The kind of instruction prepared for an agent when a Run starts — investigate, implement, review, or a custom prompt.
 _Avoid_: mode, template, preset
 
+**Implementation Queue**:
+An ordered selection of open GitHub sub-issues from an Item's linked spec. It records the launch configuration, checkout approvals, and the Run attached to its first entry; only one active queue may exist per Item.
+_Avoid_: batch, ticket batch
+
 ### Attention
 
 **Needs Attention**:

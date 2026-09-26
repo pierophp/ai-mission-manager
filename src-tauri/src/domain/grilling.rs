@@ -4,10 +4,8 @@ use super::*;
 
 const GRILL_SKILL_SOURCE: &str = include_str!("../../../.agents/skills/grilling/SKILL.md");
 const TO_SPEC_SKILL_SOURCE: &str = include_str!("../../../.agents/skills/to-spec/SKILL.md");
-const TO_TICKETS_SKILL_SOURCE: &str =
-    include_str!("../../../.agents/skills/to-tickets/SKILL.md");
-const IMPLEMENT_SKILL_SOURCE: &str =
-    include_str!("../../../.agents/skills/implement/SKILL.md");
+const TO_TICKETS_SKILL_SOURCE: &str = include_str!("../../../.agents/skills/to-tickets/SKILL.md");
+const IMPLEMENT_SKILL_SOURCE: &str = include_str!("../../../.agents/skills/implement/SKILL.md");
 
 /// Return skill instructions without YAML metadata, which is for skill discovery
 /// and should not be sent to an agent as prompt content.

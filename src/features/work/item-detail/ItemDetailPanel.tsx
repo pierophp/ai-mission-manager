@@ -36,6 +36,7 @@ import {
   type ItemIntent,
   displayItemIdentifier,
   itemSignals,
+  itemSpecs,
 } from "../item-signals";
 import { useItemCommands } from "../use-item-commands";
 import { workActions } from "../work-mutations";
@@ -43,12 +44,14 @@ import { LinksTab } from "./LinksTab";
 import { OverviewTab } from "./OverviewTab";
 import { RepositoriesTab } from "./RepositoriesTab";
 import { type GrillAnswerDrafts, RunsTab } from "./RunsTab";
+import { SpecTab } from "./SpecTab";
 import { useFormIntent } from "./shared";
 
 const headerForms = ["rename"] as const;
 
 const tabLabels: Record<ItemDetailTab, string> = {
   overview: "Overview",
+  spec: "Spec",
   runs: "Runs",
   repositories: "Repositories",
   links: "Links",
@@ -97,10 +100,20 @@ export function ItemDetailPanel({
   const commands = useItemCommands(onChanged);
   const { isSaving, saveItem } = commands;
   const [isRenaming, setIsRenaming] = useState(false);
+  const [focusedQueueRun, setFocusedQueueRun] = useState<{
+    runId: number;
+    request: number;
+  }>();
   const [titleDraft, setTitleDraft] = useState(view.item.title);
   const displayIdentifier = displayItemIdentifier(view.item.human_identifier);
   const signals = itemSignals(view);
   const runsNeedAttention = signals.grillWaiting || signals.runActive;
+  const specs = itemSpecs(view);
+  // The Spec tab exists only while the Item has a spec.
+  const visibleTabs = (Object.keys(tabLabels) as ItemDetailTab[]).filter(
+    (value) => value !== "spec" || specs.length > 0,
+  );
+  const activeTab = visibleTabs.includes(tab) ? tab : "overview";
 
   useEffect(() => {
     if (!isRenaming) setTitleDraft(view.item.title);
@@ -114,6 +127,11 @@ export function ItemDetailPanel({
     if (!nextTitle || nextTitle === view.item.title) return;
     const result = await saveItem(workActions.setItemTitle(view.item.id, nextTitle));
     if (result) setIsRenaming(false);
+  }
+
+  function openQueueRun(runId: number) {
+    setFocusedQueueRun((current) => ({ runId, request: (current?.request ?? 0) + 1 }));
+    onTabChange("runs");
   }
 
   return (
@@ -215,12 +233,12 @@ export function ItemDetailPanel({
         </DialogDescription>
       </header>
       <Tabs
-        value={tab}
+        value={activeTab}
         onValueChange={(next) => onTabChange(next as ItemDetailTab)}
         className="min-h-0 flex-1 gap-0"
       >
         <TabsList className="mx-4 mt-3">
-          {(Object.keys(tabLabels) as ItemDetailTab[]).map((value) => (
+          {visibleTabs.map((value) => (
             <TabsTrigger value={value} key={value}>
               {tabLabels[value]}
               {value === "runs" && runsNeedAttention && (
@@ -250,6 +268,12 @@ export function ItemDetailPanel({
               onNotesDirtyChange={onNotesDirtyChange}
             />
           </TabsContent>
+          {specs.length > 0 && (
+            // Not kept mounted: it reads GitHub, so it loads only when opened.
+            <TabsContent value="spec">
+              <SpecTab view={view} specs={specs} repositories={repositories} contexts={contexts} modelCatalog={grillModelCatalog} commands={commands} onOpenRun={openQueueRun} />
+            </TabsContent>
+          )}
           <TabsContent value="runs" forceMount className="data-[state=inactive]:hidden">
             <RunsTab
               view={view}
@@ -262,6 +286,7 @@ export function ItemDetailPanel({
               grillDrafts={grillDrafts}
               onGrillDraftsChange={onGrillDraftsChange}
               onOpenTerminal={onOpenTerminal}
+              focusedRunRequest={focusedQueueRun}
             />
           </TabsContent>
           <TabsContent value="repositories" forceMount className="data-[state=inactive]:hidden">

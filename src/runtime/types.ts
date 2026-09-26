@@ -12,6 +12,7 @@ export type Context = {
   name: string;
   execution_machine_id: number | null;
   grill_defaults: GrillConfiguration;
+  implement_defaults: GrillConfiguration;
 };
 
 export type GrillConfiguration = {
@@ -244,6 +245,47 @@ export type ExternalSnapshot = {
   fetched_at: number;
 };
 
+/** A GitHub Issue read as a document, fresh from GitHub. */
+export type IssueDocument = {
+  body: string;
+  subIssues: SubIssue[];
+};
+
+export type SubIssue = {
+  number: number;
+  title: string;
+  state: string;
+  url: string;
+};
+
+export type ImplementationQueueStart = {
+  specExternalObjectId: number;
+  specUrl: string;
+  entries: { position: number; ticketNumber: number; ticketTitle: string; ticketUrl: string; ticketState: string; runId: number | null; done: boolean; skipped?: boolean }[];
+};
+
+export type ImplementationQueuePauseReason =
+  | { kind: "ticket_still_open" }
+  | { kind: "checkout_dirty" }
+  | { kind: "run_stopped" }
+  | { kind: "pane_missing" }
+  | { kind: "launch_failed"; message: string };
+
+export type ImplementationQueue = {
+  id: number;
+  itemId: number;
+  specExternalObjectId: number;
+  specUrl: string;
+  workspaceId: number;
+  repositoryId: number;
+  configuration: GrillConfiguration;
+  allowDirty: boolean;
+  allowSharedCheckouts: boolean;
+  entries: ImplementationQueueStart["entries"];
+  active: boolean;
+  pausedReason: ImplementationQueuePauseReason | null;
+};
+
 export type ExternalChangeKind = "title" | "state" | "metadata";
 
 export type ExternalChange = {
@@ -277,10 +319,11 @@ export type ExternalChangePolicy = {
 };
 
 export type AttentionEntry = {
-  kind: "external_change" | "review" | "reminder" | "blocked_run";
+  kind: "external_change" | "review" | "reminder" | "blocked_run" | "implementation_queue";
   link_id: number;
   reminder_id: number | null;
   run_id: number | null;
+  queue_id: number | null;
   item_id: number;
   external_object_id: number;
   source_title: string;
@@ -326,6 +369,7 @@ export type ItemView = {
   workspaces: Workspace[];
   worktrees: Worktree[];
   runs: Run[];
+  implementation_queues: ImplementationQueue[];
   links: ExternalLinkView[];
 };
 

@@ -15,6 +15,8 @@ import type {
   ItemRelation,
   ItemRelationKind,
   ItemView,
+  IssueDocument,
+  ImplementationQueueStart,
   PollResult,
   Run,
   RunCheckout,
@@ -188,6 +190,8 @@ export const workAdapter = {
     primaryRepositoryId,
     machineId,
     agent,
+    configuration,
+    implementationQueue,
     executionProfile,
     prompt,
     promptSelection,
@@ -200,6 +204,8 @@ export const workAdapter = {
     primaryRepositoryId: number;
     machineId: number | null;
     agent: Run["agent"];
+    configuration?: GrillConfiguration;
+    implementationQueue?: ImplementationQueueStart;
     executionProfile: Run["execution_profile"];
     prompt: string;
     promptSelection: RunPromptSelection;
@@ -213,6 +219,8 @@ export const workAdapter = {
       primaryRepositoryId,
       machineId,
       agent,
+      configuration,
+      implementationQueue,
       executionProfile,
       prompt,
       promptSelection,
@@ -220,6 +228,9 @@ export const workAdapter = {
       allowDirty,
       allowSharedCheckouts,
     }),
+  checkImplementationQueue: (queueId: number) => command<void>("check_implementation_queue", { queueId }),
+  skipImplementationQueueEntry: (queueId: number) => command<void>("skip_implementation_queue_entry", { queueId }),
+  cancelImplementationQueue: (queueId: number) => command<void>("cancel_implementation_queue", { queueId }),
   startGrillRun: ({
     itemId,
     workspaceId,
@@ -280,6 +291,8 @@ export const workAdapter = {
     }),
   refreshExternalObject: (externalObjectId: number) =>
     command<ExternalSnapshot>("refresh_external_object", { externalObjectId }),
+  fetchIssueDocument: (externalObjectId: number) =>
+    command<IssueDocument>("fetch_issue_document", { externalObjectId }),
   createGithubIssue: (itemId: number, repositoryId: number, title: string, body: string) =>
     command<ExternalLinkAction>("create_github_issue", {
       itemId,

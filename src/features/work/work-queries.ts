@@ -41,6 +41,22 @@ export const runSuggestionsQueryOptions = () =>
     staleTime: 5_000,
   });
 
+/**
+ * Specs are read from GitHub on demand. They live outside `workKeys` so saving
+ * an Item does not refetch them; the Spec tab refreshes them explicitly.
+ */
+export const issueDocumentQueryOptions = (externalObjectId: number) =>
+  queryOptions({
+    queryKey: ["issueDocument", externalObjectId] as const,
+    queryFn: () => workAdapter.fetchIssueDocument(externalObjectId),
+    staleTime: 5 * 60_000,
+    retry: false,
+  });
+
+export function useIssueDocumentQuery(externalObjectId: number) {
+  return useQuery(issueDocumentQueryOptions(externalObjectId));
+}
+
 export const activityKeys = {
   all: ["activity"] as const,
   tab: () => [...activityKeys.all, "tab"] as const,

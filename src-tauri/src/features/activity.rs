@@ -109,6 +109,7 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
                 context_id: context.id,
             }),
             Effect::PersistContextGrillDefaults { .. }
+            | Effect::PersistContextImplementDefaults { .. }
             | Effect::UpdateContext { .. }
             | Effect::UpdateProject { .. } => None,
             Effect::PersistProject { project, .. } => Some(AuditAction::ProjectCreated {
@@ -254,6 +255,11 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
                     })
             }
             Effect::PersistRun { run, .. } => Some(AuditAction::RunCreated { run_id: run.id }),
+            Effect::PersistImplementationQueue { .. }
+            | Effect::FetchImplementationTicketState { .. }
+            | Effect::InspectImplementationCheckout { .. }
+            | Effect::CloseImplementationRunSession { .. }
+            | Effect::LaunchImplementationQueueEntry { .. } => None,
             Effect::PersistRunState { run } => {
                 let previous = before.runs.iter().find(|candidate| candidate.id == run.id);
                 previous
@@ -351,6 +357,7 @@ mod tests {
             worktrees: Vec::new(),
             machines: Vec::new(),
             runs: Vec::new(),
+            implementation_queues: Vec::new(),
             relationships: Vec::new(),
             external_objects: vec![
                 ExternalObject {

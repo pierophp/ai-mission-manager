@@ -1,5 +1,520 @@
 use super::*;
 
+mod implementation_queue_tests {
+    use super::*;
+
+    fn state() -> DomainState {
+        DomainState {
+            next_context_id: 2,
+            next_project_id: 2,
+            next_item_id: 2,
+            next_item_number: 2,
+            next_repository_id: 2,
+            next_workspace_id: 2,
+            next_worktree_id: 1,
+            next_machine_id: 2,
+            next_run_id: 1,
+            next_external_object_id: 2,
+            next_link_id: 2,
+            next_activity_id: 1,
+            next_reminder_id: 1,
+            contexts: vec![Context {
+                id: 1,
+                name: "Context".into(),
+                execution_machine_id: Some(1),
+                grill_defaults: GrillConfiguration::default(),
+                implement_defaults: GrillConfiguration::default(),
+            }],
+            projects: vec![Project {
+                id: 1,
+                context_id: 1,
+                name: "Project".into(),
+                defaults: ProjectDefaults::default(),
+            }],
+            repositories: vec![Repository {
+                id: 1,
+                project_id: 1,
+                name: "repo".into(),
+                remote_url: "git@github.com:o/r.git".into(),
+                base_branch: "main".into(),
+            }],
+            repository_locations: vec![],
+            items: vec![Item {
+                id: 1,
+                human_identifier: "ITEM-1".into(),
+                title: "Work".into(),
+                project_id: 1,
+                status: ItemStatus::Active,
+                notes: String::new(),
+                reminders: vec![],
+            }],
+            workspaces: vec![Workspace {
+                id: 1,
+                item_id: 1,
+                repositories: vec![WorkspaceRepository {
+                    repository_id: 1,
+                    branch: "feature".into(),
+                    base_branch: "main".into(),
+                }],
+                preparation_state: WorkspacePreparationState::Ready,
+            }],
+            worktrees: vec![],
+            machines: vec![Machine {
+                id: 1,
+                context_id: 1,
+                name: "Mac".into(),
+                socket_name: "mission".into(),
+                transport: MachineTransport::Local,
+                last_observed: MachineObservation::Available,
+                last_observed_at: None,
+            }],
+            runs: vec![],
+            implementation_queues: vec![],
+            relationships: vec![],
+            external_objects: vec![ExternalObject {
+                id: 1,
+                provider: ExternalProvider::GitHub,
+                kind: ExternalObjectKind::Issue,
+                external_key: "o/r#87".into(),
+                canonical_url: "https://github.com/o/r/issues/87".into(),
+            }],
+            links: vec![Link {
+                id: 1,
+                item_id: 1,
+                external_object_id: 1,
+                reviewed_activity_id: 0,
+                attention_policy: None,
+                watch_until: None,
+                review_at: None,
+                provenance: None,
+            }],
+            snapshots: vec![],
+            activities: vec![],
+            attention_defaults: vec![],
+        }
+    }
+
+    fn event(ticket_state: &str) -> Event {
+        Event::StartDirectRun {
+            item_id: 1,
+            workspace_id: 1,
+            machine_id: 1,
+            agent: AgentKind::Claude,
+            configuration: Some(GrillConfiguration::default()),
+            execution_profile: ExecutionProfile::Implement,
+            prompt: "ignored by queue projection".into(),
+            working_directory: "/repo".into(),
+            session_name: "session".into(),
+            pane_id: "%1".into(),
+            started_at: 1,
+            prompt_selection: RunPromptSelection {
+                include_objective: true,
+                include_notes: false,
+                external_object_ids: vec![],
+            },
+            checkouts: vec![RunCheckout {
+                repository_id: 1,
+                path: "/repo".into(),
+                branch: "feature".into(),
+                is_dirty: false,
+            }],
+            repository_id: 1,
+            allow_dirty: false,
+            allow_shared_checkouts: false,
+            implementation_queue: Some(ImplementationQueueStart {
+                spec_external_object_id: 1,
+                spec_url: "https://github.com/o/r/issues/87".into(),
+                entries: vec![
+                    ImplementationQueueEntry {
+                        position: 0,
+                        ticket_number: 89,
+                        ticket_title: "Implement queue".into(),
+                        ticket_url: "https://github.com/o/r/issues/89".into(),
+                        ticket_state: ticket_state.into(),
+                        run_id: None,
+                        done: false,
+                        skipped: false,
+                    },
+                    ImplementationQueueEntry {
+                        position: 1,
+                        ticket_number: 90,
+                        ticket_title: "Later".into(),
+                        ticket_url: "https://github.com/o/r/issues/90".into(),
+                        ticket_state: "open".into(),
+                        run_id: None,
+                        done: false,
+                        skipped: false,
+                    },
+                ],
+            }),
+        }
+    }
+
+    #[test]
+    fn starts_only_first_queue_entry_and_persists_queue_with_run() {
+        let decision = decide(state(), event("open")).unwrap();
+        assert_eq!(
+            decision.state.implementation_queues[0].entries[0].run_id,
+            Some(1)
+        );
+        assert!(decision
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PersistImplementationQueue { .. })));
+        assert_eq!(decision.state.runs.len(), 1);
+        assert_eq!(
+            decision.state.runs[0].execution_profile,
+            ExecutionProfile::Implement
+        );
+        assert_eq!(
+            decision.state.runs[0].model.as_deref(),
+            Some("claude-sonnet-4-5")
+        );
+        assert_eq!(decision.state.runs[0].effort.as_deref(), Some("high"));
+        assert_eq!(
+            decision
+                .effects
+                .iter()
+                .filter(|effect| matches!(effect, Effect::PersistRun { .. }))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn completed_ticket_and_clean_checkout_advance_and_finish_without_changing_item() {
+        let started = decide(state(), event("open")).unwrap();
+        let finished = decide(
+            started.state,
+            Event::ApplyAgentStateReport {
+                run_id: 1,
+                state: RunState::Finished,
+                sequence: Some(1),
+            },
+        )
+        .unwrap();
+        assert!(finished.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::FetchImplementationTicketState {
+                queue_id: 1,
+                run_id: 1,
+                ..
+            }
+        )));
+        assert!(finished.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::InspectImplementationCheckout {
+                queue_id: 1,
+                run_id: 1,
+                ..
+            }
+        )));
+
+        let first_done = decide(
+            finished.state,
+            Event::AdvanceImplementationQueue {
+                queue_id: 1,
+                run_id: 1,
+                ticket_closed: true,
+                checkout_clean: true,
+            },
+        )
+        .unwrap();
+        assert!(first_done.state.implementation_queues[0].entries[0].done);
+        assert!(first_done.state.implementation_queues[0].active);
+        assert!(first_done
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CloseImplementationRunSession { run_id: 1 })));
+        assert!(first_done.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::LaunchImplementationQueueEntry {
+                queue_id: 1,
+                position: 1
+            }
+        )));
+
+        let mut next_run = event("open");
+        if let Event::StartDirectRun {
+            implementation_queue,
+            session_name,
+            pane_id,
+            ..
+        } = &mut next_run
+        {
+            *implementation_queue = None;
+            *session_name = "session-2".into();
+            *pane_id = "%2".into();
+        }
+        let launched = decide(first_done.state, next_run).unwrap();
+        let attached = decide(
+            launched.state,
+            Event::SetImplementationQueueEntryRun {
+                queue_id: 1,
+                position: 1,
+                run_id: 2,
+            },
+        )
+        .unwrap();
+        let finished = decide(
+            attached.state,
+            Event::ApplyAgentStateReport {
+                run_id: 2,
+                state: RunState::Finished,
+                sequence: Some(1),
+            },
+        )
+        .unwrap();
+        let completed = decide(
+            finished.state,
+            Event::AdvanceImplementationQueue {
+                queue_id: 1,
+                run_id: 2,
+                ticket_closed: true,
+                checkout_clean: true,
+            },
+        )
+        .unwrap();
+        assert!(completed.state.implementation_queues[0]
+            .entries
+            .iter()
+            .all(|entry| entry.done));
+        assert!(!completed.state.implementation_queues[0].active);
+        assert_eq!(completed.state.items[0].status, ItemStatus::Active);
+        assert!(!completed
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PersistItemUpdate { .. })));
+        assert!(!completed
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::LaunchImplementationQueueEntry { .. })));
+    }
+
+    #[test]
+    fn rejects_closed_ticket_and_second_active_queue() {
+        assert!(matches!(
+            decide(state(), event("closed")),
+            Err(DomainError::InvalidImplementationQueueEntries)
+        ));
+        let first = decide(state(), event("open")).unwrap();
+        let mut second = event("open");
+        if let Event::StartDirectRun {
+            session_name,
+            pane_id,
+            ..
+        } = &mut second
+        {
+            *session_name = "session-2".into();
+            *pane_id = "%2".into();
+        }
+        assert!(matches!(
+            decide(first.state, second),
+            Err(DomainError::ImplementationQueueAlreadyActive { item_id: 1 })
+        ));
+    }
+
+    #[test]
+    fn each_queue_pause_reason_raises_ticket_attention_and_clears_on_resume() {
+        for reason in [
+            ImplementationQueuePauseReason::TicketStillOpen,
+            ImplementationQueuePauseReason::CheckoutDirty,
+            ImplementationQueuePauseReason::RunStopped,
+            ImplementationQueuePauseReason::PaneMissing,
+            ImplementationQueuePauseReason::LaunchFailed("could not launch".into()),
+        ] {
+            let started = decide(state(), event("open")).unwrap();
+            let paused = decide(
+                started.state,
+                Event::PauseImplementationQueue {
+                    queue_id: 1,
+                    reason: reason.clone(),
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                paused.state.implementation_queues[0].paused_reason,
+                Some(reason)
+            );
+            let attention = attention_entries(&paused.state, None, "999");
+            assert_eq!(attention.len(), 1);
+            assert_eq!(attention[0].kind, AttentionEntryKind::ImplementationQueue);
+            assert!(attention[0].summary.contains("#89"));
+            assert!(attention[0].summary.contains("paused"));
+            let resumed = decide(
+                paused.state,
+                Event::CancelImplementationQueue { queue_id: 1 },
+            )
+            .unwrap();
+            assert!(attention_entries(&resumed.state, None, "999").is_empty());
+        }
+    }
+
+    #[test]
+    fn ticket_open_and_dirty_checkout_pause_with_specific_reasons() {
+        let started = decide(state(), event("open")).unwrap();
+        let finished = decide(
+            started.state,
+            Event::ApplyAgentStateReport {
+                run_id: 1,
+                state: RunState::Finished,
+                sequence: Some(1),
+            },
+        )
+        .unwrap();
+        let still_open = decide(
+            finished.state.clone(),
+            Event::AdvanceImplementationQueue {
+                queue_id: 1,
+                run_id: 1,
+                ticket_closed: false,
+                checkout_clean: true,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            still_open.state.implementation_queues[0].paused_reason,
+            Some(ImplementationQueuePauseReason::TicketStillOpen)
+        );
+        let dirty = decide(
+            finished.state,
+            Event::AdvanceImplementationQueue {
+                queue_id: 1,
+                run_id: 1,
+                ticket_closed: true,
+                checkout_clean: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            dirty.state.implementation_queues[0].paused_reason,
+            Some(ImplementationQueuePauseReason::CheckoutDirty)
+        );
+    }
+
+    #[test]
+    fn automatic_resume_clears_pause_and_keeps_paused_run_session_open() {
+        let started = decide(state(), event("open")).unwrap();
+        let finished = decide(
+            started.state,
+            Event::ApplyAgentStateReport {
+                run_id: 1,
+                state: RunState::Finished,
+                sequence: Some(1),
+            },
+        )
+        .unwrap();
+        let paused = decide(
+            finished.state,
+            Event::AdvanceImplementationQueue {
+                queue_id: 1,
+                run_id: 1,
+                ticket_closed: false,
+                checkout_clean: true,
+            },
+        )
+        .unwrap();
+        let resumed = decide(
+            paused.state,
+            Event::AdvanceImplementationQueue {
+                queue_id: 1,
+                run_id: 1,
+                ticket_closed: true,
+                checkout_clean: true,
+            },
+        )
+        .unwrap();
+        assert!(resumed.state.implementation_queues[0]
+            .paused_reason
+            .is_none());
+        assert!(attention_entries(&resumed.state, None, "999").is_empty());
+        assert!(!resumed
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CloseImplementationRunSession { .. })));
+        assert!(resumed.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::LaunchImplementationQueueEntry { position: 1, .. }
+        )));
+    }
+
+    #[test]
+    fn check_again_cannot_advance_a_paused_run_before_its_turn_ends() {
+        let started = decide(state(), event("open")).unwrap();
+        let mut paused = decide(
+            started.state,
+            Event::PauseImplementationQueue {
+                queue_id: 1,
+                reason: ImplementationQueuePauseReason::RunStopped,
+            },
+        )
+        .unwrap()
+        .state;
+        paused.runs[0].state = RunState::Working;
+
+        let result = decide(
+            paused,
+            Event::AdvanceImplementationQueue {
+                queue_id: 1,
+                run_id: 1,
+                ticket_closed: true,
+                checkout_clean: true,
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(DomainError::ImplementationQueueRunNotFinished {
+                queue_id: 1,
+                run_id: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn skip_and_cancel_do_not_close_or_stop_paused_runs() {
+        let started = decide(state(), event("open")).unwrap();
+        let paused = decide(
+            started.state,
+            Event::PauseImplementationQueue {
+                queue_id: 1,
+                reason: ImplementationQueuePauseReason::RunStopped,
+            },
+        )
+        .unwrap();
+        let skipped = decide(
+            paused.state.clone(),
+            Event::SkipImplementationQueueEntry {
+                queue_id: 1,
+                position: 0,
+            },
+        )
+        .unwrap();
+        assert!(skipped.state.implementation_queues[0].entries[0].skipped);
+        assert!(skipped.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::LaunchImplementationQueueEntry { position: 1, .. }
+        )));
+        assert!(!skipped
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CloseImplementationRunSession { .. })));
+        let cancelled = decide(
+            paused.state,
+            Event::CancelImplementationQueue { queue_id: 1 },
+        )
+        .unwrap();
+        assert!(!cancelled.state.implementation_queues[0].active);
+        assert!(cancelled.state.implementation_queues[0]
+            .paused_reason
+            .is_none());
+        assert!(!cancelled
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CloseImplementationRunSession { .. })));
+    }
+}
+
 mod context_execution_machine_tests {
     use super::*;
 
@@ -24,12 +539,14 @@ mod context_execution_machine_tests {
                     name: "Unconfigured".into(),
                     execution_machine_id: None,
                     grill_defaults: GrillConfiguration::default(),
+                    implement_defaults: GrillConfiguration::default(),
                 },
                 Context {
                     id: 2,
                     name: "Other".into(),
                     execution_machine_id: None,
                     grill_defaults: GrillConfiguration::default(),
+                    implement_defaults: GrillConfiguration::default(),
                 },
             ],
             projects: Vec::new(),
@@ -59,6 +576,7 @@ mod context_execution_machine_tests {
                 },
             ],
             runs: Vec::new(),
+            implementation_queues: Vec::new(),
             relationships: Vec::new(),
             external_objects: Vec::new(),
             links: Vec::new(),
@@ -131,6 +649,7 @@ mod machine_deletion_tests {
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
                 grill_defaults: GrillConfiguration::default(),
+                implement_defaults: GrillConfiguration::default(),
             }],
             projects: vec![Project {
                 id: 1,
@@ -219,6 +738,7 @@ mod machine_deletion_tests {
                 grill_action: None,
                 grill_action_started_at: None,
             }],
+            implementation_queues: Vec::new(),
             relationships: Vec::new(),
             external_objects: Vec::new(),
             links: Vec::new(),
@@ -352,6 +872,7 @@ mod workspace_contract_tests {
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
                 grill_defaults: GrillConfiguration::default(),
+                implement_defaults: GrillConfiguration::default(),
             }],
             projects: vec![Project {
                 id: 1,
@@ -388,6 +909,7 @@ mod workspace_contract_tests {
                 last_observed_at: None,
             }],
             runs: Vec::new(),
+            implementation_queues: Vec::new(),
             relationships: Vec::new(),
             external_objects: Vec::new(),
             links: Vec::new(),
@@ -501,6 +1023,7 @@ mod workspace_contract_tests {
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
                 grill_defaults: GrillConfiguration::default(),
+                implement_defaults: GrillConfiguration::default(),
             }],
             projects: vec![Project {
                 id: 1,
@@ -570,6 +1093,7 @@ mod workspace_contract_tests {
                 },
             ],
             runs: Vec::new(),
+            implementation_queues: Vec::new(),
             relationships: Vec::new(),
             external_objects: Vec::new(),
             links: Vec::new(),
@@ -650,6 +1174,7 @@ mod grill_contract_tests {
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
                 grill_defaults: GrillConfiguration::default(),
+                implement_defaults: GrillConfiguration::default(),
             }],
             projects: vec![Project {
                 id: 1,
@@ -700,6 +1225,7 @@ mod grill_contract_tests {
                 last_observed_at: None,
             }],
             runs: Vec::new(),
+            implementation_queues: Vec::new(),
             relationships: Vec::new(),
             external_objects: Vec::new(),
             links: Vec::new(),

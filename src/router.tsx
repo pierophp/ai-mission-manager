@@ -138,6 +138,12 @@ const settingsGrillRoute = createRoute({
   component: () => <StructurePage section="grill" />,
 });
 
+const settingsImplementRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/settings/implement",
+  component: () => <StructurePage section="implement" />,
+});
+
 const settingsResetRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/settings/reset",
@@ -164,6 +170,7 @@ const routeTree = rootRoute.addChildren([
   settingsMachinesRoute,
   settingsAttentionRoute,
   settingsGrillRoute,
+  settingsImplementRoute,
   settingsResetRoute,
   activityRoute,
 ]);

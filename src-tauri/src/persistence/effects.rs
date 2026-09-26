@@ -15,14 +15,20 @@ impl SqliteStore {
         let transaction = self.connection.transaction()?;
         for effect in effects {
             match effect {
+                Effect::PersistImplementationQueue { queue } => {
+                    transaction.execute(
+                        "INSERT INTO implementation_queues (id, item_id, queue_json) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET queue_json = excluded.queue_json",
+                        params![queue.id, queue.item_id, serde_json::to_string(queue).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?],
+                    )?;
+                }
                 Effect::PersistContext {
                     context,
                     next_context_id,
                 } => {
                     transaction.execute(
                         "INSERT INTO contexts
-                            (id, name, execution_machine_id, grill_agent, grill_model, grill_effort)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            (id, name, execution_machine_id, grill_agent, grill_model, grill_effort, implement_agent, implement_model, implement_effort)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         params![
                             context.id,
                             context.name,
@@ -30,6 +36,9 @@ impl SqliteStore {
                             agent_kind_as_str(context.grill_defaults.agent),
                             context.grill_defaults.model,
                             context.grill_defaults.effort,
+                            agent_kind_as_str(context.implement_defaults.agent),
+                            context.implement_defaults.model,
+                            context.implement_defaults.effort,
                         ],
                     )?;
                     transaction.execute(
@@ -56,6 +65,12 @@ impl SqliteStore {
                             context.grill_defaults.effort,
                             context.id,
                         ],
+                    )?;
+                }
+                Effect::PersistContextImplementDefaults { context } => {
+                    transaction.execute(
+                        "UPDATE contexts SET implement_agent = ?1, implement_model = ?2, implement_effort = ?3 WHERE id = ?4",
+                        params![agent_kind_as_str(context.implement_defaults.agent), context.implement_defaults.model, context.implement_defaults.effort, context.id],
                     )?;
                 }
                 Effect::PersistProject {
@@ -195,8 +210,8 @@ impl SqliteStore {
                     )?;
                     transaction.execute(
                         "INSERT INTO contexts
-                            (id, name, execution_machine_id, grill_agent, grill_model, grill_effort)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                            (id, name, execution_machine_id, grill_agent, grill_model, grill_effort, implement_agent, implement_model, implement_effort)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                         params![
                             context.id,
                             context.name,
@@ -204,6 +219,9 @@ impl SqliteStore {
                             agent_kind_as_str(context.grill_defaults.agent),
                             context.grill_defaults.model,
                             context.grill_defaults.effort,
+                            agent_kind_as_str(context.implement_defaults.agent),
+                            context.implement_defaults.model,
+                            context.implement_defaults.effort,
                         ],
                     )?;
                     transaction.execute(
@@ -477,6 +495,10 @@ impl SqliteStore {
                         ],
                     )?;
                 }
+                Effect::FetchImplementationTicketState { .. }
+                | Effect::InspectImplementationCheckout { .. }
+                | Effect::CloseImplementationRunSession { .. }
+                | Effect::LaunchImplementationQueueEntry { .. } => {}
                 Effect::PersistRunTranscript { run } => {
                     transaction.execute(
                         "UPDATE runs

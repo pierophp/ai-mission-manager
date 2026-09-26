@@ -11,6 +11,8 @@ pub struct Context {
     #[serde(default)]
     pub execution_machine_id: Option<i64>,
     pub grill_defaults: GrillConfiguration,
+    #[serde(default)]
+    pub implement_defaults: GrillConfiguration,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -90,6 +92,49 @@ pub struct Workspace {
     pub item_id: i64,
     pub repositories: Vec<WorkspaceRepository>,
     pub preparation_state: WorkspacePreparationState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImplementationQueueEntry {
+    pub position: i64,
+    pub ticket_number: i64,
+    pub ticket_title: String,
+    pub ticket_url: String,
+    pub ticket_state: String,
+    pub run_id: Option<i64>,
+    #[serde(default)]
+    pub done: bool,
+    #[serde(default)]
+    pub skipped: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "message", rename_all = "snake_case")]
+pub enum ImplementationQueuePauseReason {
+    TicketStillOpen,
+    CheckoutDirty,
+    RunStopped,
+    PaneMissing,
+    LaunchFailed(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImplementationQueue {
+    pub id: i64,
+    pub item_id: i64,
+    pub spec_external_object_id: i64,
+    pub spec_url: String,
+    pub workspace_id: i64,
+    pub repository_id: i64,
+    pub configuration: GrillConfiguration,
+    pub allow_dirty: bool,
+    pub allow_shared_checkouts: bool,
+    pub entries: Vec<ImplementationQueueEntry>,
+    pub active: bool,
+    #[serde(default)]
+    pub paused_reason: Option<ImplementationQueuePauseReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,7 +315,6 @@ pub struct Run {
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
-    #[serde(default)]
     pub skill_snapshot: Option<String>,
     pub prompt: String,
     pub working_directory: String,
@@ -506,6 +550,7 @@ pub enum AttentionEntryKind {
     Reminder,
     #[serde(rename = "blocked_run")]
     BlockedRun,
+    ImplementationQueue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -514,6 +559,8 @@ pub struct AttentionEntry {
     pub link_id: i64,
     pub reminder_id: Option<i64>,
     pub run_id: Option<i64>,
+    #[serde(default)]
+    pub queue_id: Option<i64>,
     pub item_id: i64,
     pub external_object_id: i64,
     pub source_title: String,
@@ -563,6 +610,8 @@ pub struct ItemView {
     pub workspaces: Vec<Workspace>,
     pub worktrees: Vec<Worktree>,
     pub runs: Vec<Run>,
+    #[serde(default)]
+    pub implementation_queues: Vec<ImplementationQueue>,
     pub links: Vec<ExternalLinkView>,
 }
 
@@ -1036,6 +1085,8 @@ pub struct DomainState {
     pub worktrees: Vec<Worktree>,
     pub machines: Vec<Machine>,
     pub runs: Vec<Run>,
+    #[serde(default)]
+    pub implementation_queues: Vec<ImplementationQueue>,
     pub relationships: Vec<ItemRelation>,
     pub external_objects: Vec<ExternalObject>,
     pub links: Vec<Link>,

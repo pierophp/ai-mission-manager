@@ -206,6 +206,8 @@ export const structureAdapter = {
     }),
   setContextGrillDefaults: (contextId: number, defaults: GrillConfiguration) =>
     command<Context>("set_context_grill_defaults", { contextId, defaults }),
+  setContextImplementDefaults: (contextId: number, defaults: GrillConfiguration) =>
+    command<Context>("set_context_implement_defaults", { contextId, defaults }),
   createItem: (title: string, contextId: number, projectId: number) =>
     command<Item>("create_item", { title, contextId, projectId }),
 };

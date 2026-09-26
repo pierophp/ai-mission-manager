@@ -16,6 +16,10 @@ pub enum Event {
         context_id: i64,
         defaults: GrillConfiguration,
     },
+    SetContextImplementDefaults {
+        context_id: i64,
+        defaults: GrillConfiguration,
+    },
     CreateProject {
         context_id: i64,
         name: String,
@@ -146,6 +150,7 @@ pub enum Event {
         workspace_id: i64,
         machine_id: i64,
         agent: AgentKind,
+        configuration: Option<GrillConfiguration>,
         execution_profile: ExecutionProfile,
         prompt: String,
         working_directory: String,
@@ -157,6 +162,7 @@ pub enum Event {
         repository_id: i64,
         allow_dirty: bool,
         allow_shared_checkouts: bool,
+        implementation_queue: Option<ImplementationQueueStart>,
     },
     StartWorktreeRun {
         item_id: i64,
@@ -209,6 +215,28 @@ pub enum Event {
         sequence: Option<i64>,
     },
     FinishRun {
+        run_id: i64,
+    },
+    AdvanceImplementationQueue {
+        queue_id: i64,
+        run_id: i64,
+        ticket_closed: bool,
+        checkout_clean: bool,
+    },
+    PauseImplementationQueue {
+        queue_id: i64,
+        reason: ImplementationQueuePauseReason,
+    },
+    SkipImplementationQueueEntry {
+        queue_id: i64,
+        position: i64,
+    },
+    CancelImplementationQueue {
+        queue_id: i64,
+    },
+    SetImplementationQueueEntryRun {
+        queue_id: i64,
+        position: i64,
         run_id: i64,
     },
     ContinueGrill {
@@ -297,6 +325,14 @@ pub enum Event {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImplementationQueueStart {
+    pub spec_external_object_id: i64,
+    pub spec_url: String,
+    pub entries: Vec<ImplementationQueueEntry>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
     PersistContext {
@@ -307,6 +343,9 @@ pub enum Effect {
         context: Context,
     },
     PersistContextGrillDefaults {
+        context: Context,
+    },
+    PersistContextImplementDefaults {
         context: Context,
     },
     PersistProject {
@@ -377,6 +416,26 @@ pub enum Effect {
     PersistRun {
         run: Run,
         next_run_id: i64,
+    },
+    PersistImplementationQueue {
+        queue: ImplementationQueue,
+    },
+    FetchImplementationTicketState {
+        queue_id: i64,
+        run_id: i64,
+        ticket_url: String,
+    },
+    InspectImplementationCheckout {
+        queue_id: i64,
+        run_id: i64,
+        checkouts: Vec<RunCheckout>,
+    },
+    CloseImplementationRunSession {
+        run_id: i64,
+    },
+    LaunchImplementationQueueEntry {
+        queue_id: i64,
+        position: i64,
     },
     PersistRunState {
         run: Run,

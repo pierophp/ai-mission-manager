@@ -27,7 +27,7 @@ use crate::{
         RunPromptSelection, RunState, RunSuggestion, Worktree,
     },
     persistence::SqliteStore,
-    provider::resolve_gh_executable,
+    provider::{resolve_gh_executable, IssueDocument},
     terminal::{MachineReadiness, PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime},
 };
 
@@ -63,6 +63,7 @@ pub struct Runtime {
     pub(crate) external_snapshot_applied_generations: HashMap<i64, u64>,
     pub(crate) pending_grill_transcript_captures: HashSet<i64>,
     pub(crate) run_launch_lock: Arc<tauri::async_runtime::Mutex<()>>,
+    pub(crate) implementation_queue_lock: Arc<tauri::async_runtime::Mutex<()>>,
     pub(crate) terminal_runtime: Arc<dyn TerminalRuntime>,
     pub(crate) reconciliation_in_progress: Arc<AtomicBool>,
     pub(crate) machine_readiness: HashMap<i64, MachineReadiness>,
@@ -156,6 +157,7 @@ impl Runtime {
             external_snapshot_applied_generations: HashMap::new(),
             pending_grill_transcript_captures: HashSet::new(),
             run_launch_lock: Arc::new(tauri::async_runtime::Mutex::new(())),
+            implementation_queue_lock: Arc::new(tauri::async_runtime::Mutex::new(())),
             terminal_runtime: Arc::new(terminal_runtime),
             reconciliation_in_progress: Arc::new(AtomicBool::new(false)),
             machine_readiness: HashMap::new(),
@@ -413,6 +415,15 @@ pub fn set_context_grill_defaults(
     crate::features::structure::set_context_grill_defaults(context_id, defaults, state)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_context_implement_defaults(
+    context_id: i64,
+    defaults: GrillConfiguration,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    crate::features::structure::set_context_implement_defaults(context_id, defaults, state)
+}
+
 #[tauri::command]
 pub fn list_projects(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Project>, String> {
     crate::features::structure::list_projects(state)
@@ -512,6 +523,8 @@ pub async fn start_direct_run(
     machine_id: Option<i64>,
     primary_repository_id: i64,
     agent: AgentKind,
+    configuration: Option<GrillConfiguration>,
+    implementation_queue: Option<crate::domain::ImplementationQueueStart>,
     execution_profile: ExecutionProfile,
     prompt: String,
     prompt_selection: RunPromptSelection,
@@ -526,6 +539,8 @@ pub async fn start_direct_run(
         machine_id,
         primary_repository_id,
         agent,
+        configuration,
+        implementation_queue,
         execution_profile,
         prompt,
         prompt_selection,
@@ -721,6 +736,30 @@ pub async fn open_external_terminal(
 #[tauri::command(rename_all = "camelCase")]
 pub async fn stop_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
     crate::features::work::stop_run(run_id, state).await
+}
+
+#[tauri::command]
+pub async fn check_implementation_queue(
+    queue_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    crate::features::work::check_implementation_queue(queue_id, state).await
+}
+
+#[tauri::command]
+pub async fn skip_implementation_queue_entry(
+    queue_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    crate::features::work::skip_implementation_queue_entry(queue_id, state).await
+}
+
+#[tauri::command]
+pub async fn cancel_implementation_queue(
+    queue_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    crate::features::work::cancel_implementation_queue(queue_id, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1253,6 +1292,14 @@ pub async fn add_external_comment(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub async fn fetch_issue_document(
+    external_object_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<IssueDocument, String> {
+    crate::features::work::fetch_issue_document(external_object_id, state).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn refresh_external_object(
     external_object_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1338,8 +1385,8 @@ mod tests {
 
     use super::*;
     use crate::domain::{
-        parse_grill_question_group, search_items, AuditAction, GrillPhase, MachineObservation,
-        ProjectDefaults, RunPaneStatus, grill_skill_snapshot,
+        grill_skill_snapshot, parse_grill_question_group, search_items, AuditAction, GrillPhase,
+        MachineObservation, ProjectDefaults, RunPaneStatus,
     };
     use crate::features::deletion::RESET_CONFIRMATION_PHRASE;
     use crate::persistence::SqliteStore;

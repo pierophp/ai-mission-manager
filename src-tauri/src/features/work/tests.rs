@@ -899,6 +899,11 @@ fn direct_grill_and_worktree_runs_are_persisted_before_their_gate_is_released() 
                             None,
                             repository.id,
                             AgentKind::Claude,
+                            Some(GrillConfiguration {
+                                agent: AgentKind::Claude,
+                                model: "claude-sonnet-4-5".into(),
+                                effort: "high".into(),
+                            }),
                             ExecutionProfile::Implement,
                             "Implement the change".into(),
                             selection,
@@ -962,6 +967,13 @@ fn direct_grill_and_worktree_runs_are_persisted_before_their_gate_is_released() 
             assert_eq!(runtime.state.runs.len(), 1);
             assert_eq!(runtime.state.runs[0].state, RunState::Unknown);
             assert_eq!(runtime.state.runs[0].pane_id, "%fake-1");
+            if matches!(flow, Flow::Direct) {
+                assert_eq!(
+                    runtime.state.runs[0].model.as_deref(),
+                    Some("claude-sonnet-4-5")
+                );
+                assert_eq!(runtime.state.runs[0].effort.as_deref(), Some("high"));
+            }
         }
         blocked_release.release();
         let run = worker
@@ -1038,6 +1050,7 @@ fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
                         None,
                         repository.id,
                         AgentKind::Claude,
+                        None,
                         ExecutionProfile::Implement,
                         "Implement the change".into(),
                         selection.clone(),
@@ -1138,6 +1151,7 @@ fn failed_run_commit_kills_only_its_gated_session_without_release() {
         None,
         repository.id,
         AgentKind::Claude,
+        None,
         ExecutionProfile::Implement,
         "Implement the change".into(),
         RunPromptSelection {
@@ -1195,6 +1209,7 @@ fn release_failure_keeps_recorded_run_unknown_and_reports_that_it_was_not_releas
         None,
         repository.id,
         AgentKind::Claude,
+        None,
         ExecutionProfile::Implement,
         "Implement the change".into(),
         RunPromptSelection {

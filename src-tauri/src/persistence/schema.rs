@@ -18,7 +18,10 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              execution_machine_id INTEGER,
              grill_agent TEXT NOT NULL DEFAULT 'claude',
              grill_model TEXT NOT NULL DEFAULT 'claude-sonnet-4-5',
-             grill_effort TEXT NOT NULL DEFAULT 'high'
+             grill_effort TEXT NOT NULL DEFAULT 'high',
+             implement_agent TEXT NOT NULL DEFAULT 'claude',
+             implement_model TEXT NOT NULL DEFAULT 'claude-sonnet-4-5',
+             implement_effort TEXT NOT NULL DEFAULT 'high'
          );
          CREATE TABLE IF NOT EXISTS projects (
              id INTEGER PRIMARY KEY NOT NULL,
@@ -78,6 +81,22 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
             "ALTER TABLE contexts ADD COLUMN grill_effort TEXT NOT NULL DEFAULT 'high'",
             [],
         )?;
+    }
+    for (column, definition) in [
+        ("implement_agent", "TEXT NOT NULL DEFAULT 'claude'"),
+        (
+            "implement_model",
+            "TEXT NOT NULL DEFAULT 'claude-sonnet-4-5'",
+        ),
+        ("implement_effort", "TEXT NOT NULL DEFAULT 'high'"),
+    ] {
+        if !context_columns.is_empty() && !context_columns.iter().any(|existing| existing == column)
+        {
+            connection.execute(
+                &format!("ALTER TABLE contexts ADD COLUMN {column} {definition}"),
+                [],
+            )?;
+        }
     }
 
     connection.execute(
@@ -149,7 +168,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              ON repository_locations (machine_id, repository_id);
          CREATE TABLE IF NOT EXISTS workspaces (
              id INTEGER PRIMARY KEY NOT NULL,
-             item_id INTEGER NOT NULL REFERENCES items(id),
+             item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
              preparation_state TEXT NOT NULL DEFAULT 'pending'
          );
          CREATE INDEX IF NOT EXISTS workspaces_by_item
@@ -207,6 +226,13 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              grill_phase TEXT,
              grill_action TEXT,
              grill_action_started_at INTEGER
+             ,implementation_queue_id INTEGER
+             ,implementation_queue_position INTEGER
+         );
+         CREATE TABLE IF NOT EXISTS implementation_queues (
+             id INTEGER PRIMARY KEY NOT NULL,
+             item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+             queue_json TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS runs_by_item
              ON runs (item_id, id);

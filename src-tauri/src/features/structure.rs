@@ -140,6 +140,16 @@ pub(crate) fn set_context_grill_defaults(
     })
 }
 
+pub(crate) fn set_context_implement_defaults(
+    context_id: i64,
+    defaults: crate::domain::GrillConfiguration,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    locked(state, |runtime| {
+        runtime.set_context_implement_defaults(context_id, defaults)
+    })
+}
+
 pub(crate) fn create_project(
     name: String,
     context_id: i64,
@@ -760,6 +770,30 @@ impl Runtime {
         let decision = decide(
             self.state.clone(),
             Event::SetContextGrillDefaults {
+                context_id,
+                defaults,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let context = decision
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .cloned()
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+        self.commit(decision)?;
+        Ok(context)
+    }
+
+    pub(crate) fn set_context_implement_defaults(
+        &mut self,
+        context_id: i64,
+        defaults: crate::domain::GrillConfiguration,
+    ) -> Result<Context, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::SetContextImplementDefaults {
                 context_id,
                 defaults,
             },

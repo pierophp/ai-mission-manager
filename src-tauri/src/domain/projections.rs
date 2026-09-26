@@ -307,6 +307,7 @@ fn attention_entries_at(
                 link_id: link.id,
                 reminder_id: None,
                 run_id: None,
+                queue_id: None,
                 item_id: link.item_id,
                 external_object_id: object.id,
                 source_title: state
@@ -341,6 +342,7 @@ fn attention_entries_at(
                     link_id: 0,
                     reminder_id: Some(reminder.id),
                     run_id: None,
+                    queue_id: None,
                     item_id: item.id,
                     external_object_id: 0,
                     source_title: item.title.clone(),
@@ -370,6 +372,7 @@ fn attention_entries_at(
                     link_id: 0,
                     reminder_id: None,
                     run_id: Some(run.id),
+                    queue_id: None,
                     item_id: item.id,
                     external_object_id: 0,
                     source_title: item.title.clone(),
@@ -379,6 +382,58 @@ fn attention_entries_at(
                 })
             }),
     );
+
+    for queue in state
+        .implementation_queues
+        .iter()
+        .filter(|queue| queue.active && queue.paused_reason.is_some())
+    {
+        let Some(entry) = queue
+            .entries
+            .iter()
+            .find(|entry| !entry.done && !entry.skipped)
+        else {
+            continue;
+        };
+        let Some(link) = state.links.iter().find(|link| {
+            link.item_id == queue.item_id
+                && link.external_object_id == queue.spec_external_object_id
+        }) else {
+            continue;
+        };
+        let Some(object) = state
+            .external_objects
+            .iter()
+            .find(|object| object.id == queue.spec_external_object_id)
+        else {
+            continue;
+        };
+        let reason = match queue.paused_reason.as_ref().expect("filtered paused queue") {
+            ImplementationQueuePauseReason::TicketStillOpen => "ticket is still open".to_owned(),
+            ImplementationQueuePauseReason::CheckoutDirty => "checkout is dirty".to_owned(),
+            ImplementationQueuePauseReason::RunStopped => "Run was stopped".to_owned(),
+            ImplementationQueuePauseReason::PaneMissing => "Run Pane is missing".to_owned(),
+            ImplementationQueuePauseReason::LaunchFailed(message) => {
+                format!("next Run failed to launch: {message}")
+            }
+        };
+        entries.push(AttentionEntry {
+            kind: AttentionEntryKind::ImplementationQueue,
+            link_id: link.id,
+            reminder_id: None,
+            run_id: entry.run_id,
+            queue_id: Some(queue.id),
+            item_id: queue.item_id,
+            external_object_id: object.id,
+            source_title: entry.ticket_title.clone(),
+            source_url: entry.ticket_url.clone(),
+            activities: Vec::new(),
+            summary: format!(
+                "Implementation Queue ticket #{} paused: {reason}",
+                entry.ticket_number
+            ),
+        });
+    }
 
     entries
 }
@@ -467,6 +522,12 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 workspaces,
                 worktrees,
                 runs,
+                implementation_queues: state
+                    .implementation_queues
+                    .iter()
+                    .filter(|queue| queue.item_id == item.id)
+                    .cloned()
+                    .collect(),
                 links,
             })
         })
@@ -1124,6 +1185,7 @@ fn attention_entry_for_link_at(
         link_id: link.id,
         reminder_id: None,
         run_id: None,
+        queue_id: None,
         item_id: link.item_id,
         external_object_id: object.id,
         source_title,

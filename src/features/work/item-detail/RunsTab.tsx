@@ -2,9 +2,11 @@ import {
   type Dispatch,
   type FormEvent,
   type SetStateAction,
+  useEffect,
   useRef,
   useState,
 } from "react";
+import { cn } from "cn";
 import {
   Alert,
   AlertDescription,
@@ -68,6 +70,7 @@ export function RunsTab({
   grillDrafts,
   onGrillDraftsChange,
   onOpenTerminal,
+  focusedRunRequest,
 }: {
   view: ItemView;
   repositories: Repository[];
@@ -79,6 +82,7 @@ export function RunsTab({
   grillDrafts: GrillAnswerDrafts;
   onGrillDraftsChange: Dispatch<SetStateAction<GrillAnswerDrafts>>;
   onOpenTerminal: (runId: number, pane: PaneTab) => void;
+  focusedRunRequest?: { runId: number; request: number };
 }) {
   const { isSaving, saveItem, whileSaving, confirm, workCommand } = commands;
   const { itemRepositories, itemContext, executionMachine } = itemExecution(
@@ -90,8 +94,17 @@ export function RunsTab({
   const [runForm, setRunForm] = useState<"grill" | "direct">();
   const grillSubmissionLocks = useRef(new Set<string>());
 
+  useEffect(() => {
+    if (!focusedRunRequest) return;
+    const runCard = document.getElementById(`run-card-${focusedRunRequest.runId}`);
+    runCard?.scrollIntoView({ behavior: "smooth", block: "center" });
+    runCard?.focus({ preventScroll: true });
+  }, [focusedRunRequest]);
+
   // Direct Run form
   const [runAgent, setRunAgent] = useState<AgentKind>("claude");
+  const [runModel, setRunModel] = useState("claude-sonnet-4-5");
+  const [runEffort, setRunEffort] = useState("high");
   const [runProfile, setRunProfile] = useState<ExecutionProfile>("implement");
   const [includeRunNotes, setIncludeRunNotes] = useState(false);
   const [runCustomPrompt, setRunCustomPrompt] = useState("");
@@ -303,6 +316,10 @@ export function RunsTab({
   }
 
   async function openDirectRunPreview(workspace: Workspace) {
+    const defaults = itemContext?.implement_defaults;
+    setRunAgent(defaults?.agent ?? "claude");
+    setRunModel(defaults?.model ?? "claude-sonnet-4-5");
+    setRunEffort(defaults?.effort ?? "high");
     const includeNotes = Boolean(view.item.notes.trim());
     setRunForm("direct");
     setDirectRunWorkspaceId(workspace.id);
@@ -310,7 +327,6 @@ export function RunsTab({
     setDirectRunPreview(undefined);
     setDirectRunDirtyConfirmed(false);
     setDirectRunSharedConfirmed(false);
-    setRunAgent("claude");
     setRunProfile("implement");
     setIncludeRunNotes(includeNotes);
     setRunCustomPrompt("");
@@ -365,6 +381,7 @@ export function RunsTab({
         primaryRepositoryId: directRunRepositoryId,
         machineId: null,
         agent: runAgent,
+        configuration: runProfile === "implement" ? { agent: runAgent, model: runModel, effort: runEffort } : undefined,
         executionProfile: runProfile,
         prompt: runPrompt,
         promptSelection: runPromptSelection(),
@@ -758,7 +775,7 @@ export function RunsTab({
                 <span>Agent</span>
                 <NativeSelect
                   value={runAgent}
-                  onChange={(event) => setRunAgent(event.target.value as AgentKind)}
+                  onChange={(event) => { const agent = event.target.value as AgentKind; const model = grillModelCatalog.find((catalog) => catalog.agent === agent)?.models[0]; setRunAgent(agent); setRunModel(model?.id ?? ""); setRunEffort(model?.efforts[0]?.id ?? ""); }}
                   disabled={isSaving}
                 >
                   <NativeSelectOption value="claude">Claude Code</NativeSelectOption>
@@ -782,6 +799,7 @@ export function RunsTab({
                 </NativeSelect>
               </label>
             </div>
+            {runProfile === "implement" && <div className="grid gap-3 md:grid-cols-2"><label className="grid gap-1.5 text-sm font-medium"><span>Model</span><NativeSelect value={runModel} onChange={(event) => { const model = grillModelCatalog.find((catalog) => catalog.agent === runAgent)?.models.find((candidate) => candidate.id === event.target.value); setRunModel(event.target.value); setRunEffort(model?.efforts[0]?.id ?? ""); }} disabled={isSaving}>{grillModelCatalog.find((catalog) => catalog.agent === runAgent)?.models.map((model) => <NativeSelectOption value={model.id} key={model.id}>{model.label} ({model.id})</NativeSelectOption>)}</NativeSelect></label><label className="grid gap-1.5 text-sm font-medium"><span>Effort</span><NativeSelect value={runEffort} onChange={(event) => setRunEffort(event.target.value)} disabled={isSaving}>{grillModelCatalog.find((catalog) => catalog.agent === runAgent)?.models.find((model) => model.id === runModel)?.efforts.map((effort) => <NativeSelectOption value={effort.id} key={effort.id}>{effort.label} ({effort.id})</NativeSelectOption>)}</NativeSelect></label></div>}
             {runProfile === "custom" && (
               <label className="grid gap-1.5 text-sm font-medium">
                 <span>Custom prompt source</span>
@@ -903,7 +921,16 @@ export function RunsTab({
           (action) => !(action === "to-spec" && run.grill_action === "to-spec"),
         );
         return (
-          <Card size="sm" className="bg-muted/20" key={run.id}>
+          <Card
+            size="sm"
+            id={`run-card-${run.id}`}
+            tabIndex={-1}
+            className={cn(
+              "bg-muted/20",
+              focusedRunRequest?.runId === run.id && "ring-2 ring-primary",
+            )}
+            key={run.id}
+          >
             <CardContent className="grid gap-2 pt-4">
               <div>
                 <strong className="block text-sm">
@@ -911,7 +938,7 @@ export function RunsTab({
                 </strong>
                 <span className="text-xs text-muted-foreground">
                   {run.execution_profile} ·{" "}
-                  {run.execution_profile === "grill" && run.model && run.effort
+                  {run.model && run.effort
                     ? `${run.model} · ${run.effort} · `
                     : ""}
                   {machines.find((machine) => machine.id === run.machine_id)

@@ -4,6 +4,32 @@ use super::*;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum DomainError {
+    #[error("Item {item_id} already has an active Implementation Queue")]
+    ImplementationQueueAlreadyActive { item_id: i64 },
+    #[error("Implementation Queue {queue_id} does not exist")]
+    ImplementationQueueNotFound { queue_id: i64 },
+    #[error("Run {run_id} is not an entry in Implementation Queue {queue_id}")]
+    ImplementationQueueRunNotFound { queue_id: i64, run_id: i64 },
+    #[error("Run {run_id} has not finished and cannot advance Implementation Queue {queue_id}")]
+    ImplementationQueueRunNotFinished { queue_id: i64, run_id: i64 },
+    #[error("Entry {position} does not exist in Implementation Queue {queue_id}")]
+    ImplementationQueueEntryNotFound { queue_id: i64, position: i64 },
+    #[error("Entry {position} in Implementation Queue {queue_id} is already done")]
+    ImplementationQueueEntryAlreadyDone { queue_id: i64, position: i64 },
+    #[error("Implementation Queue {queue_id} is not paused")]
+    ImplementationQueueNotPaused { queue_id: i64 },
+    #[error("Implementation Queue requires one or more open tickets")]
+    ImplementationQueueContainsClosedTicket,
+    #[error("Implementation Queue configuration is missing")]
+    ImplementationQueueConfigurationMissing,
+    #[error("Implementation spec does not exist or is not a GitHub Issue")]
+    ImplementationSpecNotFound,
+    #[error("Implementation spec is not linked to the Item")]
+    ImplementationSpecNotLinked,
+    #[error("Implementation spec URL does not match the linked spec")]
+    ImplementationSpecUrlMismatch,
+    #[error("Implementation Queue entries must be ordered, unique, and open")]
+    InvalidImplementationQueueEntries,
     #[error("a Context name cannot be blank")]
     EmptyContextName,
     #[error("a Project name cannot be blank")]

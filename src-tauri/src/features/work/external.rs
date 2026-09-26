@@ -772,6 +772,45 @@ pub(crate) async fn refresh_external_object_with_state(
     runtime.apply_refresh(&object, generation, &executable, snapshot)
 }
 
+/// Read a linked GitHub Issue as a document (body and sub-issues) for display.
+pub(crate) async fn fetch_issue_document_with_state(
+    external_object_id: i64,
+    state: &Mutex<Runtime>,
+) -> Result<IssueDocument, String> {
+    let (object, stored_executable) = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let object = runtime
+            .state
+            .external_objects
+            .iter()
+            .find(|object| object.id == external_object_id)
+            .cloned()
+            .ok_or_else(|| format!("External Object {external_object_id} does not exist"))?;
+        if object.provider != ExternalProvider::GitHub || object.kind != ExternalObjectKind::Issue {
+            return Err("Only GitHub Issues can be read as a document".into());
+        }
+        (object, runtime.gh_executable_path.clone())
+    };
+    let (executable, document) =
+        tauri::async_runtime::spawn_blocking(move || -> Result<_, String> {
+            let executable = resolve_gh_executable(stored_executable.as_deref())
+                .map_err(|error| error.to_string())?;
+            let document = GithubCli::new(executable.clone())
+                .fetch_issue_document(&object.canonical_url)
+                .map_err(|error| error.to_string())?;
+            Ok((executable, document))
+        })
+        .await
+        .map_err(|error| format!("GitHub Issue reader failed: {error}"))??;
+    let mut runtime = state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+    runtime.remember_gh_executable(&executable)?;
+    Ok(document)
+}
+
 pub(crate) async fn add_external_comment_with_state(
     link_id: i64,
     body: String,

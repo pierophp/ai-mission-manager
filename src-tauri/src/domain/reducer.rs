@@ -25,6 +25,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 name,
                 execution_machine_id: None,
                 grill_defaults: GrillConfiguration::default(),
+                implement_defaults: GrillConfiguration::default(),
             };
             let project = Project {
                 id: project_id,
@@ -140,6 +141,23 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             Ok(Decision {
                 state,
                 effects: vec![Effect::PersistContextGrillDefaults { context }],
+            })
+        }
+        Event::SetContextImplementDefaults {
+            context_id,
+            defaults,
+        } => {
+            validate_grill_configuration(&defaults)?;
+            let context = state
+                .contexts
+                .iter_mut()
+                .find(|context| context.id == context_id)
+                .ok_or(DomainError::ContextNotFound { context_id })?;
+            context.implement_defaults = defaults;
+            let context = context.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistContextImplementDefaults { context }],
             })
         }
         Event::CreateProject {
@@ -536,6 +554,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 name: "Personal".into(),
                 execution_machine_id: None,
                 grill_defaults: GrillConfiguration::default(),
+                implement_defaults: GrillConfiguration::default(),
             };
             let project = Project {
                 id: project_id,
@@ -1485,6 +1504,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             workspace_id,
             machine_id,
             agent,
+            configuration,
             execution_profile,
             prompt,
             working_directory,
@@ -1496,8 +1516,17 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             repository_id,
             allow_dirty,
             allow_shared_checkouts,
+            implementation_queue,
         } => {
             let context_id = item_context_id(&state, item_id)?;
+            if implementation_queue.is_some()
+                && state
+                    .implementation_queues
+                    .iter()
+                    .any(|queue| queue.item_id == item_id && queue.active)
+            {
+                return Err(DomainError::ImplementationQueueAlreadyActive { item_id });
+            }
             let workspace = state
                 .workspaces
                 .iter()
@@ -1640,6 +1669,38 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             }
             let id = state.next_run_id;
             let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let implementation_queue = if let Some(start) = implementation_queue {
+                if execution_profile != ExecutionProfile::Implement {
+                    return Err(DomainError::ImplementationQueueAlreadyActive { item_id });
+                }
+                let configuration = configuration
+                    .clone()
+                    .ok_or(DomainError::ImplementationQueueConfigurationMissing)?;
+                Some(create_implementation_queue(
+                    &state,
+                    id,
+                    item_id,
+                    workspace_id,
+                    repository_id,
+                    &configuration,
+                    allow_dirty,
+                    allow_shared_checkouts,
+                    start,
+                )?)
+            } else {
+                None
+            };
+            if let Some(configuration) = &configuration {
+                validate_grill_configuration(configuration)?;
+                if execution_profile != ExecutionProfile::Implement || configuration.agent != agent
+                {
+                    return Err(DomainError::InvalidGrillConfiguration {
+                        agent: configuration.agent,
+                        model: configuration.model.clone(),
+                        effort: configuration.effort.clone(),
+                    });
+                }
+            }
             let run = Run {
                 id,
                 item_id,
@@ -1649,8 +1710,12 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 machine_id,
                 agent,
                 execution_profile,
-                model: None,
-                effort: None,
+                model: configuration
+                    .as_ref()
+                    .map(|configuration| configuration.model.clone()),
+                effort: configuration
+                    .as_ref()
+                    .map(|configuration| configuration.effort.clone()),
                 skill_snapshot: None,
                 prompt,
                 working_directory,
@@ -1671,11 +1736,18 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 grill_action_started_at: None,
             };
             state.next_run_id = next_run_id;
+            let mut effects = vec![];
+            if let Some(mut queue) = implementation_queue {
+                queue.entries[0].run_id = Some(run.id);
+                state.implementation_queues.push(queue.clone());
+                effects.push(Effect::PersistImplementationQueue { queue });
+            }
+            effects.push(Effect::PersistRun {
+                run: run.clone(),
+                next_run_id,
+            });
             state.runs.push(run.clone());
-            Ok(Decision {
-                state,
-                effects: vec![Effect::PersistRun { run, next_run_id }],
-            })
+            Ok(Decision { state, effects })
         }
         Event::StartWorktreeRun {
             item_id,
@@ -2198,11 +2270,12 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 });
             }
             let run = run.clone();
+            let mut effects = vec![Effect::PersistRunState { run: run.clone() }];
+            if run_state == RunState::Finished {
+                effects.extend(queue_finish_observation_effects(&state, &run));
+            }
 
-            Ok(Decision {
-                state,
-                effects: vec![Effect::PersistRunState { run }],
-            })
+            Ok(Decision { state, effects })
         }
         Event::FinishRun { run_id } => {
             let run = state
@@ -2215,10 +2288,177 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 run.grill_phase = Some(GrillPhase::Finished);
             }
             let run = run.clone();
+            let mut effects = vec![Effect::PersistRunState { run: run.clone() }];
+            effects.extend(queue_finish_observation_effects(&state, &run));
 
+            Ok(Decision { state, effects })
+        }
+        Event::AdvanceImplementationQueue {
+            queue_id,
+            run_id,
+            ticket_closed,
+            checkout_clean,
+        } => {
+            let queue = state
+                .implementation_queues
+                .iter_mut()
+                .find(|queue| queue.id == queue_id)
+                .ok_or(DomainError::ImplementationQueueNotFound { queue_id })?;
+            if !queue.active {
+                return Ok(Decision {
+                    state,
+                    effects: Vec::new(),
+                });
+            }
+            let was_paused = queue.paused_reason.is_some();
+            if !state
+                .runs
+                .iter()
+                .any(|run| run.id == run_id && run.state == RunState::Finished)
+            {
+                return Err(DomainError::ImplementationQueueRunNotFinished { queue_id, run_id });
+            }
+            let index = queue
+                .entries
+                .iter()
+                .position(|entry| entry.run_id == Some(run_id))
+                .ok_or(DomainError::ImplementationQueueRunNotFound { queue_id, run_id })?;
+            if queue.entries[index].done {
+                return Ok(Decision {
+                    state,
+                    effects: Vec::new(),
+                });
+            }
+            if !ticket_closed || !checkout_clean {
+                queue.paused_reason = Some(if !ticket_closed {
+                    ImplementationQueuePauseReason::TicketStillOpen
+                } else {
+                    ImplementationQueuePauseReason::CheckoutDirty
+                });
+                let queue = queue.clone();
+                return Ok(Decision {
+                    state,
+                    effects: vec![Effect::PersistImplementationQueue { queue }],
+                });
+            }
+            queue.paused_reason = None;
+            queue.entries[index].done = true;
+            let next_position = queue.entries.get(index + 1).map(|entry| entry.position);
+            if next_position.is_none() {
+                queue.active = false;
+            }
+            let queue = queue.clone();
+            let mut effects = vec![Effect::PersistImplementationQueue {
+                queue: queue.clone(),
+            }];
+            if !was_paused {
+                effects.push(Effect::CloseImplementationRunSession { run_id });
+            }
+            if let Some(position) = next_position {
+                effects.push(Effect::LaunchImplementationQueueEntry { queue_id, position });
+            }
+            Ok(Decision { state, effects })
+        }
+        Event::PauseImplementationQueue { queue_id, reason } => {
+            let queue = state
+                .implementation_queues
+                .iter_mut()
+                .find(|queue| queue.id == queue_id)
+                .ok_or(DomainError::ImplementationQueueNotFound { queue_id })?;
+            if !queue.active {
+                return Ok(Decision {
+                    state,
+                    effects: Vec::new(),
+                });
+            }
+            queue.paused_reason = Some(reason);
+            let queue = queue.clone();
             Ok(Decision {
                 state,
-                effects: vec![Effect::PersistRunState { run }],
+                effects: vec![Effect::PersistImplementationQueue { queue }],
+            })
+        }
+        Event::SkipImplementationQueueEntry { queue_id, position } => {
+            let queue = state
+                .implementation_queues
+                .iter_mut()
+                .find(|queue| queue.id == queue_id)
+                .ok_or(DomainError::ImplementationQueueNotFound { queue_id })?;
+            if !queue.active || queue.paused_reason.is_none() {
+                return Err(DomainError::ImplementationQueueNotPaused { queue_id });
+            }
+            let index = queue
+                .entries
+                .iter()
+                .position(|entry| entry.position == position)
+                .ok_or(DomainError::ImplementationQueueEntryNotFound { queue_id, position })?;
+            if queue.entries[index].done {
+                return Err(DomainError::ImplementationQueueEntryAlreadyDone {
+                    queue_id,
+                    position,
+                });
+            }
+            queue.entries[index].skipped = true;
+            queue.paused_reason = None;
+            let next_position = queue
+                .entries
+                .iter()
+                .skip(index + 1)
+                .find(|entry| !entry.done && !entry.skipped)
+                .map(|entry| entry.position);
+            if next_position.is_none() {
+                queue.active = false;
+            }
+            let queue = queue.clone();
+            let mut effects = vec![Effect::PersistImplementationQueue {
+                queue: queue.clone(),
+            }];
+            if let Some(position) = next_position {
+                effects.push(Effect::LaunchImplementationQueueEntry { queue_id, position });
+            }
+            Ok(Decision { state, effects })
+        }
+        Event::CancelImplementationQueue { queue_id } => {
+            let queue = state
+                .implementation_queues
+                .iter_mut()
+                .find(|queue| queue.id == queue_id)
+                .ok_or(DomainError::ImplementationQueueNotFound { queue_id })?;
+            queue.active = false;
+            queue.paused_reason = None;
+            let queue = queue.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistImplementationQueue { queue }],
+            })
+        }
+        Event::SetImplementationQueueEntryRun {
+            queue_id,
+            position,
+            run_id,
+        } => {
+            let queue = state
+                .implementation_queues
+                .iter_mut()
+                .find(|queue| queue.id == queue_id)
+                .ok_or(DomainError::ImplementationQueueNotFound { queue_id })?;
+            let entry = queue
+                .entries
+                .iter_mut()
+                .find(|entry| entry.position == position)
+                .ok_or(DomainError::ImplementationQueueEntryNotFound { queue_id, position })?;
+            if entry.done {
+                return Err(DomainError::ImplementationQueueEntryAlreadyDone {
+                    queue_id,
+                    position,
+                });
+            }
+            entry.run_id = Some(run_id);
+            queue.paused_reason = None;
+            let queue = queue.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistImplementationQueue { queue }],
             })
         }
         Event::ContinueGrill {
@@ -2428,11 +2668,22 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 }
             }
             let run = run.clone();
-
-            Ok(Decision {
-                state,
-                effects: vec![Effect::PersistRunPaneStatus { run }],
-            })
+            let mut effects = vec![Effect::PersistRunPaneStatus { run: run.clone() }];
+            if status == RunPaneStatus::Missing {
+                if let Some(queue) = state.implementation_queues.iter_mut().find(|queue| {
+                    queue.active
+                        && queue
+                            .entries
+                            .iter()
+                            .any(|entry| entry.run_id == Some(run_id) && !entry.done)
+                }) {
+                    queue.paused_reason = Some(ImplementationQueuePauseReason::PaneMissing);
+                    effects.push(Effect::PersistImplementationQueue {
+                        queue: queue.clone(),
+                    });
+                }
+            }
+            Ok(Decision { state, effects })
         }
         Event::SetItemStatus { item_id, status } => {
             let item = state
@@ -2730,4 +2981,33 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             })
         }
     }
+}
+
+fn queue_finish_observation_effects(state: &DomainState, run: &Run) -> Vec<Effect> {
+    let Some((queue, entry)) = state.implementation_queues.iter().find_map(|queue| {
+        queue
+            .active
+            .then(|| {
+                queue
+                    .entries
+                    .iter()
+                    .find(|entry| entry.run_id == Some(run.id) && !entry.done && !entry.skipped)
+                    .map(|entry| (queue, entry))
+            })
+            .flatten()
+    }) else {
+        return Vec::new();
+    };
+    vec![
+        Effect::FetchImplementationTicketState {
+            queue_id: queue.id,
+            run_id: run.id,
+            ticket_url: entry.ticket_url.clone(),
+        },
+        Effect::InspectImplementationCheckout {
+            queue_id: queue.id,
+            run_id: run.id,
+            checkouts: run.direct_checkouts.clone(),
+        },
+    ]
 }

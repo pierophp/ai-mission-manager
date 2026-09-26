@@ -14,10 +14,11 @@ use crate::domain::{
     Activity, AgentKind, AuditAction, AuditEntry, Context, ContextAttentionDefault, DomainState,
     Effect, ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalMetadata,
     ExternalObject, ExternalObjectKind, ExternalProvider, ExternalSnapshot, GrillAnswer,
-    GrillConfiguration, GrillContinuationAction, GrillPhase, GrillQuestionGroup, Item,
-    ItemRelation, ItemRelationKind, ItemStatus, Link, LinkProvenance, Machine, MachineObservation,
-    Project, ProjectDefaults, Reminder, Repository, RepositoryLocation, Run, RunPaneStatus,
-    RunState, Workspace, WorkspacePreparationState, WorkspaceRepository, Worktree,
+    GrillConfiguration, GrillContinuationAction, GrillPhase, GrillQuestionGroup,
+    ImplementationQueue, Item, ItemRelation, ItemRelationKind, ItemStatus, Link, LinkProvenance,
+    Machine, MachineObservation, Project, ProjectDefaults, Reminder, Repository,
+    RepositoryLocation, Run, RunPaneStatus, RunState, Workspace, WorkspacePreparationState,
+    WorkspaceRepository, Worktree,
 };
 
 #[derive(Debug, Error)]

@@ -39,7 +39,9 @@ use crate::{
         RunSuggestion, Workspace, WorkspaceRepository, WorkspaceRepositoryInput, Worktree,
     },
     git::GitCli,
-    provider::{classify_url, github_repository_name, resolve_gh_executable, GithubCli},
+    provider::{
+        classify_url, github_repository_name, resolve_gh_executable, GithubCli, IssueDocument,
+    },
     terminal::{
         open_pane_in_terminal, terminal_transport, AgentLaunchContext, ExternalPaneIdentity,
         MachineObservationFailure, RunReconciliationResult, TerminalRuntime, TmuxControlPane,
@@ -362,6 +364,13 @@ pub(crate) async fn add_external_comment(
     external::add_external_comment_with_state(link_id, body, state.inner()).await
 }
 
+pub(crate) async fn fetch_issue_document(
+    external_object_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<IssueDocument, String> {
+    external::fetch_issue_document_with_state(external_object_id, state.inner()).await
+}
+
 pub(crate) async fn refresh_external_object(
     external_object_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -512,6 +521,8 @@ pub(crate) async fn start_direct_run(
     machine_id: Option<i64>,
     primary_repository_id: i64,
     agent: AgentKind,
+    configuration: Option<GrillConfiguration>,
+    implementation_queue: Option<crate::domain::ImplementationQueueStart>,
     execution_profile: ExecutionProfile,
     prompt: String,
     prompt_selection: RunPromptSelection,
@@ -520,12 +531,14 @@ pub(crate) async fn start_direct_run(
     allow_shared_checkouts: bool,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    runs::start_direct_run_with_state(
+    runs::start_direct_run_with_queue_state(
         item_id,
         workspace_id,
         machine_id,
         primary_repository_id,
         agent,
+        configuration,
+        implementation_queue,
         execution_profile,
         prompt,
         prompt_selection,
@@ -724,6 +737,27 @@ pub(crate) async fn open_external_terminal(
 
 pub(crate) async fn stop_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
     runs::stop_run_with_state(run_id, state.inner()).await
+}
+
+pub(crate) async fn check_implementation_queue(
+    queue_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    runs::check_implementation_queue_with_state(queue_id, state.inner()).await
+}
+
+pub(crate) async fn skip_implementation_queue_entry(
+    queue_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    runs::skip_implementation_queue_entry_with_state(queue_id, state.inner()).await
+}
+
+pub(crate) async fn cancel_implementation_queue(
+    queue_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    runs::cancel_implementation_queue_with_state(queue_id, state.inner()).await
 }
 
 pub(crate) fn finish_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {

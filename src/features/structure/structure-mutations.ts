@@ -103,6 +103,8 @@ export const structureActions = {
     contextId: number,
     defaults: Parameters<typeof structureAdapter.setContextGrillDefaults>[1],
   ) => () => structureAdapter.setContextGrillDefaults(contextId, defaults),
+  setContextImplementDefaults: (contextId: number, defaults: Parameters<typeof structureAdapter.setContextImplementDefaults>[1]) =>
+    () => structureAdapter.setContextImplementDefaults(contextId, defaults),
   createItem: (title: string, contextId: number, projectId: number) =>
     () => structureAdapter.createItem(title, contextId, projectId),
   prepareReset: () => () => structureAdapter.prepareReset(),

@@ -5,10 +5,12 @@ use rusqlite::Connection;
 use tempfile::tempdir;
 
 use crate::domain::{
-    compose_grill_prompt, decide, format_grill_response, parse_grill_question_group, AgentKind,
-    AuditAction, ConfirmedDownstreamIssue, DownstreamIssueDiscovery, Event, GrillAnswer,
-    GrillConfiguration, GrillContinuationAction, GrillPhase, LinkProvenance, MachineTransport,
-    RunCheckout, WorkspaceRepositoryInput, grill_skill_snapshot,
+    compose_grill_prompt, decide, format_grill_response, grill_skill_snapshot,
+    parse_grill_question_group, AgentKind, AuditAction, ConfirmedDownstreamIssue,
+    DownstreamIssueDiscovery, Effect, Event, GrillAnswer, GrillConfiguration,
+    GrillContinuationAction, GrillPhase, ImplementationQueue, ImplementationQueueEntry,
+    ImplementationQueuePauseReason, LinkProvenance, MachineTransport, RunCheckout,
+    WorkspaceRepositoryInput,
 };
 
 use super::{
@@ -26,6 +28,55 @@ fn apply_event(
         .apply(&decision.effects)
         .expect("event effects should persist");
     decision.state
+}
+
+#[test]
+fn implementation_queue_and_first_run_link_round_trip() {
+    let directory = tempdir().expect("temporary directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let mut store = SqliteStore::open(&database).expect("database should open");
+    let state = store.load_state().expect("initial state should load");
+    let project_id = state.projects[0].id;
+    store.connection.execute(
+        "INSERT INTO items (id, human_identifier, title, project_id, status, notes) VALUES (77, 'I-77', 'Queued item', ?1, 'Inbox', '')",
+        [project_id],
+    ).expect("fixture Item should be inserted");
+    let queue = ImplementationQueue {
+        id: 9,
+        item_id: 77,
+        spec_external_object_id: 3,
+        spec_url: "https://github.com/o/r/issues/87".into(),
+        workspace_id: 4,
+        repository_id: 5,
+        configuration: GrillConfiguration::default(),
+        allow_dirty: false,
+        allow_shared_checkouts: false,
+        active: true,
+        paused_reason: Some(ImplementationQueuePauseReason::CheckoutDirty),
+        entries: vec![ImplementationQueueEntry {
+            position: 0,
+            ticket_number: 89,
+            ticket_title: "First".into(),
+            ticket_url: "https://github.com/o/r/issues/89".into(),
+            ticket_state: "open".into(),
+            run_id: Some(9),
+            done: false,
+            skipped: true,
+        }],
+    };
+    store
+        .apply(&[Effect::PersistImplementationQueue { queue }])
+        .expect("queue should persist");
+    let reloaded = SqliteStore::open(&database)
+        .expect("database should reopen")
+        .load_state()
+        .expect("queue should reload");
+    assert_eq!(reloaded.implementation_queues[0].entries[0].run_id, Some(9));
+    assert!(reloaded.implementation_queues[0].entries[0].skipped);
+    assert_eq!(
+        reloaded.implementation_queues[0].paused_reason,
+        Some(ImplementationQueuePauseReason::CheckoutDirty)
+    );
 }
 
 #[test]
@@ -538,6 +589,18 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
             defaults: configuration.clone(),
         },
     );
+    state = apply_event(
+        &mut store,
+        state,
+        Event::SetContextImplementDefaults {
+            context_id: 1,
+            defaults: GrillConfiguration {
+                agent: AgentKind::Codex,
+                model: "gpt-6-sol".into(),
+                effort: "medium".into(),
+            },
+        },
+    );
     let prompt = compose_grill_prompt(
         &state,
         1,
@@ -641,6 +704,8 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
     assert_eq!(reloaded, state);
     assert_eq!(reloaded.contexts[0].grill_defaults.model, "gpt-6-luna");
     assert_eq!(reloaded.contexts[0].grill_defaults.effort, "xhigh");
+    assert_eq!(reloaded.contexts[0].implement_defaults.model, "gpt-6-sol");
+    assert_eq!(reloaded.contexts[0].implement_defaults.effort, "medium");
     assert_eq!(
         reloaded.runs[0].execution_profile,
         crate::domain::ExecutionProfile::Grill

@@ -149,3 +149,55 @@ html[data-theme="dark"] {
 .terminal-surface .xterm {
   height: 100%;
 }
+
+/* Specs are Markdown read from GitHub; keep them readable inside the Item. */
+.spec-markdown {
+  @apply grid gap-3 text-sm leading-relaxed text-foreground;
+}
+.spec-markdown h1,
+.spec-markdown h2,
+.spec-markdown h3,
+.spec-markdown h4 {
+  @apply mt-3 font-heading font-medium leading-snug;
+}
+.spec-markdown h1 {
+  @apply text-lg;
+}
+.spec-markdown h2 {
+  @apply border-b border-border/70 pb-1 text-base;
+}
+.spec-markdown h3,
+.spec-markdown h4 {
+  @apply text-sm;
+}
+.spec-markdown ul {
+  @apply grid list-disc gap-1 pl-5;
+}
+.spec-markdown ol {
+  @apply grid list-decimal gap-1 pl-5;
+}
+.spec-markdown li:has(> input[type="checkbox"]) {
+  @apply list-none;
+}
+.spec-markdown a {
+  @apply text-primary underline-offset-4 hover:underline;
+}
+.spec-markdown code {
+  @apply rounded bg-muted px-1 py-0.5 font-mono text-xs;
+}
+.spec-markdown pre {
+  @apply overflow-x-auto rounded-md bg-muted p-3;
+}
+.spec-markdown pre code {
+  @apply bg-transparent p-0;
+}
+.spec-markdown blockquote {
+  @apply border-l-2 border-border pl-3 text-muted-foreground;
+}
+.spec-markdown table {
+  @apply w-full border-collapse text-xs;
+}
+.spec-markdown th,
+.spec-markdown td {
+  @apply border border-border px-2 py-1 text-left;
+}

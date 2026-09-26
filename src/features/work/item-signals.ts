@@ -1,8 +1,14 @@
 import { currentMinute } from "../../runtime/time";
 import type { GrillContinuationAction } from "../../runtime/execution-types";
-import type { ItemView, Run } from "../../runtime/types";
+import type { ExternalLinkView, ItemView, Run } from "../../runtime/types";
 
-export const itemDetailTabs = ["overview", "runs", "repositories", "links"] as const;
+export const itemDetailTabs = [
+  "overview",
+  "spec",
+  "runs",
+  "repositories",
+  "links",
+] as const;
 export type ItemDetailTab = (typeof itemDetailTabs)[number];
 
 /** Forms an Item action opens inside the Item detail panel. */
@@ -96,4 +102,19 @@ export function nextGrillAction(
   if (previous === "to-spec") return "to-tickets";
   if (previous === "to-tickets") return "implement";
   return undefined;
+}
+
+/**
+ * The Item's specs: GitHub Issues a Grill's to-spec step created, newest
+ * first. A spec linked by hand has no provenance and is not recognised.
+ */
+export function itemSpecs(view: ItemView): ExternalLinkView[] {
+  return view.links
+    .filter(
+      (link) =>
+        link.link.provenance?.action === "to-spec" &&
+        link.object.provider === "github" &&
+        link.object.kind === "issue",
+    )
+    .sort((left, right) => right.link.id - left.link.id);
 }

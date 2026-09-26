@@ -18,13 +18,17 @@ impl SqliteStore {
         let next_reminder_id = self.sequence("next_reminder_id")?;
         let contexts = {
             let mut statement = self.connection.prepare(
-                "SELECT id, name, execution_machine_id, grill_agent, grill_model, grill_effort
+                "SELECT id, name, execution_machine_id, grill_agent, grill_model, grill_effort,
+                        implement_agent, implement_model, implement_effort
                      FROM contexts ORDER BY id",
             )?;
             let rows = statement.query_map([], |row| {
                 let agent: String = row.get(3)?;
                 let model: String = row.get(4)?;
                 let effort: String = row.get(5)?;
+                let implement_agent: String = row.get(6)?;
+                let implement_model: String = row.get(7)?;
+                let implement_effort: String = row.get(8)?;
                 Ok(Context {
                     id: row.get(0)?,
                     name: row.get(1)?,
@@ -39,6 +43,17 @@ impl SqliteStore {
                         })?,
                         model,
                         effort,
+                    },
+                    implement_defaults: GrillConfiguration {
+                        agent: parse_agent_kind(&implement_agent).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                6,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        model: implement_model,
+                        effort: implement_effort,
                     },
                 })
             })?;
@@ -583,6 +598,22 @@ impl SqliteStore {
             rows.collect::<Result<Vec<_>, _>>()?
         };
 
+        let implementation_queues = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT queue_json FROM implementation_queues ORDER BY id")?;
+            let rows = statement.query_map([], |row| {
+                let json: String = row.get(0)?;
+                serde_json::from_str::<ImplementationQueue>(&json).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
         Ok(DomainState {
             next_context_id,
             next_project_id,
@@ -606,6 +637,7 @@ impl SqliteStore {
             worktrees,
             machines,
             runs,
+            implementation_queues,
             relationships,
             external_objects,
             links,

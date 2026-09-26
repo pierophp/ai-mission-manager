@@ -3115,6 +3115,20 @@ mod tests {
     }
 
     #[test]
+    fn implement_launch_uses_provider_identifiers_for_model_and_effort() {
+        assert_eq!(
+            agent_cli_arguments(AgentKind::Codex, Some("gpt-6-luna"), Some("xhigh"))
+                .expect("Implement arguments should be valid"),
+            vec![
+                "--model",
+                "gpt-6-luna",
+                "-c",
+                "model_reasoning_effort=xhigh"
+            ]
+        );
+    }
+
+    #[test]
     fn launch_gate_command_waits_on_the_machine_socket_before_exporting_or_execing_agent() {
         let state_file = Path::new("/home/runner/.local/state/ai-mission-manager/runs/run-23.json");
         let launch = AgentLaunchContext {

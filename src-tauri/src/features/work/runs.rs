@@ -298,6 +298,29 @@ pub(crate) async fn stop_run_with_state(
                 "Run {run_id}'s Pane was stopped, but its status could not be persisted: {error}"
             )
         })?;
+    if let Some(queue_id) = runtime
+        .state
+        .implementation_queues
+        .iter()
+        .find(|queue| {
+            queue.active
+                && queue
+                    .entries
+                    .iter()
+                    .any(|entry| entry.run_id == Some(run_id) && !entry.done)
+        })
+        .map(|queue| queue.id)
+    {
+        let decision = decide(
+            runtime.state.clone(),
+            Event::PauseImplementationQueue {
+                queue_id,
+                reason: crate::domain::ImplementationQueuePauseReason::RunStopped,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        runtime.commit(decision)?;
+    }
     Ok(stopped)
 }
 
@@ -384,7 +407,505 @@ pub(crate) async fn recover_run_states_with_state(state: &Mutex<Runtime>) -> Res
             runtime.apply_grill_transcript(snapshot.run.id, transcript)?;
         }
     }
+    let finished_queue_runs = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        runtime
+            .state
+            .implementation_queues
+            .iter()
+            .filter(|queue| queue.active)
+            .flat_map(|queue| {
+                queue
+                    .entries
+                    .iter()
+                    .filter(|entry| !entry.done && !entry.skipped)
+                    .filter_map(|entry| entry.run_id)
+            })
+            .filter(|run_id| {
+                runtime
+                    .state
+                    .runs
+                    .iter()
+                    .any(|run| run.id == *run_id && run.state == RunState::Finished)
+            })
+            .collect::<Vec<_>>()
+    };
+    for run_id in finished_queue_runs {
+        advance_finished_implementation_queue(state, run_id).await?;
+    }
     Ok(())
+}
+
+/// Reconcile a finished queue Run against GitHub and its real checkout, then advance it.
+pub(crate) async fn advance_finished_implementation_queue(
+    state: &Mutex<Runtime>,
+    run_id: i64,
+) -> Result<(), String> {
+    let serial = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        Arc::clone(&runtime.implementation_queue_lock)
+    };
+    let _serial_guard = serial.lock().await;
+    let (queue, entry, run, machine, terminal, gh_path) = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let Some((queue, entry)) = runtime
+            .state
+            .implementation_queues
+            .iter()
+            .filter(|queue| queue.active)
+            .find_map(|queue| {
+                queue
+                    .entries
+                    .iter()
+                    .find(|entry| entry.run_id == Some(run_id) && !entry.done && !entry.skipped)
+                    .map(|entry| (queue.clone(), entry.clone()))
+            })
+        else {
+            return Ok(());
+        };
+        let Some(run) = runtime
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        if run.state != RunState::Finished {
+            return Err(format!(
+                "Run #{run_id} must finish before the Implementation Queue can be checked"
+            ));
+        }
+        let Some(machine) = runtime
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == run.machine_id)
+            .cloned()
+        else {
+            return Ok(());
+        };
+        (
+            queue,
+            entry,
+            run,
+            machine,
+            Arc::clone(&runtime.terminal_runtime),
+            runtime.gh_executable_path.clone(),
+        )
+    };
+    let ticket_url = entry.ticket_url.clone();
+    let checkouts = run.direct_checkouts.clone();
+    let worker_machine = machine.clone();
+    let (ticket_closed, checkout_clean) =
+        tauri::async_runtime::spawn_blocking(move || -> Result<(bool, bool), String> {
+            let gh = crate::provider::GithubCli::new(
+                crate::provider::resolve_gh_executable(gh_path.as_deref())
+                    .map_err(|error| error.to_string())?,
+            );
+            let object =
+                crate::provider::classify_url(&ticket_url).map_err(|error| error.to_string())?;
+            let ticket = gh
+                .fetch(&object, current_unix_seconds())
+                .map_err(|error| error.to_string())?;
+            let ticket_closed = ticket.state.eq_ignore_ascii_case("closed");
+            let git = GitCli::system();
+            let mut clean = true;
+            for checkout in checkouts {
+                let inspection = git
+                    .inspect_checkout_on_machine(&worker_machine, Path::new(&checkout.path))
+                    .map_err(|error| error.to_string())?;
+                clean &= !inspection.is_dirty;
+            }
+            Ok((ticket_closed, clean))
+        })
+        .await
+        .map_err(|error| format!("Implementation Queue inspection worker failed: {error}"))??;
+    let decision = decide(
+        state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+            .state
+            .clone(),
+        Event::AdvanceImplementationQueue {
+            queue_id: queue.id,
+            run_id,
+            ticket_closed,
+            checkout_clean,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let should_close = decision.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            crate::domain::Effect::CloseImplementationRunSession { .. }
+        )
+    });
+    let next_position = decision.effects.iter().find_map(|effect| match effect {
+        crate::domain::Effect::LaunchImplementationQueueEntry { position, .. } => Some(*position),
+        _ => None,
+    });
+    {
+        let mut runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        runtime.commit(decision)?;
+    }
+    if should_close {
+        let worker_terminal = Arc::clone(&terminal);
+        let close_machine = machine.clone();
+        let close_session = run.session_name.clone();
+        let close_result = tauri::async_runtime::spawn_blocking(move || {
+            worker_terminal.kill_session(&close_machine, &close_session)
+        })
+        .await
+        .map_err(|error| format!("Finished Run session cleanup worker failed: {error}"))?;
+        if let Err(error) = close_result {
+            eprintln!(
+                "Could not close finished Implementation Queue Run {run_id} session: {error}"
+            );
+        }
+    }
+
+    let Some(position) = next_position else {
+        return Ok(());
+    };
+    let Some(next) = queue
+        .entries
+        .iter()
+        .find(|candidate| candidate.position == position)
+        .cloned()
+    else {
+        return Ok(());
+    };
+    let next_run = match start_direct_run_with_queue_state(
+        queue.item_id,
+        queue.workspace_id,
+        Some(run.machine_id),
+        queue.repository_id,
+        queue.configuration.agent,
+        Some(queue.configuration.clone()),
+        None,
+        ExecutionProfile::Implement,
+        crate::domain::compose_implementation_prompt(
+            include_str!("../../../../.agents/skills/implement/SKILL.md"),
+            next.ticket_number,
+            &next.ticket_url,
+            &queue.spec_url,
+        ),
+        RunPromptSelection {
+            include_objective: true,
+            include_notes: false,
+            external_object_ids: Vec::new(),
+        },
+        run.direct_checkouts.clone(),
+        queue.allow_dirty,
+        queue.allow_shared_checkouts,
+        state,
+    )
+    .await
+    {
+        Ok(run) => run,
+        Err(error) => {
+            let decision = decide(
+                state
+                    .lock()
+                    .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+                    .state
+                    .clone(),
+                Event::PauseImplementationQueue {
+                    queue_id: queue.id,
+                    reason: crate::domain::ImplementationQueuePauseReason::LaunchFailed(error),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            state
+                .lock()
+                .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+                .commit(decision)?;
+            return Ok(());
+        }
+    };
+    let decision = decide(
+        state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+            .state
+            .clone(),
+        Event::SetImplementationQueueEntryRun {
+            queue_id: queue.id,
+            position: next.position,
+            run_id: next_run.id,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .commit(decision)?;
+    Ok(())
+}
+
+pub(crate) async fn check_implementation_queue_with_state(
+    queue_id: i64,
+    state: &Mutex<Runtime>,
+) -> Result<(), String> {
+    let (entry_run_id, position, source_run_id) = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let queue = runtime
+            .state
+            .implementation_queues
+            .iter()
+            .find(|queue| queue.id == queue_id && queue.active && queue.paused_reason.is_some())
+            .ok_or_else(|| format!("Implementation Queue {queue_id} is not paused"))?;
+        let (index, entry) = queue
+            .entries
+            .iter()
+            .enumerate()
+            .find(|(_, entry)| !entry.done && !entry.skipped)
+            .ok_or_else(|| "Paused queue has no ticket to check".to_owned())?;
+        let source_run_id = entry.run_id.or_else(|| {
+            queue.entries[..index]
+                .iter()
+                .rev()
+                .find_map(|previous| previous.run_id)
+        });
+        (entry.run_id, entry.position, source_run_id)
+    };
+    if let Some(run_id) = entry_run_id {
+        return advance_finished_implementation_queue(state, run_id).await;
+    }
+    let source_run_id = source_run_id.ok_or_else(|| {
+        "Paused ticket has no previous Run context to retry its launch".to_owned()
+    })?;
+    let serial = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        Arc::clone(&runtime.implementation_queue_lock)
+    };
+    let _serial_guard = serial.lock().await;
+    launch_implementation_queue_entry_with_state(queue_id, position, source_run_id, state).await
+}
+
+async fn launch_implementation_queue_entry_with_state(
+    queue_id: i64,
+    position: i64,
+    source_run_id: i64,
+    state: &Mutex<Runtime>,
+) -> Result<(), String> {
+    let (queue, entry, source_run) = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let queue = runtime
+            .state
+            .implementation_queues
+            .iter()
+            .find(|queue| queue.id == queue_id && queue.active)
+            .cloned()
+            .ok_or_else(|| format!("Implementation Queue {queue_id} is not active"))?;
+        let entry = queue
+            .entries
+            .iter()
+            .find(|entry| entry.position == position && !entry.done && !entry.skipped)
+            .cloned()
+            .ok_or_else(|| format!("Queue entry {position} is not available"))?;
+        let source_run = runtime
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == source_run_id)
+            .cloned()
+            .ok_or_else(|| format!("Run {source_run_id} does not exist"))?;
+        (queue, entry, source_run)
+    };
+    let next_run = match start_direct_run_with_queue_state(
+        queue.item_id,
+        queue.workspace_id,
+        Some(source_run.machine_id),
+        queue.repository_id,
+        queue.configuration.agent,
+        Some(queue.configuration.clone()),
+        None,
+        ExecutionProfile::Implement,
+        crate::domain::compose_implementation_prompt(
+            include_str!("../../../../.agents/skills/implement/SKILL.md"),
+            entry.ticket_number,
+            &entry.ticket_url,
+            &queue.spec_url,
+        ),
+        RunPromptSelection {
+            include_objective: true,
+            include_notes: false,
+            external_object_ids: Vec::new(),
+        },
+        source_run.direct_checkouts.clone(),
+        queue.allow_dirty,
+        queue.allow_shared_checkouts,
+        state,
+    )
+    .await
+    {
+        Ok(run) => run,
+        Err(error) => {
+            let decision = decide(
+                state
+                    .lock()
+                    .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+                    .state
+                    .clone(),
+                Event::PauseImplementationQueue {
+                    queue_id,
+                    reason: crate::domain::ImplementationQueuePauseReason::LaunchFailed(error),
+                },
+            )
+            .map_err(|error| error.to_string())?;
+            state
+                .lock()
+                .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+                .commit(decision)?;
+            return Ok(());
+        }
+    };
+    let decision = decide(
+        state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+            .state
+            .clone(),
+        Event::SetImplementationQueueEntryRun {
+            queue_id,
+            position,
+            run_id: next_run.id,
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .commit(decision)
+}
+
+pub(crate) async fn skip_implementation_queue_entry_with_state(
+    queue_id: i64,
+    state: &Mutex<Runtime>,
+) -> Result<(), String> {
+    let serial = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        Arc::clone(&runtime.implementation_queue_lock)
+    };
+    let _serial_guard = serial.lock().await;
+    let (position, source_run_id) = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let queue = runtime
+            .state
+            .implementation_queues
+            .iter()
+            .find(|queue| queue.id == queue_id && queue.active && queue.paused_reason.is_some())
+            .ok_or_else(|| format!("Implementation Queue {queue_id} is not paused"))?;
+        let entry = queue
+            .entries
+            .iter()
+            .find(|entry| !entry.done && !entry.skipped)
+            .ok_or_else(|| "Paused queue has no ticket to skip".to_owned())?;
+        let index = queue
+            .entries
+            .iter()
+            .position(|candidate| candidate.position == entry.position)
+            .expect("entry came from queue");
+        let source_run_id = entry.run_id.or_else(|| {
+            queue.entries[..index]
+                .iter()
+                .rev()
+                .find_map(|previous| previous.run_id)
+        });
+        (entry.position, source_run_id)
+    };
+    let decision = decide(
+        state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+            .state
+            .clone(),
+        Event::SkipImplementationQueueEntry { queue_id, position },
+    )
+    .map_err(|error| error.to_string())?;
+    let should_launch = decision.effects.iter().any(|effect| {
+        matches!(
+            effect,
+            crate::domain::Effect::LaunchImplementationQueueEntry { .. }
+        )
+    });
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .commit(decision)?;
+    if !should_launch {
+        return Ok(());
+    }
+    let source_run_id = source_run_id.ok_or_else(|| {
+        "Paused ticket has no previous Run context for the next launch".to_owned()
+    })?;
+    let next_position = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        runtime
+            .state
+            .implementation_queues
+            .iter()
+            .find(|queue| queue.id == queue_id)
+            .and_then(|queue| {
+                queue
+                    .entries
+                    .iter()
+                    .find(|entry| !entry.done && !entry.skipped && entry.run_id.is_none())
+                    .map(|entry| entry.position)
+            })
+            .ok_or_else(|| "Queue has no next ticket".to_owned())?
+    };
+    launch_implementation_queue_entry_with_state(queue_id, next_position, source_run_id, state)
+        .await
+}
+
+pub(crate) async fn cancel_implementation_queue_with_state(
+    queue_id: i64,
+    state: &Mutex<Runtime>,
+) -> Result<(), String> {
+    let serial = {
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        Arc::clone(&runtime.implementation_queue_lock)
+    };
+    let _serial_guard = serial.lock().await;
+    let decision = decide(
+        state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+            .state
+            .clone(),
+        Event::CancelImplementationQueue { queue_id },
+    )
+    .map_err(|error| error.to_string())?;
+    state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
+        .commit(decision)
 }
 
 pub(crate) async fn list_run_suggestions_with_state(
@@ -1218,6 +1739,19 @@ fn apply_terminal_state_record(app: &AppHandle, run_is_grill: bool, record: Agen
     };
     if let Some(run_id) = accepted_run_id {
         reconcile_after_terminal_state(app, run_id, run_is_grill);
+        if record.state == RunState::Finished {
+            let queue_app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let Some(app_state) = queue_app.try_state::<Mutex<Runtime>>() else {
+                    return;
+                };
+                if let Err(error) =
+                    advance_finished_implementation_queue(app_state.inner(), run_id).await
+                {
+                    eprintln!("Could not advance Implementation Queue after Run {run_id}: {error}");
+                }
+            });
+        }
     }
 }
 
@@ -2035,6 +2569,8 @@ enum RunLaunchInput {
         machine_id: Option<i64>,
         primary_repository_id: i64,
         agent: AgentKind,
+        configuration: Option<GrillConfiguration>,
+        implementation_queue: Option<crate::domain::ImplementationQueueStart>,
         execution_profile: ExecutionProfile,
         prompt: String,
         prompt_selection: RunPromptSelection,
@@ -2141,6 +2677,8 @@ impl RunLaunchSnapshot {
                 workspace_id,
                 primary_repository_id,
                 agent,
+                configuration,
+                implementation_queue,
                 execution_profile,
                 prompt_selection,
                 allow_dirty,
@@ -2157,6 +2695,8 @@ impl RunLaunchSnapshot {
                     workspace_id: *workspace_id,
                     machine_id: self.machine.id,
                     agent: *agent,
+                    configuration: configuration.clone(),
+                    implementation_queue: implementation_queue.clone(),
                     execution_profile: *execution_profile,
                     prompt: self.prompt.clone(),
                     working_directory,
@@ -2494,6 +3034,25 @@ fn run_launch_snapshot(
     runtime: &mut Runtime,
     input: RunLaunchInput,
 ) -> Result<RunLaunchSnapshot, String> {
+    match &input {
+        RunLaunchInput::Direct {
+            configuration: Some(configuration),
+            agent,
+            execution_profile,
+            ..
+        } => {
+            crate::domain::validate_grill_configuration(configuration)
+                .map_err(|error| error.to_string())?;
+            if *execution_profile != ExecutionProfile::Implement || configuration.agent != *agent {
+                return Err("Implement model configuration must match the selected agent and Implement profile".into());
+            }
+        }
+        RunLaunchInput::Grill { configuration, .. } => {
+            crate::domain::validate_grill_configuration(configuration)
+                .map_err(|error| error.to_string())?
+        }
+        _ => {}
+    }
     let (machine, direct_checkout, worktree) = match &input {
         RunLaunchInput::Direct {
             item_id,
@@ -2567,6 +3126,21 @@ fn run_launch_snapshot(
             initial_prompt,
         )
         .map_err(|error| error.to_string())?,
+        RunLaunchInput::Direct {
+            implementation_queue: Some(queue),
+            ..
+        } => {
+            let ticket = queue
+                .entries
+                .first()
+                .ok_or_else(|| "Implementation Queue has no tickets".to_owned())?;
+            crate::domain::compose_implementation_prompt(
+                include_str!("../../../../.agents/skills/implement/SKILL.md"),
+                ticket.ticket_number,
+                &ticket.ticket_url,
+                &queue.spec_url,
+            )
+        }
         RunLaunchInput::Direct { prompt, .. } | RunLaunchInput::Worktree { prompt, .. } => {
             prompt.clone()
         }
@@ -2735,6 +3309,14 @@ async fn start_run_with_state(
             Some(configuration.model.clone()),
             Some(configuration.effort.clone()),
         ),
+        RunLaunchInput::Direct {
+            configuration: Some(configuration),
+            ..
+        } => (
+            configuration.agent,
+            Some(configuration.model.clone()),
+            Some(configuration.effort.clone()),
+        ),
         _ => (observation.snapshot.input.agent(), None, None),
     };
     let run_id = observation.snapshot.run_id;
@@ -2864,12 +3446,14 @@ async fn start_run_with_state(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) async fn start_direct_run_with_state(
+pub(crate) async fn start_direct_run_with_queue_state(
     item_id: i64,
     workspace_id: i64,
     machine_id: Option<i64>,
     primary_repository_id: i64,
     agent: AgentKind,
+    configuration: Option<GrillConfiguration>,
+    implementation_queue: Option<crate::domain::ImplementationQueueStart>,
     execution_profile: ExecutionProfile,
     prompt: String,
     prompt_selection: RunPromptSelection,
@@ -2885,6 +3469,8 @@ pub(crate) async fn start_direct_run_with_state(
             machine_id,
             primary_repository_id,
             agent,
+            configuration,
+            implementation_queue,
             execution_profile,
             prompt,
             prompt_selection,
@@ -2892,6 +3478,42 @@ pub(crate) async fn start_direct_run_with_state(
             allow_dirty,
             allow_shared_checkouts,
         },
+        state,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+pub(crate) async fn start_direct_run_with_state(
+    item_id: i64,
+    workspace_id: i64,
+    machine_id: Option<i64>,
+    primary_repository_id: i64,
+    agent: AgentKind,
+    configuration: Option<GrillConfiguration>,
+    execution_profile: ExecutionProfile,
+    prompt: String,
+    prompt_selection: RunPromptSelection,
+    expected_checkouts: Vec<RunCheckout>,
+    allow_dirty: bool,
+    allow_shared_checkouts: bool,
+    state: &Mutex<Runtime>,
+) -> Result<Run, String> {
+    start_direct_run_with_queue_state(
+        item_id,
+        workspace_id,
+        machine_id,
+        primary_repository_id,
+        agent,
+        configuration,
+        None,
+        execution_profile,
+        prompt,
+        prompt_selection,
+        expected_checkouts,
+        allow_dirty,
+        allow_shared_checkouts,
         state,
     )
     .await

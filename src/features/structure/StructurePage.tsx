@@ -124,6 +124,7 @@ type SettingsSection =
   | "machines"
   | "attention"
   | "grill"
+  | "implement"
   | "reset";
 
 type AddDialog = "context" | "project" | "repository" | "machine";
@@ -140,6 +141,7 @@ const settingsSections = [
   { id: "machines", label: "Machines", path: "/settings/machines" },
   { id: "attention", label: "Attention defaults", path: "/settings/attention" },
   { id: "grill", label: "Grill defaults", path: "/settings/grill" },
+  { id: "implement", label: "Implement defaults", path: "/settings/implement" },
   { id: "reset", label: "Reset local data", path: "/settings/reset" },
 ] as const;
 
@@ -200,6 +202,9 @@ export function StructurePage({ section }: { section: SettingsSection }) {
   const [grillAgent, setGrillAgent] = useState<GrillConfiguration["agent"]>("claude");
   const [grillModel, setGrillModel] = useState("claude-sonnet-4-5");
   const [grillEffort, setGrillEffort] = useState("high");
+  const [implementAgent, setImplementAgent] = useState<GrillConfiguration["agent"]>("claude");
+  const [implementModel, setImplementModel] = useState("claude-sonnet-4-5");
+  const [implementEffort, setImplementEffort] = useState("high");
   const [repositoryDeletionPreview, setRepositoryDeletionPreview] =
     useState<RepositoryDeletionPreview>();
   const [parentDeletionPreview, setParentDeletionPreview] =
@@ -269,6 +274,9 @@ export function StructurePage({ section }: { section: SettingsSection }) {
     setGrillAgent(context.grill_defaults.agent);
     setGrillModel(context.grill_defaults.model);
     setGrillEffort(context.grill_defaults.effort);
+    setImplementAgent(context.implement_defaults.agent);
+    setImplementModel(context.implement_defaults.model);
+    setImplementEffort(context.implement_defaults.effort);
   }, [contexts, selectedContextId]);
 
   async function refreshAfterEdit() {
@@ -877,12 +885,26 @@ export function StructurePage({ section }: { section: SettingsSection }) {
     }
   }
 
+  async function saveImplementDefaults(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedContextId) return;
+    setIsSaving(true);
+    try {
+      await structureCommand.execute(structureActions.setContextImplementDefaults(selectedContextId, { agent: implementAgent, model: implementModel, effort: implementEffort }));
+      await refreshAfterEdit();
+      setError(undefined);
+    } catch (saveError) { setError(errorMessage(saveError)); }
+    finally { setIsSaving(false); }
+  }
+
   const selectedGrillCatalog = grillModelCatalog.find(
     (catalog) => catalog.agent === grillAgent,
   );
   const selectedGrillModel = selectedGrillCatalog?.models.find(
     (model) => model.id === grillModel,
   );
+  const selectedImplementCatalog = grillModelCatalog.find((catalog) => catalog.agent === implementAgent);
+  const selectedImplementModel = selectedImplementCatalog?.models.find((model) => model.id === implementModel);
   const isEditingContext = editDialog?.kind === "context";
   const isEditingProject = editDialog?.kind === "project";
   const isEditingRepository = editDialog?.kind === "repository";
@@ -1194,6 +1216,8 @@ export function StructurePage({ section }: { section: SettingsSection }) {
           {activeSection === "attention" && <Card><CardHeader className="border-b border-border/70"><CardTitle>Attention defaults</CardTitle><CardDescription>Choose which External Object changes interrupt Links in a Context.</CardDescription></CardHeader><CardContent className="space-y-4 p-4"><form className="grid gap-4 lg:grid-cols-[1fr_1fr_2fr_auto] lg:items-end" onSubmit={saveAttentionDefault}><ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} /><Field label="External Object type"><NativeSelect value={attentionObjectKind} onChange={(event) => setAttentionObjectKind(event.target.value as ExternalObjectKind)} disabled={isSaving}>{objectKinds.map((kind) => <NativeSelectOption value={kind} key={kind}>{externalObjectKindLabel(kind)}</NativeSelectOption>)}</NativeSelect></Field><div className="flex flex-wrap gap-4 pb-1">{(["title", "state", "metadata"] as const).map((kind) => <label className="flex items-center gap-2 text-sm" key={kind}><Checkbox checked={attentionDefaultPolicy[kind]} onCheckedChange={(checked) => setAttentionDefaultPolicy((current) => ({ ...current, [kind]: checked === true }))} disabled={isSaving} />{kind[0].toUpperCase() + kind.slice(1)} changes</label>)}</div><Button type="submit" disabled={isSaving || !selectedContextId}>Save defaults</Button></form></CardContent></Card>}
 
           {activeSection === "grill" && <Card><CardHeader className="border-b border-border/70"><CardTitle>Grill defaults</CardTitle><CardDescription>Context-scoped agent, model, and effort defaults for starting a Grill Run from an Item.</CardDescription></CardHeader><CardContent className="space-y-4 p-4"><form className="grid gap-4 lg:grid-cols-[1fr_1fr_1fr_1fr_auto] lg:items-end" onSubmit={saveGrillDefaults}><ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} /><Field label="Agent"><NativeSelect value={grillAgent} onChange={(event) => { const nextAgent = event.target.value as GrillConfiguration["agent"]; const nextCatalog = grillModelCatalog.find((catalog) => catalog.agent === nextAgent); const nextModel = nextCatalog?.models[0]; setGrillAgent(nextAgent); setGrillModel(nextModel?.id ?? ""); setGrillEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || grillModelCatalog.length === 0}>{grillModelCatalog.map((catalog) => <NativeSelectOption value={catalog.agent} key={catalog.agent}>{catalog.agent === "claude" ? "Claude Code" : "Codex"}</NativeSelectOption>)}</NativeSelect></Field><Field label="Model"><NativeSelect value={grillModel} onChange={(event) => { const nextModel = selectedGrillCatalog?.models.find((model) => model.id === event.target.value); setGrillModel(event.target.value); setGrillEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || !selectedGrillCatalog}>{selectedGrillCatalog?.models.map((model) => <NativeSelectOption value={model.id} key={model.id}>{model.label} ({model.id})</NativeSelectOption>)}</NativeSelect></Field><Field label="Effort"><NativeSelect value={grillEffort} onChange={(event) => setGrillEffort(event.target.value)} disabled={isSaving || !selectedGrillModel}>{selectedGrillModel?.efforts.map((effort) => <NativeSelectOption value={effort.id} key={effort.id}>{effort.label} ({effort.id})</NativeSelectOption>)}</NativeSelect></Field><Button type="submit" disabled={isSaving || !selectedContextId || !selectedGrillModel}>Save defaults</Button></form></CardContent></Card>}
+
+          {activeSection === "implement" && <Card><CardHeader className="border-b border-border/70"><CardTitle>Implement defaults</CardTitle><CardDescription>Context-scoped agent, model, and effort defaults for Direct Implement Runs.</CardDescription></CardHeader><CardContent className="space-y-4 p-4"><form className="grid gap-4 lg:grid-cols-[1fr_1fr_1fr_1fr_auto] lg:items-end" onSubmit={saveImplementDefaults}><ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} /><Field label="Agent"><NativeSelect value={implementAgent} onChange={(event) => { const nextAgent = event.target.value as GrillConfiguration["agent"]; const nextCatalog = grillModelCatalog.find((catalog) => catalog.agent === nextAgent); const nextModel = nextCatalog?.models[0]; setImplementAgent(nextAgent); setImplementModel(nextModel?.id ?? ""); setImplementEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || grillModelCatalog.length === 0}>{grillModelCatalog.map((catalog) => <NativeSelectOption value={catalog.agent} key={catalog.agent}>{catalog.agent === "claude" ? "Claude Code" : "Codex"}</NativeSelectOption>)}</NativeSelect></Field><Field label="Model"><NativeSelect value={implementModel} onChange={(event) => { const nextModel = selectedImplementCatalog?.models.find((model) => model.id === event.target.value); setImplementModel(event.target.value); setImplementEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || !selectedImplementCatalog}>{selectedImplementCatalog?.models.map((model) => <NativeSelectOption value={model.id} key={model.id}>{model.label} ({model.id})</NativeSelectOption>)}</NativeSelect></Field><Field label="Effort"><NativeSelect value={implementEffort} onChange={(event) => setImplementEffort(event.target.value)} disabled={isSaving || !selectedImplementModel}>{selectedImplementModel?.efforts.map((effort) => <NativeSelectOption value={effort.id} key={effort.id}>{effort.label} ({effort.id})</NativeSelectOption>)}</NativeSelect></Field><Button type="submit" disabled={isSaving || !selectedContextId || !selectedImplementModel}>Save defaults</Button></form></CardContent></Card>}
 
           {activeSection === "reset" && <Card className="border-destructive/30 bg-destructive/5"><CardHeader><CardTitle>Reset all local data</CardTitle><CardDescription>Remove Mission Manager&apos;s local working model, cached External Objects, and Activity history. Provider-owned Issues and pull requests are never deleted.</CardDescription></CardHeader><CardContent className="space-y-4"><Button type="button" variant="destructive" disabled={isSaving} onClick={() => void handlePrepareReset()}>Review reset impact</Button>{resetLocalDataPreview && <ResetLocalDataPreviewCard preview={resetLocalDataPreview} disabled={isSaving} onConfirm={() => void handleReset()} onCancel={() => setResetLocalDataPreview(undefined)} />}</CardContent></Card>}
         </div>

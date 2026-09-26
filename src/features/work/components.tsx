@@ -463,6 +463,10 @@ export function AttentionEntryCard({
           <span className="text-xs text-muted-foreground">
             Open the Run to answer the agent.
           </span>
+        ) : entry.kind === "implementation_queue" ? (
+          <span className="text-xs text-muted-foreground">
+            Open the Item’s Spec tab to recover the queue.
+          </span>
         ) : (
           <Button
             type="button"
@@ -589,6 +593,7 @@ function attentionEntryLabel(entry: AttentionEntry): string {
   if (entry.kind === "reminder") return "Reminder due";
   if (entry.kind === "review") return "Review date reached";
   if (entry.kind === "blocked_run") return "Run blocked";
+  if (entry.kind === "implementation_queue") return "Implementation Queue paused";
   return `${entry.activities.length} change${entry.activities.length === 1 ? "" : "s"}`;
 }
 

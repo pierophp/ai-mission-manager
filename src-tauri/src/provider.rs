@@ -3,7 +3,7 @@ use std::{
     process::Command,
 };
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::dependencies::resolve_executable;
@@ -20,6 +20,8 @@ pub enum ProviderError {
     EmptyUrl,
     #[error("GitHub CLI is not available at an executable absolute path")]
     GhNotFound,
+    #[error("only GitHub Issues have a readable issue document")]
+    NotAnIssue,
     #[error("GitHub CLI failed: {message}")]
     GhFailed { message: String },
     #[error("GitHub returned invalid JSON: {0}")]
@@ -237,6 +239,95 @@ impl GithubCli {
         let response = serde_json::from_slice::<GithubResponse>(&output.stdout)?;
         Ok(response.into_snapshot(fetched_at))
     }
+}
+
+impl GithubCli {
+    /// Read an Issue's Markdown body and its native sub-issues. Nothing is
+    /// stored: specs are read fresh, so editing one never raises attention.
+    pub fn fetch_issue_document(&self, issue_url: &str) -> Result<IssueDocument, ProviderError> {
+        let issue = classify_url(issue_url)?;
+        if issue.kind != ExternalObjectKind::Issue {
+            return Err(ProviderError::NotAnIssue);
+        }
+        let (repository, number) = issue
+            .external_key
+            .strip_prefix("issue:")
+            .and_then(|key| key.split_once('#'))
+            .ok_or(ProviderError::NotAnIssue)?;
+
+        let output = Command::new(&self.executable)
+            .args([
+                "issue",
+                "view",
+                issue.canonical_url.as_str(),
+                "--json",
+                "body",
+            ])
+            .output()?;
+        ensure_success(&output)?;
+        let body = serde_json::from_slice::<GithubIssueBody>(&output.stdout)?.body;
+
+        let sub_issues_path = format!("repos/{repository}/issues/{number}/sub_issues");
+        let output = Command::new(&self.executable)
+            .args([
+                "api",
+                sub_issues_path.as_str(),
+                "--paginate",
+                "--jq",
+                ".[] | {number, title, state, html_url}",
+            ])
+            .output()?;
+        ensure_success(&output)?;
+        let sub_issues = String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| {
+                let sub_issue = serde_json::from_str::<GithubSubIssue>(line)?;
+                // Canonical, so it matches the URL of a Link to the same Issue.
+                let url = classify_url(&sub_issue.html_url)
+                    .map(|object| object.canonical_url)
+                    .unwrap_or(sub_issue.html_url);
+                Ok(SubIssue {
+                    number: sub_issue.number,
+                    title: sub_issue.title,
+                    state: sub_issue.state,
+                    url,
+                })
+            })
+            .collect::<Result<Vec<_>, ProviderError>>()?;
+
+        Ok(IssueDocument { body, sub_issues })
+    }
+}
+
+/// An Issue read as a document: its body and the sub-issues that break it down.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IssueDocument {
+    pub body: String,
+    pub sub_issues: Vec<SubIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SubIssue {
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub url: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubIssueBody {
+    #[serde(default)]
+    body: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubSubIssue {
+    number: u64,
+    title: String,
+    state: String,
+    html_url: String,
 }
 
 fn ensure_success(output: &std::process::Output) -> Result<(), ProviderError> {
@@ -498,5 +589,61 @@ fi
                 "Please review the edge case",
             ]
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn github_cli_reads_an_issue_body_and_its_sub_issues() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempdir().expect("temporary provider directory should exist");
+        let executable = directory.path().join("gh");
+        let script = r###"#!/bin/sh
+if [ "$1" = issue ] && [ "$2" = view ]; then
+  printf '%s' '{"body":"## Problem Statement\nDevTools open on every launch."}'
+elif [ "$1" = api ] && [ "$2" = repos/acme/app/issues/7/sub_issues ]; then
+  printf '%s\n' '{"html_url":"https://github.com/Acme/App/issues/8","number":8,"state":"open","title":"Gate DevTools"}'
+  printf '%s\n' '{"html_url":"https://github.com/Acme/App/issues/9","number":9,"state":"closed","title":"Document the flag"}'
+else
+  exit 1
+fi
+"###;
+        fs::write(&executable, script).expect("fake gh should be written");
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
+            .expect("fake gh should be executable");
+
+        let document = GithubCli::new(executable)
+            .fetch_issue_document("https://github.com/acme/app/issues/7")
+            .expect("the issue document should be read");
+
+        assert_eq!(
+            document.body,
+            "## Problem Statement\nDevTools open on every launch."
+        );
+        assert_eq!(
+            document.sub_issues,
+            vec![
+                SubIssue {
+                    number: 8,
+                    title: "Gate DevTools".into(),
+                    state: "open".into(),
+                    url: "https://github.com/acme/app/issues/8".into(),
+                },
+                SubIssue {
+                    number: 9,
+                    title: "Document the flag".into(),
+                    state: "closed".into(),
+                    url: "https://github.com/acme/app/issues/9".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn only_github_issues_have_an_issue_document() {
+        let error = GithubCli::new(PathBuf::from("/nonexistent/gh"))
+            .fetch_issue_document("https://github.com/acme/app/pull/7")
+            .expect_err("a pull request is not an issue document");
+        assert!(matches!(error, ProviderError::NotAnIssue));
     }
 }
