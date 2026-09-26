@@ -143,9 +143,6 @@ export function RunsTab({
   const [grillDirtyConfirmed, setGrillDirtyConfirmed] = useState(false);
   const [grillSharedConfirmed, setGrillSharedConfirmed] = useState(false);
 
-  const runsNewestFirst = [...view.runs].sort(
-    (left, right) => right.started_at - left.started_at || right.id - left.id,
-  );
   const selectedGrillCatalog = grillModelCatalog.find(
     (catalog) => catalog.agent === grillAgent,
   );
@@ -154,7 +151,7 @@ export function RunsTab({
   );
 
   function openRunForm(form: ItemForm) {
-    if (form === "run" && view.workspaces[0]) openRun(view.workspaces[0]);
+    if (form === "run") openRun();
   }
 
   useFormIntent(intent, runForms, openRunForm);
@@ -174,9 +171,8 @@ export function RunsTab({
     setGrillPromptNeedsCompose(true);
   }
 
-  function openRun(workspace: Workspace) {
+  function openRun() {
     openGrillStart();
-    void openDirectRunPreview(workspace);
   }
 
   function openGrillStart() {
@@ -184,6 +180,7 @@ export function RunsTab({
     const executionWorkspaceId = view.workspaces[0]?.id;
     setRunForm("run");
     setRunProfile("grill");
+    setRunCustomPrompt("");
     setGrillAgent(defaults?.agent ?? "claude");
     setGrillModel(defaults?.model ?? "claude-sonnet-4-5");
     setGrillEffort(defaults?.effort ?? "high");
@@ -345,6 +342,10 @@ export function RunsTab({
       const draft = runPromptDrafts.current[profile];
       setRunPrompt(draft?.prompt ?? "");
       setRunPromptNeedsCompose(draft?.needsCompose ?? true);
+      const workspace = view.workspaces[0];
+      if (!directRunPreview && workspace) {
+        void openDirectRunPreview(workspace, profile);
+      }
     }
   }
 
@@ -374,7 +375,10 @@ export function RunsTab({
     });
   }
 
-  async function openDirectRunPreview(workspace: Workspace) {
+  async function openDirectRunPreview(
+    workspace: Workspace,
+    profile: Exclude<ExecutionProfile, "grill"> = "implement",
+  ) {
     const defaults = itemContext?.implement_defaults;
     setRunAgent(defaults?.agent ?? "claude");
     setRunModel(defaults?.model ?? "claude-sonnet-4-5");
@@ -393,9 +397,9 @@ export function RunsTab({
           workCommand.execute(
             workActions.composeRunPrompt(
               view.item.id,
-              "implement",
+              profile,
               { includeObjective: true, includeNotes, externalObjectIds: [] },
-              null,
+              profile === "custom" ? runCustomPrompt : null,
             ),
             false,
           ),
@@ -406,9 +410,7 @@ export function RunsTab({
         ]);
         setRunPrompt(prompt);
         setRunPromptNeedsCompose(false);
-        runPromptDrafts.current = {
-          implement: { prompt, needsCompose: false },
-        };
+        runPromptDrafts.current[profile] = { prompt, needsCompose: false };
         setDirectRunPreview(preview);
       } catch (previewError) {
         closeRunForm();
@@ -1051,8 +1053,7 @@ export function RunsTab({
           variant="outline"
           disabled={isSaving || !view.workspaces[0]}
           onClick={() => {
-            const workspace = view.workspaces[0];
-            if (workspace) openRun(workspace);
+            openRun();
           }}
         >
           Start Run
@@ -1061,7 +1062,7 @@ export function RunsTab({
       {view.runs.length === 0 && (
         <span className="text-sm text-muted-foreground">No Runs yet.</span>
       )}
-      {runsNewestFirst.map((run) => {
+      {view.runs.map((run) => {
         const runRepository =
           run.repository_id === null
             ? run.direct_checkouts.find(
