@@ -4269,7 +4269,18 @@ mod identity_tests {
                 prompt.contains("Implement the work described by the user in the spec or tickets.")
             );
             assert!(prompt.contains("Run typechecking regularly, single test files regularly"));
+            assert!(prompt.contains(&format!("## Ticket #{}", entry.ticket_number)));
             assert!(prompt.contains(&entry.ticket_url));
+            assert!(prompt.contains("Parent spec: https://github.com/o/r/issues/87"));
+            assert!(prompt.contains(&format!(
+                "Read the ticket using `gh issue view {} --comments` before making changes.",
+                entry.ticket_number
+            )));
+            assert!(prompt.contains(&format!(
+                "Reference #{} in the commit message and close this sub-issue when the work is complete.",
+                entry.ticket_number
+            )));
+            assert!(prompt.contains("Never close the parent spec or any other issue."));
             assert!(!prompt.contains("name: implement"));
         }
     }
