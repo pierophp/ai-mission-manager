@@ -703,7 +703,7 @@ pub(crate) async fn check_implementation_queue_with_state(
     launch_implementation_queue_entry_with_state(queue_id, position, source_run_id, state).await
 }
 
-async fn launch_implementation_queue_entry_with_state(
+pub(super) async fn launch_implementation_queue_entry_with_state(
     queue_id: i64,
     position: i64,
     source_run_id: i64,
@@ -4222,10 +4222,9 @@ fn agent_display_name(agent: AgentKind) -> &'static str {
 mod identity_tests {
     use super::{
         direct_repository_identity_set_matches, downstream_confirmation_transcript,
-        grill_transcript_identity_matches, implementation_queue_entry_prompt,
-        DeferredTerminalEvent, TerminalCallbackGate,
+        grill_transcript_identity_matches, DeferredTerminalEvent, TerminalCallbackGate,
     };
-    use crate::domain::{ImplementationQueueEntry, Repository, RepositoryLocation};
+    use crate::domain::{Repository, RepositoryLocation};
     use crate::{
         agent_state::AgentStateRecord,
         app::Runtime,
@@ -4235,55 +4234,6 @@ mod identity_tests {
         path::PathBuf,
         sync::{Arc, Mutex},
     };
-
-    #[test]
-    fn first_and_advanced_queue_runs_receive_the_local_implement_skill() {
-        let entries = [
-            ImplementationQueueEntry {
-                position: 0,
-                ticket_number: 42,
-                ticket_title: "First issue".into(),
-                ticket_url: "https://github.com/o/r/issues/42".into(),
-                ticket_state: "open".into(),
-                run_id: None,
-                done: false,
-                skipped: false,
-            },
-            ImplementationQueueEntry {
-                position: 1,
-                ticket_number: 43,
-                ticket_title: "Next issue".into(),
-                ticket_url: "https://github.com/o/r/issues/43".into(),
-                ticket_state: "open".into(),
-                run_id: None,
-                done: false,
-                skipped: false,
-            },
-        ];
-
-        for entry in entries {
-            let prompt =
-                implementation_queue_entry_prompt(&entry, "https://github.com/o/r/issues/87");
-
-            assert!(
-                prompt.contains("Implement the work described by the user in the spec or tickets.")
-            );
-            assert!(prompt.contains("Run typechecking regularly, single test files regularly"));
-            assert!(prompt.contains(&format!("## Ticket #{}", entry.ticket_number)));
-            assert!(prompt.contains(&entry.ticket_url));
-            assert!(prompt.contains("Parent spec: https://github.com/o/r/issues/87"));
-            assert!(prompt.contains(&format!(
-                "Read the ticket using `gh issue view {} --comments` before making changes.",
-                entry.ticket_number
-            )));
-            assert!(prompt.contains(&format!(
-                "Reference #{} in the commit message and close this sub-issue when the work is complete.",
-                entry.ticket_number
-            )));
-            assert!(prompt.contains("Never close the parent spec or any other issue."));
-            assert!(!prompt.contains("name: implement"));
-        }
-    }
 
     #[test]
     fn direct_checkout_snapshot_rejects_a_new_project_repository() {

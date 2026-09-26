@@ -1045,6 +1045,154 @@ fn direct_grill_and_worktree_runs_are_persisted_before_their_gate_is_released() 
 }
 
 #[test]
+fn first_and_advancing_queue_launches_deliver_the_local_implement_prompt() {
+    use crate::{
+        domain::{
+            decide, AgentKind, Event, ExecutionProfile, GrillConfiguration,
+            ImplementationQueueEntry, ImplementationQueueStart, LinkPurpose, RunCheckout,
+            RunPromptSelection,
+        },
+        terminal::{FakeMachineOutcome, FakeTerminalRuntime},
+    };
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let checkout = directory.path().join("checkout");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+    let (runtime, item, workspace, repository, _) = runtime_for_run_launch(
+        &directory.path().join("mission-manager.sqlite"),
+        &checkout,
+        fake,
+    );
+    let state = Mutex::new(runtime);
+    let spec = decide(
+        state.lock().unwrap().state.clone(),
+        Event::LinkExternalObject {
+            item_id: item.id,
+            object: ExternalObjectInput {
+                provider: ExternalProvider::GitHub,
+                kind: ExternalObjectKind::Issue,
+                external_key: "owner/repo#87".into(),
+                canonical_url: "https://github.com/o/r/issues/87".into(),
+            },
+            snapshot: None,
+        },
+    )
+    .expect("spec issue should link");
+    state
+        .lock()
+        .unwrap()
+        .commit(spec)
+        .expect("spec link should persist");
+    state
+        .lock()
+        .unwrap()
+        .set_link_purpose(1, LinkPurpose::ToSpec)
+        .expect("linked issue should be markable as the spec");
+
+    let selection = RunPromptSelection {
+        include_objective: true,
+        include_notes: false,
+        external_object_ids: Vec::new(),
+    };
+    let checkouts = vec![RunCheckout {
+        repository_id: repository.id,
+        path: checkout.to_string_lossy().into_owned(),
+        branch: "feature/run-gate".into(),
+        is_dirty: false,
+    }];
+    let configuration = GrillConfiguration {
+        agent: AgentKind::Claude,
+        model: "claude-sonnet-4-5".into(),
+        effort: "high".into(),
+    };
+    let queue = ImplementationQueueStart {
+        spec_external_object_id: 1,
+        spec_url: "https://github.com/o/r/issues/87".into(),
+        entries: vec![
+            ImplementationQueueEntry {
+                position: 0,
+                ticket_number: 42,
+                ticket_title: "First issue".into(),
+                ticket_url: "https://github.com/o/r/issues/42".into(),
+                ticket_state: "open".into(),
+                run_id: None,
+                done: false,
+                skipped: false,
+            },
+            ImplementationQueueEntry {
+                position: 1,
+                ticket_number: 43,
+                ticket_title: "Next issue".into(),
+                ticket_url: "https://github.com/o/r/issues/43".into(),
+                ticket_state: "open".into(),
+                run_id: None,
+                done: false,
+                skipped: false,
+            },
+        ],
+    };
+
+    let first_run = tauri::async_runtime::block_on(runs::start_direct_run_with_queue_state(
+        item.id,
+        workspace.id,
+        None,
+        repository.id,
+        AgentKind::Claude,
+        Some(configuration),
+        Some(queue),
+        ExecutionProfile::Implement,
+        "ignored queue seed prompt".into(),
+        selection,
+        checkouts,
+        false,
+        false,
+        &state,
+    ))
+    .expect("initial queue Run should launch");
+
+    {
+        let mut runtime = state.lock().unwrap();
+        assert_local_implementation_queue_prompt(
+            &runtime.state.runs[0].prompt,
+            42,
+            "https://github.com/o/r/issues/42",
+        );
+        runtime.state.runs[0].state = crate::domain::RunState::Finished;
+    }
+
+    tauri::async_runtime::block_on(runs::launch_implementation_queue_entry_with_state(
+        1,
+        1,
+        first_run.id,
+        &state,
+    ))
+    .expect("advancing queue Run should launch");
+    let runtime = state.lock().unwrap();
+    assert_eq!(runtime.state.runs.len(), 2);
+    assert_local_implementation_queue_prompt(
+        &runtime.state.runs[1].prompt,
+        43,
+        "https://github.com/o/r/issues/43",
+    );
+}
+
+fn assert_local_implementation_queue_prompt(prompt: &str, ticket_number: i64, ticket_url: &str) {
+    assert!(prompt.starts_with("Implement the work described by the user in the spec or tickets."));
+    assert!(prompt.contains("Run typechecking regularly, single test files regularly"));
+    assert!(!prompt.contains("name: implement"));
+    assert!(prompt.contains(&format!("## Ticket #{ticket_number}")));
+    assert!(prompt.contains(ticket_url));
+    assert!(prompt.contains("Parent spec: https://github.com/o/r/issues/87"));
+    assert!(prompt.contains(&format!(
+        "Read the ticket using `gh issue view {ticket_number} --comments` before making changes."
+    )));
+    assert!(prompt.contains(&format!(
+        "Reference #{ticket_number} in the commit message and close this sub-issue when the work is complete."
+    )));
+    assert!(prompt.contains("Never close the parent spec or any other issue."));
+}
+
+#[test]
 fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
     use crate::{
         domain::{AgentKind, ExecutionProfile, GrillConfiguration, RunPromptSelection},
