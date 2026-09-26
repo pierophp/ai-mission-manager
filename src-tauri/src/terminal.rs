@@ -655,20 +655,35 @@ impl TmuxControlPane {
         self.send_command(&format!("refresh-client -C {columns},{rows}"))
     }
 
+    /// Captures the visible Pane screen as bytes ready to replay into a fresh
+    /// terminal emulator, including the cursor position.
     pub fn capture_pane_snapshot(
         &self,
         after_end: impl FnOnce() + Send + 'static,
     ) -> Result<Vec<u8>, String> {
         validate_pane_id(&self.pane_id)?;
-        let (sender, receiver) = mpsc::sync_channel(1);
-        self.send_command_with_response(
-            &format!("capture-pane -p -e -t {}", self.pane_id),
-            sender,
-            Box::new(after_end),
+        let (screen_sender, screen_receiver) = mpsc::sync_channel(1);
+        let (cursor_sender, cursor_receiver) = mpsc::sync_channel(1);
+        // Both commands share one line so tmux runs them back to back without
+        // processing Pane output in between; the barrier follows the second.
+        self.send_command_inner(
+            &format!(
+                "capture-pane -p -e -t {pane} ; display-message -p -t {pane} '#{{cursor_x}} #{{cursor_y}}'",
+                pane = self.pane_id
+            ),
+            vec![
+                (Some(screen_sender), None),
+                (Some(cursor_sender), Some(Box::new(after_end))),
+            ],
         )?;
-        receiver
-            .recv_timeout(Duration::from_secs(15))
-            .map_err(|error| format!("Could not capture Pane snapshot: {error}"))?
+        let receive = |receiver: mpsc::Receiver<Result<Vec<u8>, String>>| {
+            receiver
+                .recv_timeout(Duration::from_secs(15))
+                .map_err(|error| format!("Could not capture Pane snapshot: {error}"))?
+        };
+        let screen = receive(screen_receiver)?;
+        let cursor = receive(cursor_receiver)?;
+        Ok(render_pane_snapshot(&screen, parse_pane_cursor(&cursor)))
     }
 
     pub fn close(&self) -> Result<(), String> {
@@ -697,23 +712,18 @@ impl TmuxControlPane {
     }
 
     fn send_command(&self, command: &str) -> Result<(), String> {
-        self.send_command_inner(command, None, None)
+        self.send_command_inner(command, vec![(None, None)])
     }
 
-    fn send_command_with_response(
-        &self,
-        command: &str,
-        response_sender: mpsc::SyncSender<Result<Vec<u8>, String>>,
-        after_end: Box<dyn FnOnce() + Send>,
-    ) -> Result<(), String> {
-        self.send_command_inner(command, Some(response_sender), Some(after_end))
-    }
-
+    /// Sends one command line; `responses` holds one entry per tmux command in
+    /// that line, in order, since tmux answers each with its own block.
     fn send_command_inner(
         &self,
         command: &str,
-        response_sender: Option<mpsc::SyncSender<Result<Vec<u8>, String>>>,
-        after_end: Option<Box<dyn FnOnce() + Send>>,
+        responses: Vec<(
+            Option<mpsc::SyncSender<Result<Vec<u8>, String>>>,
+            Option<Box<dyn FnOnce() + Send>>,
+        )>,
     ) -> Result<(), String> {
         let closed = self
             .operation
@@ -726,15 +736,22 @@ impl TmuxControlPane {
             .input
             .lock()
             .map_err(|_| "tmux control client is unavailable".to_owned())?;
-        let response_id = self.next_response_id.fetch_add(1, Ordering::Relaxed);
-        self.pending_responses
-            .lock()
-            .map_err(|_| "tmux control response queue is unavailable".to_owned())?
-            .push_back(PendingControlCommand {
-                id: response_id,
-                response_sender,
-                after_end,
-            });
+        let mut response_ids = Vec::with_capacity(responses.len());
+        {
+            let mut pending_responses = self
+                .pending_responses
+                .lock()
+                .map_err(|_| "tmux control response queue is unavailable".to_owned())?;
+            for (response_sender, after_end) in responses {
+                let id = self.next_response_id.fetch_add(1, Ordering::Relaxed);
+                response_ids.push(id);
+                pending_responses.push_back(PendingControlCommand {
+                    id,
+                    response_sender,
+                    after_end,
+                });
+            }
+        }
         let write_result = input
             .write_all(command.as_bytes())
             .and_then(|_| input.write_all(b"\n"))
@@ -743,7 +760,7 @@ impl TmuxControlPane {
             self.pending_responses
                 .lock()
                 .map_err(|_| "tmux control response queue is unavailable".to_owned())?
-                .retain(|pending| pending.id != response_id);
+                .retain(|pending| !response_ids.contains(&pending.id));
             return Err(format!("Could not send command to Pane: {error}"));
         }
         Ok(())
@@ -2782,6 +2799,30 @@ fn validate_pane_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// `capture-pane -p` separates rows with bare LF, which a terminal emulator
+/// treats as "down one row, same column". Replaying it verbatim shifts every
+/// row right by the previous row's width, so rows are rejoined with CRLF and
+/// the cursor is put back where the Pane has it.
+fn render_pane_snapshot(screen: &[u8], cursor: Option<(u16, u16)>) -> Vec<u8> {
+    let screen = screen.strip_suffix(b"\n").unwrap_or(screen);
+    let mut rows = screen.split(|byte| *byte == b'\n').collect::<Vec<_>>();
+    while rows.len() > 1 && rows.last().is_some_and(|row| row.is_empty()) {
+        rows.pop();
+    }
+    let mut rendered = rows.join(&b"\r\n"[..]);
+    rendered.extend_from_slice(b"\x1b[0m");
+    if let Some((column, row)) = cursor {
+        rendered.extend_from_slice(format!("\x1b[{};{}H", row + 1, column + 1).as_bytes());
+    }
+    rendered
+}
+
+fn parse_pane_cursor(response: &[u8]) -> Option<(u16, u16)> {
+    let text = std::str::from_utf8(response).ok()?;
+    let (column, row) = text.trim().split_once(' ')?;
+    Some((column.parse().ok()?, row.parse().ok()?))
+}
+
 fn handle_control_line(
     line: &[u8],
     pane_id: &str,
@@ -3214,6 +3255,20 @@ mod tests {
         assert_eq!(
             *events.lock().expect("event log should remain available"),
             vec!["output:before\r", "snapshot barrier", "output:after\r"]
+        );
+    }
+
+    #[test]
+    fn pane_snapshot_replays_rows_from_the_first_column_and_restores_the_cursor() {
+        let capture = b"linha1\n  linha2\n\tlinha3\n\n\n";
+
+        assert_eq!(
+            render_pane_snapshot(capture, parse_pane_cursor(b"3 2\n")),
+            b"linha1\r\n  linha2\r\n\tlinha3\x1b[0m\x1b[3;4H"
+        );
+        assert_eq!(
+            render_pane_snapshot(capture, parse_pane_cursor(b"")),
+            b"linha1\r\n  linha2\r\n\tlinha3\x1b[0m"
         );
     }
 
