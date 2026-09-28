@@ -42,6 +42,86 @@ mod implementation_queue_tests {
     }
 
     #[test]
+    fn context_configuration_is_updated_as_one_domain_change() {
+        let mut initial = state();
+        initial.attention_defaults = vec![ContextAttentionDefault {
+            context_id: 1,
+            object_kind: ExternalObjectKind::Issue,
+            policy: ExternalChangePolicy::all(),
+        }];
+        let grill_defaults = GrillConfiguration {
+            agent: AgentKind::Codex,
+            model: "gpt-6-sol".into(),
+            effort: "high".into(),
+        };
+        let implement_defaults = GrillConfiguration {
+            agent: AgentKind::Claude,
+            model: "claude-sonnet-4-5".into(),
+            effort: "medium".into(),
+        };
+        let policies = vec![
+            ContextAttentionDefault {
+                context_id: 1,
+                object_kind: ExternalObjectKind::Issue,
+                policy: ExternalChangePolicy {
+                    title: true,
+                    state: false,
+                    metadata: true,
+                },
+            },
+            ContextAttentionDefault {
+                context_id: 1,
+                object_kind: ExternalObjectKind::PullRequest,
+                policy: ExternalChangePolicy {
+                    title: false,
+                    state: true,
+                    metadata: false,
+                },
+            },
+            ContextAttentionDefault {
+                context_id: 1,
+                object_kind: ExternalObjectKind::Generic,
+                policy: ExternalChangePolicy {
+                    title: true,
+                    state: true,
+                    metadata: false,
+                },
+            },
+        ];
+
+        let decision = decide(
+            initial,
+            Event::UpdateContextConfiguration {
+                context_id: 1,
+                configuration: ContextConfiguration {
+                    name: "  Renamed Context  ".into(),
+                    execution_machine_id: None,
+                    claude_profile_id: None,
+                    codex_profile_id: None,
+                    check_dirty_checkouts: false,
+                    grill_defaults: grill_defaults.clone(),
+                    implement_defaults: implement_defaults.clone(),
+                    attention_defaults: policies.clone(),
+                },
+            },
+        )
+        .expect("a valid complete Context configuration can be updated");
+
+        let context = &decision.state.contexts[0];
+        assert_eq!(context.name, "Renamed Context");
+        assert_eq!(context.execution_machine_id, None);
+        assert!(!context.check_dirty_checkouts);
+        assert_eq!(context.grill_defaults, grill_defaults);
+        assert_eq!(context.implement_defaults, implement_defaults);
+        assert_eq!(decision.state.attention_defaults, policies);
+        assert!(decision.state.projects == state().projects);
+        assert!(matches!(
+            decision.effects.as_slice(),
+            [Effect::PersistContextConfiguration { .. }]
+        ));
+    }
+
+    #[test]
     fn direct_run_records_the_context_selected_cli_profile_identity() {
         let mut initial = state();
         initial.contexts[0].claude_profile_id = Some(7);
@@ -979,6 +1059,90 @@ mod context_execution_machine_tests {
 
         assert_eq!(decision.state.contexts[0].execution_machine_id, Some(2));
     }
+
+    #[test]
+    fn aggregate_machine_change_requires_incompatible_profiles_to_be_cleared_in_the_same_edit() {
+        let state = decide(
+            state(),
+            Event::CreateCliConfigurationProfile {
+                machine_id: 1,
+                provider: AgentKind::Claude,
+                name: "Work profile".into(),
+                directory: "/profiles/work".into(),
+                app_managed: true,
+            },
+        )
+        .expect("the profile should be created")
+        .state;
+        let state = decide(
+            state,
+            Event::SetContextExecutionMachine {
+                context_id: 1,
+                machine_id: Some(1),
+            },
+        )
+        .unwrap()
+        .state;
+        let state = decide(
+            state,
+            Event::SetContextCliConfigurationProfile {
+                context_id: 1,
+                provider: AgentKind::Claude,
+                profile_id: Some(1),
+            },
+        )
+        .unwrap()
+        .state;
+        let attention_defaults = [
+            ExternalObjectKind::Issue,
+            ExternalObjectKind::PullRequest,
+            ExternalObjectKind::Generic,
+        ]
+        .into_iter()
+        .map(|object_kind| ContextAttentionDefault {
+            context_id: 1,
+            object_kind,
+            policy: ExternalChangePolicy::all(),
+        })
+        .collect();
+        let configuration = ContextConfiguration {
+            name: "Unconfigured".into(),
+            execution_machine_id: Some(2),
+            claude_profile_id: None,
+            codex_profile_id: None,
+            check_dirty_checkouts: true,
+            grill_defaults: GrillConfiguration::default(),
+            implement_defaults: GrillConfiguration::default(),
+            attention_defaults,
+        };
+
+        let accepted = decide(
+            state.clone(),
+            Event::UpdateContextConfiguration {
+                context_id: 1,
+                configuration: configuration.clone(),
+            },
+        )
+        .expect("the user can replace the Machine and clear its profile in one edit");
+        assert_eq!(accepted.state.contexts[0].execution_machine_id, Some(2));
+        assert_eq!(accepted.state.contexts[0].claude_profile_id, None);
+
+        let incompatible = decide(
+            state,
+            Event::UpdateContextConfiguration {
+                context_id: 1,
+                configuration: ContextConfiguration {
+                    claude_profile_id: Some(1),
+                    ..configuration
+                },
+            },
+        );
+        assert!(matches!(
+            incompatible,
+            Err(DomainError::CliConfigurationProfileMachineMismatch { .. })
+        ));
+    }
+
 }
 
 mod machine_deletion_tests {
@@ -1176,6 +1340,43 @@ mod machine_deletion_tests {
             },
         )
         .expect_err("active Runs must finish before changing their Context Machine");
+
+        assert!(matches!(error, DomainError::ContextHasActiveRuns { .. }));
+    }
+
+    #[test]
+    fn aggregate_context_edit_cannot_change_machine_while_a_run_is_active() {
+        let current = state();
+        let context = current.contexts[0].clone();
+        let attention_defaults = [
+            ExternalObjectKind::Issue,
+            ExternalObjectKind::PullRequest,
+            ExternalObjectKind::Generic,
+        ]
+        .into_iter()
+        .map(|object_kind| ContextAttentionDefault {
+            context_id: context.id,
+            object_kind,
+            policy: ExternalChangePolicy::all(),
+        })
+        .collect();
+        let error = decide(
+            current,
+            Event::UpdateContextConfiguration {
+                context_id: context.id,
+                configuration: ContextConfiguration {
+                    name: context.name,
+                    execution_machine_id: None,
+                    claude_profile_id: None,
+                    codex_profile_id: None,
+                    check_dirty_checkouts: context.check_dirty_checkouts,
+                    grill_defaults: context.grill_defaults,
+                    implement_defaults: context.implement_defaults,
+                    attention_defaults,
+                },
+            },
+        )
+        .expect_err("an active Run prevents a Machine change in the aggregate edit");
 
         assert!(matches!(error, DomainError::ContextHasActiveRuns { .. }));
     }

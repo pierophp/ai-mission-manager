@@ -63,6 +63,56 @@ impl SqliteStore {
                         ],
                     )?;
                 }
+                Effect::PersistContextConfiguration {
+                    context,
+                    attention_defaults,
+                } => {
+                    transaction.execute(
+                        "UPDATE contexts
+                         SET name = ?1, execution_machine_id = ?2, check_dirty_checkouts = ?3,
+                             claude_profile_id = ?4, codex_profile_id = ?5,
+                             grill_agent = ?6, grill_model = ?7, grill_effort = ?8,
+                             implement_agent = ?9, implement_model = ?10, implement_effort = ?11
+                         WHERE id = ?12",
+                        params![
+                            context.name,
+                            context.execution_machine_id,
+                            bool_as_i64(context.check_dirty_checkouts),
+                            context.claude_profile_id,
+                            context.codex_profile_id,
+                            agent_kind_as_str(context.grill_defaults.agent),
+                            context.grill_defaults.model,
+                            context.grill_defaults.effort,
+                            agent_kind_as_str(context.implement_defaults.agent),
+                            context.implement_defaults.model,
+                            context.implement_defaults.effort,
+                            context.id,
+                        ],
+                    )?;
+                    for attention_default in attention_defaults {
+                        let (title_attention, state_attention, metadata_attention) = (
+                            attention_default.policy.title,
+                            attention_default.policy.state,
+                            attention_default.policy.metadata,
+                        );
+                        transaction.execute(
+                            "INSERT INTO context_attention_defaults
+                                (context_id, object_kind, title_attention, state_attention, metadata_attention)
+                             VALUES (?1, ?2, ?3, ?4, ?5)
+                             ON CONFLICT(context_id, object_kind) DO UPDATE SET
+                                title_attention = excluded.title_attention,
+                                state_attention = excluded.state_attention,
+                                metadata_attention = excluded.metadata_attention",
+                            params![
+                                attention_default.context_id,
+                                external_object_kind_as_str(attention_default.object_kind),
+                                bool_as_i64(title_attention),
+                                bool_as_i64(state_attention),
+                                bool_as_i64(metadata_attention),
+                            ],
+                        )?;
+                    }
+                }
                 Effect::PersistCliConfigurationProfile {
                     profile,
                     next_cli_profile_id,

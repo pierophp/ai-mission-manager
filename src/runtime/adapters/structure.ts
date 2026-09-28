@@ -1,5 +1,6 @@
 import type {
   Context,
+  ContextConfiguration,
   CliProfileSettingsView,
   ContextAttentionDefault,
   Machine,
@@ -40,6 +41,8 @@ export const structureAdapter = {
   createContext: (name: string) => command<Context>("create_context", { name }),
   updateContext: (contextId: number, name: string) =>
     command<Context>("update_context", { contextId, name }),
+  updateContextConfiguration: (contextId: number, configuration: ContextConfiguration) =>
+    command<Context>("update_context_configuration", { contextId, configuration }),
   setContextExecutionMachine: (contextId: number, machineId: number | null) =>
     command<Context>("set_context_execution_machine", { contextId, machineId }),
   createCliConfigurationProfile: (input: { machineId: number; provider: AgentKind; name: string; appManaged: boolean; existingDirectory: string | null }) =>

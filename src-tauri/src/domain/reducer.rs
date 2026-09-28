@@ -98,6 +98,125 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::UpdateContext { context }],
             })
         }
+        Event::UpdateContextConfiguration {
+            context_id,
+            mut configuration,
+        } => {
+            configuration.name = clean_name(configuration.name, DomainError::EmptyContextName)?;
+            let ContextConfiguration {
+                name,
+                execution_machine_id,
+                claude_profile_id,
+                codex_profile_id,
+                check_dirty_checkouts,
+                grill_defaults,
+                implement_defaults,
+                attention_defaults,
+            } = configuration;
+            if state
+                .contexts
+                .iter()
+                .any(|context| context.id != context_id && context.name == name)
+            {
+                return Err(DomainError::ContextNameTaken { name });
+            }
+            let existing = state
+                .contexts
+                .iter()
+                .find(|context| context.id == context_id)
+                .cloned()
+                .ok_or(DomainError::ContextNotFound { context_id })?;
+            if existing.execution_machine_id != execution_machine_id {
+                let active_run_ids = state
+                    .runs
+                    .iter()
+                    .filter(|run| {
+                        run_is_active(run)
+                            && item_context_id(&state, run.item_id).is_ok_and(|id| id == context_id)
+                    })
+                    .map(|run| run.id)
+                    .collect::<Vec<_>>();
+                if !active_run_ids.is_empty() {
+                    return Err(DomainError::ContextHasActiveRuns {
+                        context_id,
+                        run_ids: active_run_ids,
+                    });
+                }
+            }
+            if let Some(machine_id) = execution_machine_id {
+                if !state
+                    .machines
+                    .iter()
+                    .any(|machine| machine.id == machine_id)
+                {
+                    return Err(DomainError::MachineNotFound { machine_id });
+                }
+            }
+            if let Some(profile_id) = claude_profile_id {
+                validate_context_profile(
+                    &state,
+                    execution_machine_id,
+                    AgentKind::Claude,
+                    profile_id,
+                )?;
+            }
+            if let Some(profile_id) = codex_profile_id {
+                validate_context_profile(
+                    &state,
+                    execution_machine_id,
+                    AgentKind::Codex,
+                    profile_id,
+                )?;
+            }
+            validate_grill_configuration(&grill_defaults)?;
+            validate_grill_configuration(&implement_defaults)?;
+            if attention_defaults.len() != 3
+                || attention_defaults
+                    .iter()
+                    .any(|policy| policy.context_id != context_id)
+                || ![
+                    ExternalObjectKind::Issue,
+                    ExternalObjectKind::PullRequest,
+                    ExternalObjectKind::Generic,
+                ]
+                .iter()
+                .all(|kind| {
+                    attention_defaults
+                        .iter()
+                        .filter(|policy| policy.object_kind == *kind)
+                        .count()
+                        == 1
+                })
+            {
+                return Err(DomainError::InvalidContextAttentionDefaults);
+            }
+
+            let context = state
+                .contexts
+                .iter_mut()
+                .find(|context| context.id == context_id)
+                .expect("the Context was checked above");
+            context.name = name;
+            context.execution_machine_id = execution_machine_id;
+            context.claude_profile_id = claude_profile_id;
+            context.codex_profile_id = codex_profile_id;
+            context.check_dirty_checkouts = check_dirty_checkouts;
+            context.grill_defaults = grill_defaults;
+            context.implement_defaults = implement_defaults;
+            let context = context.clone();
+            state
+                .attention_defaults
+                .retain(|policy| policy.context_id != context_id);
+            state.attention_defaults.extend(attention_defaults.clone());
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistContextConfiguration {
+                    context,
+                    attention_defaults,
+                }],
+            })
+        }
         Event::SetContextExecutionMachine {
             context_id,
             machine_id,

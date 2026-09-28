@@ -40,6 +40,8 @@ pub enum DomainError {
     EmptyReminderAt,
     #[error("Context name already exists: {name}")]
     ContextNameTaken { name: String },
+    #[error("Context attention defaults must contain one policy for Issue, Pull Request, and generic External Objects")]
+    InvalidContextAttentionDefaults,
     #[error("Project name already exists in Context {context_id}: {name}")]
     ProjectNameTaken { context_id: i64, name: String },
     #[error("Context {context_id} does not exist")]

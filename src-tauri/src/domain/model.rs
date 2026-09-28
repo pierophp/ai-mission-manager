@@ -587,6 +587,19 @@ pub struct ContextAttentionDefault {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextConfiguration {
+    pub name: String,
+    pub execution_machine_id: Option<i64>,
+    pub claude_profile_id: Option<i64>,
+    pub codex_profile_id: Option<i64>,
+    pub check_dirty_checkouts: bool,
+    pub grill_defaults: GrillConfiguration,
+    pub implement_defaults: GrillConfiguration,
+    pub attention_defaults: Vec<ContextAttentionDefault>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
     pub id: i64,
     pub item_id: i64,

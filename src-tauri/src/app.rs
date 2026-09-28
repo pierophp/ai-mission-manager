@@ -19,9 +19,9 @@ use crate::domain::Event;
 use crate::{
     dependencies::resolve_executable,
     domain::{
-        ActivityTabView, AgentKind, AuditEntry, Context, ContextAttentionDefault, DomainState,
-        ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
-        ExternalObjectKind, ExternalSnapshot, GrillAnswer, GrillConfiguration,
+        ActivityTabView, AgentKind, AuditEntry, Context, ContextAttentionDefault,
+        ContextConfiguration, DomainState, ExecutionMode, ExecutionProfile, ExternalChangePolicy,
+        ExternalLinkView, ExternalObjectKind, ExternalSnapshot, GrillAnswer, GrillConfiguration,
         GrillContinuationAction, HomeView, Item, ItemRelation, ItemRelationKind, ItemStatus,
         ItemView, LinkPurpose, Machine, MachineTransport, Project, Repository, Run, RunCheckout,
         RunPromptSelection, RunState, RunSuggestion, Worktree,
@@ -880,6 +880,15 @@ pub fn update_context(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn update_context_configuration(
+    context_id: i64,
+    configuration: ContextConfiguration,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    crate::features::structure::update_context_configuration(context_id, configuration, state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn set_context_execution_machine(
     context_id: i64,
     machine_id: Option<i64>,
@@ -1512,6 +1521,108 @@ mod tests {
             grill_action_started_at: None,
         });
         runtime
+    }
+
+    #[test]
+    fn failed_context_configuration_write_preserves_runtime_and_database_state() {
+        let directory = tempdir().expect("temporary directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        let previous_context = runtime.state.contexts[0].clone();
+        let previous_defaults = runtime.state.attention_defaults.clone();
+        rusqlite::Connection::open(&database)
+            .expect("database should reopen")
+            .execute_batch(
+                "CREATE TRIGGER reject_context_attention
+                 BEFORE INSERT ON context_attention_defaults
+                 BEGIN SELECT RAISE(ABORT, 'forced configuration failure'); END;",
+            )
+            .expect("failure trigger should be created");
+
+        let attention_defaults = [
+            ExternalObjectKind::Issue,
+            ExternalObjectKind::PullRequest,
+            ExternalObjectKind::Generic,
+        ]
+        .into_iter()
+        .map(|object_kind| ContextAttentionDefault {
+            context_id: previous_context.id,
+            object_kind,
+            policy: ExternalChangePolicy {
+                title: false,
+                state: true,
+                metadata: false,
+            },
+        })
+        .collect();
+        let result = runtime.update_context_configuration(
+            previous_context.id,
+            ContextConfiguration {
+                name: "Changed Context".into(),
+                execution_machine_id: previous_context.execution_machine_id,
+                claude_profile_id: previous_context.claude_profile_id,
+                codex_profile_id: previous_context.codex_profile_id,
+                check_dirty_checkouts: !previous_context.check_dirty_checkouts,
+                grill_defaults: previous_context.grill_defaults.clone(),
+                implement_defaults: previous_context.implement_defaults.clone(),
+                attention_defaults,
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(runtime.state.contexts[0], previous_context);
+        assert_eq!(runtime.state.attention_defaults, previous_defaults);
+        let persisted = runtime
+            .store
+            .load_state()
+            .expect("stored state should reload");
+        assert_eq!(persisted.contexts[0], previous_context);
+        assert_eq!(persisted.attention_defaults, previous_defaults);
+    }
+
+    #[test]
+    fn context_configuration_save_round_trips_the_complete_update() {
+        let directory = tempdir().expect("temporary directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        let previous_context = runtime.state.contexts[0].clone();
+        let attention_defaults = [
+            ExternalObjectKind::Generic,
+            ExternalObjectKind::Issue,
+            ExternalObjectKind::PullRequest,
+        ]
+        .into_iter()
+        .map(|object_kind| ContextAttentionDefault {
+            context_id: previous_context.id,
+            object_kind,
+            policy: ExternalChangePolicy {
+                title: true,
+                state: object_kind != ExternalObjectKind::PullRequest,
+                metadata: false,
+            },
+        })
+        .collect::<Vec<_>>();
+        let updated = runtime
+            .update_context_configuration(
+                previous_context.id,
+                ContextConfiguration {
+                    name: "Edited Context".into(),
+                    execution_machine_id: None,
+                    claude_profile_id: None,
+                    codex_profile_id: None,
+                    check_dirty_checkouts: false,
+                    grill_defaults: previous_context.grill_defaults,
+                    implement_defaults: previous_context.implement_defaults,
+                    attention_defaults: attention_defaults.clone(),
+                },
+            )
+            .expect("the aggregate Context edit should persist");
+
+        assert_eq!(updated.name, "Edited Context");
+        assert_eq!(runtime.state.attention_defaults, attention_defaults);
+        let persisted = runtime.store.load_state().expect("stored state should reload");
+        assert_eq!(persisted.contexts[0], updated);
+        assert_eq!(persisted.attention_defaults, attention_defaults);
     }
 
     #[test]

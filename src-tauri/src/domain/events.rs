@@ -8,6 +8,10 @@ pub enum Event {
         context_id: i64,
         name: String,
     },
+    UpdateContextConfiguration {
+        context_id: i64,
+        configuration: ContextConfiguration,
+    },
     SetContextExecutionMachine {
         context_id: i64,
         machine_id: Option<i64>,
@@ -364,6 +368,10 @@ pub enum Effect {
     },
     UpdateContext {
         context: Context,
+    },
+    PersistContextConfiguration {
+        context: Context,
+        attention_defaults: Vec<ContextAttentionDefault>,
     },
     PersistCliConfigurationProfile {
         profile: CliConfigurationProfile,

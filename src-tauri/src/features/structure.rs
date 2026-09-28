@@ -17,9 +17,9 @@ use crate::{
     app::{current_unix_seconds, MachineSettingsView, Runtime},
     domain::{
         decide, normalize_machine_path, AgentKind, CliConfigurationProfile, Context,
-        ContextAttentionDefault, Event, ExecutionMode, ExternalChangePolicy, ExternalObjectKind,
-        Machine, MachineObservation, MachineTransport, Project, ProjectDefaults, Repository,
-        RepositoryLocation,
+        ContextAttentionDefault, ContextConfiguration, Event, ExecutionMode, ExternalChangePolicy,
+        ExternalObjectKind, Machine, MachineObservation, MachineTransport, Project,
+        ProjectDefaults, Repository, RepositoryLocation,
     },
     git::GitCli,
     terminal::{run_machine_shell, shell_quote, MachineReadiness, TerminalRuntime},
@@ -210,6 +210,16 @@ pub(crate) fn update_context(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Context, String> {
     locked(state, |runtime| runtime.update_context(context_id, name))
+}
+
+pub(crate) fn update_context_configuration(
+    context_id: i64,
+    configuration: ContextConfiguration,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    locked(state, |runtime| {
+        runtime.update_context_configuration(context_id, configuration)
+    })
 }
 
 pub(crate) fn set_context_execution_machine(
@@ -827,6 +837,30 @@ impl Runtime {
         let decision = decide(
             self.state.clone(),
             Event::UpdateContext { context_id, name },
+        )
+        .map_err(|error| error.to_string())?;
+        let context = decision
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .cloned()
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+        self.commit(decision)?;
+        Ok(context)
+    }
+
+    pub(crate) fn update_context_configuration(
+        &mut self,
+        context_id: i64,
+        configuration: ContextConfiguration,
+    ) -> Result<Context, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::UpdateContextConfiguration {
+                context_id,
+                configuration,
+            },
         )
         .map_err(|error| error.to_string())?;
         let context = decision

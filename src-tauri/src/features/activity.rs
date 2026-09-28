@@ -110,6 +110,7 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
             }),
             Effect::PersistContextGrillDefaults { .. }
             | Effect::PersistContextImplementDefaults { .. }
+            | Effect::PersistContextConfiguration { .. }
             | Effect::UpdateContext { .. }
             | Effect::PersistCliConfigurationProfile { .. }
             | Effect::RemoveCliConfigurationProfile { .. }

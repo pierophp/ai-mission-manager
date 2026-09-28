@@ -18,6 +18,17 @@ export type Context = {
   implement_defaults: GrillConfiguration;
 };
 
+export type ContextConfiguration = {
+  name: string;
+  executionMachineId: number | null;
+  claudeProfileId: number | null;
+  codexProfileId: number | null;
+  checkDirtyCheckouts: boolean;
+  grillDefaults: GrillConfiguration;
+  implementDefaults: GrillConfiguration;
+  attentionDefaults: ContextAttentionDefault[];
+};
+
 export type GrillConfiguration = {
   agent: AgentKind;
   model: string;
