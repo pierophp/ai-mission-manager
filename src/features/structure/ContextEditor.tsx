@@ -37,25 +37,31 @@ const defaultPolicy: ExternalChangePolicy = {
   state: true,
   metadata: true,
 };
+const defaultGrillConfiguration = (): GrillConfiguration => ({
+  agent: "claude",
+  model: "claude-sonnet-4-5",
+  effort: "high",
+});
 
 function initialConfiguration(
-  context: Context,
+  context: Context | undefined,
   attentionDefaults: ContextAttentionDefault[],
 ): ContextConfiguration {
   return {
-    name: context.name,
-    executionMachineId: context.execution_machine_id,
-    claudeProfileId: context.claude_profile_id,
-    codexProfileId: context.codex_profile_id,
-    checkDirtyCheckouts: context.check_dirty_checkouts,
-    grillDefaults: context.grill_defaults,
-    implementDefaults: context.implement_defaults,
+    name: context?.name ?? "",
+    executionMachineId: context?.execution_machine_id ?? null,
+    claudeProfileId: context?.claude_profile_id ?? null,
+    codexProfileId: context?.codex_profile_id ?? null,
+    checkDirtyCheckouts: context?.check_dirty_checkouts ?? true,
+    grillDefaults: context?.grill_defaults ?? defaultGrillConfiguration(),
+    implementDefaults:
+      context?.implement_defaults ?? defaultGrillConfiguration(),
     attentionDefaults: objectKinds.map(
       (object_kind) =>
         attentionDefaults.find(
           (entry) => entry.object_kind === object_kind,
         ) ?? {
-          context_id: context.id,
+          context_id: context?.id ?? 0,
           object_kind,
           policy: defaultPolicy,
         },
@@ -174,7 +180,7 @@ export function ContextEditor({
   onCancel,
   onDirtyChange,
 }: {
-  context: Context;
+  context: Context | undefined;
   attentionDefaults: ContextAttentionDefault[];
   machines: Machine[];
   profiles: CliProfileSettingsView[];
@@ -188,7 +194,7 @@ export function ContextEditor({
     () =>
       initialConfiguration(
         context,
-        attentionDefaults.filter((entry) => entry.context_id === context.id),
+        attentionDefaults.filter((entry) => entry.context_id === context?.id),
       ),
     [attentionDefaults, context],
   );
@@ -246,9 +252,13 @@ export function ContextEditor({
       onSubmit={(event) => void submit(event)}
     >
       <header>
-        <h3 className="m-0 text-base font-semibold">Edit {context.name}</h3>
+        <h3 className="m-0 text-base font-semibold">
+          {context ? `Edit ${context.name}` : "Create Context"}
+        </h3>
         <p className="mb-0 mt-1 text-sm text-muted-foreground">
-          Update this Context and its settings together.
+          {context
+            ? "Update this Context and its settings together."
+            : "Create a Context with its settings together."}
         </p>
       </header>
       {error && (
@@ -424,7 +434,7 @@ export function ContextEditor({
           Cancel
         </Button>
         <Button type="submit" disabled={isSaving || !configuration.name.trim()}>
-          Save Context
+          {context ? "Save Context" : "Create Context"}
         </Button>
       </footer>
     </form>

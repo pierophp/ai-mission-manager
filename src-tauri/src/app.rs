@@ -871,6 +871,14 @@ pub fn create_context(name: String, state: State<'_, Mutex<Runtime>>) -> Result<
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn create_context_configuration(
+    configuration: ContextConfiguration,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    crate::features::structure::create_context_configuration(configuration, state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn update_context(
     context_id: i64,
     name: String,
@@ -1623,6 +1631,109 @@ mod tests {
         let persisted = runtime.store.load_state().expect("stored state should reload");
         assert_eq!(persisted.contexts[0], updated);
         assert_eq!(persisted.attention_defaults, attention_defaults);
+    }
+
+    #[test]
+    fn context_creation_saves_configuration_and_default_project_together() {
+        let directory = tempdir().expect("temporary directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        let attention_defaults = [
+            ExternalObjectKind::Issue,
+            ExternalObjectKind::PullRequest,
+            ExternalObjectKind::Generic,
+        ]
+        .into_iter()
+        .map(|object_kind| ContextAttentionDefault {
+            context_id: 0,
+            object_kind,
+            policy: ExternalChangePolicy {
+                title: false,
+                state: true,
+                metadata: false,
+            },
+        })
+        .collect::<Vec<_>>();
+        let grill_defaults = GrillConfiguration {
+            agent: AgentKind::Codex,
+            model: "gpt-6-sol".into(),
+            effort: "high".into(),
+        };
+
+        let created = runtime
+            .create_context_configuration(ContextConfiguration {
+                name: "  Research  ".into(),
+                execution_machine_id: None,
+                claude_profile_id: None,
+                codex_profile_id: None,
+                check_dirty_checkouts: false,
+                grill_defaults: grill_defaults.clone(),
+                implement_defaults: GrillConfiguration::default(),
+                attention_defaults: attention_defaults.clone(),
+            })
+            .expect("the complete Context setup should save");
+
+        assert_eq!(created.name, "Research");
+        assert!(!created.check_dirty_checkouts);
+        assert_eq!(created.grill_defaults, grill_defaults);
+        assert_eq!(runtime.state.projects[1].name, "Default");
+        assert_eq!(runtime.state.attention_defaults.len(), 3);
+        let persisted = runtime.store.load_state().expect("state should reload");
+        assert_eq!(persisted.contexts[1], created);
+        assert_eq!(persisted.projects[1], runtime.state.projects[1]);
+        assert_eq!(persisted.attention_defaults.len(), 3);
+        assert!(persisted.attention_defaults.iter().all(|persisted| {
+            runtime
+                .state
+                .attention_defaults
+                .iter()
+                .any(|expected| expected == persisted)
+        }));
+    }
+
+    #[test]
+    fn failed_context_creation_rolls_back_the_context_settings_and_default_project() {
+        let directory = tempdir().expect("temporary directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        let original_state = runtime.state.clone();
+        rusqlite::Connection::open(&database)
+            .expect("database should reopen")
+            .execute_batch(
+                "CREATE TRIGGER reject_default_project
+                 BEFORE INSERT ON projects WHEN NEW.name = 'Default'
+                 BEGIN SELECT RAISE(ABORT, 'forced project failure'); END;",
+            )
+            .expect("failure trigger should be created");
+
+        let result = runtime.create_context_configuration(ContextConfiguration {
+            name: "Research".into(),
+            execution_machine_id: None,
+            claude_profile_id: None,
+            codex_profile_id: None,
+            check_dirty_checkouts: false,
+            grill_defaults: GrillConfiguration::default(),
+            implement_defaults: GrillConfiguration::default(),
+            attention_defaults: [
+                ExternalObjectKind::Issue,
+                ExternalObjectKind::PullRequest,
+                ExternalObjectKind::Generic,
+            ]
+            .into_iter()
+            .map(|object_kind| ContextAttentionDefault {
+                context_id: 0,
+                object_kind,
+                policy: ExternalChangePolicy::all(),
+            })
+            .collect(),
+        });
+
+        assert!(result.is_err());
+        assert_eq!(runtime.state, original_state);
+        assert_eq!(
+            runtime.store.load_state().expect("state should reload"),
+            original_state
+        );
     }
 
     #[test]

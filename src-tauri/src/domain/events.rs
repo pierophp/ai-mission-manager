@@ -4,6 +4,9 @@ pub enum Event {
     CreateContext {
         name: String,
     },
+    CreateContextConfiguration {
+        configuration: ContextConfiguration,
+    },
     UpdateContext {
         context_id: i64,
         name: String,

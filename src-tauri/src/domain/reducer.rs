@@ -77,6 +77,33 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 ],
             })
         }
+        Event::CreateContextConfiguration { mut configuration } => {
+            let name = clean_name(configuration.name.clone(), DomainError::EmptyContextName)?;
+            configuration.name = name.clone();
+            let created = decide(state, Event::CreateContext { name })?;
+            let context_id = created
+                .state
+                .contexts
+                .last()
+                .map(|context| context.id)
+                .ok_or(DomainError::SequenceExhausted)?;
+            for attention_default in &mut configuration.attention_defaults {
+                attention_default.context_id = context_id;
+            }
+            let configured = decide(
+                created.state,
+                Event::UpdateContextConfiguration {
+                    context_id,
+                    configuration,
+                },
+            )?;
+            let mut effects = created.effects;
+            effects.extend(configured.effects);
+            Ok(Decision {
+                state: configured.state,
+                effects,
+            })
+        }
         Event::UpdateContext { context_id, name } => {
             let name = clean_name(name, DomainError::EmptyContextName)?;
             if state

@@ -7,6 +7,9 @@ export type StructureAction<TData> = () => Promise<TData>;
 
 export const structureActions = {
   createContext: (name: string) => () => structureAdapter.createContext(name),
+  createContextConfiguration: (
+    configuration: Parameters<typeof structureAdapter.createContextConfiguration>[0],
+  ) => () => structureAdapter.createContextConfiguration(configuration),
   updateContext: (contextId: number, name: string) =>
     () => structureAdapter.updateContext(contextId, name),
   updateContextConfiguration: (

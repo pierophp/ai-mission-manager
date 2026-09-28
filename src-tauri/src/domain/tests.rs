@@ -122,6 +122,105 @@ mod implementation_queue_tests {
     }
 
     #[test]
+    fn context_creation_applies_the_complete_configuration_with_its_default_project() {
+        let configuration = ContextConfiguration {
+            name: "  Research  ".into(),
+            execution_machine_id: None,
+            claude_profile_id: None,
+            codex_profile_id: None,
+            check_dirty_checkouts: false,
+            grill_defaults: GrillConfiguration::default(),
+            implement_defaults: GrillConfiguration::default(),
+            attention_defaults: [
+                ExternalObjectKind::Issue,
+                ExternalObjectKind::PullRequest,
+                ExternalObjectKind::Generic,
+            ]
+            .into_iter()
+            .map(|object_kind| ContextAttentionDefault {
+                context_id: 0,
+                object_kind,
+                policy: ExternalChangePolicy::all(),
+            })
+            .collect(),
+        };
+
+        let decision = decide(state(), Event::CreateContextConfiguration { configuration })
+            .expect("a valid Context and its configuration can be created together");
+
+        assert_eq!(decision.state.contexts[1].name, "Research");
+        assert!(!decision.state.contexts[1].check_dirty_checkouts);
+        assert_eq!(decision.state.projects.len(), 2);
+        assert_eq!(decision.state.projects[1].name, "Default");
+        assert_eq!(decision.state.projects[1].context_id, 2);
+        assert_eq!(decision.state.attention_defaults.len(), 3);
+        assert!(decision
+            .state
+            .attention_defaults
+            .iter()
+            .all(|policy| policy.context_id == 2));
+        assert_eq!(decision.effects.len(), 3);
+        assert!(decision
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PersistContext { .. })));
+        assert!(decision
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PersistProject { .. })));
+        assert!(decision.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::PersistContextConfiguration {
+                attention_defaults,
+                ..
+            } if attention_defaults.len() == 3
+        )));
+    }
+
+    #[test]
+    fn context_creation_rejects_invalid_configuration_as_one_transition() {
+        let initial = state();
+        let original = initial.clone();
+        let result = decide(
+            initial,
+            Event::CreateContextConfiguration {
+                configuration: ContextConfiguration {
+                    name: "Research".into(),
+                    execution_machine_id: None,
+                    claude_profile_id: None,
+                    codex_profile_id: None,
+                    check_dirty_checkouts: true,
+                    grill_defaults: GrillConfiguration {
+                        agent: AgentKind::Claude,
+                        model: "unsupported-model".into(),
+                        effort: "high".into(),
+                    },
+                    implement_defaults: GrillConfiguration::default(),
+                    attention_defaults: [
+                        ExternalObjectKind::Issue,
+                        ExternalObjectKind::PullRequest,
+                        ExternalObjectKind::Generic,
+                    ]
+                    .into_iter()
+                    .map(|object_kind| ContextAttentionDefault {
+                        context_id: 0,
+                        object_kind,
+                        policy: ExternalChangePolicy::all(),
+                    })
+                    .collect(),
+                },
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(DomainError::InvalidGrillConfiguration { .. })
+        ));
+        assert_eq!(original.contexts.len(), 1);
+        assert_eq!(original.projects.len(), 1);
+    }
+
+    #[test]
     fn direct_run_records_the_context_selected_cli_profile_identity() {
         let mut initial = state();
         initial.contexts[0].claude_profile_id = Some(7);

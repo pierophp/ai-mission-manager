@@ -39,6 +39,8 @@ export const structureAdapter = {
   listGrillModelCatalog: () =>
     command<GrillAgentCatalog[]>("list_grill_model_catalog"),
   createContext: (name: string) => command<Context>("create_context", { name }),
+  createContextConfiguration: (configuration: ContextConfiguration) =>
+    command<Context>("create_context_configuration", { configuration }),
   updateContext: (contextId: number, name: string) =>
     command<Context>("update_context", { contextId, name }),
   updateContextConfiguration: (contextId: number, configuration: ContextConfiguration) =>

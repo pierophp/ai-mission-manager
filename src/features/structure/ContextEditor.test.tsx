@@ -148,6 +148,75 @@ describe("ContextEditor", () => {
     );
   });
 
+  it("starts a new Context with current defaults and saves the full configuration", async () => {
+    const onSave = vi.fn(async () => {});
+    act(() =>
+      root.render(
+        createElement(ContextEditor, {
+          context: undefined,
+          attentionDefaults: [],
+          machines: [],
+          profiles: [],
+          catalog: [],
+          isSaving: false,
+          onSave,
+          onCancel: vi.fn(),
+          onDirtyChange: vi.fn(),
+        }),
+      ),
+    );
+
+    expect(container.textContent).toContain("Create Context");
+    expect(container.textContent).toContain(
+      "Runs cannot start until this Context has an execution Machine.",
+    );
+    const nameInput = container.querySelector<HTMLInputElement>("input");
+    Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      "value",
+    )?.set?.call(nameInput, "Research");
+    act(() => nameInput?.dispatchEvent(new Event("input", { bubbles: true })));
+    await act(async () => {
+      container
+        .querySelector("form")
+        ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+    });
+
+    expect(onSave).toHaveBeenCalledWith(
+      expect.objectContaining({
+        name: "Research",
+        executionMachineId: null,
+        claudeProfileId: null,
+        codexProfileId: null,
+        checkDirtyCheckouts: true,
+        grillDefaults: {
+          agent: "claude",
+          model: "claude-sonnet-4-5",
+          effort: "high",
+        },
+        implementDefaults: {
+          agent: "claude",
+          model: "claude-sonnet-4-5",
+          effort: "high",
+        },
+        attentionDefaults: expect.arrayContaining([
+          expect.objectContaining({
+            object_kind: "issue",
+            policy: { title: true, state: true, metadata: true },
+          }),
+          expect.objectContaining({
+            object_kind: "pull_request",
+            policy: { title: true, state: true, metadata: true },
+          }),
+          expect.objectContaining({
+            object_kind: "generic",
+            policy: { title: true, state: true, metadata: true },
+          }),
+        ]),
+      }),
+    );
+  });
+
   it("saves one complete Context configuration and filters profiles by provider", async () => {
     const onSave = vi.fn(async () => {});
     act(() =>

@@ -204,6 +204,15 @@ pub(crate) fn create_context(
     locked(state, |runtime| runtime.create_context(name))
 }
 
+pub(crate) fn create_context_configuration(
+    configuration: ContextConfiguration,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    locked(state, |runtime| {
+        runtime.create_context_configuration(configuration)
+    })
+}
+
 pub(crate) fn update_context(
     context_id: i64,
     name: String,
@@ -819,6 +828,25 @@ impl Runtime {
     pub(crate) fn create_context(&mut self, name: String) -> Result<Context, String> {
         let decision = decide(self.state.clone(), Event::CreateContext { name })
             .map_err(|error| error.to_string())?;
+        let context = decision
+            .state
+            .contexts
+            .last()
+            .cloned()
+            .ok_or_else(|| "Context creation produced no Context".to_owned())?;
+        self.commit(decision)?;
+        Ok(context)
+    }
+
+    pub(crate) fn create_context_configuration(
+        &mut self,
+        configuration: ContextConfiguration,
+    ) -> Result<Context, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::CreateContextConfiguration { configuration },
+        )
+        .map_err(|error| error.to_string())?;
         let context = decision
             .state
             .contexts

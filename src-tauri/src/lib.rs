@@ -131,6 +131,7 @@ pub fn run() {
             app::reconcile_runs,
             app::search_items_command,
             app::create_context,
+            app::create_context_configuration,
             app::update_context,
             app::update_context_configuration,
             app::set_context_execution_machine,

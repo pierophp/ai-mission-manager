@@ -165,7 +165,6 @@ export function StructurePage({ section }: { section: SettingsSection }) {
 
   const [selectedContextId, setSelectedContextId] = useState<number>();
   const [selectedProjectId, setSelectedProjectId] = useState<number>();
-  const [contextName, setContextName] = useState("");
   const [projectName, setProjectName] = useState("");
   const [projectDefaultStatus, setProjectDefaultStatus] =
     useState<ItemStatus>("Inbox");
@@ -210,6 +209,7 @@ export function StructurePage({ section }: { section: SettingsSection }) {
   const [addDialog, setAddDialog] = useState<AddDialog>();
   const [editDialog, setEditDialog] = useState<EditDialog>();
   const [editingContextId, setEditingContextId] = useState<number>();
+  const [creatingContext, setCreatingContext] = useState(false);
   const [contextEditorDirty, setContextEditorDirty] = useState(false);
 
   const selectedProjects = projects.filter(
@@ -270,6 +270,7 @@ export function StructurePage({ section }: { section: SettingsSection }) {
       if (!contextEditorDirty) return false;
       if (!window.confirm("Discard unsaved Context changes?")) return true;
       setEditingContextId(undefined);
+      setCreatingContext(false);
       setContextEditorDirty(false);
       return false;
     },
@@ -293,8 +294,8 @@ export function StructurePage({ section }: { section: SettingsSection }) {
 
   function openEditContext(context: Context) {
     if (contextEditorDirty && !window.confirm("Discard unsaved Context changes?")) return;
-    setContextName(context.name);
     setEditingContextId(context.id);
+    setCreatingContext(false);
     setSelectedContextId(context.id);
     setAddDialog(undefined);
     setContextEditorDirty(false);
@@ -303,6 +304,16 @@ export function StructurePage({ section }: { section: SettingsSection }) {
   function closeContextEditor() {
     if (contextEditorDirty && !window.confirm("Discard unsaved Context changes?")) return;
     setEditingContextId(undefined);
+    setCreatingContext(false);
+    setContextEditorDirty(false);
+  }
+
+  function openCreateContext() {
+    if (contextEditorDirty && !window.confirm("Discard unsaved Context changes?")) return;
+    setEditingContextId(undefined);
+    setCreatingContext(true);
+    setAddDialog(undefined);
+    setEditDialog(undefined);
     setContextEditorDirty(false);
   }
 
@@ -313,6 +324,7 @@ export function StructurePage({ section }: { section: SettingsSection }) {
       await refreshAfterEdit();
       setSelectedContextId(contextId);
       setEditingContextId(undefined);
+      setCreatingContext(false);
       setContextEditorDirty(false);
       setError(undefined);
     } finally {
@@ -376,24 +388,20 @@ export function StructurePage({ section }: { section: SettingsSection }) {
     setAddDialog(undefined);
   }
 
-  async function handleCreateContext(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!contextName.trim()) return;
-
+  async function createContextConfiguration(configuration: Parameters<typeof structureActions.createContextConfiguration>[0]) {
     setIsSaving(true);
     try {
       const context = await structureCommand.execute(
-        structureActions.createContext(contextName.trim()),
+        structureActions.createContextConfiguration(configuration),
       );
       await refreshAfterEdit();
       setSelectedContextId(context.id);
       setSelectedProjectId(undefined);
-      setContextName("");
+      setCreatingContext(false);
       setAddDialog(undefined);
       setEditDialog(undefined);
+      setContextEditorDirty(false);
       setError(undefined);
-    } catch (saveError) {
-      setError(errorMessage(saveError));
     } finally {
       setIsSaving(false);
     }
@@ -980,26 +988,13 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                     <CardTitle>Contexts</CardTitle>
                     <CardDescription>A Context owns its Projects and Machines.</CardDescription>
                   </div>
-                  <Dialog open={addDialog === "context"} onOpenChange={(open) => { if (open) { setAddDialog("context"); setEditDialog(undefined); } else { setAddDialog(undefined); setEditDialog(undefined); } }}>
-                    <DialogTrigger asChild>
-                      <Button type="button">Add Context</Button>
-                    </DialogTrigger>
-                    <DialogContent className="sm:max-w-lg">
-                      <form className="grid gap-4" onSubmit={handleCreateContext}>
-                        <DialogHeader>
-                          <DialogTitle>Add Context</DialogTitle>
-                          <DialogDescription>Create a new boundary for Projects, Machines, and Items.</DialogDescription>
-                        </DialogHeader>
-                        <Field label="Context name">
-                          <Input value={contextName} onChange={(event) => setContextName(event.target.value)} placeholder="Work" disabled={isSaving} autoFocus />
-                        </Field>
-                        <DialogFooter>
-                          <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
-                          <Button type="submit" disabled={isSaving || !contextName.trim()}>Add Context</Button>
-                        </DialogFooter>
-                      </form>
-                    </DialogContent>
-                  </Dialog>
+                  <Button
+                    type="button"
+                    onClick={openCreateContext}
+                    disabled={isSaving || creatingContext}
+                  >
+                    Add Context
+                  </Button>
                 </div>
               </CardHeader>
               <CardContent className="p-4">
@@ -1007,9 +1002,9 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                   {contexts.length === 0 ? (
                     <EmptyDescription>No Contexts have been created yet.</EmptyDescription>
                   ) : contexts.map((context) => (
-                    <EntityRow key={context.id} title={context.name} detail={`${projects.filter((project) => project.context_id === context.id).length} Projects`}>
+                    <EntityRow key={context.id} title={context.name} detail={`${projects.filter((project) => project.context_id === context.id).length} Projects`} selected={context.id === selectedContextId}>
                       <Button type="button" variant="ghost" size="sm" disabled={isSaving} onClick={() => openEditContext(context)}>Edit</Button>
-                      <Button type="button" variant="outline" size="sm" disabled={isSaving || Boolean(editingContextId)} onClick={() => void handlePrepareContextDeletion(context.id)}>Delete</Button>
+                      <Button type="button" variant="outline" size="sm" disabled={isSaving || Boolean(editingContextId) || creatingContext} onClick={() => void handlePrepareContextDeletion(context.id)}>Delete</Button>
                     </EntityRow>
                   ))}
                 </EntityList>
@@ -1027,6 +1022,19 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                     onDirtyChange={setContextEditorDirty}
                   />
                 ))}
+                {creatingContext && (
+                  <ContextEditor
+                    context={undefined}
+                    attentionDefaults={attentionDefaults}
+                    machines={machines}
+                    profiles={cliConfigurationProfiles}
+                    catalog={grillModelCatalog}
+                    isSaving={isSaving}
+                    onSave={createContextConfiguration}
+                    onCancel={closeContextEditor}
+                    onDirtyChange={setContextEditorDirty}
+                  />
+                )}
               </CardContent>
             </Card>
           )}
@@ -1319,9 +1327,16 @@ function EntityList({ children }: { children: React.ReactNode }) {
   return <div className="grid gap-2">{children}</div>;
 }
 
-function EntityRow({ title, detail, children }: { title: string; detail: string; children: React.ReactNode }) {
+function EntityRow({ title, detail, children, selected = false }: { title: string; detail: string; children: React.ReactNode; selected?: boolean }) {
   return (
-    <div className="flex flex-wrap items-start gap-3 rounded-lg border border-border/70 p-3">
+    <div
+      data-selected={selected || undefined}
+      className={`flex flex-wrap items-start gap-3 rounded-lg border p-3 ${
+        selected
+          ? "border-primary bg-primary/5"
+          : "border-border/70"
+      }`}
+    >
       <div className="min-w-0 flex-1">
         <div className="font-medium">{title}</div>
         <div className="truncate text-sm text-muted-foreground">{detail}</div>
