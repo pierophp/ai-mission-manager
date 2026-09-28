@@ -39,49 +39,52 @@
   --sidebar-accent-foreground: #24221f;
   --sidebar-border: #e4ddd2;
   --sidebar-ring: #b05c39;
-  --terminal-bg: #201c19;
-  --terminal-border: #3f352e;
-  --terminal-heading: #fff8ef;
-  --terminal-muted: #c9a68f;
-  --terminal-shadow-rgb: 42 31 22;
-  --terminal-tab-border: #5c493e;
-  --terminal-tab: #302722;
-  --terminal-tab-text: #dbc8b9;
-  --terminal-tab-muted: #ae9180;
-  --terminal-active-border: #d8956f;
-  --terminal-active: #49362d;
-  --terminal-surface-border: #4a3a32;
+  /* The terminal keeps one dark palette in both themes; VS Code Dark Modern. */
+  --terminal-bg: #181818;
+  --terminal-foreground: #cccccc;
+  --terminal-border: #2b2b2b;
+  --terminal-heading: #ffffff;
+  --terminal-muted: #9d9d9d;
+  --terminal-shadow-rgb: 0 0 0;
+  --terminal-tab-border: #3c3c3c;
+  --terminal-tab: #202020;
+  --terminal-tab-text: #cccccc;
+  --terminal-tab-muted: #9d9d9d;
+  --terminal-active-border: #0078d4;
+  --terminal-active: #04395e;
+  --terminal-surface-border: #2b2b2b;
+  --terminal-cursor: #ffffff;
 }
 
+/* Dark tokens follow the VS Code Dark Modern palette. */
 html[data-theme="dark"] {
   color-scheme: dark;
-  --background: #171411;
-  --foreground: #f5efe8;
-  --card: #211b17;
-  --card-foreground: #f5efe8;
-  --popover: #211b17;
-  --popover-foreground: #f5efe8;
-  --primary: #d07b51;
-  --primary-foreground: #fff8ef;
-  --secondary: #2a211c;
-  --secondary-foreground: #f5efe8;
-  --muted: #2a211c;
-  --muted-foreground: #b9ada2;
-  --accent: #2a211c;
-  --accent-foreground: #f5efe8;
-  --destructive: #e27c6e;
-  --border: #3b332c;
-  --input: #55473d;
-  --ring: #d07b51;
-  --sidebar: #211b17;
-  --sidebar-foreground: #f5efe8;
-  --sidebar-primary: #d07b51;
-  --sidebar-primary-foreground: #fff8ef;
-  --sidebar-accent: #2a211c;
-  --sidebar-accent-foreground: #f5efe8;
-  --sidebar-border: #3b332c;
-  --sidebar-ring: #d07b51;
-  --terminal-shadow-rgb: 0 0 0;
+  --background: #1f1f1f;
+  --foreground: #cccccc;
+  --card: #202020;
+  --card-foreground: #cccccc;
+  --popover: #202020;
+  --popover-foreground: #cccccc;
+  --primary: #0078d4;
+  --primary-foreground: #ffffff;
+  --secondary: #313131;
+  --secondary-foreground: #cccccc;
+  --muted: #2b2b2b;
+  --muted-foreground: #9d9d9d;
+  --accent: #2a2d2e;
+  --accent-foreground: #cccccc;
+  --destructive: #cd3131;
+  --border: #2b2b2b;
+  --input: #3c3c3c;
+  --ring: #0078d4;
+  --sidebar: #181818;
+  --sidebar-foreground: #cccccc;
+  --sidebar-primary: #0078d4;
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: #2a2d2e;
+  --sidebar-accent-foreground: #cccccc;
+  --sidebar-border: #2b2b2b;
+  --sidebar-ring: #0078d4;
 }
 
 @theme inline {

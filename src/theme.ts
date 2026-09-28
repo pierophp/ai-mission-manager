@@ -41,13 +41,18 @@ export function watchSystemTheme(onChange: (theme: Theme) => void): () => void {
   return () => query.removeEventListener("change", listener);
 }
 
+/** Reads a theme custom property off the document root, as the browser resolved it. */
+export function themeToken(name: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
+
 export function applyTheme(theme: Theme) {
   if (typeof document === "undefined") return;
 
   document.documentElement.dataset.theme = theme;
   document
     .querySelector('meta[name="theme-color"]')
-    ?.setAttribute("content", theme === "dark" ? "#171411" : "#f7f4ee");
+    ?.setAttribute("content", themeToken("--background"));
 }
 
 export function saveThemePreference(preference: ThemePreference) {
