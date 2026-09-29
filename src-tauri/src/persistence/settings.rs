@@ -24,6 +24,42 @@ impl SqliteStore {
         self.set_executable_path("gh_executable_path", path)
     }
 
+    pub fn set_context_gh_executable_path(
+        &mut self,
+        context_id: i64,
+        path: &Path,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE contexts SET gh_executable_path = ?1 WHERE id = ?2",
+            params![path.to_string_lossy(), context_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_context_twg_executable_path(
+        &mut self,
+        context_id: i64,
+        path: &Path,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE contexts SET twg_executable_path = ?1 WHERE id = ?2",
+            params![path.to_string_lossy(), context_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn set_context_az_executable_path(
+        &mut self,
+        context_id: i64,
+        path: &Path,
+    ) -> Result<(), StoreError> {
+        self.connection.execute(
+            "UPDATE contexts SET az_executable_path = ?1 WHERE id = ?2",
+            params![path.to_string_lossy(), context_id],
+        )?;
+        Ok(())
+    }
+
     pub fn setting(&self, key: &str) -> Result<Option<String>, StoreError> {
         self.connection
             .query_row(

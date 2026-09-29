@@ -78,6 +78,12 @@ const contexts = [
       model: "claude-sonnet-4-5",
       effort: "high",
     },
+    gh_executable_path: null,
+    twg_executable_path: null,
+    az_executable_path: null,
+    atlassian_site: null,
+    azure_devops_organization: null,
+    bitbucket_workspace: null,
   },
 ];
 

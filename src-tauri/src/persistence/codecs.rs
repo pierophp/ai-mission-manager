@@ -204,6 +204,8 @@ pub(super) fn parse_item_relation_kind(kind: &str) -> Result<ItemRelationKind, S
 pub(super) fn external_provider_as_str(provider: ExternalProvider) -> &'static str {
     match provider {
         ExternalProvider::GitHub => "github",
+        ExternalProvider::Atlassian => "atlassian",
+        ExternalProvider::AzureDevOps => "azure_dev_ops",
         ExternalProvider::Generic => "generic",
     }
 }
@@ -211,6 +213,8 @@ pub(super) fn external_provider_as_str(provider: ExternalProvider) -> &'static s
 pub(super) fn parse_external_provider(provider: &str) -> Result<ExternalProvider, StoreError> {
     match provider {
         "github" => Ok(ExternalProvider::GitHub),
+        "atlassian" => Ok(ExternalProvider::Atlassian),
+        "azure_dev_ops" => Ok(ExternalProvider::AzureDevOps),
         "generic" => Ok(ExternalProvider::Generic),
         other => Err(StoreError::InvalidExternalProvider(other.into())),
     }
@@ -220,6 +224,7 @@ pub(super) fn external_object_kind_as_str(kind: ExternalObjectKind) -> &'static 
     match kind {
         ExternalObjectKind::Issue => "issue",
         ExternalObjectKind::PullRequest => "pull_request",
+        ExternalObjectKind::Document => "document",
         ExternalObjectKind::Generic => "generic",
     }
 }
@@ -245,6 +250,7 @@ pub(super) fn parse_external_object_kind(kind: &str) -> Result<ExternalObjectKin
     match kind {
         "issue" => Ok(ExternalObjectKind::Issue),
         "pull_request" => Ok(ExternalObjectKind::PullRequest),
+        "document" => Ok(ExternalObjectKind::Document),
         "generic" => Ok(ExternalObjectKind::Generic),
         other => Err(StoreError::InvalidExternalObjectKind(other.into())),
     }

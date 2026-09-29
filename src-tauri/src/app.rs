@@ -22,12 +22,12 @@ use crate::{
         ActivityTabView, AgentKind, AuditEntry, Context, ContextAttentionDefault,
         ContextConfiguration, DomainState, ExecutionMode, ExecutionProfile, ExternalChangePolicy,
         ExternalLinkView, ExternalObjectKind, ExternalSnapshot, GrillAnswer, GrillConfiguration,
-        GrillContinuationAction, GrillLanguage, HomeView, Item, ItemRelation, ItemRelationKind, ItemStatus,
-        ItemView, LinkPurpose, Machine, MachineTransport, Project, Repository, Run, RunCheckout,
-        RunPromptSelection, RunState, RunSuggestion, Worktree,
+        GrillContinuationAction, GrillLanguage, HomeView, Item, ItemRelation, ItemRelationKind,
+        ItemStatus, ItemView, LinkPurpose, Machine, MachineTransport, Project, Repository, Run,
+        RunCheckout, RunPromptSelection, RunState, RunSuggestion, Worktree,
     },
     persistence::SqliteStore,
-    provider::{resolve_gh_executable, IssueDocument},
+    provider::IssueDocument,
     terminal::{MachineReadiness, PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime},
 };
 
@@ -44,7 +44,6 @@ pub(crate) use crate::features::work::{ExternalLinkAction, PollResult};
 pub struct Runtime {
     pub(crate) store: SqliteStore,
     pub(crate) state: DomainState,
-    pub(crate) gh_executable_path: Option<PathBuf>,
     pub(crate) pending_worktree_removals: HashMap<i64, WorktreeRemovalReport>,
     pub(crate) pending_item_deletion: Option<ItemDeletionPreview>,
     pub(crate) pending_external_object_deletion: Option<ExternalObjectDeletionPreview>,
@@ -124,23 +123,11 @@ impl Runtime {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("agent-state");
-        let mut store = SqliteStore::open(&database_path).map_err(|error| error.to_string())?;
+        let store = SqliteStore::open(&database_path).map_err(|error| error.to_string())?;
         let state = store.load_state().map_err(|error| error.to_string())?;
-        let configured_gh_path = store
-            .gh_executable_path()
-            .map_err(|error| error.to_string())?;
-        let gh_executable_path = resolve_gh_executable(configured_gh_path.as_deref()).ok();
-        if gh_executable_path != configured_gh_path {
-            if let Some(path) = gh_executable_path.as_deref() {
-                store
-                    .set_gh_executable_path(path)
-                    .map_err(|error| error.to_string())?;
-            }
-        }
         let mut runtime = Self {
             store,
             state,
-            gh_executable_path,
             pending_worktree_removals: HashMap::new(),
             pending_item_deletion: None,
             pending_external_object_deletion: None,
@@ -1380,6 +1367,22 @@ pub async fn fetch_issue_document(
     crate::features::work::fetch_issue_document(external_object_id, state).await
 }
 
+#[tauri::command]
+pub async fn fetch_external_comments(
+    external_object_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Vec<crate::provider::ExternalComment>, String> {
+    crate::features::work::fetch_external_comments(external_object_id, state).await
+}
+
+#[tauri::command]
+pub async fn fetch_external_document(
+    external_object_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<String, String> {
+    crate::features::work::fetch_external_document(external_object_id, state).await
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn refresh_external_object(
     external_object_id: i64,
@@ -1406,9 +1409,10 @@ pub fn set_link_attention_policy(
 pub fn set_link_purpose(
     link_id: i64,
     purpose: LinkPurpose,
+    spec_external_object_id: Option<i64>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkView, String> {
-    crate::features::work::set_link_purpose(link_id, purpose, state)
+    crate::features::work::set_link_purpose(link_id, purpose, spec_external_object_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1540,6 +1544,15 @@ mod tests {
         runtime
     }
 
+    fn configure_test_context_gh(runtime: &mut Runtime, executable: &Path) {
+        runtime
+            .store
+            .set_context_gh_executable_path(1, executable)
+            .expect("fake Context gh path should persist");
+        runtime.state.contexts[0].gh_executable_path =
+            Some(executable.to_string_lossy().into_owned());
+    }
+
     #[test]
     fn failed_context_configuration_write_preserves_runtime_and_database_state() {
         let directory = tempdir().expect("temporary directory should exist");
@@ -1583,6 +1596,7 @@ mod tests {
                 grill_defaults: previous_context.grill_defaults.clone(),
                 implement_defaults: previous_context.implement_defaults.clone(),
                 attention_defaults,
+                ..ContextConfiguration::default()
             },
         );
 
@@ -1631,13 +1645,17 @@ mod tests {
                     grill_defaults: previous_context.grill_defaults,
                     implement_defaults: previous_context.implement_defaults,
                     attention_defaults: attention_defaults.clone(),
+                    ..ContextConfiguration::default()
                 },
             )
             .expect("the aggregate Context edit should persist");
 
         assert_eq!(updated.name, "Edited Context");
         assert_eq!(runtime.state.attention_defaults, attention_defaults);
-        let persisted = runtime.store.load_state().expect("stored state should reload");
+        let persisted = runtime
+            .store
+            .load_state()
+            .expect("stored state should reload");
         assert_eq!(persisted.contexts[0], updated);
         assert_eq!(persisted.attention_defaults, attention_defaults);
     }
@@ -1679,6 +1697,7 @@ mod tests {
                 grill_defaults: grill_defaults.clone(),
                 implement_defaults: GrillConfiguration::default(),
                 attention_defaults: attention_defaults.clone(),
+                ..ContextConfiguration::default()
             })
             .expect("the complete Context setup should save");
 
@@ -1735,6 +1754,7 @@ mod tests {
                 policy: ExternalChangePolicy::all(),
             })
             .collect(),
+            ..ContextConfiguration::default()
         });
 
         assert!(result.is_err());
@@ -3008,13 +3028,8 @@ fi
         fs::write(&executable, script).expect("fake gh should be written");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
             .expect("fake gh should be executable");
-        let mut store = SqliteStore::open(&database).expect("database should open");
-        store
-            .set_gh_executable_path(&executable)
-            .expect("fake gh path should persist");
-        drop(store);
-
         let mut runtime = Runtime::open(&database).expect("runtime should open");
+        configure_test_context_gh(&mut runtime, &executable);
         runtime
             .create_item("Keep this Item".into(), 1, 1)
             .expect("Item should be created");
@@ -3161,13 +3176,8 @@ fi
         fs::write(&executable, script).expect("fake gh should be written");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
             .expect("fake gh should be executable");
-        let mut store = SqliteStore::open(&database).expect("database should open");
-        store
-            .set_gh_executable_path(&executable)
-            .expect("fake gh path should persist");
-        drop(store);
-
         let mut runtime = Runtime::open(&database).expect("runtime should open");
+        configure_test_context_gh(&mut runtime, &executable);
         runtime
             .create_item("Keep this Item".into(), 1, 1)
             .expect("Item should be created");
@@ -3205,13 +3215,8 @@ exit 1
         fs::write(&executable, script).expect("fake gh should be written");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
             .expect("fake gh should be executable");
-        let mut store = SqliteStore::open(&database).expect("database should open");
-        store
-            .set_gh_executable_path(&executable)
-            .expect("fake gh path should persist");
-        drop(store);
-
         let mut runtime = Runtime::open(&database).expect("runtime should open");
+        configure_test_context_gh(&mut runtime, &executable);
         runtime
             .create_item("Capture downstream work".into(), 1, 1)
             .expect("Item should be created");
@@ -3269,6 +3274,8 @@ https://example.com/unrelated"#;
                 run_id: 1,
                 action: GrillContinuationAction::ToTickets,
                 discovery: crate::domain::DownstreamIssueDiscovery::StructuredEvent,
+                ordinal: Some(1),
+                blocked_by: vec![],
             })
         );
     }
@@ -3291,15 +3298,10 @@ exit 1
         fs::write(&executable, script).expect("fake gh should be written");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
             .expect("fake gh should be executable");
-        let mut store = SqliteStore::open(&database).expect("database should open");
-        store
-            .set_gh_executable_path(&executable)
-            .expect("fake gh path should persist");
-        drop(store);
-
         let terminal = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
         terminal.set_transcript_capture_failure(1, "%1", "Pane disappeared during capture");
         let mut runtime = runtime_with_single_reconciliation_run(&database, terminal);
+        configure_test_context_gh(&mut runtime, &executable);
         let run = &mut runtime.state.runs[0];
         run.execution_profile = ExecutionProfile::Grill;
         run.grill_action = Some(GrillContinuationAction::ToTickets);
@@ -3318,6 +3320,8 @@ exit 1
                 run_id: 1,
                 action: GrillContinuationAction::ToTickets,
                 discovery: crate::domain::DownstreamIssueDiscovery::StructuredEvent,
+                ordinal: Some(1),
+                blocked_by: vec![],
             })
         );
     }

@@ -27,6 +27,24 @@ fn selected_cli_configuration_profile(
     })
 }
 
+fn detach_ticket_links_from_spec(
+    state: &mut DomainState,
+    item_id: i64,
+    spec_external_object_id: i64,
+) -> Vec<Link> {
+    state
+        .links
+        .iter_mut()
+        .filter(|link| {
+            link.item_id == item_id && link.spec_external_object_id == Some(spec_external_object_id)
+        })
+        .map(|link| {
+            link.spec_external_object_id = None;
+            link.clone()
+        })
+        .collect()
+}
+
 pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainError> {
     match event {
         Event::CreateContext { name } => {
@@ -50,6 +68,12 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                gh_executable_path: None,
+                twg_executable_path: None,
+                az_executable_path: None,
+                atlassian_site: None,
+                azure_devops_organization: None,
+                bitbucket_workspace: None,
             };
             let project = Project {
                 id: project_id,
@@ -138,6 +162,12 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 check_dirty_checkouts,
                 grill_defaults,
                 implement_defaults,
+                gh_executable_path,
+                twg_executable_path,
+                az_executable_path,
+                atlassian_site,
+                azure_devops_organization,
+                bitbucket_workspace,
                 attention_defaults,
             } = configuration;
             if state
@@ -230,6 +260,13 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             context.check_dirty_checkouts = check_dirty_checkouts;
             context.grill_defaults = grill_defaults;
             context.implement_defaults = implement_defaults;
+            context.gh_executable_path = clean_optional_identifier(gh_executable_path);
+            context.twg_executable_path = clean_optional_identifier(twg_executable_path);
+            context.az_executable_path = clean_optional_identifier(az_executable_path);
+            context.atlassian_site = clean_optional_identifier(atlassian_site);
+            context.azure_devops_organization =
+                clean_optional_identifier(azure_devops_organization);
+            context.bitbucket_workspace = clean_optional_identifier(bitbucket_workspace);
             let context = context.clone();
             state
                 .attention_defaults
@@ -268,6 +305,29 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     return Err(DomainError::ContextHasActiveRuns {
                         context_id,
                         run_ids: active_run_ids,
+                    });
+                }
+            }
+            let uses_local_tracker = state.external_objects.iter().any(|object| {
+                object.external_key.starts_with("local:")
+                    && state.links.iter().any(|link| {
+                        link.external_object_id == object.id
+                            && item_context_id(&state, link.item_id)
+                                .is_ok_and(|id| id == context_id)
+                    })
+            });
+            if uses_local_tracker {
+                let machine = machine_id.and_then(|machine_id| {
+                    state
+                        .machines
+                        .iter()
+                        .find(|machine| machine.id == machine_id)
+                });
+                if machine
+                    .is_none_or(|machine| !matches!(machine.transport, MachineTransport::Local))
+                {
+                    return Err(DomainError::LocalTrackerRequiresLocalExecutionMachine {
+                        context_id,
                     });
                 }
             }
@@ -843,6 +903,12 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                gh_executable_path: None,
+                twg_executable_path: None,
+                az_executable_path: None,
+                atlassian_site: None,
+                azure_devops_organization: None,
+                bitbucket_workspace: None,
             };
             let project = Project {
                 id: project_id,
@@ -1730,6 +1796,11 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .cloned()
                 .ok_or(DomainError::LinkNotFound { link_id })?;
             let external_object_id = link.external_object_id;
+            let detached_ticket_links = if link.purpose == LinkPurpose::ToSpec {
+                detach_ticket_links_from_spec(&mut state, link.item_id, external_object_id)
+            } else {
+                Vec::new()
+            };
             state.links.retain(|candidate| candidate.id != link_id);
             let orphaned = !state
                 .links
@@ -1747,10 +1818,14 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     .retain(|activity| activity.external_object_id != external_object_id);
             }
 
-            let mut effects = vec![Effect::RemoveLink {
+            let mut effects = detached_ticket_links
+                .into_iter()
+                .map(|link| Effect::PersistLinkState { link })
+                .collect::<Vec<_>>();
+            effects.push(Effect::RemoveLink {
                 link_id,
                 external_object_id,
-            }];
+            });
             if orphaned {
                 effects.push(Effect::RemoveExternalObject { external_object_id });
             }
@@ -2835,14 +2910,30 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             }
 
             let mut effects = Vec::new();
+            // to-tickets objects are currently created by the selected tracker
+            // skill in the Run, then captured here. ProviderDispatch only owns
+            // GitHub's explicit create API; keep parentage as local Link state
+            // so capture never depends on reading a provider relation back.
+            let parent_spec_external_object_id = (action == GrillContinuationAction::ToTickets)
+                .then(|| {
+                    state
+                        .links
+                        .iter()
+                        .find(|link| {
+                            link.item_id == run.item_id && link.purpose == LinkPurpose::ToSpec
+                        })
+                        .map(|link| link.external_object_id)
+                })
+                .flatten();
             for issue in issues {
-                if issue.object.provider != ExternalProvider::GitHub
-                    || issue.object.kind != ExternalObjectKind::Issue
+                if (issue.object.provider == ExternalProvider::Generic
+                    && !issue.object.external_key.starts_with("local:"))
                     || issue.object.external_key.trim().is_empty()
                     || issue.object.canonical_url.trim().is_empty()
                 {
                     continue;
                 }
+                let object_identity = (issue.object.provider, issue.object.external_key.clone());
                 effects.extend(link_external_object(
                     &mut state,
                     run.item_id,
@@ -2852,9 +2943,59 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                         run_id,
                         action,
                         discovery: issue.discovery,
+                        ordinal: issue.ordinal,
+                        blocked_by: issue.blocked_by,
                     }),
                     true,
                 )?);
+                let external_object_id = state
+                    .external_objects
+                    .iter()
+                    .find(|object| {
+                        object.provider == object_identity.0
+                            && object.external_key == object_identity.1
+                    })
+                    .map(|object| object.id);
+                let captured_purpose = external_object_id
+                    .and_then(|id| state.external_objects.iter().find(|object| object.id == id))
+                    .map(|object| match action {
+                        GrillContinuationAction::ToSpec
+                            if super::implementation_queue::is_implementation_spec_object(
+                                object,
+                            ) =>
+                        {
+                            LinkPurpose::ToSpec
+                        }
+                        GrillContinuationAction::ToTickets
+                            if super::implementation_queue::is_implementation_ticket_object(
+                                object,
+                            ) =>
+                        {
+                            LinkPurpose::ToTickets
+                        }
+                        _ => LinkPurpose::Others,
+                    })
+                    .unwrap_or(LinkPurpose::Others);
+                if let Some(link) = external_object_id.and_then(|external_object_id| {
+                    state.links.iter_mut().find(|link| {
+                        link.item_id == run.item_id && link.external_object_id == external_object_id
+                    })
+                }) {
+                    let purpose = captured_purpose;
+                    let spec_external_object_id = if purpose == LinkPurpose::ToTickets {
+                        parent_spec_external_object_id
+                            .filter(|spec_id| *spec_id != link.external_object_id)
+                    } else {
+                        None
+                    };
+                    if link.purpose != purpose
+                        || link.spec_external_object_id != spec_external_object_id
+                    {
+                        link.purpose = purpose;
+                        link.spec_external_object_id = spec_external_object_id;
+                        effects.push(Effect::PersistLinkState { link: link.clone() });
+                    }
+                }
             }
 
             Ok(Decision { state, effects })
@@ -3151,23 +3292,51 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::PersistLinkState { link }],
             })
         }
-        Event::SetLinkPurpose { link_id, purpose } => {
-            let external_object_id = state
+        Event::SetLinkPurpose {
+            link_id,
+            purpose,
+            spec_external_object_id,
+        } => {
+            let link_details = state
                 .links
                 .iter()
                 .find(|link| link.id == link_id)
-                .map(|link| link.external_object_id)
+                .map(|link| (link.external_object_id, link.item_id))
                 .ok_or(DomainError::LinkNotFound { link_id })?;
+            let (external_object_id, item_id) = link_details;
             if purpose == LinkPurpose::ToSpec {
                 let object = state
                     .external_objects
                     .iter()
                     .find(|object| object.id == external_object_id)
                     .ok_or(DomainError::ExternalObjectNotFound { external_object_id })?;
-                if object.provider != ExternalProvider::GitHub
-                    || object.kind != ExternalObjectKind::Issue
-                {
+                if !super::implementation_queue::is_implementation_spec_object(object) {
                     return Err(DomainError::LinkCannotBeSpec);
+                }
+            }
+            if purpose == LinkPurpose::ToTickets {
+                let object = state
+                    .external_objects
+                    .iter()
+                    .find(|object| object.id == external_object_id)
+                    .ok_or(DomainError::ExternalObjectNotFound { external_object_id })?;
+                if !super::implementation_queue::is_implementation_ticket_object(object) {
+                    return Err(DomainError::LinkCannotBeTicket);
+                }
+                if let Some(spec_external_object_id) = spec_external_object_id {
+                    let spec_link = state.links.iter().find(|candidate| {
+                        candidate.item_id == item_id
+                            && candidate.external_object_id == spec_external_object_id
+                            && candidate.external_object_id != external_object_id
+                            && candidate.purpose == LinkPurpose::ToSpec
+                    });
+                    let spec_object = state.external_objects.iter().find(|object| {
+                        object.id == spec_external_object_id
+                            && super::implementation_queue::is_implementation_spec_object(object)
+                    });
+                    if spec_link.is_none() || spec_object.is_none() {
+                        return Err(DomainError::LinkCannotBeTicketForSpec);
+                    }
                 }
             }
             let link = state
@@ -3176,12 +3345,24 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .find(|link| link.id == link_id)
                 .ok_or(DomainError::LinkNotFound { link_id })?;
             link.purpose = purpose;
+            link.spec_external_object_id = if purpose == LinkPurpose::ToTickets {
+                spec_external_object_id
+            } else {
+                None
+            };
             let link = link.clone();
+            let mut effects = vec![Effect::PersistLinkState { link: link.clone() }];
+            if purpose != LinkPurpose::ToSpec {
+                for ticket_link in
+                    detach_ticket_links_from_spec(&mut state, item_id, external_object_id)
+                {
+                    effects.push(Effect::PersistLinkState {
+                        link: ticket_link.clone(),
+                    });
+                }
+            }
 
-            Ok(Decision {
-                state,
-                effects: vec![Effect::PersistLinkState { link }],
-            })
+            Ok(Decision { state, effects })
         }
         Event::SetLinkReviewAt { link_id, review_at } => {
             let link = state
@@ -3332,6 +3513,13 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             })
         }
     }
+}
+
+fn clean_optional_identifier(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_owned())
+    })
 }
 
 fn validate_context_profile(

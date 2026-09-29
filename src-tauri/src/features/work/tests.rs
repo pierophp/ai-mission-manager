@@ -96,6 +96,93 @@ fn runtime_with_grill_run(
     (runtime, run_id)
 }
 
+#[test]
+fn grill_capture_resolves_local_markdown_against_repository_checkout_for_worktree_run() {
+    use crate::domain::GrillContinuationAction;
+
+    let database = tempdir().expect("temporary database directory should exist");
+    let checkout = tempdir().expect("temporary checkout should exist");
+    let worktree = tempdir().expect("temporary Worktree should exist");
+    let scratch = checkout.path().join(".scratch");
+    std::fs::create_dir_all(&scratch).expect("scratch directory should be created");
+    std::fs::write(scratch.join("spec.md"), "# Captured local Spec\n")
+        .expect("local Markdown should be written");
+    let worktree_scratch = worktree.path().join(".scratch");
+    std::fs::create_dir_all(&worktree_scratch).expect("Worktree scratch directory should exist");
+    std::fs::write(
+        worktree_scratch.join("spec.md"),
+        "# Worktree copy, not the tracker file\n",
+    )
+    .expect("Worktree Markdown should be written");
+    let (mut runtime, run_id) = runtime_with_grill_run(
+        &database.path().join("capture.db"),
+        crate::terminal::FakeTerminalRuntime::new([(
+            1,
+            crate::terminal::FakeMachineOutcome::Available,
+        )]),
+    );
+    let run = runtime
+        .state
+        .runs
+        .iter_mut()
+        .find(|run| run.id == run_id)
+        .expect("Grill Run should exist");
+    let repository_id = run.direct_checkouts[0].repository_id;
+    let machine_id = run.machine_id;
+    run.direct_checkouts.clear();
+    run.worktree_id = Some(99);
+    run.working_directory = worktree.path().to_string_lossy().into_owned();
+    run.grill_action = Some(GrillContinuationAction::ToSpec);
+    run.grill_action_started_at = Some(1);
+    let item_id = run.item_id;
+    runtime
+        .state
+        .repository_locations
+        .push(crate::domain::RepositoryLocation {
+            repository_id,
+            machine_id,
+            checkout_path: checkout.path().to_string_lossy().into_owned(),
+            worktree_root: worktree.path().to_string_lossy().into_owned(),
+        });
+    let transcript = format!(
+        "AI_MISSION_MANAGER_EVENT {{\"event\":\"external.object.created\",\"url\":\".scratch/spec.md\",\"run_id\":{run_id},\"action\":\"to-spec\"}}"
+    );
+
+    runtime
+        .capture_downstream_issues(run_id, &transcript)
+        .expect("local Markdown capture should succeed");
+
+    assert_eq!(runtime.state.links.len(), 1);
+    assert_eq!(runtime.state.links[0].item_id, item_id);
+    assert_eq!(
+        runtime.state.external_objects[0].provider,
+        ExternalProvider::Generic
+    );
+    assert_eq!(
+        runtime.state.external_objects[0].external_key,
+        format!("local:{repository_id}#.scratch/spec.md",)
+    );
+    assert_eq!(
+        runtime.state.external_objects[0].canonical_url,
+        format!(
+            "file://{}",
+            checkout
+                .path()
+                .canonicalize()
+                .expect("main Repository checkout should resolve")
+                .join(".scratch/spec.md")
+                .display()
+        )
+    );
+    assert_eq!(
+        runtime.state.links[0]
+            .provenance
+            .as_ref()
+            .map(|provenance| provenance.action),
+        Some(GrillContinuationAction::ToSpec)
+    );
+}
+
 fn init_test_repository(path: &Path, remote_url: &str, branch: &str) {
     std::fs::create_dir_all(path).expect("repository directory should be created");
     let output = Command::new("git")
@@ -405,7 +492,7 @@ fn link_purpose_setting_persists_and_round_trips_through_runtime() {
     runtime.commit(link).expect("the Link should persist");
 
     let marked = runtime
-        .set_link_purpose(1, crate::domain::LinkPurpose::ToSpec)
+        .set_link_purpose(1, crate::domain::LinkPurpose::ToSpec, None)
         .expect("the Link can be marked as a Spec");
     assert_eq!(marked.link.purpose, crate::domain::LinkPurpose::ToSpec);
     drop(runtime);
@@ -416,11 +503,11 @@ fn link_purpose_setting_persists_and_round_trips_through_runtime() {
         crate::domain::LinkPurpose::ToSpec
     );
     let unmarked = reopened
-        .set_link_purpose(1, crate::domain::LinkPurpose::ToTickets)
+        .set_link_purpose(1, crate::domain::LinkPurpose::ToTickets, None)
         .expect("the Link type can change to tickets");
     assert_eq!(unmarked.link.purpose, crate::domain::LinkPurpose::ToTickets);
     let other = reopened
-        .set_link_purpose(1, crate::domain::LinkPurpose::Others)
+        .set_link_purpose(1, crate::domain::LinkPurpose::Others, None)
         .expect("the Link type can change to others");
     assert_eq!(other.link.purpose, crate::domain::LinkPurpose::Others);
 }
@@ -1211,7 +1298,7 @@ fn first_and_advancing_queue_launches_deliver_the_local_implement_prompt() {
     state
         .lock()
         .unwrap()
-        .set_link_purpose(1, LinkPurpose::ToSpec)
+        .set_link_purpose(1, LinkPurpose::ToSpec, None)
         .expect("linked issue should be markable as the spec");
 
     let selection = RunPromptSelection {
@@ -1420,7 +1507,8 @@ fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
 
         assert_eq!(state.lock().unwrap().state.runs[0].id, run.id);
         if matches!(flow, Flow::Grill) {
-            assert_eq!(run.prompt, edited_grill_prompt);
+            assert!(run.prompt.starts_with(edited_grill_prompt));
+            assert!(run.prompt.contains("GRILL_RESPONSE_LANGUAGE=portuguese"));
         }
         match flow {
             Flow::Direct | Flow::Grill => {

@@ -115,7 +115,8 @@ export const workActions = {
   setLinkPurpose: (
     linkId: number,
     purpose: Parameters<typeof workAdapter.setLinkPurpose>[1],
-  ) => () => workAdapter.setLinkPurpose(linkId, purpose),
+    specExternalObjectId: Parameters<typeof workAdapter.setLinkPurpose>[2],
+  ) => () => workAdapter.setLinkPurpose(linkId, purpose, specExternalObjectId),
   markLinkReviewed: (linkId: number) => () => workAdapter.markLinkReviewed(linkId),
   setLinkWatchUntil: (linkId: number, watchUntil: string | null) =>
     () => workAdapter.setLinkWatchUntil(linkId, watchUntil),

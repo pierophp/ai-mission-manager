@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Context {
     pub id: i64,
     pub name: String,
@@ -19,6 +19,18 @@ pub struct Context {
     pub grill_defaults: GrillConfiguration,
     #[serde(default)]
     pub implement_defaults: GrillConfiguration,
+    #[serde(default)]
+    pub gh_executable_path: Option<String>,
+    #[serde(default)]
+    pub twg_executable_path: Option<String>,
+    #[serde(default)]
+    pub az_executable_path: Option<String>,
+    #[serde(default)]
+    pub atlassian_site: Option<String>,
+    #[serde(default)]
+    pub azure_devops_organization: Option<String>,
+    #[serde(default)]
+    pub bitbucket_workspace: Option<String>,
 }
 
 impl Context {
@@ -455,6 +467,10 @@ pub struct Item {
 pub enum ExternalProvider {
     #[serde(rename = "github")]
     GitHub,
+    #[serde(rename = "atlassian")]
+    Atlassian,
+    #[serde(rename = "azure_dev_ops")]
+    AzureDevOps,
     #[serde(rename = "generic")]
     Generic,
 }
@@ -465,6 +481,8 @@ pub enum ExternalObjectKind {
     Issue,
     #[serde(rename = "pull_request")]
     PullRequest,
+    #[serde(rename = "document")]
+    Document,
     #[serde(rename = "generic")]
     Generic,
 }
@@ -586,7 +604,7 @@ pub struct ContextAttentionDefault {
     pub policy: ExternalChangePolicy,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextConfiguration {
     pub name: String,
@@ -596,6 +614,12 @@ pub struct ContextConfiguration {
     pub check_dirty_checkouts: bool,
     pub grill_defaults: GrillConfiguration,
     pub implement_defaults: GrillConfiguration,
+    pub gh_executable_path: Option<String>,
+    pub twg_executable_path: Option<String>,
+    pub az_executable_path: Option<String>,
+    pub atlassian_site: Option<String>,
+    pub azure_devops_organization: Option<String>,
+    pub bitbucket_workspace: Option<String>,
     pub attention_defaults: Vec<ContextAttentionDefault>,
 }
 
@@ -610,6 +634,8 @@ pub struct Link {
     pub review_at: Option<String>,
     #[serde(default)]
     pub purpose: LinkPurpose,
+    #[serde(default)]
+    pub spec_external_object_id: Option<i64>,
     #[serde(default)]
     pub provenance: Option<LinkProvenance>,
 }

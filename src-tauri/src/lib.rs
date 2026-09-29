@@ -202,6 +202,8 @@ pub fn run() {
             app::create_github_issue,
             app::add_external_comment,
             app::fetch_issue_document,
+            app::fetch_external_comments,
+            app::fetch_external_document,
             app::refresh_external_object,
             app::poll_external_objects,
             app::set_link_attention_policy,

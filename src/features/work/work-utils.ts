@@ -36,7 +36,15 @@ export function grillPhaseLabel(phase: NonNullable<Run["grill_phase"]>): string 
 export function externalObjectKindLabel(kind: ExternalObject["kind"]): string {
   if (kind === "pull_request") return "Pull request";
   if (kind === "issue") return "Issue";
+  if (kind === "document") return "Document";
   return "Link";
+}
+
+export function externalProviderLabel(provider: ExternalObject["provider"]): string {
+  if (provider === "github") return "GitHub";
+  if (provider === "atlassian") return "Atlassian";
+  if (provider === "azure_dev_ops") return "Azure DevOps";
+  return "Generic";
 }
 
 export function formatSnapshotAge(fetchedAt: number): string {

@@ -18,6 +18,52 @@ use super::{
     SqliteStore,
 };
 
+#[test]
+fn legacy_app_wide_github_executable_is_copied_to_each_existing_context_once() {
+    let directory = tempdir().expect("temporary directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let legacy_path = Path::new("/legacy/tools/gh");
+    let mut store = SqliteStore::open(&database).expect("database should open");
+    store
+        .connection
+        .execute("INSERT INTO contexts (id, name) VALUES (2, 'Research')", [])
+        .expect("second legacy Context should be inserted");
+    store
+        .set_gh_executable_path(legacy_path)
+        .expect("legacy app-wide gh path should be stored");
+    store
+        .connection
+        .execute("UPDATE contexts SET gh_executable_path = NULL", [])
+        .expect("Context paths should be cleared to model the old schema");
+    store
+        .connection
+        .execute(
+            "UPDATE metadata SET value = 0 WHERE key = 'contexts_gh_path_migrated'",
+            [],
+        )
+        .expect("legacy migration should be reset for the fixture");
+    drop(store);
+
+    let migrated = SqliteStore::open(&database).expect("legacy database should migrate");
+    let state = migrated
+        .load_state()
+        .expect("migrated Contexts should load");
+    assert_eq!(state.contexts.len(), 2);
+    assert!(state
+        .contexts
+        .iter()
+        .all(|context| context.gh_executable_path.as_deref() == Some("/legacy/tools/gh")));
+    let migration_done: i64 = migrated
+        .connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'contexts_gh_path_migrated'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("migration completion should be recorded");
+    assert_eq!(migration_done, 1);
+}
+
 fn apply_event(
     store: &mut SqliteStore,
     state: crate::domain::DomainState,
@@ -999,6 +1045,8 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
                     fetched_at: 456,
                 },
                 discovery: DownstreamIssueDiscovery::StructuredEvent,
+                ordinal: Some(3),
+                blocked_by: vec!["https://github.com/acme/app/issues/6".into()],
             }],
         },
     );
@@ -1018,6 +1066,8 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
             run_id: 1,
             action: GrillContinuationAction::ToTickets,
             discovery: DownstreamIssueDiscovery::StructuredEvent,
+            ordinal: Some(3),
+            blocked_by: vec!["https://github.com/acme/app/issues/6".into()],
         })
     );
 }
@@ -1086,4 +1136,57 @@ fn preserves_settings_executable_paths_audit_history_and_sequences() {
         )
         .expect("audit sequence should load");
     assert_eq!(next_audit_id, 3);
+}
+
+#[test]
+fn classification_migration_preserves_existing_external_objects_and_attention_defaults() {
+    let directory = tempdir().expect("temporary directory should exist");
+    let database_path = directory.path().join("mission-manager.sqlite");
+    let store = SqliteStore::open(&database_path).expect("database should open");
+    drop(store);
+
+    // Rebuild the two tables with the previous enum constraints to model a database
+    // created by an earlier release, keeping the same stable table names.
+    let connection = rusqlite::Connection::open(&database_path).expect("database should reopen");
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP TABLE external_objects;
+             CREATE TABLE external_objects (
+                 id INTEGER PRIMARY KEY NOT NULL,
+                 provider TEXT NOT NULL CHECK (provider IN ('github', 'generic')),
+                 kind TEXT NOT NULL CHECK (kind IN ('issue', 'pull_request', 'generic')),
+                 external_key TEXT NOT NULL,
+                 canonical_url TEXT NOT NULL,
+                 UNIQUE (provider, external_key)
+             );
+             INSERT INTO external_objects VALUES
+                 (91, 'generic', 'generic', 'https://example.com/old', 'https://example.com/old');
+             DROP TABLE context_attention_defaults;
+             CREATE TABLE context_attention_defaults (
+                 context_id INTEGER NOT NULL REFERENCES contexts(id) ON DELETE CASCADE,
+                 object_kind TEXT NOT NULL CHECK (object_kind IN ('issue', 'pull_request', 'generic')),
+                 title_attention INTEGER NOT NULL,
+                 state_attention INTEGER NOT NULL,
+                 metadata_attention INTEGER NOT NULL,
+                 PRIMARY KEY (context_id, object_kind)
+             );
+             INSERT INTO context_attention_defaults VALUES (1, 'generic', 1, 0, 1);",
+        )
+        .expect("legacy schema should be written");
+    drop(connection);
+
+    let migrated = SqliteStore::open(&database_path)
+        .expect("legacy database should migrate")
+        .load_state()
+        .expect("migrated state should load");
+    assert_eq!(migrated.external_objects.len(), 1);
+    assert_eq!(migrated.external_objects[0].id, 91);
+    assert_eq!(
+        migrated.external_objects[0].external_key,
+        "https://example.com/old"
+    );
+    assert_eq!(migrated.attention_defaults.len(), 1);
+    assert_eq!(migrated.attention_defaults[0].policy.title, true);
+    assert_eq!(migrated.attention_defaults[0].policy.state, false);
 }

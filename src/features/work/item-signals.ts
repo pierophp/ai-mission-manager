@@ -58,6 +58,26 @@ export function activeRuns(view: ItemView): Run[] {
   );
 }
 
+/** External Objects whose Link can serve as an Implementation Queue Spec. */
+export function supportsImplementationSpec(link: ExternalLinkView): boolean {
+  const { object } = link;
+  return (
+    (object.provider === "github" && object.kind === "issue") ||
+    (object.provider === "atlassian" && ["document", "issue"].includes(object.kind)) ||
+    (object.provider === "generic" && object.external_key.startsWith("local:"))
+  );
+}
+
+/** External Objects whose Link can serve as a queued ticket. */
+export function supportsImplementationTicket(link: ExternalLinkView): boolean {
+  const { object } = link;
+  return (
+    (object.provider === "github" && object.kind === "issue") ||
+    (object.provider === "atlassian" && object.kind === "issue") ||
+    (object.provider === "generic" && object.external_key.startsWith("local:"))
+  );
+}
+
 /**
  * What an Item needs from the user, shown on the collapsed card and the Runs
  * tab. A Grill waiting for answers is not also counted as an active Run.
@@ -99,16 +119,15 @@ export function nextGrillAction(
 }
 
 /**
- * The Item's Specs: GitHub Issues explicitly marked on their Link, newest
- * first.
+ * The Item's Specs: supported Spec Objects explicitly marked on their Link,
+ * newest first.
  */
 export function itemSpecs(view: ItemView): ExternalLinkView[] {
   return view.links
     .filter(
       (link) =>
         link.link.purpose === "to-spec" &&
-        link.object.provider === "github" &&
-        link.object.kind === "issue",
+        supportsImplementationSpec(link),
     )
     .sort((left, right) => right.link.id - left.link.id);
 }

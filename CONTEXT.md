@@ -24,6 +24,14 @@ _Avoid_: task, ticket, issue, card, mission
 A single thing owned by an external system — a GitHub Issue, a pull request, a Jira work item. It exists once no matter how many Items refer to it.
 _Avoid_: ticket, remote item, upstream object
 
+**Spec**:
+An External Object or local Markdown document linked to an Item as the description of work to be done. It may have Tickets that break the work down for an Implementation Queue.
+_Avoid_: plan, parent issue
+
+**Ticket**:
+An External Object or local Markdown file linked to a Spec as one implementable piece of work, with its own order and blocking relationships for an Implementation Queue.
+_Avoid_: task, sub-issue
+
 **Link**:
 The pairing of one Item with one External Object, carrying the user's own state about it: which changes they care about, and how far they have reviewed.
 _Avoid_: association, reference, join
@@ -63,7 +71,7 @@ The kind of instruction prepared for an agent when a Run starts — investigate,
 _Avoid_: mode, template, preset
 
 **Implementation Queue**:
-An ordered selection of open GitHub sub-issues from an Item's linked spec. It records the launch configuration, checkout approvals, and the Run attached to its first entry; only one active queue may exist per Item.
+An ordered selection of open Tickets linked to an Item's Spec, arranged by their captured order and blocking relationships. It records the launch configuration, checkout approvals, and the Run attached to its first entry; only one active queue may exist per Item.
 _Avoid_: batch, ticket batch
 
 ### Attention

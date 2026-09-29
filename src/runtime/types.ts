@@ -16,6 +16,12 @@ export type Context = {
   check_dirty_checkouts: boolean;
   grill_defaults: GrillConfiguration;
   implement_defaults: GrillConfiguration;
+  gh_executable_path: string | null;
+  twg_executable_path: string | null;
+  az_executable_path: string | null;
+  atlassian_site: string | null;
+  azure_devops_organization: string | null;
+  bitbucket_workspace: string | null;
 };
 
 export type ContextConfiguration = {
@@ -26,6 +32,12 @@ export type ContextConfiguration = {
   checkDirtyCheckouts: boolean;
   grillDefaults: GrillConfiguration;
   implementDefaults: GrillConfiguration;
+  ghExecutablePath: string | null;
+  twgExecutablePath: string | null;
+  azExecutablePath: string | null;
+  atlassianSite: string | null;
+  azureDevopsOrganization: string | null;
+  bitbucketWorkspace: string | null;
   attentionDefaults: ContextAttentionDefault[];
 };
 
@@ -254,8 +266,8 @@ export type ItemRelation = {
 
 export type ExternalObject = {
   id: number;
-  provider: "github" | "generic";
-  kind: "issue" | "pull_request" | "generic";
+  provider: "github" | "atlassian" | "azure_dev_ops" | "generic";
+  kind: "issue" | "pull_request" | "document" | "generic";
   external_key: string;
   canonical_url: string;
 };
@@ -275,10 +287,18 @@ export type ExternalSnapshot = {
   fetched_at: number;
 };
 
-/** A GitHub Issue read as a document, fresh from GitHub. */
+/** An external work item or Confluence page read as a document. */
 export type IssueDocument = {
   body: string;
+  bodyFormat: "markdown" | "html";
   subIssues: SubIssue[];
+};
+
+export type ExternalComment = {
+  id: number;
+  author: string;
+  body: string;
+  createdAt: string;
 };
 
 export type SubIssue = {
@@ -291,7 +311,16 @@ export type SubIssue = {
 export type ImplementationQueueStart = {
   specExternalObjectId: number;
   specUrl: string;
-  entries: { position: number; ticketNumber: number; ticketTitle: string; ticketUrl: string; ticketState: string; runId: number | null; done: boolean; skipped?: boolean }[];
+  entries: {
+    position: number;
+    ticketNumber: number;
+    ticketTitle: string;
+    ticketUrl: string;
+    ticketState: string;
+    runId: number | null;
+    done: boolean;
+    skipped?: boolean;
+  }[];
 };
 
 export type ImplementationQueuePauseReason =
@@ -349,7 +378,12 @@ export type ExternalChangePolicy = {
 };
 
 export type AttentionEntry = {
-  kind: "external_change" | "review" | "reminder" | "blocked_run" | "implementation_queue";
+  kind:
+    | "external_change"
+    | "review"
+    | "reminder"
+    | "blocked_run"
+    | "implementation_queue";
   link_id: number;
   reminder_id: number | null;
   run_id: number | null;
@@ -371,10 +405,13 @@ export type ExternalLink = {
   watch_until: string | null;
   review_at: string | null;
   purpose: LinkPurpose;
+  spec_external_object_id: number | null;
   provenance: {
     run_id: number;
     action: GrillContinuationAction;
     discovery: "structured-event" | "output-url";
+    ordinal?: number | null;
+    blocked_by?: string[];
   } | null;
 };
 
@@ -622,7 +659,7 @@ export type ResetLocalDataPreview = {
   plan: {
     summary: ResetLocalDataSummary;
     affectedRecords: ResetLocalDataRecord[];
-  workspaces: ItemDeletionPlan["workspaces"];
+    workspaces: ItemDeletionPlan["workspaces"];
   };
   auditEntryCount: number;
   blockers: string[];

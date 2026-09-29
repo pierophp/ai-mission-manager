@@ -24,7 +24,13 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              implement_model TEXT NOT NULL DEFAULT 'claude-sonnet-4-5',
              implement_effort TEXT NOT NULL DEFAULT 'high',
              claude_profile_id INTEGER,
-             codex_profile_id INTEGER
+             codex_profile_id INTEGER,
+             gh_executable_path TEXT,
+             twg_executable_path TEXT,
+             az_executable_path TEXT,
+             atlassian_site TEXT,
+             azure_devops_organization TEXT,
+             bitbucket_workspace TEXT
          );
          CREATE TABLE IF NOT EXISTS projects (
              id INTEGER PRIMARY KEY NOT NULL,
@@ -96,6 +102,12 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
         ("implement_effort", "TEXT NOT NULL DEFAULT 'high'"),
         ("claude_profile_id", "INTEGER"),
         ("codex_profile_id", "INTEGER"),
+        ("gh_executable_path", "TEXT"),
+        ("twg_executable_path", "TEXT"),
+        ("az_executable_path", "TEXT"),
+        ("atlassian_site", "TEXT"),
+        ("azure_devops_organization", "TEXT"),
+        ("bitbucket_workspace", "TEXT"),
     ] {
         if !context_columns.is_empty() && !context_columns.iter().any(|existing| existing == column)
         {
@@ -104,6 +116,30 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
                 [],
             )?;
         }
+    }
+
+    // Carry the previous app-wide GitHub executable into existing Contexts once.
+    // New Contexts leave it unset and resolve `gh` from PATH on first use.
+    let gh_context_migration_done: i64 = connection.query_row(
+        "SELECT COALESCE((SELECT value FROM metadata WHERE key = 'contexts_gh_path_migrated'), 0)",
+        [],
+        |row| row.get(0),
+    )?;
+    if gh_context_migration_done == 0 {
+        connection.execute(
+            "UPDATE contexts
+             SET gh_executable_path = (
+                 SELECT value FROM settings WHERE key = 'gh_executable_path'
+             )
+             WHERE gh_executable_path IS NULL
+               AND EXISTS (SELECT 1 FROM settings WHERE key = 'gh_executable_path')",
+            [],
+        )?;
+        connection.execute(
+            "INSERT INTO metadata (key, value) VALUES ('contexts_gh_path_migrated', 1)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [],
+        )?;
     }
 
     connection.execute(
@@ -272,8 +308,8 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              ON item_relationships (to_item_id);
          CREATE TABLE IF NOT EXISTS external_objects (
              id INTEGER PRIMARY KEY NOT NULL,
-             provider TEXT NOT NULL CHECK (provider IN ('github', 'generic')),
-             kind TEXT NOT NULL CHECK (kind IN ('issue', 'pull_request', 'generic')),
+             provider TEXT NOT NULL CHECK (provider IN ('github', 'atlassian', 'azure_dev_ops', 'generic')),
+             kind TEXT NOT NULL CHECK (kind IN ('issue', 'pull_request', 'document', 'generic')),
              external_key TEXT NOT NULL,
              canonical_url TEXT NOT NULL,
              UNIQUE (provider, external_key)
@@ -283,6 +319,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
              external_object_id INTEGER NOT NULL REFERENCES external_objects(id) ON DELETE CASCADE,
              purpose TEXT NOT NULL DEFAULT 'others',
+             spec_external_object_id INTEGER REFERENCES external_objects(id) ON DELETE SET NULL,
              UNIQUE (item_id, external_object_id)
          );
          CREATE TABLE IF NOT EXISTS external_snapshots (
@@ -310,7 +347,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
          );
          CREATE TABLE IF NOT EXISTS context_attention_defaults (
              context_id INTEGER NOT NULL REFERENCES contexts(id) ON DELETE CASCADE,
-             object_kind TEXT NOT NULL CHECK (object_kind IN ('issue', 'pull_request', 'generic')),
+             object_kind TEXT NOT NULL CHECK (object_kind IN ('issue', 'pull_request', 'document', 'generic')),
              title_attention INTEGER NOT NULL,
              state_attention INTEGER NOT NULL,
              metadata_attention INTEGER NOT NULL,
@@ -330,6 +367,8 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
          CREATE INDEX IF NOT EXISTS audit_entries_by_recorded_at
              ON audit_entries (recorded_at, id);",
     )?;
+
+    migrate_external_object_classification(connection)?;
 
     let external_link_columns = table_columns(connection, "external_links")?;
     if !external_link_columns
@@ -368,6 +407,15 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
                 "UPDATE external_links
                  SET purpose = ({purpose_backfill})"
             ),
+            [],
+        )?;
+    }
+    if !table_columns(connection, "external_links")?
+        .iter()
+        .any(|column| column == "spec_external_object_id")
+    {
+        connection.execute(
+            "ALTER TABLE external_links ADD COLUMN spec_external_object_id INTEGER REFERENCES external_objects(id) ON DELETE SET NULL",
             [],
         )?;
     }
@@ -538,6 +586,76 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
     ensure_sequence_at_least(connection, "next_audit_id", "audit_entries", "id")?;
 
     Ok(())
+}
+
+/// Expand the two enum CHECK constraints without dropping any existing records.
+fn migrate_external_object_classification(connection: &mut Connection) -> Result<(), StoreError> {
+    let object_sql = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'external_objects'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let attention_sql = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'context_attention_defaults'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let migrate_objects = object_sql
+        .as_deref()
+        .is_some_and(|sql| !sql.contains("azure_dev_ops"));
+    let migrate_attention = attention_sql
+        .as_deref()
+        .is_some_and(|sql| !sql.contains("document"));
+    if !migrate_objects && !migrate_attention {
+        return Ok(());
+    }
+
+    // Keep dependent foreign-key declarations pointed at the stable table names.
+    connection.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
+    let result = (|| -> Result<(), StoreError> {
+        if migrate_objects {
+            connection.execute_batch(
+                "CREATE TABLE external_objects_expanded (
+                     id INTEGER PRIMARY KEY NOT NULL,
+                     provider TEXT NOT NULL CHECK (provider IN ('github', 'atlassian', 'azure_dev_ops', 'generic')),
+                     kind TEXT NOT NULL CHECK (kind IN ('issue', 'pull_request', 'document', 'generic')),
+                     external_key TEXT NOT NULL,
+                     canonical_url TEXT NOT NULL,
+                     UNIQUE (provider, external_key)
+                 );
+                 INSERT INTO external_objects_expanded (id, provider, kind, external_key, canonical_url)
+                     SELECT id, provider, kind, external_key, canonical_url FROM external_objects;
+                 DROP TABLE external_objects;
+                 ALTER TABLE external_objects_expanded RENAME TO external_objects;",
+            )?;
+        }
+        if migrate_attention {
+            connection.execute_batch(
+                "CREATE TABLE context_attention_defaults_expanded (
+                     context_id INTEGER NOT NULL REFERENCES contexts(id) ON DELETE CASCADE,
+                     object_kind TEXT NOT NULL CHECK (object_kind IN ('issue', 'pull_request', 'document', 'generic')),
+                     title_attention INTEGER NOT NULL,
+                     state_attention INTEGER NOT NULL,
+                     metadata_attention INTEGER NOT NULL,
+                     PRIMARY KEY (context_id, object_kind)
+                 );
+                 INSERT INTO context_attention_defaults_expanded
+                     (context_id, object_kind, title_attention, state_attention, metadata_attention)
+                     SELECT context_id, object_kind, title_attention, state_attention, metadata_attention
+                     FROM context_attention_defaults;
+                 DROP TABLE context_attention_defaults;
+                 ALTER TABLE context_attention_defaults_expanded RENAME TO context_attention_defaults;",
+            )?;
+        }
+        connection.execute_batch("COMMIT;")?;
+        Ok(())
+    })();
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    result
 }
 
 /// Remove data owned by the legacy Workset model exactly once.

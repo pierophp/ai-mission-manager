@@ -72,8 +72,11 @@ impl SqliteStore {
                          SET name = ?1, execution_machine_id = ?2, check_dirty_checkouts = ?3,
                              claude_profile_id = ?4, codex_profile_id = ?5,
                              grill_agent = ?6, grill_model = ?7, grill_effort = ?8,
-                             implement_agent = ?9, implement_model = ?10, implement_effort = ?11
-                         WHERE id = ?12",
+                             implement_agent = ?9, implement_model = ?10, implement_effort = ?11,
+                             gh_executable_path = ?12, twg_executable_path = ?13,
+                             az_executable_path = ?14, atlassian_site = ?15,
+                             azure_devops_organization = ?16, bitbucket_workspace = ?17
+                         WHERE id = ?18",
                         params![
                             context.name,
                             context.execution_machine_id,
@@ -86,6 +89,12 @@ impl SqliteStore {
                             agent_kind_as_str(context.implement_defaults.agent),
                             context.implement_defaults.model,
                             context.implement_defaults.effort,
+                            context.gh_executable_path,
+                            context.twg_executable_path,
+                            context.az_executable_path,
+                            context.atlassian_site,
+                            context.azure_devops_organization,
+                            context.bitbucket_workspace,
                             context.id,
                         ],
                     )?;
@@ -999,13 +1008,14 @@ impl SqliteStore {
                 }
                 Effect::PersistLink { link, next_link_id } => {
                     transaction.execute(
-                        "INSERT INTO external_links (id, item_id, external_object_id, purpose)
-                         VALUES (?1, ?2, ?3, ?4)",
+                        "INSERT INTO external_links (id, item_id, external_object_id, purpose, spec_external_object_id)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
                         params![
                             link.id,
                             link.item_id,
                             link.external_object_id,
-                            link_purpose_as_str(link.purpose)
+                            link_purpose_as_str(link.purpose),
+                            link.spec_external_object_id
                         ],
                     )?;
                     persist_link_state(&transaction, link)?;
@@ -1096,8 +1106,12 @@ fn persist_link_state(
     link: &Link,
 ) -> Result<(), rusqlite::Error> {
     transaction.execute(
-        "UPDATE external_links SET purpose = ?1 WHERE id = ?2",
-        params![link_purpose_as_str(link.purpose), link.id],
+        "UPDATE external_links SET purpose = ?1, spec_external_object_id = ?2 WHERE id = ?3",
+        params![
+            link_purpose_as_str(link.purpose),
+            link.spec_external_object_id,
+            link.id
+        ],
     )?;
     let (title_attention, state_attention, metadata_attention) = link
         .attention_policy

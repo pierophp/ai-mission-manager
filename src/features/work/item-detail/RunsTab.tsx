@@ -146,6 +146,9 @@ export function RunsTab({
   const [grillDirtyConfirmed, setGrillDirtyConfirmed] = useState(false);
   const [grillSharedConfirmed, setGrillSharedConfirmed] = useState(false);
 
+  const runsNewestFirst = [...view.runs].sort(
+    (left, right) => right.started_at - left.started_at || right.id - left.id,
+  );
   const selectedGrillCatalog = grillModelCatalog.find(
     (catalog) => catalog.agent === grillAgent,
   );
@@ -1102,7 +1105,7 @@ export function RunsTab({
       {view.runs.length === 0 && (
         <span className="text-sm text-muted-foreground">No Runs yet.</span>
       )}
-      {view.runs.map((run) => {
+      {runsNewestFirst.map((run) => {
         const runRepository =
           run.repository_id === null
             ? run.direct_checkouts.find(

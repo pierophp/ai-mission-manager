@@ -22,6 +22,7 @@ import {
   type ItemForm,
   type ItemIntent,
   displayItemIdentifier,
+  supportsImplementationSpec,
 } from "../item-signals";
 import type { ItemCommands } from "../use-item-commands";
 import { workActions } from "../work-mutations";
@@ -32,11 +33,13 @@ const linkForms = ["link", "issue"] as const;
 
 export function LinksTab({
   view,
+  isActive,
   repositories,
   commands,
   intent,
 }: {
   view: ItemView;
+  isActive: boolean;
   repositories: Repository[];
   commands: ItemCommands;
   intent: ItemIntent | undefined;
@@ -50,8 +53,14 @@ export function LinksTab({
   const [issueBody, setIssueBody] = useState(view.item.notes);
   const [externalObjectDeletionPreview, setExternalObjectDeletionPreview] =
     useState<ExternalObjectDeletionPreview>();
+  const [providerWarning, setProviderWarning] = useState<string>();
   const itemRepositories = repositories.filter(
     (repository) => repository.project_id === view.item.project_id,
+  );
+  const specs = view.links.filter(
+    (link) =>
+      link.link.purpose === "to-spec" &&
+      supportsImplementationSpec(link),
   );
 
   function openLinkForm(form: ItemForm) {
@@ -78,7 +87,7 @@ export function LinksTab({
         setExternalUrl("");
         setOpenForm(undefined);
         await onChanged();
-        if (result.warning) window.alert(result.warning);
+        if (result.warning) setProviderWarning(result.warning);
       } catch (linkError) {
         window.alert(errorMessage(linkError));
       }
@@ -101,7 +110,7 @@ export function LinksTab({
         setOpenForm(undefined);
         setIssueRepository(undefined);
         await onChanged();
-        if (result.warning) window.alert(result.warning);
+        if (result.warning) setProviderWarning(result.warning);
       } catch (createError) {
         window.alert(errorMessage(createError));
       }
@@ -187,6 +196,12 @@ export function LinksTab({
 
   return (
     <div className="grid gap-4">
+      {providerWarning && (
+        <Alert>
+          <AlertTitle>Provider configuration warning</AlertTitle>
+          <AlertDescription>{providerWarning}</AlertDescription>
+        </Alert>
+      )}
       {!openForm && (
         <div className="flex flex-wrap gap-2">
           <Button
@@ -218,7 +233,8 @@ export function LinksTab({
           <div>
             <h4 className="m-0 text-base font-medium">Add external link</h4>
             <p className="mt-1 text-sm text-muted-foreground">
-              Link a GitHub Issue, pull request, or other external URL to this Item.
+              Link a GitHub Issue, pull request, or other external URL to this
+              Item.
             </p>
           </div>
           <label className="grid gap-1.5 text-sm font-medium">
@@ -331,15 +347,21 @@ export function LinksTab({
         <ExternalLinkCard
           key={externalLink.link.id}
           externalLink={externalLink}
+          isActive={isActive}
           isSaving={isSaving}
           onRefresh={() => refreshExternalObject(externalLink.object.id)}
           onUnlink={() => handleUnlinkExternalLink(externalLink.link.id)}
           onPrepareDeleteObject={() =>
             handlePrepareExternalObjectDeletion(externalLink.object.id)
           }
-          onSetPurpose={async (purpose) => {
+          specs={specs}
+          onSetPurpose={async (purpose, specExternalObjectId) => {
             await saveItem(
-              workActions.setLinkPurpose(externalLink.link.id, purpose),
+              workActions.setLinkPurpose(
+                externalLink.link.id,
+                purpose,
+                purpose === "to-tickets" ? specExternalObjectId : null,
+              ),
             );
           }}
           onSavePolicy={async (policy) => {
@@ -381,7 +403,9 @@ export function LinksTab({
               deleted.
             </p>
             <ul className="grid gap-1 pl-5">
-              <li>{externalObjectDeletionPreview.plan.linkIds.length} Link(s)</li>
+              <li>
+                {externalObjectDeletionPreview.plan.linkIds.length} Link(s)
+              </li>
               <li>
                 {externalObjectDeletionPreview.plan.snapshotCount} snapshot(s)
               </li>
@@ -394,7 +418,8 @@ export function LinksTab({
               <strong>Items affected</strong>
               {externalObjectDeletionPreview.links.map((link) => (
                 <span key={link.linkId}>
-                  {displayItemIdentifier(link.itemIdentifier)} · {link.itemTitle}
+                  {displayItemIdentifier(link.itemIdentifier)} ·{" "}
+                  {link.itemTitle}
                 </span>
               ))}
             </div>

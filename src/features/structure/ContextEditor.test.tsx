@@ -42,6 +42,12 @@ describe("ContextEditor", () => {
               model: "gpt-6-sol",
               effort: "high",
             },
+            gh_executable_path: null,
+            twg_executable_path: null,
+            az_executable_path: null,
+            atlassian_site: null,
+            azure_devops_organization: null,
+            bitbucket_workspace: null,
           },
           attentionDefaults: ["issue", "pull_request", "generic"].map(
             (object_kind) => ({
@@ -239,6 +245,12 @@ describe("ContextEditor", () => {
               model: "gpt-6-sol",
               effort: "high",
             },
+            gh_executable_path: null,
+            twg_executable_path: null,
+            az_executable_path: null,
+            atlassian_site: null,
+            azure_devops_organization: null,
+            bitbucket_workspace: null,
           },
           attentionDefaults: ["issue", "pull_request", "generic"].map(
             (object_kind) => ({

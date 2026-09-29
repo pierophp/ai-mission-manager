@@ -33,15 +33,16 @@ use crate::{
         ConfirmedDownstreamIssue, Context, DomainState, Event, ExecutionProfile,
         ExternalChangePolicy, ExternalLinkView, ExternalObjectInput, ExternalObjectKind,
         ExternalProvider, ExternalSnapshot, GrillAnswer, GrillConfiguration,
-        GrillContinuationAction, GrillLanguage, GrillPhase, HomeView, Item, ItemRelation, ItemRelationKind,
-        ItemStatus, ItemView, LinkPurpose, Machine, MachineObservation, MachineTransport, Project,
-        Repository, RepositoryLocation, Run, RunCheckout, RunPaneStatus, RunPromptSelection,
-        RunState, RunSuggestion, Workspace, WorkspaceRepository, WorkspaceRepositoryInput,
-        Worktree,
+        GrillContinuationAction, GrillLanguage, GrillPhase, HomeView, Item, ItemRelation,
+        ItemRelationKind, ItemStatus, ItemView, LinkPurpose, Machine, MachineObservation,
+        MachineTransport, Project, Repository, RepositoryLocation, Run, RunCheckout, RunPaneStatus,
+        RunPromptSelection, RunState, RunSuggestion, Workspace, WorkspaceRepository,
+        WorkspaceRepositoryInput, Worktree,
     },
     git::GitCli,
     provider::{
-        classify_url, github_repository_name, resolve_gh_executable, GithubCli, IssueDocument,
+        classify_local_markdown, classify_url, github_repository_name, resolve_gh_executable,
+        ExternalComment, IssueDocument, ProviderDispatch,
     },
     terminal::{
         open_pane_in_terminal, terminal_transport, AgentLaunchContext, ExternalPaneIdentity,
@@ -261,9 +262,12 @@ pub(crate) fn set_link_attention_policy(
 pub(crate) fn set_link_purpose(
     link_id: i64,
     purpose: LinkPurpose,
+    spec_external_object_id: Option<i64>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkView, String> {
-    locked(state, |runtime| runtime.set_link_purpose(link_id, purpose))
+    locked(state, |runtime| {
+        runtime.set_link_purpose(link_id, purpose, spec_external_object_id)
+    })
 }
 
 pub(crate) fn set_link_watch_until(
@@ -378,6 +382,20 @@ pub(crate) async fn fetch_issue_document(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<IssueDocument, String> {
     external::fetch_issue_document_with_state(external_object_id, state.inner()).await
+}
+
+pub(crate) async fn fetch_external_comments(
+    external_object_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Vec<ExternalComment>, String> {
+    external::fetch_external_comments_with_state(external_object_id, state.inner()).await
+}
+
+pub(crate) async fn fetch_external_document(
+    external_object_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<String, String> {
+    external::fetch_external_document_with_state(external_object_id, state.inner()).await
 }
 
 pub(crate) async fn refresh_external_object(

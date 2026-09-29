@@ -673,17 +673,6 @@ pub fn compose_grill_continuation_prompt(
         .ok_or(DomainError::ItemNotFound {
             item_id: run.item_id,
         })?;
-    if matches!(
-        action,
-        GrillContinuationAction::ToSpec | GrillContinuationAction::ToTickets
-    ) {
-        return Ok(format!(
-            "{}\n\n{}\n\n{}",
-            action.skill_snapshot(),
-            GRILL_OUTPUT_CONTRACT,
-            downstream_issue_event_instruction(run.id, action),
-        ));
-    }
     let mut context = vec![format!("Item objective:\n{}", item.title)];
     if !item.notes.trim().is_empty() {
         context.push(format!("Item notes:\n{}", item.notes.trim()));
@@ -761,7 +750,7 @@ pub fn compose_grill_continuation_prompt(
 
 fn downstream_issue_event_instruction(run_id: i64, action: GrillContinuationAction) -> String {
     format!(
-        "Mission Manager links the Issues you create to the Item. Right after creating each GitHub Issue, print one line on its own with its canonical URL (one line per Issue, no line breaks inside it):\nAI_MISSION_MANAGER_EVENT {{\"event\":\"github.issue.created\",\"url\":\"https://github.com/<owner>/<repo>/issues/<number>\",\"run_id\":{},\"action\":\"{}\"}}",
+        "Mission Manager links the work objects you create to the Item. For to-tickets, set each ticket's native parent to the Spec when the tracker supports it; treat that relation write as best-effort, so a rejection must not stop creation. Mission Manager records the parent locally and never reads tracker relations back. Immediately after creating each object, print one JSON event on a line by itself. Use its canonical URL, or its local Markdown path for files under a registered checkout. Keep objects in publication order; use a 1-based ordinal for each ticket and list any tickets it is blocked by as their URLs or paths in blocked_by. Example: AI_MISSION_MANAGER_EVENT {{\"event\":\"external.object.created\",\"url\":\"<canonical URL or local path>\",\"ordinal\":1,\"blocked_by\":[],\"run_id\":{},\"action\":\"{}\"}}",
         run_id,
         action.as_str(),
     )
@@ -1105,6 +1094,7 @@ pub(crate) fn link_external_object(
                 .as_ref()
                 .map(|provenance| LinkPurpose::from(provenance.action))
                 .unwrap_or_default(),
+            spec_external_object_id: None,
             provenance,
         };
         state.next_link_id = next_link_id;

@@ -324,6 +324,7 @@ pub enum Event {
     SetLinkPurpose {
         link_id: i64,
         purpose: LinkPurpose,
+        spec_external_object_id: Option<i64>,
     },
     SetLinkReviewAt {
         link_id: i64,

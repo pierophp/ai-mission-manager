@@ -27,7 +27,12 @@ import type {
   Machine,
 } from "../../runtime/types";
 
-const objectKinds: ExternalObjectKind[] = ["issue", "pull_request", "generic"];
+const objectKinds: ExternalObjectKind[] = [
+  "issue",
+  "pull_request",
+  "document",
+  "generic",
+];
 const agentLabels: Record<GrillConfiguration["agent"], string> = {
   claude: "Claude Code",
   codex: "Codex",
@@ -56,6 +61,12 @@ function initialConfiguration(
     grillDefaults: context?.grill_defaults ?? defaultGrillConfiguration(),
     implementDefaults:
       context?.implement_defaults ?? defaultGrillConfiguration(),
+    ghExecutablePath: context?.gh_executable_path ?? null,
+    twgExecutablePath: context?.twg_executable_path ?? null,
+    azExecutablePath: context?.az_executable_path ?? null,
+    atlassianSite: context?.atlassian_site ?? null,
+    azureDevopsOrganization: context?.azure_devops_organization ?? null,
+    bitbucketWorkspace: context?.bitbucket_workspace ?? null,
     attentionDefaults: objectKinds.map(
       (object_kind) =>
         attentionDefaults.find(
@@ -269,6 +280,7 @@ export function ContextEditor({
       <Tabs defaultValue="primary" className="grid gap-4">
         <TabsList aria-label="Context settings">
           <TabsTrigger value="primary">Primary settings</TabsTrigger>
+          <TabsTrigger value="providers">Providers</TabsTrigger>
           <TabsTrigger value="attention">Needs Attention</TabsTrigger>
         </TabsList>
         <TabsContent value="primary" forceMount className="grid gap-4">
@@ -386,6 +398,37 @@ export function ContextEditor({
               setConfiguration((current) => ({ ...current, implementDefaults }))
             }
           />
+        </TabsContent>
+        <TabsContent value="providers" forceMount className="grid gap-4">
+          <p className="m-0 text-sm text-muted-foreground">
+            Configure executable locations and provider identifiers for this Context. Authentication stays in each CLI's own configuration.
+          </p>
+          {([
+            ["ghExecutablePath", "GitHub CLI executable (`gh`)", "gh"],
+            ["twgExecutablePath", "Atlassian CLI executable (`twg`)", "twg"],
+            ["azExecutablePath", "Azure CLI executable (`az`)", "az"],
+            ["atlassianSite", "Atlassian site", "company.atlassian.net"],
+            ["azureDevopsOrganization", "Azure DevOps organization", "organization"],
+            ["bitbucketWorkspace", "Bitbucket workspace", "workspace"],
+          ] as const).map(([field, label, placeholder]) => (
+            <SettingField key={field} label={label}>
+              <Input
+                value={configuration[field] ?? ""}
+                placeholder={placeholder}
+                autoComplete="off"
+                onChange={(event) =>
+                  setConfiguration((current) => ({
+                    ...current,
+                    [field]: event.target.value.trim() || null,
+                  }))
+                }
+                disabled={isSaving}
+              />
+            </SettingField>
+          ))}
+          <p className="m-0 text-sm text-muted-foreground">
+            No access tokens are stored by Mission Manager.
+          </p>
         </TabsContent>
         <TabsContent value="attention" forceMount className="grid gap-3">
           <p className="m-0 text-sm text-muted-foreground">

@@ -23,7 +23,9 @@ impl SqliteStore {
                 "SELECT id, name, execution_machine_id, check_dirty_checkouts,
                         grill_agent, grill_model, grill_effort,
                         implement_agent, implement_model, implement_effort,
-                        claude_profile_id, codex_profile_id
+                        claude_profile_id, codex_profile_id,
+                        gh_executable_path, twg_executable_path, az_executable_path,
+                        atlassian_site, azure_devops_organization, bitbucket_workspace
                      FROM contexts ORDER BY id",
             )?;
             let rows = statement.query_map([], |row| {
@@ -62,6 +64,12 @@ impl SqliteStore {
                         model: implement_model,
                         effort: implement_effort,
                     },
+                    gh_executable_path: row.get(12)?,
+                    twg_executable_path: row.get(13)?,
+                    az_executable_path: row.get(14)?,
+                    atlassian_site: row.get(15)?,
+                    azure_devops_organization: row.get(16)?,
+                    bitbucket_workspace: row.get(17)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -523,7 +531,8 @@ impl SqliteStore {
                         link_attention_state.watch_until,
                         link_attention_state.review_at,
                         link_attention_state.provenance_json,
-                        external_links.purpose
+                        external_links.purpose,
+                        external_links.spec_external_object_id
                  FROM external_links
                  LEFT JOIN link_attention_state
                    ON link_attention_state.link_id = external_links.id
@@ -569,6 +578,7 @@ impl SqliteStore {
                             Box::new(error),
                         )
                     })?,
+                    spec_external_object_id: row.get(11)?,
                     provenance,
                 })
             })?;

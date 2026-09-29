@@ -22,7 +22,7 @@ pub enum DomainError {
     ImplementationQueueContainsClosedTicket,
     #[error("Implementation Queue configuration is missing")]
     ImplementationQueueConfigurationMissing,
-    #[error("Implementation spec does not exist or is not a GitHub Issue")]
+    #[error("Implementation spec does not exist or is not supported by an Implementation Queue")]
     ImplementationSpecNotFound,
     #[error("Implementation spec is not linked to the Item")]
     ImplementationSpecNotLinked,
@@ -180,6 +180,8 @@ pub enum DomainError {
     MachineContextMismatch { machine_id: i64, context_id: i64 },
     #[error("Context {context_id} has no execution Machine configured")]
     ContextHasNoExecutionMachine { context_id: i64 },
+    #[error("local Markdown tracker in Context {context_id} requires a local execution Machine because its files are read from the Repository's main checkout")]
+    LocalTrackerRequiresLocalExecutionMachine { context_id: i64 },
     #[error(
         "Machine {machine_id} is not the execution Machine configured for Context {context_id}"
     )]
@@ -292,8 +294,12 @@ pub enum DomainError {
     LinkAlreadyExists,
     #[error("Link {link_id} does not exist")]
     LinkNotFound { link_id: i64 },
-    #[error("Only a GitHub Issue can have the Spec Link purpose")]
+    #[error("This External Object cannot have the Spec Link purpose")]
     LinkCannotBeSpec,
+    #[error("This External Object cannot have the Tickets Link purpose")]
+    LinkCannotBeTicket,
+    #[error("A ticket must reference a supported Spec on the same Item")]
+    LinkCannotBeTicketForSpec,
     #[error("Reminder {reminder_id} does not exist on Item {item_id}")]
     ReminderNotFound { item_id: i64, reminder_id: i64 },
 }

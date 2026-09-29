@@ -102,6 +102,7 @@ mod implementation_queue_tests {
                     grill_defaults: grill_defaults.clone(),
                     implement_defaults: implement_defaults.clone(),
                     attention_defaults: policies.clone(),
+                    ..ContextConfiguration::default()
                 },
             },
         )
@@ -143,6 +144,7 @@ mod implementation_queue_tests {
                 policy: ExternalChangePolicy::all(),
             })
             .collect(),
+            ..ContextConfiguration::default()
         };
 
         let decision = decide(state(), Event::CreateContextConfiguration { configuration })
@@ -169,12 +171,12 @@ mod implementation_queue_tests {
             .iter()
             .any(|effect| matches!(effect, Effect::PersistProject { .. })));
         assert!(decision.effects.iter().any(|effect| matches!(
-            effect,
-            Effect::PersistContextConfiguration {
-                attention_defaults,
-                ..
-            } if attention_defaults.len() == 3
-        )));
+                    effect,
+                    Effect::PersistContextConfiguration {
+                        attention_defaults,
+                        ..
+        } if attention_defaults.len() == 3
+                )));
     }
 
     #[test]
@@ -208,6 +210,7 @@ mod implementation_queue_tests {
                         policy: ExternalChangePolicy::all(),
                     })
                     .collect(),
+                    ..ContextConfiguration::default()
                 },
             },
         );
@@ -359,6 +362,7 @@ mod implementation_queue_tests {
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                ..Context::default()
             }],
             projects: vec![Project {
                 id: 1,
@@ -422,7 +426,8 @@ mod implementation_queue_tests {
                 attention_policy: None,
                 watch_until: None,
                 review_at: None,
-                purpose: LinkPurpose::Others,
+                purpose: LinkPurpose::ToSpec,
+                spec_external_object_id: None,
                 provenance: None,
             }],
             snapshots: vec![],
@@ -516,6 +521,90 @@ mod implementation_queue_tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn implementation_queue_accepts_atlassian_and_local_specs_but_requires_the_spec_link() {
+        let cases = [
+            (
+                ExternalProvider::Atlassian,
+                ExternalObjectKind::Document,
+                "confluence:acme#123",
+                "https://acme.atlassian.net/wiki/spaces/ENG/pages/123/spec",
+                "https://acme.atlassian.net/browse/APP-42",
+            ),
+            (
+                ExternalProvider::Generic,
+                ExternalObjectKind::Generic,
+                "local:9#.scratch/feature/spec.md",
+                "file:///repo/.scratch/feature/spec.md",
+                "local:9#.scratch/feature/issues/01-ticket.md",
+            ),
+        ];
+        for (provider, kind, key, spec_url, ticket_url) in cases {
+            let mut initial = state();
+            initial.external_objects[0].provider = provider;
+            initial.external_objects[0].kind = kind;
+            initial.external_objects[0].external_key = key.into();
+            initial.external_objects[0].canonical_url = spec_url.into();
+            let start = || {
+                let mut start = event("open");
+                if let Event::StartDirectRun {
+                    implementation_queue: Some(queue),
+                    ..
+                } = &mut start
+                {
+                    queue.spec_url = spec_url.into();
+                    queue.entries[0].ticket_url = ticket_url.into();
+                }
+                start
+            };
+            let queued = decide(initial.clone(), start())
+                .unwrap_or_else(|error| panic!("{provider:?} queue should start: {error}"));
+            assert_eq!(queued.state.implementation_queues[0].spec_url, spec_url);
+
+            initial.links[0].purpose = LinkPurpose::Others;
+            assert!(matches!(
+                decide(initial, start()),
+                Err(DomainError::ImplementationSpecNotLinked)
+            ));
+        }
+    }
+
+    #[test]
+    fn azure_devops_work_items_are_rejected_as_queue_specs_and_tickets() {
+        let mut initial = state();
+        initial.external_objects[0].provider = ExternalProvider::AzureDevOps;
+        initial.external_objects[0].kind = ExternalObjectKind::Issue;
+        initial.external_objects[0].external_key = "ado:acme/apps#23".into();
+        initial.external_objects[0].canonical_url =
+            "https://dev.azure.com/acme/apps/_workitems/edit/23".into();
+        let mut spec_start = event("open");
+        if let Event::StartDirectRun {
+            implementation_queue: Some(queue),
+            ..
+        } = &mut spec_start
+        {
+            queue.spec_url = initial.external_objects[0].canonical_url.clone();
+        }
+        assert!(matches!(
+            decide(initial, spec_start),
+            Err(DomainError::ImplementationSpecNotFound)
+        ));
+
+        let mut ticket_start = event("open");
+        if let Event::StartDirectRun {
+            implementation_queue: Some(queue),
+            ..
+        } = &mut ticket_start
+        {
+            queue.entries[0].ticket_url =
+                "https://dev.azure.com/acme/apps/_workitems/edit/42".into();
+        }
+        assert!(matches!(
+            decide(state(), ticket_start),
+            Err(DomainError::InvalidImplementationQueueEntries)
+        ));
     }
 
     #[test]
@@ -1070,6 +1159,7 @@ mod context_execution_machine_tests {
                     check_dirty_checkouts: true,
                     grill_defaults: GrillConfiguration::default(),
                     implement_defaults: GrillConfiguration::default(),
+                    ..Context::default()
                 },
                 Context {
                     id: 2,
@@ -1080,6 +1170,7 @@ mod context_execution_machine_tests {
                     check_dirty_checkouts: true,
                     grill_defaults: GrillConfiguration::default(),
                     implement_defaults: GrillConfiguration::default(),
+                    ..Context::default()
                 },
             ],
             projects: Vec::new(),
@@ -1213,6 +1304,7 @@ mod context_execution_machine_tests {
             grill_defaults: GrillConfiguration::default(),
             implement_defaults: GrillConfiguration::default(),
             attention_defaults,
+            ..ContextConfiguration::default()
         };
 
         let accepted = decide(
@@ -1241,7 +1333,6 @@ mod context_execution_machine_tests {
             Err(DomainError::CliConfigurationProfileMachineMismatch { .. })
         ));
     }
-
 }
 
 mod machine_deletion_tests {
@@ -1272,6 +1363,7 @@ mod machine_deletion_tests {
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                ..Context::default()
             }],
             projects: vec![Project {
                 id: 1,
@@ -1472,6 +1564,7 @@ mod machine_deletion_tests {
                     grill_defaults: context.grill_defaults,
                     implement_defaults: context.implement_defaults,
                     attention_defaults,
+                    ..ContextConfiguration::default()
                 },
             },
         )
@@ -1538,6 +1631,7 @@ mod workspace_contract_tests {
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                ..Context::default()
             }],
             projects: vec![Project {
                 id: 1,
@@ -1694,6 +1788,7 @@ mod workspace_contract_tests {
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                ..Context::default()
             }],
             projects: vec![Project {
                 id: 1,
@@ -1850,6 +1945,7 @@ mod grill_contract_tests {
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                ..Context::default()
             }],
             projects: vec![Project {
                 id: 1,
@@ -2632,7 +2728,7 @@ mod grill_contract_tests {
             assert!(prompt.contains(GRILL_OUTPUT_CONTRACT));
             assert!(prompt.contains(action.as_str()));
             assert!(prompt.contains("AI_MISSION_MANAGER_EVENT"));
-            assert!(prompt.contains("github.issue.created"));
+            assert!(prompt.contains("external.object.created"));
             assert!(prompt.contains("\"run_id\":1"));
             if action == GrillContinuationAction::Implement {
                 assert!(prompt.contains("Decide the next architecture"));
@@ -2641,11 +2737,16 @@ mod grill_contract_tests {
                 assert!(prompt.contains("docs/agents/issue-tracker.md"));
                 assert!(prompt.contains("same Run and Pane"));
             } else {
-                assert!(!prompt.contains("Relevant Item context:"));
-                assert!(!prompt.contains("Recorded Grill decisions:"));
-                assert!(!prompt.contains("docs/agents/issue-tracker.md"));
-                assert!(!prompt.contains("Spec created earlier in this Run"));
-                assert!(!prompt.contains("same Run and Pane"));
+                assert!(prompt.contains("Relevant Item context:"));
+                assert!(prompt.contains("Recorded Grill decisions:"));
+                assert!(prompt.contains("same Run and Pane"));
+                if matches!(
+                    action,
+                    GrillContinuationAction::ToSpec | GrillContinuationAction::ToTickets
+                ) {
+                    assert!(prompt.contains("docs/agents/issue-tracker.md"));
+                    assert!(!prompt.contains("Spec created earlier in this Run"));
+                }
             }
         }
     }
@@ -2928,7 +3029,7 @@ mod grill_contract_tests {
     #[test]
     fn downstream_issue_discovery_keeps_structured_provenance_and_plain_issue_urls() {
         let structured = discover_downstream_issue_candidates(
-            r#"AI_MISSION_MANAGER_EVENT {"event":"github.issue.created","url":"https://github.com/acme/app/issues/7","run_id":1,"action":"to-tickets"}
+            r#"AI_MISSION_MANAGER_EVENT {"event":"external.object.created","url":"https://github.com/acme/app/issues/7","ordinal":1,"blocked_by":[],"run_id":1,"action":"to-tickets"}
 https://github.com/acme/app/issues/8
 https://example.com/unrelated"#,
         );
@@ -2939,6 +3040,8 @@ https://example.com/unrelated"#,
             DownstreamIssueDiscovery::StructuredEvent
         );
         assert_eq!(structured[0].run_id, Some(1));
+        assert_eq!(structured[0].ordinal, Some(1));
+        assert!(structured[0].blocked_by.is_empty());
         assert_eq!(
             structured[0].action,
             Some(GrillContinuationAction::ToTickets)
@@ -2957,7 +3060,7 @@ https://example.com/unrelated"#,
     #[test]
     fn downstream_issue_discovery_keeps_structured_provenance_with_a_transcript_bullet() {
         let candidates = discover_downstream_issue_candidates(
-            "• AI_MISSION_MANAGER_EVENT {\"event\":\"github.issue.created\",\"url\":\"https://github.com/acme/app/issues/92\",\"run_id\":18,\"action\":\"to-spec\"}\nhttps://github.com/acme/app/issues/92",
+            "• AI_MISSION_MANAGER_EVENT {\"event\":\"external.object.created\",\"url\":\"https://github.com/acme/app/issues/92\",\"run_id\":18,\"action\":\"to-spec\"}\nhttps://github.com/acme/app/issues/92",
         );
 
         assert_eq!(candidates.len(), 1);
@@ -2967,6 +3070,39 @@ https://example.com/unrelated"#,
         );
         assert_eq!(candidates[0].run_id, Some(18));
         assert_eq!(candidates[0].action, Some(GrillContinuationAction::ToSpec));
+    }
+
+    #[test]
+    fn downstream_capture_discovers_other_providers_and_local_markdown_from_transcripts() {
+        let candidates = discover_downstream_issue_candidates(
+            "• AI_MISSION_MANAGER_EVENT {\"event\":\"external.object.created\",\"url\":\"https://acme.atlassian.net/browse/OPS-41\",\"ordinal\":2,\"blocked_by\":[\"https://dev.azure.com/acme/Platform/_workitems/edit/17\"],\"run_id\":9,\"action\":\"to-tickets\"}\n> https://dev.azure.com/acme/Platform/_workitems/edit/17\n.scratch/spec.md\nCreated object: `AI_MISSION_MANAGER_EVENT {\"event\":\"external.object.created\",\"url\":\"https://acme.atlassian.net/browse/OPS-42\",\"run_id\":9,\"action\":\"to-tickets\"}`",
+        );
+        assert_eq!(candidates.len(), 4);
+        assert_eq!(
+            candidates[0].url,
+            "https://acme.atlassian.net/browse/OPS-41"
+        );
+        assert_eq!(candidates[0].ordinal, Some(2));
+        assert_eq!(
+            candidates[0].blocked_by,
+            ["https://dev.azure.com/acme/Platform/_workitems/edit/17"]
+        );
+        assert_eq!(candidates[0].run_id, Some(9));
+        assert_eq!(
+            candidates[1].url,
+            "https://dev.azure.com/acme/Platform/_workitems/edit/17"
+        );
+        assert_eq!(candidates[2].url, ".scratch/spec.md");
+        assert_eq!(candidates[2].discovery, DownstreamIssueDiscovery::OutputUrl);
+        assert_eq!(
+            candidates[3].url,
+            "https://acme.atlassian.net/browse/OPS-42"
+        );
+        assert_eq!(
+            candidates[3].discovery,
+            DownstreamIssueDiscovery::StructuredEvent
+        );
+        assert_eq!(candidates[3].run_id, Some(9));
     }
 
     #[test]
@@ -2988,6 +3124,7 @@ https://example.com/unrelated"#,
             watch_until: None,
             review_at: None,
             purpose: LinkPurpose::Others,
+            spec_external_object_id: None,
             provenance: None,
         });
         let marked = decide(
@@ -2995,6 +3132,7 @@ https://example.com/unrelated"#,
             Event::SetLinkPurpose {
                 link_id: 1,
                 purpose: LinkPurpose::ToSpec,
+                spec_external_object_id: None,
             },
         )
         .expect("an Item's linked GitHub Issue can be marked as a Spec");
@@ -3005,6 +3143,7 @@ https://example.com/unrelated"#,
             Event::SetLinkPurpose {
                 link_id: 1,
                 purpose: LinkPurpose::Others,
+                spec_external_object_id: None,
             },
         )
         .expect("the Link purpose can change to others");
@@ -3012,7 +3151,7 @@ https://example.com/unrelated"#,
     }
 
     #[test]
-    fn only_a_github_issue_can_be_marked_as_spec() {
+    fn pull_requests_cannot_be_marked_as_spec() {
         let mut initial_state = state();
         initial_state.external_objects.push(ExternalObject {
             id: 1,
@@ -3030,6 +3169,7 @@ https://example.com/unrelated"#,
             watch_until: None,
             review_at: None,
             purpose: LinkPurpose::Others,
+            spec_external_object_id: None,
             provenance: None,
         });
 
@@ -3038,10 +3178,60 @@ https://example.com/unrelated"#,
             Event::SetLinkPurpose {
                 link_id: 1,
                 purpose: LinkPurpose::ToSpec,
+                spec_external_object_id: None,
             },
         )
         .expect_err("a pull request cannot be an Issue Spec");
         assert_eq!(error, DomainError::LinkCannotBeSpec);
+    }
+
+    #[test]
+    fn azure_devops_work_items_can_only_be_regular_links() {
+        let linked_work_item = || {
+            let mut initial = state();
+            initial.external_objects.push(ExternalObject {
+                id: 1,
+                provider: ExternalProvider::AzureDevOps,
+                kind: ExternalObjectKind::Issue,
+                external_key: "ado:acme/platform#17".into(),
+                canonical_url: "https://dev.azure.com/acme/platform/_workitems/edit/17".into(),
+            });
+            initial.links.push(Link {
+                id: 1,
+                item_id: 1,
+                external_object_id: 1,
+                reviewed_activity_id: 0,
+                attention_policy: None,
+                watch_until: None,
+                review_at: None,
+                purpose: LinkPurpose::Others,
+                spec_external_object_id: None,
+                provenance: None,
+            });
+            initial
+        };
+
+        let spec_error = decide(
+            linked_work_item(),
+            Event::SetLinkPurpose {
+                link_id: 1,
+                purpose: LinkPurpose::ToSpec,
+                spec_external_object_id: None,
+            },
+        )
+        .expect_err("Azure DevOps work items cannot be Specs");
+        assert_eq!(spec_error, DomainError::LinkCannotBeSpec);
+
+        let ticket_error = decide(
+            linked_work_item(),
+            Event::SetLinkPurpose {
+                link_id: 1,
+                purpose: LinkPurpose::ToTickets,
+                spec_external_object_id: None,
+            },
+        )
+        .expect_err("Azure DevOps work items cannot be queue tickets");
+        assert_eq!(ticket_error, DomainError::LinkCannotBeTicket);
     }
 
     fn waiting_for_answers_state() -> DomainState {
@@ -3306,7 +3496,9 @@ https://example.com/unrelated"#,
             },
         )
         .expect("to-tickets should continue the Run");
-        let issue = confirmed_downstream_issue("https://github.com/acme/app/issues/7");
+        let mut issue = confirmed_downstream_issue("https://github.com/acme/app/issues/7");
+        issue.ordinal = Some(2);
+        issue.blocked_by = vec!["https://github.com/acme/app/issues/6".into()];
         let second_item = decide(
             continued.state,
             Event::CreateItem {
@@ -3349,6 +3541,8 @@ https://example.com/unrelated"#,
                 run_id: 1,
                 action: GrillContinuationAction::ToTickets,
                 discovery: DownstreamIssueDiscovery::StructuredEvent,
+                ordinal: Some(2),
+                blocked_by: vec!["https://github.com/acme/app/issues/6".into()],
             })
         );
 
@@ -3364,6 +3558,180 @@ https://example.com/unrelated"#,
         assert_eq!(second.state.external_objects.len(), 1);
         assert_eq!(second.state.links.len(), 2);
         assert!(second.effects.is_empty());
+    }
+
+    #[test]
+    fn downstream_capture_links_atlassian_azure_devops_and_local_markdown_objects() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let awaiting = decide(
+            started.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the Grill should finish");
+        let continued = decide(
+            awaiting.state,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToSpec,
+                started_at: 100,
+            },
+        )
+        .expect("to-spec should continue the Run");
+        let mut atlassian = confirmed_downstream_issue("https://github.com/acme/app/issues/7");
+        atlassian.object = crate::provider::classify_url(
+            "https://acme.atlassian.net/wiki/spaces/ENG/pages/456/Runbook",
+        )
+        .expect("Confluence URL should classify");
+        let mut azure = confirmed_downstream_issue("https://github.com/acme/app/issues/8");
+        azure.object =
+            crate::provider::classify_url("https://dev.azure.com/acme/Platform/_workitems/edit/17")
+                .expect("Azure DevOps URL should classify");
+        let mut local = confirmed_downstream_issue("https://github.com/acme/app/issues/9");
+        local.object = ExternalObjectInput {
+            provider: ExternalProvider::Generic,
+            kind: ExternalObjectKind::Generic,
+            external_key: "local:9#.scratch/spec.md".into(),
+            canonical_url: "file:///repo/.scratch/spec.md".into(),
+        };
+
+        let captured = decide(
+            continued.state,
+            Event::CaptureDownstreamIssues {
+                run_id: 1,
+                action: GrillContinuationAction::ToSpec,
+                issues: vec![atlassian, azure, local],
+            },
+        )
+        .expect("all classified provider outputs should become Item Links");
+
+        assert_eq!(captured.state.external_objects.len(), 3);
+        assert_eq!(captured.state.links.len(), 3);
+        let azure_object_id = captured
+            .state
+            .external_objects
+            .iter()
+            .find(|object| object.provider == ExternalProvider::AzureDevOps)
+            .expect("Azure DevOps should remain a captured External Object")
+            .id;
+        let azure_link = captured
+            .state
+            .links
+            .iter()
+            .find(|link| link.external_object_id == azure_object_id)
+            .expect("Azure DevOps should remain linked to the Item");
+        assert_eq!(azure_link.purpose, LinkPurpose::Others);
+        assert_eq!(
+            azure_link
+                .provenance
+                .as_ref()
+                .map(|provenance| provenance.action),
+            Some(GrillContinuationAction::ToSpec)
+        );
+        assert_eq!(
+            captured
+                .state
+                .links
+                .iter()
+                .filter(|link| link.external_object_id != azure_object_id)
+                .filter(|link| link.purpose == LinkPurpose::ToSpec)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn downstream_ticket_parentage_is_recorded_locally_without_provider_relation_reads() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let spec = crate::provider::classify_url(
+            "https://acme.atlassian.net/wiki/spaces/ENG/pages/456/Runbook",
+        )
+        .expect("Confluence Spec should classify");
+        let linked_spec = decide(
+            started.state,
+            Event::LinkExternalObject {
+                item_id: 1,
+                object: spec,
+                snapshot: None,
+            },
+        )
+        .expect("the local Spec Link should be created");
+        let marked_spec = decide(
+            linked_spec.state,
+            Event::SetLinkPurpose {
+                link_id: 1,
+                purpose: LinkPurpose::ToSpec,
+                spec_external_object_id: None,
+            },
+        )
+        .expect("the Link should be recorded as the Item Spec");
+        let awaiting = decide(
+            marked_spec.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the Grill should finish");
+        let continued = decide(
+            awaiting.state,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                started_at: 100,
+            },
+        )
+        .expect("to-tickets should continue the Run");
+        let ticket = confirmed_downstream_issue("https://github.com/acme/app/issues/7");
+        let mut azure = confirmed_downstream_issue("https://github.com/acme/app/issues/17");
+        azure.object =
+            crate::provider::classify_url("https://dev.azure.com/acme/Platform/_workitems/edit/17")
+                .expect("Azure DevOps work item should classify");
+
+        let captured = decide(
+            continued.state,
+            Event::CaptureDownstreamIssues {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                issues: vec![ticket, azure],
+            },
+        )
+        .expect("capturing a ticket should not need provider relation reads");
+
+        assert_eq!(captured.state.links.len(), 3);
+        let ticket_link = captured
+            .state
+            .links
+            .iter()
+            .find(|link| link.purpose == LinkPurpose::ToTickets)
+            .expect("captured ticket Link should exist");
+        assert_eq!(ticket_link.spec_external_object_id, Some(1));
+        let azure_object_id = captured
+            .state
+            .external_objects
+            .iter()
+            .find(|object| object.provider == ExternalProvider::AzureDevOps)
+            .expect("Azure work item should remain captured")
+            .id;
+        let azure_link = captured
+            .state
+            .links
+            .iter()
+            .find(|link| link.external_object_id == azure_object_id)
+            .expect("Azure work item should remain linked");
+        assert_eq!(azure_link.purpose, LinkPurpose::Others);
+        assert_eq!(azure_link.spec_external_object_id, None);
+        assert_eq!(
+            azure_link
+                .provenance
+                .as_ref()
+                .map(|provenance| provenance.action),
+            Some(GrillContinuationAction::ToTickets)
+        );
     }
 
     #[test]
@@ -3432,6 +3800,8 @@ https://example.com/unrelated"#,
                 fetched_at: 123,
             },
             discovery: DownstreamIssueDiscovery::StructuredEvent,
+            ordinal: None,
+            blocked_by: vec![],
         }
     }
 }
