@@ -257,7 +257,7 @@ describe("RunsTab", () => {
     expect(workActions.composeRunPrompt).toHaveBeenCalledWith(
       1,
       "custom",
-      { includeObjective: true, includeNotes: false, externalObjectIds: [] },
+      { includeObjective: true, externalObjectIds: [] },
       "portuguese",
       "Rename the module",
     );

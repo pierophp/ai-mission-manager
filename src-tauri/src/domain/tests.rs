@@ -11,7 +11,6 @@ mod implementation_queue_tests {
             ExecutionProfile::Implement,
             &RunPromptSelection {
                 include_objective: true,
-                include_notes: false,
                 external_object_ids: vec![],
             },
             None,
@@ -27,7 +26,6 @@ mod implementation_queue_tests {
     fn no_selection() -> RunPromptSelection {
         RunPromptSelection {
             include_objective: true,
-            include_notes: false,
             external_object_ids: vec![],
         }
     }
@@ -570,7 +568,6 @@ mod implementation_queue_tests {
             started_at: 1,
             prompt_selection: RunPromptSelection {
                 include_objective: true,
-                include_notes: false,
                 external_object_ids: vec![],
             },
             checkouts: vec![RunCheckout {

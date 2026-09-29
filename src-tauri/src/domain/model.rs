@@ -347,7 +347,6 @@ pub enum RunPaneStatus {
 #[serde(rename_all = "camelCase")]
 pub struct RunPromptSelection {
     pub include_objective: bool,
-    pub include_notes: bool,
     pub external_object_ids: Vec<i64>,
 }
 

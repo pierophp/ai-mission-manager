@@ -102,6 +102,5 @@ export type RunSuggestion = {
 
 export type RunPromptSelection = {
   includeObjective: boolean;
-  includeNotes: boolean;
   externalObjectIds: number[];
 };

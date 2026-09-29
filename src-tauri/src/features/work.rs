@@ -180,7 +180,7 @@ pub(crate) fn create_item(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Item, String> {
     locked(state, |runtime| {
-        runtime.create_item_with_notes(title, context_id, project_id, notes.unwrap_or_default())
+        runtime.create_item(title, context_id, project_id, notes.unwrap_or_default())
     })
 }
 

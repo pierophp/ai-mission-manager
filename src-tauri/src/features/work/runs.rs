@@ -662,7 +662,6 @@ pub(crate) async fn advance_finished_implementation_queue(
         implementation_queue_entry_prompt(&next, &queue.spec_url),
         RunPromptSelection {
             include_objective: true,
-            include_notes: false,
             external_object_ids: Vec::new(),
         },
         run.direct_checkouts.clone(),
@@ -801,7 +800,6 @@ pub(super) async fn launch_implementation_queue_entry_with_state(
         implementation_queue_entry_prompt(&entry, &queue.spec_url),
         RunPromptSelection {
             include_objective: true,
-            include_notes: false,
             external_object_ids: Vec::new(),
         },
         source_run.direct_checkouts.clone(),

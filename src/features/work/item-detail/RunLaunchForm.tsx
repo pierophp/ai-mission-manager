@@ -86,7 +86,6 @@ const languages = [
 /** The Notes travel in the initial prompt, so only the objective is added. */
 const objectiveOnly = {
   includeObjective: true,
-  includeNotes: false,
   externalObjectIds: [],
 };
 

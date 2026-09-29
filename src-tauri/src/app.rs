@@ -1504,7 +1504,7 @@ mod tests {
         let mut runtime = Runtime::open_with_terminal_runtime(database, terminal)
             .expect("runtime should open with the fake terminal runtime");
         runtime
-            .create_item("Reconcile this Run".into(), 1, 1)
+            .create_item("Reconcile this Run".into(), 1, 1, String::new())
             .expect("the Run Item should be created");
         runtime.state.machines.push(Machine {
             id: 1,
@@ -1790,7 +1790,7 @@ mod tests {
             )
             .expect("second Repository should register");
         runtime
-            .create_item("Keep two lines of work reusable".into(), 1, 1)
+            .create_item("Keep two lines of work reusable".into(), 1, 1, String::new())
             .expect("Item should be created");
 
         assert_eq!(runtime.state.workspaces.len(), 1);
@@ -1907,7 +1907,7 @@ mod tests {
         let database = directory.path().join("mission-manager.sqlite");
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         runtime
-            .create_item("Keep the agent running".into(), 1, 1)
+            .create_item("Keep the agent running".into(), 1, 1, String::new())
             .expect("Item should be created");
         runtime.state.runs.push(Run {
             id: 1,
@@ -2519,7 +2519,7 @@ mod tests {
         let database = directory.path().join("mission-manager.sqlite");
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         let item = runtime
-            .create_item("Recover remote Run".into(), 1, 1)
+            .create_item("Recover remote Run".into(), 1, 1, String::new())
             .expect("the Item should be persisted");
         let machine = runtime
             .register_machine(
@@ -2700,7 +2700,7 @@ mod tests {
                     },
                     1,
                 )
-                .and_then(|_| runtime.create_item("Concurrent Item".into(), 1, 1));
+                .and_then(|_| runtime.create_item("Concurrent Item".into(), 1, 1, String::new()));
             created_tx
                 .send(result.is_ok())
                 .expect("the Item creation result should be received");
@@ -3036,7 +3036,7 @@ fi
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         configure_test_context_gh(&mut runtime, &executable);
         runtime
-            .create_item("Keep this Item".into(), 1, 1)
+            .create_item("Keep this Item".into(), 1, 1, String::new())
             .expect("Item should be created");
         runtime
             .update_item(
@@ -3048,7 +3048,7 @@ fi
             )
             .expect("Item notes should be saved");
         runtime
-            .create_item("Related Item".into(), 1, 1)
+            .create_item("Related Item".into(), 1, 1, String::new())
             .expect("related Item should be created");
         runtime
             .set_item_relation(1, 2, ItemRelationKind::Blocks)
@@ -3107,7 +3107,7 @@ fi
 
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         runtime
-            .create_item("Item in the original Project".into(), 1, 1)
+            .create_item("Item in the original Project".into(), 1, 1, String::new())
             .expect("Item should be created");
         let other_project = runtime
             .create_project("Another Project".into(), 1, ProjectDefaults::default())
@@ -3184,7 +3184,7 @@ fi
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         configure_test_context_gh(&mut runtime, &executable);
         runtime
-            .create_item("Keep this Item".into(), 1, 1)
+            .create_item("Keep this Item".into(), 1, 1, String::new())
             .expect("Item should be created");
         let repository = runtime
             .register_repository(
@@ -3223,7 +3223,7 @@ exit 1
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         configure_test_context_gh(&mut runtime, &executable);
         runtime
-            .create_item("Capture downstream work".into(), 1, 1)
+            .create_item("Capture downstream work".into(), 1, 1, String::new())
             .expect("Item should be created");
         runtime.state.runs.push(Run {
             id: 1,
@@ -3337,7 +3337,7 @@ exit 1
         let database = directory.path().join("mission-manager.sqlite");
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         runtime
-            .create_item("Delete after review".into(), 1, 1)
+            .create_item("Delete after review".into(), 1, 1, String::new())
             .expect("Item should be created");
 
         let preview = runtime
@@ -3393,7 +3393,7 @@ exit 1
             )
             .expect("Project should be created");
         runtime
-            .create_item("Delete this Project graph".into(), 2, 3)
+            .create_item("Delete this Project graph".into(), 2, 3, String::new())
             .expect("Item should be created");
 
         let preview = runtime
@@ -3561,7 +3561,6 @@ exit 1
             123,
             RunPromptSelection {
                 include_objective: true,
-                include_notes: false,
                 external_object_ids: vec![19],
             },
         );

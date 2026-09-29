@@ -213,7 +213,7 @@ function SpecDocument({
       implementationQueue: start,
       executionProfile: "implement",
       prompt: "Implementation Queue",
-      promptSelection: { includeObjective: true, includeNotes: false, externalObjectIds: [] },
+      promptSelection: { includeObjective: true, externalObjectIds: [] },
       expectedCheckouts: preview.checkouts,
       allowDirty: preview.dirtyRepositoryIds.length > 0 && dirtyConsent,
       allowSharedCheckouts: preview.sharedPaths.length > 0 && sharedConsent,

@@ -552,9 +552,6 @@ pub fn compose_run_prompt(
     if selection.include_objective {
         sections.push(format!("Item objective:\n{}", item.title));
     }
-    if selection.include_notes && !item.notes.trim().is_empty() {
-        sections.push(format!("Item notes:\n{}", item.notes.trim()));
-    }
     for external_object_id in &selection.external_object_ids {
         let link = state
             .links
