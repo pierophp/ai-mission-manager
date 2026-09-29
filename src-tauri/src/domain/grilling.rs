@@ -357,6 +357,13 @@ impl GrillLanguage {
         }
     }
 
+    pub fn run_response_instruction(self) -> &'static str {
+        match self {
+            Self::Portuguese => "Respond to the user in Portuguese throughout this Run. Keep code, identifiers, proper names, and quoted source text in their original language when appropriate.",
+            Self::English => "Respond to the user in English throughout this Run. Keep code, identifiers, proper names, and quoted source text in their original language when appropriate.",
+        }
+    }
+
     pub fn enforce_prompt(self, prompt: &str) -> String {
         let cleaned_prompt = prompt
             .lines()

@@ -15,12 +15,111 @@ mod implementation_queue_tests {
                 external_object_ids: vec![],
             },
             None,
+            None,
         )
         .expect("the direct Implement prompt should compose");
 
         assert!(prompt.contains("Implement the work described by the user in the spec or tickets."));
         assert!(prompt.contains("Run typechecking regularly, single test files regularly"));
         assert!(!prompt.contains("name: implement"));
+    }
+
+    fn no_selection() -> RunPromptSelection {
+        RunPromptSelection {
+            include_objective: true,
+            include_notes: false,
+            external_object_ids: vec![],
+        }
+    }
+
+    #[test]
+    fn custom_prompt_uses_the_initial_prompt_as_its_instruction() {
+        let prompt = compose_run_prompt(
+            &state(),
+            1,
+            ExecutionProfile::CustomPrompt,
+            &no_selection(),
+            None,
+            Some("  Rename the module.  "),
+        )
+        .expect("a Custom prompt with text should compose");
+
+        assert!(prompt.starts_with("Rename the module."));
+        assert!(!prompt.contains("User's initial prompt"));
+    }
+
+    #[test]
+    fn custom_prompt_requires_an_initial_prompt() {
+        for initial_prompt in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                compose_run_prompt(
+                    &state(),
+                    1,
+                    ExecutionProfile::CustomPrompt,
+                    &no_selection(),
+                    None,
+                    initial_prompt,
+                ),
+                Err(DomainError::EmptyRunPrompt)
+            );
+        }
+    }
+
+    #[test]
+    fn direct_profiles_append_the_initial_prompt_and_response_language() {
+        let prompt = compose_run_prompt(
+            &state(),
+            1,
+            ExecutionProfile::Investigate,
+            &no_selection(),
+            Some(GrillLanguage::English),
+            Some("Focus on the SSH path."),
+        )
+        .expect("an Investigate prompt should compose");
+
+        assert!(prompt.starts_with(GrillLanguage::English.run_response_instruction()));
+        assert!(prompt.ends_with("User's initial prompt:\nFocus on the SSH path."));
+    }
+
+    #[test]
+    fn grill_prompt_leaves_item_notes_to_the_initial_prompt() {
+        let mut state = state();
+        state.items[0].notes = "Only the prefilled prompt carries these notes.".into();
+        let prompt = compose_grill_prompt(
+            &state,
+            1,
+            &GrillConfiguration {
+                agent: AgentKind::Claude,
+                model: "claude-sonnet-4-5".into(),
+                effort: "high".into(),
+            },
+            GrillLanguage::default(),
+            "Stress-test the plan.",
+        )
+        .expect("the Grill prompt should compose");
+
+        assert!(!prompt.contains("Only the prefilled prompt carries these notes."));
+    }
+
+    #[test]
+    fn item_creation_keeps_its_notes() {
+        let decision = decide(
+            state(),
+            Event::CreateItem {
+                title: "Capture with notes".into(),
+                context_id: 1,
+                project_id: 1,
+                notes: "Start from the SSH incident.".into(),
+            },
+        )
+        .expect("an Item with notes should be created");
+
+        let item = decision.state.items.last().expect("the Item exists");
+        assert_eq!(item.notes, "Start from the SSH incident.");
+        assert!(matches!(
+            decision.effects.as_slice(),
+            [Effect::PersistItem { item, .. }] if item.notes == "Start from the SSH incident."
+        ));
     }
 
     #[test]
@@ -279,6 +378,26 @@ mod implementation_queue_tests {
         assert!(decision.state.contexts[1].check_dirty_checkouts);
         assert_eq!(decision.state.contexts[1].claude_profile_id, None);
         assert_eq!(decision.state.contexts[1].codex_profile_id, None);
+    }
+
+    #[test]
+    fn any_direct_profile_records_its_model_configuration() {
+        let mut review_run = event("open");
+        if let Event::StartDirectRun {
+            execution_profile,
+            implementation_queue,
+            ..
+        } = &mut review_run
+        {
+            *execution_profile = ExecutionProfile::Review;
+            *implementation_queue = None;
+        }
+
+        let decision = decide(state(), review_run).expect("a Review Run may choose its model");
+        let run = decision.state.runs.last().expect("the Run is recorded");
+        let configuration = GrillConfiguration::default();
+        assert_eq!(run.model.as_deref(), Some(configuration.model.as_str()));
+        assert_eq!(run.effort.as_deref(), Some(configuration.effort.as_str()));
     }
 
     #[test]
@@ -2077,7 +2196,8 @@ mod grill_contract_tests {
             .prompt
             .contains("Stress-test this architecture decision."));
         assert!(run.prompt.contains("Decide the next architecture"));
-        assert!(run.prompt.contains("The decision must stay reversible."));
+        // Item notes reach the Grill through the prefilled initial prompt, not a separate section.
+        assert!(!run.prompt.contains("The decision must stay reversible."));
         assert!(run.prompt.contains(grill_skill_snapshot()));
         assert!(run
             .prompt
@@ -3505,6 +3625,7 @@ https://example.com/unrelated"#,
                 title: "Another Item".into(),
                 context_id: 1,
                 project_id: 1,
+                notes: String::new(),
             },
         )
         .expect("a second Item should be created");

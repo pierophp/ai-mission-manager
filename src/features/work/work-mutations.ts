@@ -80,8 +80,17 @@ export const workActions = {
     itemId: number,
     executionProfile: Parameters<typeof workAdapter.composeRunPrompt>[1],
     selection: Parameters<typeof workAdapter.composeRunPrompt>[2],
-    customPrompt: string | null,
-  ) => () => workAdapter.composeRunPrompt(itemId, executionProfile, selection, customPrompt),
+    language: Parameters<typeof workAdapter.composeRunPrompt>[3],
+    initialPrompt: string | null,
+  ) =>
+    () =>
+      workAdapter.composeRunPrompt(
+        itemId,
+        executionProfile,
+        selection,
+        language,
+        initialPrompt,
+      ),
   composeGrillPrompt: (
     itemId: number,
     configuration: Parameters<typeof workAdapter.composeGrillPrompt>[1],

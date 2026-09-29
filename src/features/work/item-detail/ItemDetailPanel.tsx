@@ -320,6 +320,7 @@ export function ItemDetailPanel({
               repositories={repositories}
               machines={machines}
               contexts={contexts}
+              grillModelCatalog={grillModelCatalog}
               commands={commands}
             />
           </TabsContent>

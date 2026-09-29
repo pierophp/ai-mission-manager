@@ -224,6 +224,10 @@ export const structureAdapter = {
     command<Context>("set_context_implement_defaults", { contextId, defaults }),
   setContextDirtyCheckoutCheck: (contextId: number, enabled: boolean) =>
     command<Context>("set_context_dirty_checkout_check", { contextId, enabled }),
-  createItem: (title: string, contextId: number, projectId: number) =>
-    command<Item>("create_item", { title, contextId, projectId }),
+  createItem: (
+    title: string,
+    contextId: number,
+    projectId: number,
+    notes: string,
+  ) => command<Item>("create_item", { title, contextId, projectId, notes }),
 };

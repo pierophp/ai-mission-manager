@@ -6,6 +6,22 @@ use super::projections::{
 };
 use super::*;
 
+/// A Run's model choice must be a valid catalog entry for the agent it launches.
+fn validate_run_configuration(
+    configuration: &GrillConfiguration,
+    agent: AgentKind,
+) -> Result<(), DomainError> {
+    validate_grill_configuration(configuration)?;
+    if configuration.agent != agent {
+        return Err(DomainError::InvalidGrillConfiguration {
+            agent: configuration.agent,
+            model: configuration.model.clone(),
+            effort: configuration.effort.clone(),
+        });
+    }
+    Ok(())
+}
+
 fn selected_cli_configuration_profile(
     state: &DomainState,
     context_id: i64,
@@ -1402,6 +1418,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             title,
             context_id,
             project_id,
+            notes,
         } => {
             if title.trim().is_empty() {
                 return Err(DomainError::EmptyTitle);
@@ -1431,7 +1448,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 title: title.trim().to_owned(),
                 project_id,
                 status: project.defaults.item_status,
-                notes: String::new(),
+                notes,
                 reminders: Vec::new(),
             };
 
@@ -2069,15 +2086,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 None
             };
             if let Some(configuration) = &configuration {
-                validate_grill_configuration(configuration)?;
-                if execution_profile != ExecutionProfile::Implement || configuration.agent != agent
-                {
-                    return Err(DomainError::InvalidGrillConfiguration {
-                        agent: configuration.agent,
-                        model: configuration.model.clone(),
-                        effort: configuration.effort.clone(),
-                    });
-                }
+                validate_run_configuration(configuration, agent)?;
             }
             let run = Run {
                 id,
@@ -2136,6 +2145,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             worktree_id,
             machine_id,
             agent,
+            configuration,
             execution_profile,
             prompt,
             working_directory,
@@ -2230,6 +2240,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     pane_id,
                 });
             }
+            if let Some(configuration) = &configuration {
+                validate_run_configuration(configuration, agent)?;
+            }
             let id = state.next_run_id;
             let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
             let run = Run {
@@ -2244,8 +2257,12 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     &state, context_id, agent,
                 ),
                 execution_profile,
-                model: None,
-                effort: None,
+                model: configuration
+                    .as_ref()
+                    .map(|configuration| configuration.model.clone()),
+                effort: configuration
+                    .as_ref()
+                    .map(|configuration| configuration.effort.clone()),
                 skill_snapshot: None,
                 prompt,
                 working_directory,

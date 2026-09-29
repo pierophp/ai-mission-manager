@@ -70,6 +70,10 @@ _Avoid_: terminal, tab, window
 The kind of instruction prepared for an agent when a Run starts — investigate, implement, review, grill, or a custom prompt.
 _Avoid_: mode, template, preset
 
+**Initial Prompt**:
+The user's own words for one Run, sent alongside its Execution Profile's instruction. It starts as a copy of the Item's Notes and is edited for that Run only; the Notes are not added to the prompt separately. For a custom prompt it is the whole instruction, so it cannot be blank.
+_Avoid_: custom prompt source, notes
+
 **Implementation Queue**:
 An ordered selection of open Tickets linked to an Item's Spec, arranged by their captured order and blocking relationships. It records the launch configuration, checkout approvals, and the Run attached to its first entry; only one active queue may exist per Item.
 _Avoid_: batch, ticket batch

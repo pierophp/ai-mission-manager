@@ -2743,6 +2743,7 @@ enum RunLaunchInput {
         workspace_id: i64,
         worktree_id: i64,
         agent: AgentKind,
+        configuration: Option<GrillConfiguration>,
         execution_profile: ExecutionProfile,
         prompt: String,
         prompt_selection: RunPromptSelection,
@@ -2892,6 +2893,7 @@ impl RunLaunchSnapshot {
                 workspace_id,
                 worktree_id,
                 agent,
+                configuration,
                 execution_profile,
                 prompt_selection,
                 ..
@@ -2901,6 +2903,7 @@ impl RunLaunchSnapshot {
                 worktree_id: *worktree_id,
                 machine_id: self.machine.id,
                 agent: *agent,
+                configuration: configuration.clone(),
                 execution_profile: *execution_profile,
                 prompt: self.prompt.clone(),
                 working_directory: self
@@ -3208,13 +3211,17 @@ fn run_launch_snapshot(
         RunLaunchInput::Direct {
             configuration: Some(configuration),
             agent,
-            execution_profile,
+            ..
+        }
+        | RunLaunchInput::Worktree {
+            configuration: Some(configuration),
+            agent,
             ..
         } => {
             crate::domain::validate_grill_configuration(configuration)
                 .map_err(|error| error.to_string())?;
-            if *execution_profile != ExecutionProfile::Implement || configuration.agent != *agent {
-                return Err("Implement model configuration must match the selected agent and Implement profile".into());
+            if configuration.agent != *agent {
+                return Err("Run model configuration must match the selected agent".into());
             }
         }
         RunLaunchInput::Grill { configuration, .. } => {
@@ -3497,6 +3504,10 @@ async fn start_run_with_state(
         RunLaunchInput::Direct {
             configuration: Some(configuration),
             ..
+        }
+        | RunLaunchInput::Worktree {
+            configuration: Some(configuration),
+            ..
         } => (
             configuration.agent,
             Some(configuration.model.clone()),
@@ -3744,6 +3755,7 @@ pub(crate) async fn start_worktree_run_with_state(
     workspace_id: i64,
     worktree_id: i64,
     agent: AgentKind,
+    configuration: Option<GrillConfiguration>,
     execution_profile: ExecutionProfile,
     prompt: String,
     prompt_selection: RunPromptSelection,
@@ -3755,6 +3767,7 @@ pub(crate) async fn start_worktree_run_with_state(
             workspace_id,
             worktree_id,
             agent,
+            configuration,
             execution_profile,
             prompt,
             prompt_selection,
@@ -4013,14 +4026,16 @@ impl Runtime {
         item_id: i64,
         execution_profile: ExecutionProfile,
         selection: RunPromptSelection,
-        custom_prompt: Option<String>,
+        language: Option<GrillLanguage>,
+        initial_prompt: Option<String>,
     ) -> Result<String, String> {
         build_run_prompt(
             &self.state,
             item_id,
             execution_profile,
             &selection,
-            custom_prompt.as_deref(),
+            language,
+            initial_prompt.as_deref(),
         )
         .map_err(|error| error.to_string())
     }

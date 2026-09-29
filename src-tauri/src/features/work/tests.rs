@@ -918,6 +918,7 @@ fn a_failed_run_preflight_never_calls_the_agent_launcher() {
             workspace.id,
             worktree.id,
             AgentKind::Claude,
+            None,
             ExecutionProfile::Implement,
             "Implement the change".into(),
             RunPromptSelection {
@@ -984,6 +985,7 @@ fn selected_profile_for_the_wrong_provider_blocks_before_preflight() {
         workspace.id,
         worktree.id,
         AgentKind::Claude,
+        None,
         ExecutionProfile::Implement,
         "Implement the change".into(),
         RunPromptSelection {
@@ -1036,6 +1038,7 @@ fn worktree_run_rejects_a_checkout_without_a_registered_remote() {
         workspace.id,
         worktree.id,
         AgentKind::Claude,
+        None,
         ExecutionProfile::Implement,
         "Implement the change".into(),
         RunPromptSelection {
@@ -1168,6 +1171,7 @@ fn direct_grill_and_worktree_runs_are_persisted_before_their_gate_is_released() 
                                 workspace.id,
                                 worktree.id,
                                 agent,
+                                None,
                                 ExecutionProfile::Implement,
                                 "Implement the change".into(),
                                 selection,
@@ -1494,6 +1498,7 @@ fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
                         workspace.id,
                         worktree.id,
                         AgentKind::Claude,
+                        None,
                         ExecutionProfile::Implement,
                         "Implement the change".into(),
                         selection.clone(),

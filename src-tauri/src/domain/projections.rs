@@ -539,8 +539,10 @@ pub fn compose_run_prompt(
     item_id: i64,
     profile: ExecutionProfile,
     selection: &RunPromptSelection,
-    custom_prompt: Option<&str>,
+    language: Option<GrillLanguage>,
+    initial_prompt: Option<&str>,
 ) -> Result<String, DomainError> {
+    let initial_prompt = initial_prompt.map(str::trim).filter(|prompt| !prompt.is_empty());
     let item = state
         .items
         .iter()
@@ -593,16 +595,23 @@ pub fn compose_run_prompt(
             "Review the current changes for this Item for correctness, regressions, and missing test coverage."
                 .to_owned()
         }
-        ExecutionProfile::CustomPrompt => clean_name(
-            custom_prompt.unwrap_or_default().to_owned(),
-            DomainError::EmptyRunPrompt,
-        )?,
+        ExecutionProfile::CustomPrompt => initial_prompt
+            .ok_or(DomainError::EmptyRunPrompt)?
+            .to_owned(),
         ExecutionProfile::Grill => {
             "Use the selected grilling skill to ask a structured frontier of questions before recommending the next decision."
                 .to_owned()
         }
     };
     sections.insert(0, instruction);
+    if profile != ExecutionProfile::CustomPrompt {
+        if let Some(initial_prompt) = initial_prompt {
+            sections.push(format!("User's initial prompt:\n{initial_prompt}"));
+        }
+    }
+    if let Some(language) = language {
+        sections.insert(0, language.run_response_instruction().to_owned());
+    }
     let prompt = sections.join("\n\n");
     clean_name(prompt, DomainError::EmptyRunPrompt)
 }
@@ -621,10 +630,8 @@ pub fn compose_grill_prompt(
         .find(|item| item.id == item_id)
         .ok_or(DomainError::ItemNotFound { item_id })?;
     let initial_prompt = clean_name(initial_prompt.to_owned(), DomainError::EmptyRunPrompt)?;
+    // Item notes are not added here: the launch form prefills the initial prompt with them.
     let mut context = vec![format!("Item objective:\n{}", item.title)];
-    if !item.notes.trim().is_empty() {
-        context.push(format!("Item notes:\n{}", item.notes.trim()));
-    }
     for link in state.links.iter().filter(|link| link.item_id == item_id) {
         if let Some(object) = state
             .external_objects

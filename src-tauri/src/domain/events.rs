@@ -118,6 +118,7 @@ pub enum Event {
         title: String,
         context_id: i64,
         project_id: i64,
+        notes: String,
     },
     CreateWorkspace {
         item_id: i64,
@@ -196,6 +197,7 @@ pub enum Event {
         worktree_id: i64,
         machine_id: i64,
         agent: AgentKind,
+        configuration: Option<GrillConfiguration>,
         execution_profile: ExecutionProfile,
         prompt: String,
         working_directory: String,

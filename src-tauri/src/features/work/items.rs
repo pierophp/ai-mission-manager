@@ -17,11 +17,22 @@ impl Runtime {
             .ok_or_else(|| format!("Project {} does not exist", item.project_id))
     }
 
+    #[cfg(test)]
     pub(crate) fn create_item(
         &mut self,
         title: String,
         context_id: i64,
         project_id: i64,
+    ) -> Result<Item, String> {
+        self.create_item_with_notes(title, context_id, project_id, String::new())
+    }
+
+    pub(crate) fn create_item_with_notes(
+        &mut self,
+        title: String,
+        context_id: i64,
+        project_id: i64,
+        notes: String,
     ) -> Result<Item, String> {
         let decision = decide(
             self.state.clone(),
@@ -29,6 +40,7 @@ impl Runtime {
                 title,
                 context_id,
                 project_id,
+                notes,
             },
         )
         .map_err(|error| error.to_string())?;

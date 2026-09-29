@@ -171,13 +171,15 @@ export const workAdapter = {
     itemId: number,
     executionProfile: Run["execution_profile"],
     selection: RunPromptSelection,
-    customPrompt: string | null,
+    language: GrillLanguage | null,
+    initialPrompt: string | null,
   ) =>
     command<string>("compose_run_prompt", {
       itemId,
       executionProfile,
       promptSelection: selection,
-      customPrompt,
+      language,
+      initialPrompt,
     }),
   composeGrillPrompt: (
     itemId: number,
@@ -281,6 +283,7 @@ export const workAdapter = {
     workspaceId,
     worktreeId,
     agent,
+    configuration,
     executionProfile,
     prompt,
     promptSelection,
@@ -289,6 +292,7 @@ export const workAdapter = {
     workspaceId: number;
     worktreeId: number;
     agent: Run["agent"];
+    configuration?: GrillConfiguration;
     executionProfile: Run["execution_profile"];
     prompt: string;
     promptSelection: RunPromptSelection;
@@ -298,6 +302,7 @@ export const workAdapter = {
       workspaceId,
       worktreeId,
       agent,
+      configuration,
       executionProfile,
       prompt,
       promptSelection,

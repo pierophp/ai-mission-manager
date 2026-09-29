@@ -9,9 +9,11 @@ import type { ItemView } from "../../../runtime/types";
 import { workActions } from "../work-mutations";
 
 const actionMocks = vi.hoisted(() => ({
-  prepareGrillRun: vi.fn(),
+  prepareDirectRun: vi.fn(),
   composeGrillPrompt: vi.fn(),
+  composeRunPrompt: vi.fn(),
   startGrillRun: vi.fn(),
+  startDirectRun: vi.fn(),
 }));
 
 vi.mock("../work-mutations", () => ({ workActions: actionMocks }));
@@ -44,7 +46,7 @@ const view = {
     title: "Review the approach",
     project_id: 1,
     status: "Active",
-    notes: "",
+    notes: "Start from the SSH incident.",
     reminders: [],
   },
   context_id: 1,
@@ -94,11 +96,15 @@ describe("RunsTab", () => {
 
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    actionMocks.prepareGrillRun.mockReturnValue(async () => preview);
+    actionMocks.prepareDirectRun.mockReturnValue(async () => preview);
     actionMocks.composeGrillPrompt.mockReturnValue(
       async () => "Composed Grill prompt",
     );
+    actionMocks.composeRunPrompt.mockReturnValue(
+      async () => "Composed Custom prompt",
+    );
     actionMocks.startGrillRun.mockReturnValue(async () => ({ id: 2 }));
+    actionMocks.startDirectRun.mockReturnValue(async () => ({ id: 3 }));
 
     execute = vi.fn(async (action: () => Promise<unknown>) => action());
     container = document.createElement("div");
@@ -113,7 +119,7 @@ describe("RunsTab", () => {
     vi.clearAllMocks();
   });
 
-  it("defaults to Grill and starts with the edited composed prompt", async () => {
+  async function openLaunchForm(itemView: ItemView = view) {
     const commands = {
       workCommand: { execute },
       isSaving: false,
@@ -127,7 +133,7 @@ describe("RunsTab", () => {
     await act(async () => {
       root.render(
         createElement(RunsTab, {
-          view,
+          view: itemView,
           repositories: [
             {
               id: 1,
@@ -159,56 +165,112 @@ describe("RunsTab", () => {
         }),
       );
     });
-
     await act(async () => {
-      [...container.querySelectorAll("button")]
-        .find((button) => button.textContent?.trim() === "Start Run")
-        ?.click();
+      buttonNamed("Start Run")?.click();
     });
+  }
 
-    const profile = container.querySelector("select");
-    expect(profile?.value).toBe("grill");
-    expect([...profile!.options].map((option) => option.textContent)).toContain(
-      "Implement",
+  function buttonNamed(name: string) {
+    return [...container.querySelectorAll("button")].find(
+      (button) => button.textContent?.trim().startsWith(name),
     );
-    expect([...profile!.options].map((option) => option.textContent)).toContain(
-      "Grill",
-    );
+  }
 
-    const initialPrompt = [...container.querySelectorAll("textarea")].find(
-      (textarea) => textarea.placeholder.startsWith("What decision"),
-    );
-    expect(initialPrompt).toBeDefined();
-    await act(async () => {
-      setTextareaValue(initialPrompt!, "Stress-test the launch plan");
-    });
+  function initialPrompt() {
+    return container.querySelector<HTMLTextAreaElement>("textarea")!;
+  }
 
-    await act(async () => {
-      [...container.querySelectorAll("button")]
-        .find(
-          (button) => button.textContent?.trim() === "Preview composed prompt",
-        )
-        ?.click();
-    });
+  function profileOption(value: string) {
+    return container.querySelector<HTMLInputElement>(
+      `input[name="run-execution-profile"][value="${value}"]`,
+    )!;
+  }
 
-    const composedPrompt = [...container.querySelectorAll("textarea")].find(
-      (textarea) => textarea.value === "Composed Grill prompt",
-    );
-    expect(composedPrompt).toBeDefined();
-    await act(async () => {
-      setTextareaValue(composedPrompt!, "Edited composed Grill prompt");
-    });
-
+  async function submit() {
     await act(async () => {
       container
         .querySelector("form")
-        ?.dispatchEvent(
-          new Event("submit", { bubbles: true, cancelable: true }),
-        );
+        ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
+  }
 
+  it("defaults to Grill with the Item's Notes and keeps the composed prompt folded", async () => {
+    await openLaunchForm();
+
+    expect(profileOption("grill").checked).toBe(true);
+    expect(initialPrompt().value).toBe("Start from the SSH incident.");
+    expect(container.querySelector('textarea[aria-label="Composed prompt"]')).toBeNull();
+
+    await submit();
+
+    expect(workActions.composeGrillPrompt).toHaveBeenCalledWith(
+      1,
+      { agent: "claude", model: "claude-sonnet-4-5", effort: "high" },
+      "portuguese",
+      "Start from the SSH incident.",
+    );
+    expect(workActions.startGrillRun).toHaveBeenCalledWith(
+      expect.objectContaining({ prompt: "Composed Grill prompt" }),
+    );
+  });
+
+  it("starts with the prompt edited in the preview", async () => {
+    await openLaunchForm();
+
+    await act(async () => {
+      buttonNamed("Preview prompt")?.click();
+    });
+    const composedPrompt = container.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="Composed prompt"]',
+    );
+    expect(composedPrompt?.value).toBe("Composed Grill prompt");
+    await act(async () => {
+      setTextareaValue(composedPrompt!, "Edited composed Grill prompt");
+    });
+    await submit();
+
+    expect(workActions.composeGrillPrompt).toHaveBeenCalledTimes(1);
     expect(workActions.startGrillRun).toHaveBeenCalledWith(
       expect.objectContaining({ prompt: "Edited composed Grill prompt" }),
+    );
+  });
+
+  it("lets Custom wait for its prompt instead of failing on selection", async () => {
+    await openLaunchForm({ ...view, item: { ...view.item, notes: "" } });
+
+    await act(async () => {
+      profileOption("custom").click();
+    });
+
+    expect(workActions.composeRunPrompt).not.toHaveBeenCalled();
+    expect(container.querySelector("form")).not.toBeNull();
+    const start = () =>
+      container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    expect(start().disabled).toBe(true);
+
+    await act(async () => {
+      setTextareaValue(initialPrompt(), "Rename the module");
+    });
+    expect(start().disabled).toBe(false);
+    await submit();
+
+    expect(workActions.composeRunPrompt).toHaveBeenCalledWith(
+      1,
+      "custom",
+      { includeObjective: true, includeNotes: false, externalObjectIds: [] },
+      "portuguese",
+      "Rename the module",
+    );
+    expect(workActions.startDirectRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        executionProfile: "custom",
+        prompt: "Composed Custom prompt",
+        configuration: {
+          agent: "claude",
+          model: "claude-sonnet-4-5",
+          effort: "high",
+        },
+      }),
     );
   });
 });

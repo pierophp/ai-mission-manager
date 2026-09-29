@@ -21,6 +21,7 @@ import {
 } from "../../components/ui/card";
 import { Empty, EmptyDescription } from "../../components/ui/empty";
 import { Input } from "../../components/ui/input";
+import { Textarea } from "../../components/ui/textarea";
 import { NativeSelect, NativeSelectOption } from "../../components/ui/native-select";
 import { Spinner } from "../../components/ui/spinner";
 import { ConfirmationDialog } from "../../components/ui/confirmation-dialog";
@@ -103,6 +104,7 @@ export function WorkPage() {
   const [captureContextId, setCaptureContextId] = useState<number>();
   const [captureProjectId, setCaptureProjectId] = useState<number>();
   const [title, setTitle] = useState("");
+  const [notes, setNotes] = useState("");
   const [isCreateItemOpen, setIsCreateItemOpen] = useState(false);
   const [untrackedAgentAction, setUntrackedAgentAction] =
     useState<UntrackedAgentAction>();
@@ -331,9 +333,15 @@ export function WorkPage() {
 
     try {
       await structureCommand.execute(
-        structureActions.createItem(title, captureContextId, captureProjectId),
+        structureActions.createItem(
+          title,
+          captureContextId,
+          captureProjectId,
+          notes,
+        ),
       );
       setTitle("");
+      setNotes("");
       setIsCreateItemOpen(false);
     } catch (createError) {
       window.alert(errorMessage(createError));
@@ -639,6 +647,16 @@ export function WorkPage() {
                   </NativeSelectOption>
                 ))}
               </NativeSelect>
+            </label>
+            <label className="grid gap-1.5 text-sm font-medium">
+              <span>Notes</span>
+              <Textarea
+                value={notes}
+                onChange={(event) => setNotes(event.target.value)}
+                rows={4}
+                placeholder="Context, links, or what a Run should start from"
+                disabled={isSaving}
+              />
             </label>
             <DialogFooter>
               <DialogClose asChild>

@@ -515,14 +515,16 @@ pub fn compose_run_prompt(
     item_id: i64,
     execution_profile: ExecutionProfile,
     prompt_selection: RunPromptSelection,
-    custom_prompt: Option<String>,
+    language: Option<GrillLanguage>,
+    initial_prompt: Option<String>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<String, String> {
     crate::features::work::compose_run_prompt(
         item_id,
         execution_profile,
         prompt_selection,
-        custom_prompt,
+        language,
+        initial_prompt,
         state,
     )
 }
@@ -639,6 +641,7 @@ pub async fn start_worktree_run(
     workspace_id: i64,
     worktree_id: i64,
     agent: AgentKind,
+    configuration: Option<GrillConfiguration>,
     execution_profile: ExecutionProfile,
     prompt: String,
     prompt_selection: RunPromptSelection,
@@ -649,6 +652,7 @@ pub async fn start_worktree_run(
         workspace_id,
         worktree_id,
         agent,
+        configuration,
         execution_profile,
         prompt,
         prompt_selection,
@@ -1270,9 +1274,10 @@ pub fn create_item(
     title: String,
     context_id: i64,
     project_id: i64,
+    notes: Option<String>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Item, String> {
-    crate::features::work::create_item(title, context_id, project_id, state)
+    crate::features::work::create_item(title, context_id, project_id, notes, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]

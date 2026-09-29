@@ -477,6 +477,7 @@ fn machine_deletion_removes_metadata_but_leaves_checkout_and_worktree_files() {
             title: "Preserve files when deleting a Machine".into(),
             context_id: 1,
             project_id: 1,
+            notes: String::new(),
         },
     );
     let state = apply_event(
@@ -802,6 +803,7 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
             title: "Choose an architecture".into(),
             context_id: 1,
             project_id: 1,
+            notes: String::new(),
         },
     );
     state = apply_event(
