@@ -56,7 +56,12 @@ fn runtime_with_grill_run(
         effort: "high".into(),
     };
     let prompt = runtime
-        .compose_grill_prompt(item.id, configuration.clone(), "Test prompt".into())
+        .compose_grill_prompt(
+            item.id,
+            configuration.clone(),
+            crate::domain::GrillLanguage::default(),
+            "Test prompt".into(),
+        )
         .expect("Grill prompt should compose");
     let decision = decide(
         runtime.state.clone(),
@@ -1061,6 +1066,7 @@ fn direct_grill_and_worktree_runs_are_persisted_before_their_gate_is_released() 
                                 None,
                                 repository.id,
                                 grill_configuration,
+                                crate::domain::GrillLanguage::default(),
                                 "Check the launch flow".into(),
                                 vec![expected_checkout],
                                 false,
@@ -1386,6 +1392,7 @@ fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
                             model: "claude-sonnet-4-5".into(),
                             effort: "high".into(),
                         },
+                        crate::domain::GrillLanguage::default(),
                         edited_grill_prompt.into(),
                         vec![expected_checkout.clone()],
                         false,

@@ -33,7 +33,7 @@ use crate::{
         ConfirmedDownstreamIssue, Context, DomainState, Event, ExecutionProfile,
         ExternalChangePolicy, ExternalLinkView, ExternalObjectInput, ExternalObjectKind,
         ExternalProvider, ExternalSnapshot, GrillAnswer, GrillConfiguration,
-        GrillContinuationAction, GrillPhase, HomeView, Item, ItemRelation, ItemRelationKind,
+        GrillContinuationAction, GrillLanguage, GrillPhase, HomeView, Item, ItemRelation, ItemRelationKind,
         ItemStatus, ItemView, LinkPurpose, Machine, MachineObservation, MachineTransport, Project,
         Repository, RepositoryLocation, Run, RunCheckout, RunPaneStatus, RunPromptSelection,
         RunState, RunSuggestion, Workspace, WorkspaceRepository, WorkspaceRepositoryInput,
@@ -497,11 +497,12 @@ pub(crate) fn compose_run_prompt(
 pub(crate) fn compose_grill_prompt(
     item_id: i64,
     configuration: GrillConfiguration,
+    language: GrillLanguage,
     initial_prompt: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<String, String> {
     locked(state, |runtime| {
-        runtime.compose_grill_prompt(item_id, configuration, initial_prompt)
+        runtime.compose_grill_prompt(item_id, configuration, language, initial_prompt)
     })
 }
 
@@ -566,6 +567,7 @@ pub(crate) async fn start_grill_run(
     machine_id: Option<i64>,
     primary_repository_id: i64,
     configuration: GrillConfiguration,
+    language: GrillLanguage,
     prompt: String,
     expected_checkouts: Vec<RunCheckout>,
     allow_dirty: bool,
@@ -578,6 +580,7 @@ pub(crate) async fn start_grill_run(
         machine_id,
         primary_repository_id,
         configuration,
+        language,
         prompt,
         expected_checkouts,
         allow_dirty,

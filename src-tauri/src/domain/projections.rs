@@ -611,6 +611,7 @@ pub fn compose_grill_prompt(
     state: &DomainState,
     item_id: i64,
     configuration: &GrillConfiguration,
+    language: GrillLanguage,
     initial_prompt: &str,
 ) -> Result<String, DomainError> {
     validate_grill_configuration(configuration)?;
@@ -640,7 +641,8 @@ pub fn compose_grill_prompt(
         }
     }
     Ok(format!(
-        "You are starting a Grill Run.\n\nGrill configuration: agent={}, model={}, effort={}.\n\nGrilling skill snapshot:\n{}\n\n{}\n\nRelevant Item context:\n{}\n\nUser's initial prompt:\n{}",
+        "You are starting a Grill Run.\n\n{}\n\nGrill configuration: agent={}, model={}, effort={}.\n\nGrilling skill snapshot:\n{}\n\n{}\n\nRelevant Item context:\n{}\n\nUser's initial prompt:\n{}",
+        language.response_instruction(),
         serde_json::to_string(&configuration.agent).unwrap_or_else(|_| "unknown".into()),
         configuration.model,
         configuration.effort,
@@ -713,6 +715,9 @@ pub fn compose_grill_continuation_prompt(
     };
 
     let mut sections = vec![
+        GrillLanguage::from_run_prompt(&run.prompt)
+            .response_instruction()
+            .to_owned(),
         "Continue the existing Grill Run in the same Run and Pane. The Grill conversation is already in your context; use it as the primary source.".to_owned(),
         format!("Selected downstream action: {}", action.as_str()),
         format!(

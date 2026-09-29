@@ -1916,6 +1916,7 @@ mod grill_contract_tests {
             &state(),
             1,
             &configuration,
+            GrillLanguage::default(),
             "Stress-test this architecture decision.",
         )
         .expect("the Grill prompt should be composable");

@@ -284,6 +284,48 @@ pub struct GrillConfiguration {
     pub effort: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrillLanguage {
+    #[default]
+    Portuguese,
+    English,
+}
+
+impl GrillLanguage {
+    pub fn response_instruction(self) -> &'static str {
+        match self {
+            Self::Portuguese => "GRILL_RESPONSE_LANGUAGE=portuguese\nRespond to the user in Portuguese throughout this Grill Run, including every answer and continuation. Keep code, identifiers, proper names, and quoted source text in their original language when appropriate.",
+            Self::English => "GRILL_RESPONSE_LANGUAGE=english\nRespond to the user in English throughout this Grill Run, including every answer and continuation. Keep code, identifiers, proper names, and quoted source text in their original language when appropriate.",
+        }
+    }
+
+    pub fn enforce_prompt(self, prompt: &str) -> String {
+        let cleaned_prompt = prompt
+            .lines()
+            .filter(|line| {
+                !line.starts_with("GRILL_RESPONSE_LANGUAGE=")
+                    && !line.starts_with(
+                        "Respond to the user in Portuguese throughout this Grill Run,",
+                    )
+                    && !line.starts_with(
+                        "Respond to the user in English throughout this Grill Run,",
+                    )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("{}\n\n{}", cleaned_prompt.trim(), self.response_instruction())
+    }
+
+    pub fn from_run_prompt(prompt: &str) -> Self {
+        if prompt.contains("GRILL_RESPONSE_LANGUAGE=english") {
+            Self::English
+        } else {
+            Self::Portuguese
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrillQuestionGroup {

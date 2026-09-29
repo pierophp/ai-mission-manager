@@ -8,7 +8,7 @@ use crate::domain::{
     compose_grill_prompt, decide, format_grill_response, grill_skill_snapshot,
     parse_grill_question_group, AgentKind, AuditAction, CliConfigurationProfile,
     CliConfigurationProfileIdentity, ConfirmedDownstreamIssue, DownstreamIssueDiscovery, Effect,
-    Event, GrillAnswer, GrillConfiguration, GrillContinuationAction, GrillPhase,
+    Event, GrillAnswer, GrillConfiguration, GrillContinuationAction, GrillLanguage, GrillPhase,
     ImplementationQueue, ImplementationQueueEntry, ImplementationQueuePauseReason, LinkProvenance,
     MachineTransport, RunCheckout, WorkspaceRepositoryInput,
 };
@@ -819,6 +819,7 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
         &state,
         1,
         &configuration,
+        GrillLanguage::default(),
         "Stress-test the proposed architecture.",
     )
     .expect("Grill prompt should compose");

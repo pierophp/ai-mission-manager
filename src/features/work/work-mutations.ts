@@ -85,8 +85,16 @@ export const workActions = {
   composeGrillPrompt: (
     itemId: number,
     configuration: Parameters<typeof workAdapter.composeGrillPrompt>[1],
+    language: Parameters<typeof workAdapter.composeGrillPrompt>[2],
     initialPrompt: string,
-  ) => () => workAdapter.composeGrillPrompt(itemId, configuration, initialPrompt),
+  ) =>
+    () =>
+      workAdapter.composeGrillPrompt(
+        itemId,
+        configuration,
+        language,
+        initialPrompt,
+      ),
   startDirectRun: (input: Parameters<typeof workAdapter.startDirectRun>[0]) =>
     () => workAdapter.startDirectRun(input),
   checkImplementationQueue: (queueId: number) => () => workAdapter.checkImplementationQueue(queueId),

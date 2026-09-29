@@ -3602,12 +3602,14 @@ pub(crate) async fn start_grill_run_with_state(
     machine_id: Option<i64>,
     primary_repository_id: i64,
     configuration: GrillConfiguration,
+    language: GrillLanguage,
     prompt: String,
     expected_checkouts: Vec<RunCheckout>,
     allow_dirty: bool,
     allow_shared_checkouts: bool,
     state: &Mutex<Runtime>,
 ) -> Result<Run, String> {
+    let prompt = language.enforce_prompt(&prompt);
     start_run_with_state(
         RunLaunchInput::Grill {
             item_id,
@@ -3848,10 +3850,17 @@ impl Runtime {
         &self,
         item_id: i64,
         configuration: GrillConfiguration,
+        language: GrillLanguage,
         initial_prompt: String,
     ) -> Result<String, String> {
-        build_grill_prompt(&self.state, item_id, &configuration, &initial_prompt)
-            .map_err(|error| error.to_string())
+        build_grill_prompt(
+            &self.state,
+            item_id,
+            &configuration,
+            language,
+            &initial_prompt,
+        )
+        .map_err(|error| error.to_string())
     }
 
     #[cfg(test)]

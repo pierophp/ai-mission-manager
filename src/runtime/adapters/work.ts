@@ -8,6 +8,7 @@ import type {
   DirectRunPreview,
   GrillAnswer,
   GrillConfiguration,
+  GrillLanguage,
   HomeView,
   Item,
   ItemDeletionPreview,
@@ -177,11 +178,13 @@ export const workAdapter = {
   composeGrillPrompt: (
     itemId: number,
     configuration: GrillConfiguration,
+    language: GrillLanguage,
     initialPrompt: string,
   ) =>
     command<string>("compose_grill_prompt", {
       itemId,
       configuration,
+      language,
       initialPrompt,
     }),
   startDirectRun: ({
@@ -237,6 +240,7 @@ export const workAdapter = {
     primaryRepositoryId,
     machineId,
     configuration,
+    language,
     prompt,
     expectedCheckouts,
     allowDirty,
@@ -247,6 +251,7 @@ export const workAdapter = {
     primaryRepositoryId: number;
     machineId: number | null;
     configuration: GrillConfiguration;
+    language: GrillLanguage;
     prompt: string;
     expectedCheckouts: RunCheckout[];
     allowDirty: boolean;
@@ -258,6 +263,7 @@ export const workAdapter = {
       primaryRepositoryId,
       machineId,
       configuration,
+      language,
       prompt,
       expectedCheckouts,
       allowDirty,

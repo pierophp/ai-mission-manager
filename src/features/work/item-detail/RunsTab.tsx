@@ -33,6 +33,7 @@ import type {
   GrillAgentCatalog,
   GrillAnswer,
   GrillConfiguration,
+  GrillLanguage,
   ItemView,
   Machine,
   Repository,
@@ -134,6 +135,8 @@ export function RunsTab({
   const [grillRunPreviewError, setGrillRunPreviewError] = useState<string>();
   const [grillAgent, setGrillAgent] =
     useState<GrillConfiguration["agent"]>("claude");
+  const [grillLanguage, setGrillLanguage] =
+    useState<GrillLanguage>("portuguese");
   const [grillModel, setGrillModel] = useState("claude-sonnet-4-5");
   const [grillEffort, setGrillEffort] = useState("high");
   const [grillInitialPrompt, setGrillInitialPrompt] = useState("");
@@ -182,6 +185,7 @@ export function RunsTab({
     setRunProfile("grill");
     setRunCustomPrompt("");
     setGrillAgent(defaults?.agent ?? "claude");
+    setGrillLanguage("portuguese");
     setGrillModel(defaults?.model ?? "claude-sonnet-4-5");
     setGrillEffort(defaults?.effort ?? "high");
     setGrillInitialPrompt("");
@@ -228,6 +232,7 @@ export function RunsTab({
           workActions.composeGrillPrompt(
             view.item.id,
             { agent: grillAgent, model: grillModel, effort: grillEffort },
+            grillLanguage,
             grillInitialPrompt,
           ),
           false,
@@ -279,6 +284,7 @@ export function RunsTab({
         workspaceId: grillRunWorkspaceId,
         primaryRepositoryId: grillRunRepositoryId,
         machineId: null,
+        language: grillLanguage,
         configuration: {
           agent: grillAgent,
           model: grillModel,
@@ -707,6 +713,40 @@ export function RunsTab({
             </NativeSelect>
           </label>
         </div>
+        <fieldset className="grid gap-2 text-sm font-medium" disabled={isSaving}>
+          <legend>Response language</legend>
+          <div className="inline-flex w-fit rounded-md border p-1">
+            {([
+              ["portuguese", "Português"],
+              ["english", "English"],
+            ] as const).map(([language, label]) => (
+              <label
+                className={cn(
+                  "cursor-pointer rounded px-3 py-1.5 text-sm transition-colors",
+                  grillLanguage === language
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+                key={language}
+              >
+                <input
+                  checked={grillLanguage === language}
+                  className="peer sr-only"
+                  name="grill-response-language"
+                  onChange={() => {
+                    setGrillLanguage(language);
+                    setGrillPromptNeedsCompose(true);
+                  }}
+                  type="radio"
+                  value={language}
+                />
+                <span className="peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-ring">
+                  {label}
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
         <label className="grid gap-1.5 text-sm font-medium">
           <span>Initial prompt</span>
           <Textarea

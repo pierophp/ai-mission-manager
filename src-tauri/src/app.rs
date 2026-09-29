@@ -22,7 +22,7 @@ use crate::{
         ActivityTabView, AgentKind, AuditEntry, Context, ContextAttentionDefault,
         ContextConfiguration, DomainState, ExecutionMode, ExecutionProfile, ExternalChangePolicy,
         ExternalLinkView, ExternalObjectKind, ExternalSnapshot, GrillAnswer, GrillConfiguration,
-        GrillContinuationAction, HomeView, Item, ItemRelation, ItemRelationKind, ItemStatus,
+        GrillContinuationAction, GrillLanguage, HomeView, Item, ItemRelation, ItemRelationKind, ItemStatus,
         ItemView, LinkPurpose, Machine, MachineTransport, Project, Repository, Run, RunCheckout,
         RunPromptSelection, RunState, RunSuggestion, Worktree,
     },
@@ -544,10 +544,17 @@ pub fn compose_run_prompt(
 pub fn compose_grill_prompt(
     item_id: i64,
     configuration: GrillConfiguration,
+    language: GrillLanguage,
     initial_prompt: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<String, String> {
-    crate::features::work::compose_grill_prompt(item_id, configuration, initial_prompt, state)
+    crate::features::work::compose_grill_prompt(
+        item_id,
+        configuration,
+        language,
+        initial_prompt,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -615,6 +622,7 @@ pub async fn start_grill_run(
     machine_id: Option<i64>,
     primary_repository_id: i64,
     configuration: GrillConfiguration,
+    language: GrillLanguage,
     prompt: String,
     expected_checkouts: Vec<RunCheckout>,
     allow_dirty: bool,
@@ -627,6 +635,7 @@ pub async fn start_grill_run(
         machine_id,
         primary_repository_id,
         configuration,
+        language,
         prompt,
         expected_checkouts,
         allow_dirty,

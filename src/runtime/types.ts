@@ -35,6 +35,8 @@ export type GrillConfiguration = {
   effort: string;
 };
 
+export type GrillLanguage = "portuguese" | "english";
+
 export type GrillEffort = {
   id: string;
   label: string;
