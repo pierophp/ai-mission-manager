@@ -2563,7 +2563,7 @@ mod grill_contract_tests {
     }
 
     #[test]
-    fn downstream_prompt_contains_the_selected_skill_item_context_and_decisions() {
+    fn downstream_prompt_injects_the_skill_and_preserves_only_needed_context() {
         let started = decide(state(), start_event(GrillConfiguration::default()))
             .expect("the Grill should start");
         let transcript = decide(
@@ -2624,20 +2624,28 @@ mod grill_contract_tests {
             };
             assert!(prompt.contains(expected_instruction));
             assert!(!prompt.contains(&format!("name: {}", action.as_str())));
-            assert!(prompt.contains("Decide the next architecture"));
-            assert!(prompt.contains("The decision must stay reversible."));
             assert!(
                 !prompt.contains("❓ Q1: Which decision should we keep?"),
                 "the Pane transcript is already in the agent's context"
             );
-            assert!(prompt.contains("Q1: Keep the reversible design"));
-            assert!(prompt.contains("docs/agents/issue-tracker.md"));
             assert!(prompt.contains(GRILL_OUTPUT_CONTRACT));
             assert!(prompt.contains(action.as_str()));
-            assert!(prompt.contains("same Run and Pane"));
             assert!(prompt.contains("AI_MISSION_MANAGER_EVENT"));
             assert!(prompt.contains("github.issue.created"));
             assert!(prompt.contains("\"run_id\":1"));
+            if action == GrillContinuationAction::Implement {
+                assert!(prompt.contains("Decide the next architecture"));
+                assert!(prompt.contains("The decision must stay reversible."));
+                assert!(prompt.contains("Q1: Keep the reversible design"));
+                assert!(prompt.contains("docs/agents/issue-tracker.md"));
+                assert!(prompt.contains("same Run and Pane"));
+            } else {
+                assert!(!prompt.contains("Relevant Item context:"));
+                assert!(!prompt.contains("Recorded Grill decisions:"));
+                assert!(!prompt.contains("docs/agents/issue-tracker.md"));
+                assert!(!prompt.contains("Spec created earlier in this Run"));
+                assert!(!prompt.contains("same Run and Pane"));
+            }
         }
     }
 

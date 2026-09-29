@@ -671,6 +671,17 @@ pub fn compose_grill_continuation_prompt(
         .ok_or(DomainError::ItemNotFound {
             item_id: run.item_id,
         })?;
+    if matches!(
+        action,
+        GrillContinuationAction::ToSpec | GrillContinuationAction::ToTickets
+    ) {
+        return Ok(format!(
+            "{}\n\n{}\n\n{}",
+            action.skill_snapshot(),
+            GRILL_OUTPUT_CONTRACT,
+            downstream_issue_event_instruction(run.id, action),
+        ));
+    }
     let mut context = vec![format!("Item objective:\n{}", item.title)];
     if !item.notes.trim().is_empty() {
         context.push(format!("Item notes:\n{}", item.notes.trim()));
@@ -739,12 +750,16 @@ pub fn compose_grill_continuation_prompt(
         action.as_str()
     ));
     sections.push(GRILL_OUTPUT_CONTRACT.to_owned());
-    sections.push(format!(
-        "Mission Manager links the Issues you create to the Item. Right after creating each GitHub Issue, print one line on its own with its canonical URL (one line per Issue, no line breaks inside it):\nAI_MISSION_MANAGER_EVENT {{\"event\":\"github.issue.created\",\"url\":\"https://github.com/<owner>/<repo>/issues/<number>\",\"run_id\":{},\"action\":\"{}\"}}",
-        run.id,
-        action.as_str(),
-    ));
+    sections.push(downstream_issue_event_instruction(run.id, action));
     Ok(sections.join("\n\n"))
+}
+
+fn downstream_issue_event_instruction(run_id: i64, action: GrillContinuationAction) -> String {
+    format!(
+        "Mission Manager links the Issues you create to the Item. Right after creating each GitHub Issue, print one line on its own with its canonical URL (one line per Issue, no line breaks inside it):\nAI_MISSION_MANAGER_EVENT {{\"event\":\"github.issue.created\",\"url\":\"https://github.com/<owner>/<repo>/issues/<number>\",\"run_id\":{},\"action\":\"{}\"}}",
+        run_id,
+        action.as_str(),
+    )
 }
 
 /// The pending question group of a step the user moved on from.
