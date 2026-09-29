@@ -332,7 +332,7 @@ export function WorkPage() {
     if (!title.trim() || !captureContextId || !captureProjectId) return;
 
     try {
-      await structureCommand.execute(
+      const item = await structureCommand.execute(
         structureActions.createItem(
           title,
           captureContextId,
@@ -343,6 +343,7 @@ export function WorkPage() {
       setTitle("");
       setNotes("");
       setIsCreateItemOpen(false);
+      openItem(item.id);
     } catch (createError) {
       window.alert(errorMessage(createError));
     }
