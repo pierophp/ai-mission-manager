@@ -85,8 +85,16 @@ export const workActions = {
   composeGrillPrompt: (
     itemId: number,
     configuration: Parameters<typeof workAdapter.composeGrillPrompt>[1],
+    language: Parameters<typeof workAdapter.composeGrillPrompt>[2],
     initialPrompt: string,
-  ) => () => workAdapter.composeGrillPrompt(itemId, configuration, initialPrompt),
+  ) =>
+    () =>
+      workAdapter.composeGrillPrompt(
+        itemId,
+        configuration,
+        language,
+        initialPrompt,
+      ),
   startDirectRun: (input: Parameters<typeof workAdapter.startDirectRun>[0]) =>
     () => workAdapter.startDirectRun(input),
   checkImplementationQueue: (queueId: number) => () => workAdapter.checkImplementationQueue(queueId),
@@ -107,7 +115,8 @@ export const workActions = {
   setLinkPurpose: (
     linkId: number,
     purpose: Parameters<typeof workAdapter.setLinkPurpose>[1],
-  ) => () => workAdapter.setLinkPurpose(linkId, purpose),
+    specExternalObjectId: Parameters<typeof workAdapter.setLinkPurpose>[2],
+  ) => () => workAdapter.setLinkPurpose(linkId, purpose, specExternalObjectId),
   markLinkReviewed: (linkId: number) => () => workAdapter.markLinkReviewed(linkId),
   setLinkWatchUntil: (linkId: number, watchUntil: string | null) =>
     () => workAdapter.setLinkWatchUntil(linkId, watchUntil),

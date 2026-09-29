@@ -1,5 +1,6 @@
 use super::codecs::*;
 use super::*;
+use crate::domain::CliConfigurationProfile;
 
 impl SqliteStore {
     pub fn load_state(&self) -> Result<DomainState, StoreError> {
@@ -11,6 +12,7 @@ impl SqliteStore {
         let next_workspace_id = self.sequence("next_workspace_id")?;
         let next_worktree_id = self.sequence("next_worktree_id")?;
         let next_machine_id = self.sequence("next_machine_id")?;
+        let next_cli_profile_id = self.sequence("next_cli_profile_id")?;
         let next_run_id = self.sequence("next_run_id")?;
         let next_external_object_id = self.sequence("next_external_object_id")?;
         let next_link_id = self.sequence("next_link_id")?;
@@ -18,25 +20,32 @@ impl SqliteStore {
         let next_reminder_id = self.sequence("next_reminder_id")?;
         let contexts = {
             let mut statement = self.connection.prepare(
-                "SELECT id, name, execution_machine_id, grill_agent, grill_model, grill_effort,
-                        implement_agent, implement_model, implement_effort
+                "SELECT id, name, execution_machine_id, check_dirty_checkouts,
+                        grill_agent, grill_model, grill_effort,
+                        implement_agent, implement_model, implement_effort,
+                        claude_profile_id, codex_profile_id,
+                        gh_executable_path, twg_executable_path, az_executable_path,
+                        atlassian_site, azure_devops_organization, bitbucket_workspace
                      FROM contexts ORDER BY id",
             )?;
             let rows = statement.query_map([], |row| {
-                let agent: String = row.get(3)?;
-                let model: String = row.get(4)?;
-                let effort: String = row.get(5)?;
-                let implement_agent: String = row.get(6)?;
-                let implement_model: String = row.get(7)?;
-                let implement_effort: String = row.get(8)?;
+                let agent: String = row.get(4)?;
+                let model: String = row.get(5)?;
+                let effort: String = row.get(6)?;
+                let implement_agent: String = row.get(7)?;
+                let implement_model: String = row.get(8)?;
+                let implement_effort: String = row.get(9)?;
                 Ok(Context {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     execution_machine_id: row.get(2)?,
+                    check_dirty_checkouts: row.get::<_, i64>(3)? != 0,
+                    claude_profile_id: row.get(10)?,
+                    codex_profile_id: row.get(11)?,
                     grill_defaults: GrillConfiguration {
                         agent: parse_agent_kind(&agent).map_err(|error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                3,
+                                4,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
@@ -47,7 +56,7 @@ impl SqliteStore {
                     implement_defaults: GrillConfiguration {
                         agent: parse_agent_kind(&implement_agent).map_err(|error| {
                             rusqlite::Error::FromSqlConversionFailure(
-                                6,
+                                7,
                                 rusqlite::types::Type::Text,
                                 Box::new(error),
                             )
@@ -55,6 +64,12 @@ impl SqliteStore {
                         model: implement_model,
                         effort: implement_effort,
                     },
+                    gh_executable_path: row.get(12)?,
+                    twg_executable_path: row.get(13)?,
+                    az_executable_path: row.get(14)?,
+                    atlassian_site: row.get(15)?,
+                    azure_devops_organization: row.get(16)?,
+                    bitbucket_workspace: row.get(17)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -155,6 +170,30 @@ impl SqliteStore {
                         )
                     })?,
                     last_observed_at: row.get(6)?,
+                })
+            })?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        let cli_configuration_profiles = {
+            let mut statement = self.connection.prepare(
+                "SELECT id, machine_id, provider, name, directory, app_managed
+                 FROM cli_configuration_profiles ORDER BY id",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let provider: String = row.get(2)?;
+                Ok(CliConfigurationProfile {
+                    id: row.get(0)?,
+                    machine_id: row.get(1)?,
+                    provider: parse_agent_kind(&provider).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            2,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    name: row.get(3)?,
+                    directory: row.get(4)?,
+                    app_managed: row.get::<_, i64>(5)? != 0,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -286,7 +325,8 @@ impl SqliteStore {
                         last_applied_agent_state_sequence, pane_status,
                         direct_checkouts_json, transcript,
                         grill_question_group_json, grill_answers_json, grill_decisions_json,
-                        grill_response, grill_phase, grill_action, grill_action_started_at
+                        grill_response, grill_phase, grill_action, grill_action_started_at,
+                        cli_configuration_profile_json
                  FROM runs
                  ORDER BY id",
             )?;
@@ -299,6 +339,7 @@ impl SqliteStore {
                 let grill_decisions_json: String = row.get(23)?;
                 let grill_phase: Option<String> = row.get(25)?;
                 let grill_action: Option<String> = row.get(26)?;
+                let cli_configuration_profile_json: Option<String> = row.get(28)?;
                 let grill_question_group = grill_question_group_json
                     .map(|json| {
                         serde_json::from_str::<GrillQuestionGroup>(&json).map_err(|error| {
@@ -362,6 +403,16 @@ impl SqliteStore {
                             Box::new(error),
                         )
                     })?,
+                    cli_configuration_profile: cli_configuration_profile_json
+                        .map(|json| serde_json::from_str(&json))
+                        .transpose()
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                28,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
                     execution_profile: parse_execution_profile(&execution_profile).map_err(
                         |error| {
                             rusqlite::Error::FromSqlConversionFailure(
@@ -480,7 +531,8 @@ impl SqliteStore {
                         link_attention_state.watch_until,
                         link_attention_state.review_at,
                         link_attention_state.provenance_json,
-                        external_links.purpose
+                        external_links.purpose,
+                        external_links.spec_external_object_id
                  FROM external_links
                  LEFT JOIN link_attention_state
                    ON link_attention_state.link_id = external_links.id
@@ -526,6 +578,7 @@ impl SqliteStore {
                             Box::new(error),
                         )
                     })?,
+                    spec_external_object_id: row.get(11)?,
                     provenance,
                 })
             })?;
@@ -632,6 +685,7 @@ impl SqliteStore {
             next_workspace_id,
             next_worktree_id,
             next_machine_id,
+            next_cli_profile_id,
             next_run_id,
             next_external_object_id,
             next_link_id,
@@ -645,6 +699,7 @@ impl SqliteStore {
             workspaces,
             worktrees,
             machines,
+            cli_configuration_profiles,
             runs,
             implementation_queues,
             relationships,

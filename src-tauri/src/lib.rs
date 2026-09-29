@@ -86,6 +86,7 @@ mod devtools_tests {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             #[cfg(debug_assertions)]
             if should_open_devtools(
@@ -113,10 +114,15 @@ pub fn run() {
             app::list_grill_model_catalog,
             app::set_context_grill_defaults,
             app::set_context_implement_defaults,
+            app::set_context_dirty_checkout_check,
             app::list_projects,
             app::list_repositories,
             app::list_repository_locations,
             app::list_machines,
+            app::list_cli_configuration_profiles,
+            app::create_cli_configuration_profile,
+            app::set_context_cli_configuration_profile,
+            app::delete_cli_configuration_profile,
             app::get_setup_state,
             app::complete_setup,
             app::get_health_status,
@@ -125,7 +131,9 @@ pub fn run() {
             app::reconcile_runs,
             app::search_items_command,
             app::create_context,
+            app::create_context_configuration,
             app::update_context,
+            app::update_context_configuration,
             app::set_context_execution_machine,
             app::create_project,
             app::update_project,
@@ -194,6 +202,8 @@ pub fn run() {
             app::create_github_issue,
             app::add_external_comment,
             app::fetch_issue_document,
+            app::fetch_external_comments,
+            app::fetch_external_document,
             app::refresh_external_object,
             app::poll_external_objects,
             app::set_link_attention_policy,

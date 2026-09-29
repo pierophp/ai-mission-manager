@@ -1,4 +1,12 @@
-import { type FormEvent, useEffect, useState } from "react";
+import {
+  type DragEvent,
+  type FormEvent,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { Alert, AlertDescription, AlertTitle } from "../../components/ui/alert";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -11,37 +19,107 @@ import {
 } from "../../components/ui/card";
 import { Checkbox } from "../../components/ui/checkbox";
 import { Input } from "../../components/ui/input";
-import { NativeSelect, NativeSelectOption } from "../../components/ui/native-select";
+import {
+  NativeSelect,
+  NativeSelectOption,
+} from "../../components/ui/native-select";
 import { Textarea } from "../../components/ui/textarea";
 import { currentMinute } from "../../runtime/time";
 import { errorMessage } from "../../runtime/errors";
+import { ExternalUrlLink } from "../../components/ExternalUrlLink";
 import type {
   AttentionEntry,
   ExternalChangePolicy,
   ExternalLinkView,
+  ExternalComment,
   ItemView,
   LinkPurpose,
   RunSuggestion,
 } from "../../runtime/types";
 import { ItemCard } from "./item-card";
 import type { ItemForm } from "./item-signals";
-import { displayItemIdentifier } from "./item-signals";
-import { externalObjectKindLabel, formatSnapshotAge } from "./work-utils";
+import {
+  displayItemIdentifier,
+  supportsImplementationSpec,
+  supportsImplementationTicket,
+} from "./item-signals";
+import {
+  externalObjectKindLabel,
+  externalProviderLabel,
+  formatSnapshotAge,
+  orderHomeColumnItems,
+  parseHomeColumnOrder,
+} from "./work-utils";
 import { useWorkCommand, workActions } from "./work-mutations";
+import {
+  useExternalCommentsQuery,
+  useExternalDocumentQuery,
+} from "./work-queries";
 
 export function HomeColumn({
   title,
   hint,
   items,
+  orderKey,
   onOpenItem,
   onChanged,
 }: {
   title: string;
   hint: string;
   items: ItemView[];
+  orderKey: string;
   onOpenItem: (itemId: number, form?: ItemForm) => void;
   onChanged: () => Promise<void>;
 }) {
+  const [savedItemIds, setSavedItemIds] = useState<number[]>(() => {
+    try {
+      return parseHomeColumnOrder(window.localStorage.getItem(orderKey));
+    } catch {
+      return [];
+    }
+  });
+  const orderedItems = useMemo(
+    () => orderHomeColumnItems(items, savedItemIds),
+    [items, savedItemIds],
+  );
+
+  useEffect(() => {
+    try {
+      const nextSavedIds = parseHomeColumnOrder(
+        window.localStorage.getItem(orderKey),
+      );
+      const orderedIds = orderHomeColumnItems(items, nextSavedIds).map(
+        (view) => view.item.id,
+      );
+      setSavedItemIds(orderedIds);
+      window.localStorage.setItem(orderKey, JSON.stringify(orderedIds));
+    } catch {
+      // Keep the newest-first in-memory order if local storage is unavailable.
+    }
+  }, [items, orderKey]);
+
+  function moveItem(draggedItemId: number, targetItemId: number) {
+    const nextItemIds = orderedItems.map((view) => view.item.id);
+    const fromIndex = nextItemIds.indexOf(draggedItemId);
+    const targetIndex = nextItemIds.indexOf(targetItemId);
+    if (fromIndex === -1 || targetIndex === -1 || fromIndex === targetIndex)
+      return;
+    nextItemIds.splice(fromIndex, 1);
+    nextItemIds.splice(targetIndex, 0, draggedItemId);
+    setSavedItemIds(nextItemIds);
+    try {
+      window.localStorage.setItem(orderKey, JSON.stringify(nextItemIds));
+    } catch {
+      // The cards stay in the requested order until the view is reloaded.
+    }
+  }
+
+  function handleDrop(event: DragEvent<HTMLDivElement>, targetItemId: number) {
+    event.preventDefault();
+    const draggedItemId = Number(event.dataTransfer.getData("text/plain"));
+    if (Number.isFinite(draggedItemId)) moveItem(draggedItemId, targetItemId);
+  }
+
   return (
     <section className="min-w-0 space-y-3" aria-labelledby={`${title}-heading`}>
       <div className="flex items-start justify-between gap-3">
@@ -56,19 +134,33 @@ export function HomeColumn({
         </div>
         <Badge variant="secondary">{items.length}</Badge>
       </div>
+      <p className="sr-only">Drag cards to change their order.</p>
       {items.length === 0 ? (
         <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
           Nothing here.
         </p>
       ) : (
-        <div className="grid gap-3">
-          {items.map((view) => (
-            <ItemCard
+        <div className="grid gap-3" role="list">
+          {orderedItems.map((view) => (
+            <div
               key={view.item.id}
-              view={view}
-              onOpen={(form) => onOpenItem(view.item.id, form)}
-              onChanged={onChanged}
-            />
+              role="listitem"
+              draggable
+              onDragStart={(event) =>
+                event.dataTransfer.setData("text/plain", String(view.item.id))
+              }
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => handleDrop(event, view.item.id)}
+              className="cursor-grab active:cursor-grabbing"
+              aria-label={`Reorder ${view.item.title}`}
+              title="Drag to reorder"
+            >
+              <ItemCard
+                view={view}
+                onOpen={(form) => onOpenItem(view.item.id, form)}
+                onChanged={onChanged}
+              />
+            </div>
           ))}
         </div>
       )}
@@ -78,11 +170,13 @@ export function HomeColumn({
 
 export function ExternalLinkCard({
   externalLink,
+  isActive = true,
   isSaving,
   onRefresh,
   onUnlink,
   onPrepareDeleteObject,
   onSetPurpose,
+  specs,
   onSavePolicy,
   onMarkReviewed,
   onSaveWatchUntil,
@@ -91,11 +185,16 @@ export function ExternalLinkCard({
   onAddComment,
 }: {
   externalLink: ExternalLinkView;
+  isActive?: boolean;
   isSaving: boolean;
   onRefresh: () => Promise<void>;
   onUnlink: () => void | Promise<void>;
   onPrepareDeleteObject: () => Promise<void>;
-  onSetPurpose: (purpose: LinkPurpose) => Promise<void>;
+  onSetPurpose: (
+    purpose: LinkPurpose,
+    specExternalObjectId: number | null,
+  ) => Promise<void>;
+  specs: ExternalLinkView[];
   onSavePolicy: (policy: ExternalChangePolicy | null) => Promise<void>;
   onMarkReviewed: () => Promise<void>;
   onSaveWatchUntil: (watchUntil: string | null) => Promise<void>;
@@ -111,6 +210,11 @@ export function ExternalLinkCard({
   const [reviewAt, setReviewAt] = useState(externalLink.link.review_at ?? "");
   const [comment, setComment] = useState("");
   const [isCommenting, setIsCommenting] = useState(false);
+  const localMarkdown =
+    object.provider === "generic" && object.external_key.startsWith("local:");
+  const readable = object.kind !== "generic" || localMarkdown;
+  const document = useExternalDocumentQuery(object.id, isActive && readable);
+  const comments = useExternalCommentsQuery(object.id, isActive && readable);
   const reviewDateReached =
     externalLink.link.review_at !== null &&
     externalLink.link.review_at <= currentMinute();
@@ -132,6 +236,7 @@ export function ExternalLinkCard({
     try {
       await onAddComment(comment);
       setComment("");
+      await comments.refetch();
     } catch (commentError) {
       window.alert(errorMessage(commentError));
     } finally {
@@ -145,10 +250,16 @@ export function ExternalLinkCard({
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
             <CardTitle className="text-sm">
-              {snapshot?.title ?? object.canonical_url}
+              <ExternalUrlLink
+                href={object.canonical_url}
+                className="underline-offset-4 hover:underline"
+              >
+                {snapshot?.title ?? object.canonical_url}
+              </ExternalUrlLink>
             </CardTitle>
             <CardDescription className="mt-1">
-              {externalObjectKindLabel(object.kind)} ·{" "}
+              {localMarkdown ? "Markdown file" : externalObjectKindLabel(object.kind)} ·{" "}
+              {localMarkdown ? "Local Markdown" : externalProviderLabel(object.provider)} ·{" "}
               {snapshot?.state ?? "Not fetched"}
             </CardDescription>
           </div>
@@ -187,14 +298,12 @@ export function ExternalLinkCard({
         </div>
       </CardHeader>
       <CardContent className="grid gap-3 pt-4">
-        <a
+        <ExternalUrlLink
           href={object.canonical_url}
-          target="_blank"
-          rel="noreferrer"
           className="break-all text-sm text-primary underline-offset-4 hover:underline"
         >
           {object.canonical_url}
-        </a>
+        </ExternalUrlLink>
         <label className="grid grid-cols-[max-content_minmax(0,1fr)] items-center gap-2 text-sm">
           <span>Link type</span>
           <NativeSelect
@@ -202,19 +311,56 @@ export function ExternalLinkCard({
             value={externalLink.link.purpose}
             disabled={isSaving}
             onChange={(event) =>
-              void onSetPurpose(event.target.value as LinkPurpose)
+              void onSetPurpose(
+                event.target.value as LinkPurpose,
+                event.target.value === "to-tickets"
+                  ? externalLink.link.spec_external_object_id
+                  : null,
+              )
             }
           >
             <NativeSelectOption
               value="to-spec"
-              disabled={object.provider !== "github" || object.kind !== "issue"}
+              disabled={!supportsImplementationSpec(externalLink)}
             >
-              To spec
+              Spec
             </NativeSelectOption>
-            <NativeSelectOption value="to-tickets">To tickets</NativeSelectOption>
+            <NativeSelectOption
+              value="to-tickets"
+              disabled={!supportsImplementationTicket(externalLink)}
+            >
+              Tickets
+            </NativeSelectOption>
             <NativeSelectOption value="others">Others</NativeSelectOption>
           </NativeSelect>
         </label>
+        {externalLink.link.purpose === "to-tickets" && (
+          <label className="grid grid-cols-[max-content_minmax(0,1fr)] items-center gap-2 text-sm">
+            <span>Spec</span>
+            <NativeSelect
+              aria-label="Ticket spec"
+              value={externalLink.link.spec_external_object_id ?? ""}
+              disabled={isSaving || specs.length === 0}
+              onChange={(event) =>
+                void onSetPurpose(
+                  "to-tickets",
+                  Number(event.target.value) || null,
+                )
+              }
+            >
+              <NativeSelectOption value="" disabled>
+                {specs.length === 0
+                  ? "No specs linked to this Item"
+                  : "Select a spec…"}
+              </NativeSelectOption>
+              {specs.map((spec) => (
+                <NativeSelectOption value={spec.object.id} key={spec.object.id}>
+                  {spec.snapshot?.title ?? spec.object.canonical_url}
+                </NativeSelectOption>
+              ))}
+            </NativeSelect>
+          </label>
+        )}
         {externalLink.link.provenance && (
           <p className="m-0 text-xs text-muted-foreground">
             Discovered by Run #{externalLink.link.provenance.run_id} via{" "}
@@ -239,6 +385,57 @@ export function ExternalLinkCard({
           </>
         ) : (
           <p className="m-0 text-xs text-muted-foreground">No snapshot yet</p>
+        )}
+        {readable && (
+          <section
+            className="grid gap-2 rounded-md border p-3"
+            aria-label="External content and comments"
+          >
+            <h4 className="m-0 text-sm font-medium">Description</h4>
+            {document.isPending ? (
+              <p className="m-0 text-sm text-muted-foreground">
+                Reading description…
+              </p>
+            ) : document.isError ? (
+              <p className="m-0 text-sm text-destructive">
+                Could not read description: {errorMessage(document.error)}
+              </p>
+            ) : document.data ? (
+              <div className="markdown-body min-w-0 text-sm">
+                <Markdown remarkPlugins={[remarkGfm]}>{document.data}</Markdown>
+              </div>
+            ) : null}
+            <h4 className="m-0 mt-2 text-sm font-medium">Comments</h4>
+            {comments.isPending ? (
+              <p className="m-0 text-sm text-muted-foreground">
+                Reading comments…
+              </p>
+            ) : comments.isError ? (
+              <p className="m-0 text-sm text-destructive">
+                Could not read comments: {errorMessage(comments.error)}
+              </p>
+            ) : comments.data?.length ? (
+              <div className="grid gap-2">
+                {comments.data.map((entry: ExternalComment) => (
+                  <article
+                    key={entry.id}
+                    className="grid gap-1 rounded border p-2"
+                  >
+                    <p className="m-0 text-xs text-muted-foreground">
+                      {entry.author} · {entry.createdAt}
+                    </p>
+                    <div className="markdown-body min-w-0 text-sm">
+                      <Markdown remarkPlugins={[remarkGfm]}>
+                        {entry.body}
+                      </Markdown>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="m-0 text-sm text-muted-foreground">No comments.</p>
+            )}
+          </section>
         )}
         {object.provider === "github" && object.kind !== "generic" && (
           <form className="grid gap-2" onSubmit={handleComment}>
@@ -554,8 +751,7 @@ export function RunSuggestionCard({
           </strong>
           <span className="text-xs text-muted-foreground">
             {displayItemIdentifier(suggestion.itemIdentifier)} ·{" "}
-            {suggestion.itemTitle} ·{" "}
-            {suggestion.contextName}
+            {suggestion.itemTitle} · {suggestion.contextName}
           </span>
         </div>
         <div className="grid gap-1 text-xs">
@@ -617,10 +813,10 @@ function attentionEntryLabel(entry: AttentionEntry): string {
   if (entry.kind === "reminder") return "Reminder due";
   if (entry.kind === "review") return "Review date reached";
   if (entry.kind === "blocked_run") return "Run blocked";
-  if (entry.kind === "implementation_queue") return "Implementation Queue paused";
+  if (entry.kind === "implementation_queue")
+    return "Implementation Queue paused";
   return `${entry.activities.length} change${entry.activities.length === 1 ? "" : "s"}`;
 }
-
 
 export function SearchResult({
   view,

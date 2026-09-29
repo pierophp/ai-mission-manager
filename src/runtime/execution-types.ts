@@ -55,6 +55,11 @@ export type Run = {
   worktree_id: number | null;
   machine_id: number;
   agent: AgentKind;
+  cli_configuration_profile: {
+    profileId: number;
+    provider: AgentKind;
+    name: string;
+  } | null;
   execution_profile: ExecutionProfile;
   model: string | null;
   effort: string | null;

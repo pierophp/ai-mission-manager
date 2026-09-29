@@ -27,12 +27,13 @@ impl SqliteStore {
                 } => {
                     transaction.execute(
                         "INSERT INTO contexts
-                            (id, name, execution_machine_id, grill_agent, grill_model, grill_effort, implement_agent, implement_model, implement_effort)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                            (id, name, execution_machine_id, check_dirty_checkouts, grill_agent, grill_model, grill_effort, implement_agent, implement_model, implement_effort)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                         params![
                             context.id,
                             context.name,
                             context.execution_machine_id,
+                            bool_as_i64(context.check_dirty_checkouts),
                             agent_kind_as_str(context.grill_defaults.agent),
                             context.grill_defaults.model,
                             context.grill_defaults.effort,
@@ -49,9 +50,104 @@ impl SqliteStore {
                 Effect::UpdateContext { context } => {
                     transaction.execute(
                         "UPDATE contexts
-                         SET name = ?1, execution_machine_id = ?2
-                         WHERE id = ?3",
-                        params![context.name, context.execution_machine_id, context.id],
+                         SET name = ?1, execution_machine_id = ?2, check_dirty_checkouts = ?3,
+                             claude_profile_id = ?4, codex_profile_id = ?5
+                         WHERE id = ?6",
+                        params![
+                            context.name,
+                            context.execution_machine_id,
+                            bool_as_i64(context.check_dirty_checkouts),
+                            context.claude_profile_id,
+                            context.codex_profile_id,
+                            context.id
+                        ],
+                    )?;
+                }
+                Effect::PersistContextConfiguration {
+                    context,
+                    attention_defaults,
+                } => {
+                    transaction.execute(
+                        "UPDATE contexts
+                         SET name = ?1, execution_machine_id = ?2, check_dirty_checkouts = ?3,
+                             claude_profile_id = ?4, codex_profile_id = ?5,
+                             grill_agent = ?6, grill_model = ?7, grill_effort = ?8,
+                             implement_agent = ?9, implement_model = ?10, implement_effort = ?11,
+                             gh_executable_path = ?12, twg_executable_path = ?13,
+                             az_executable_path = ?14, atlassian_site = ?15,
+                             azure_devops_organization = ?16, bitbucket_workspace = ?17
+                         WHERE id = ?18",
+                        params![
+                            context.name,
+                            context.execution_machine_id,
+                            bool_as_i64(context.check_dirty_checkouts),
+                            context.claude_profile_id,
+                            context.codex_profile_id,
+                            agent_kind_as_str(context.grill_defaults.agent),
+                            context.grill_defaults.model,
+                            context.grill_defaults.effort,
+                            agent_kind_as_str(context.implement_defaults.agent),
+                            context.implement_defaults.model,
+                            context.implement_defaults.effort,
+                            context.gh_executable_path,
+                            context.twg_executable_path,
+                            context.az_executable_path,
+                            context.atlassian_site,
+                            context.azure_devops_organization,
+                            context.bitbucket_workspace,
+                            context.id,
+                        ],
+                    )?;
+                    for attention_default in attention_defaults {
+                        let (title_attention, state_attention, metadata_attention) = (
+                            attention_default.policy.title,
+                            attention_default.policy.state,
+                            attention_default.policy.metadata,
+                        );
+                        transaction.execute(
+                            "INSERT INTO context_attention_defaults
+                                (context_id, object_kind, title_attention, state_attention, metadata_attention)
+                             VALUES (?1, ?2, ?3, ?4, ?5)
+                             ON CONFLICT(context_id, object_kind) DO UPDATE SET
+                                title_attention = excluded.title_attention,
+                                state_attention = excluded.state_attention,
+                                metadata_attention = excluded.metadata_attention",
+                            params![
+                                attention_default.context_id,
+                                external_object_kind_as_str(attention_default.object_kind),
+                                bool_as_i64(title_attention),
+                                bool_as_i64(state_attention),
+                                bool_as_i64(metadata_attention),
+                            ],
+                        )?;
+                    }
+                }
+                Effect::PersistCliConfigurationProfile {
+                    profile,
+                    next_cli_profile_id,
+                } => {
+                    transaction.execute(
+                        "INSERT INTO cli_configuration_profiles
+                            (id, machine_id, provider, name, directory, app_managed)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                        params![
+                            profile.id,
+                            profile.machine_id,
+                            agent_kind_as_str(profile.provider),
+                            profile.name,
+                            profile.directory,
+                            bool_as_i64(profile.app_managed)
+                        ],
+                    )?;
+                    transaction.execute(
+                        "UPDATE metadata SET value = ?1 WHERE key = 'next_cli_profile_id'",
+                        params![next_cli_profile_id],
+                    )?;
+                }
+                Effect::RemoveCliConfigurationProfile { profile_id } => {
+                    transaction.execute(
+                        "DELETE FROM cli_configuration_profiles WHERE id = ?1",
+                        params![profile_id],
                     )?;
                 }
                 Effect::PersistContextGrillDefaults { context } => {
@@ -210,12 +306,13 @@ impl SqliteStore {
                     )?;
                     transaction.execute(
                         "INSERT INTO contexts
-                            (id, name, execution_machine_id, grill_agent, grill_model, grill_effort, implement_agent, implement_model, implement_effort)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                            (id, name, execution_machine_id, check_dirty_checkouts, grill_agent, grill_model, grill_effort, implement_agent, implement_model, implement_effort)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                         params![
                             context.id,
                             context.name,
                             context.execution_machine_id,
+                            bool_as_i64(context.check_dirty_checkouts),
                             agent_kind_as_str(context.grill_defaults.agent),
                             context.grill_defaults.model,
                             context.grill_defaults.effort,
@@ -430,8 +527,9 @@ impl SqliteStore {
                             started_at, state, pane_status, direct_checkouts_json,
                             transcript, grill_question_group_json, grill_answers_json,
                             grill_decisions_json, grill_response, grill_phase, grill_action,
-                            last_applied_agent_state_sequence, grill_action_started_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
+                            last_applied_agent_state_sequence, grill_action_started_at,
+                            cli_configuration_profile_json)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
                         params![
                             run.id,
                             run.item_id,
@@ -473,6 +571,13 @@ impl SqliteStore {
                             run.grill_action.map(grill_continuation_action_as_str),
                             run.last_applied_agent_state_sequence,
                             run.grill_action_started_at,
+                            run.cli_configuration_profile
+                                .as_ref()
+                                .map(serde_json::to_string)
+                                .transpose()
+                                .map_err(|error| {
+                                    rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                                })?,
                         ],
                     )?;
                     transaction.execute(
@@ -903,13 +1008,14 @@ impl SqliteStore {
                 }
                 Effect::PersistLink { link, next_link_id } => {
                     transaction.execute(
-                        "INSERT INTO external_links (id, item_id, external_object_id, purpose)
-                         VALUES (?1, ?2, ?3, ?4)",
+                        "INSERT INTO external_links (id, item_id, external_object_id, purpose, spec_external_object_id)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
                         params![
                             link.id,
                             link.item_id,
                             link.external_object_id,
-                            link_purpose_as_str(link.purpose)
+                            link_purpose_as_str(link.purpose),
+                            link.spec_external_object_id
                         ],
                     )?;
                     persist_link_state(&transaction, link)?;
@@ -1000,8 +1106,12 @@ fn persist_link_state(
     link: &Link,
 ) -> Result<(), rusqlite::Error> {
     transaction.execute(
-        "UPDATE external_links SET purpose = ?1 WHERE id = ?2",
-        params![link_purpose_as_str(link.purpose), link.id],
+        "UPDATE external_links SET purpose = ?1, spec_external_object_id = ?2 WHERE id = ?3",
+        params![
+            link_purpose_as_str(link.purpose),
+            link.spec_external_object_id,
+            link.id
+        ],
     )?;
     let (title_attention, state_attention, metadata_attention) = link
         .attention_policy

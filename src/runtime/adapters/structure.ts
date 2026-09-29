@@ -1,5 +1,7 @@
 import type {
   Context,
+  ContextConfiguration,
+  CliProfileSettingsView,
   ContextAttentionDefault,
   Machine,
   MachineDeletionPreview,
@@ -22,6 +24,7 @@ import type {
   GrillAgentCatalog,
   GrillConfiguration,
 } from "../types";
+import type { AgentKind } from "../execution-types";
 import { command } from "./tauri";
 
 export const structureAdapter = {
@@ -30,15 +33,26 @@ export const structureAdapter = {
   listRepositories: () => command<Repository[]>("list_repositories"),
   listRepositoryLocations: () => command<RepositoryLocation[]>("list_repository_locations"),
   listMachines: () => command<Machine[]>("list_machines"),
+  listCliConfigurationProfiles: () => command<CliProfileSettingsView[]>("list_cli_configuration_profiles"),
   listAttentionDefaults: () =>
     command<ContextAttentionDefault[]>("list_context_attention_defaults"),
   listGrillModelCatalog: () =>
     command<GrillAgentCatalog[]>("list_grill_model_catalog"),
   createContext: (name: string) => command<Context>("create_context", { name }),
+  createContextConfiguration: (configuration: ContextConfiguration) =>
+    command<Context>("create_context_configuration", { configuration }),
   updateContext: (contextId: number, name: string) =>
     command<Context>("update_context", { contextId, name }),
+  updateContextConfiguration: (contextId: number, configuration: ContextConfiguration) =>
+    command<Context>("update_context_configuration", { contextId, configuration }),
   setContextExecutionMachine: (contextId: number, machineId: number | null) =>
     command<Context>("set_context_execution_machine", { contextId, machineId }),
+  createCliConfigurationProfile: (input: { machineId: number; provider: AgentKind; name: string; appManaged: boolean; existingDirectory: string | null }) =>
+    command<CliProfileSettingsView>("create_cli_configuration_profile", input),
+  setContextCliConfigurationProfile: (contextId: number, provider: AgentKind, profileId: number | null) =>
+    command<Context>("set_context_cli_configuration_profile", { contextId, provider, profileId }),
+  deleteCliConfigurationProfile: (profileId: number) =>
+    command<void>("delete_cli_configuration_profile", { profileId }),
   createProject: (
     name: string,
     contextId: number,
@@ -208,6 +222,8 @@ export const structureAdapter = {
     command<Context>("set_context_grill_defaults", { contextId, defaults }),
   setContextImplementDefaults: (contextId: number, defaults: GrillConfiguration) =>
     command<Context>("set_context_implement_defaults", { contextId, defaults }),
+  setContextDirtyCheckoutCheck: (contextId: number, enabled: boolean) =>
+    command<Context>("set_context_dirty_checkout_check", { contextId, enabled }),
   createItem: (title: string, contextId: number, projectId: number) =>
     command<Item>("create_item", { title, contextId, projectId }),
 };

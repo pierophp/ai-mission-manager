@@ -6,17 +6,63 @@ use tempfile::tempdir;
 
 use crate::domain::{
     compose_grill_prompt, decide, format_grill_response, grill_skill_snapshot,
-    parse_grill_question_group, AgentKind, AuditAction, ConfirmedDownstreamIssue,
-    DownstreamIssueDiscovery, Effect, Event, GrillAnswer, GrillConfiguration,
-    GrillContinuationAction, GrillPhase, ImplementationQueue, ImplementationQueueEntry,
-    ImplementationQueuePauseReason, LinkProvenance, MachineTransport, RunCheckout,
-    WorkspaceRepositoryInput,
+    parse_grill_question_group, AgentKind, AuditAction, CliConfigurationProfile,
+    CliConfigurationProfileIdentity, ConfirmedDownstreamIssue, DownstreamIssueDiscovery, Effect,
+    Event, GrillAnswer, GrillConfiguration, GrillContinuationAction, GrillLanguage, GrillPhase,
+    ImplementationQueue, ImplementationQueueEntry, ImplementationQueuePauseReason, LinkProvenance,
+    MachineTransport, RunCheckout, WorkspaceRepositoryInput,
 };
 
 use super::{
     schema::{migrate_legacy_workset_data, table_columns},
     SqliteStore,
 };
+
+#[test]
+fn legacy_app_wide_github_executable_is_copied_to_each_existing_context_once() {
+    let directory = tempdir().expect("temporary directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let legacy_path = Path::new("/legacy/tools/gh");
+    let mut store = SqliteStore::open(&database).expect("database should open");
+    store
+        .connection
+        .execute("INSERT INTO contexts (id, name) VALUES (2, 'Research')", [])
+        .expect("second legacy Context should be inserted");
+    store
+        .set_gh_executable_path(legacy_path)
+        .expect("legacy app-wide gh path should be stored");
+    store
+        .connection
+        .execute("UPDATE contexts SET gh_executable_path = NULL", [])
+        .expect("Context paths should be cleared to model the old schema");
+    store
+        .connection
+        .execute(
+            "UPDATE metadata SET value = 0 WHERE key = 'contexts_gh_path_migrated'",
+            [],
+        )
+        .expect("legacy migration should be reset for the fixture");
+    drop(store);
+
+    let migrated = SqliteStore::open(&database).expect("legacy database should migrate");
+    let state = migrated
+        .load_state()
+        .expect("migrated Contexts should load");
+    assert_eq!(state.contexts.len(), 2);
+    assert!(state
+        .contexts
+        .iter()
+        .all(|context| context.gh_executable_path.as_deref() == Some("/legacy/tools/gh")));
+    let migration_done: i64 = migrated
+        .connection
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'contexts_gh_path_migrated'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("migration completion should be recorded");
+    assert_eq!(migration_done, 1);
+}
 
 fn apply_event(
     store: &mut SqliteStore,
@@ -294,6 +340,89 @@ fn context_execution_machine_round_trips() {
             .execution_machine_id,
         None
     );
+}
+
+#[test]
+fn cli_profiles_and_independent_context_selections_round_trip() {
+    let directory = tempdir().expect("temporary directory should exist");
+    let database = directory.path().join("mission-manager.sqlite");
+    let mut store = SqliteStore::open(&database).expect("database should open");
+    let state = store.load_state().expect("initial state should load");
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::RegisterMachine {
+            context_id: 1,
+            name: "Build Mac".into(),
+            socket_name: "mission".into(),
+            transport: MachineTransport::Local,
+        },
+    );
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::SetContextExecutionMachine {
+            context_id: 1,
+            machine_id: Some(1),
+        },
+    );
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::CreateCliConfigurationProfile {
+            machine_id: 1,
+            provider: AgentKind::Claude,
+            name: "Personal Claude".into(),
+            directory: "/profiles/claude".into(),
+            app_managed: true,
+        },
+    );
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::CreateCliConfigurationProfile {
+            machine_id: 1,
+            provider: AgentKind::Codex,
+            name: "Work Codex".into(),
+            directory: "/profiles/codex".into(),
+            app_managed: false,
+        },
+    );
+    let state = apply_event(
+        &mut store,
+        state,
+        Event::SetContextCliConfigurationProfile {
+            context_id: 1,
+            provider: AgentKind::Claude,
+            profile_id: Some(1),
+        },
+    );
+    let _state = apply_event(
+        &mut store,
+        state,
+        Event::SetContextCliConfigurationProfile {
+            context_id: 1,
+            provider: AgentKind::Codex,
+            profile_id: Some(2),
+        },
+    );
+
+    let reloaded = SqliteStore::open(&database)
+        .expect("database should reopen")
+        .load_state()
+        .expect("profiles and selections should reload");
+    assert_eq!(reloaded.cli_configuration_profiles.len(), 2);
+    assert_eq!(
+        reloaded.cli_configuration_profiles[0].directory,
+        "/profiles/claude"
+    );
+    assert!(reloaded.cli_configuration_profiles[0].app_managed);
+    assert_eq!(
+        reloaded.cli_configuration_profiles[1].provider,
+        AgentKind::Codex
+    );
+    assert_eq!(reloaded.contexts[0].claude_profile_id, Some(1));
+    assert_eq!(reloaded.contexts[0].codex_profile_id, Some(2));
 }
 
 #[test]
@@ -626,6 +755,7 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
     let database_path = directory.path().join("mission-manager.sqlite");
     let mut store = SqliteStore::open(&database_path).expect("database should open");
     let mut state = store.load_state().expect("initial state should load");
+    assert!(state.contexts[0].check_dirty_checkouts);
 
     state = apply_event(
         &mut store,
@@ -687,6 +817,17 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
         },
     );
 
+    state
+        .cli_configuration_profiles
+        .push(CliConfigurationProfile {
+            id: 1,
+            machine_id: 1,
+            provider: AgentKind::Codex,
+            name: "Build identity".into(),
+            directory: "/profiles/codex-build".into(),
+            app_managed: false,
+        });
+    state.contexts[0].codex_profile_id = Some(1);
     let configuration = GrillConfiguration {
         agent: AgentKind::Codex,
         model: "gpt-6-luna".into(),
@@ -712,10 +853,19 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
             },
         },
     );
+    state = apply_event(
+        &mut store,
+        state,
+        Event::SetContextDirtyCheckoutCheck {
+            context_id: 1,
+            enabled: false,
+        },
+    );
     let prompt = compose_grill_prompt(
         &state,
         1,
         &configuration,
+        GrillLanguage::default(),
         "Stress-test the proposed architecture.",
     )
     .expect("Grill prompt should compose");
@@ -754,6 +904,14 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
         .expect("the database should add the nullable sequence column");
     state = store.load_state().expect("legacy Run should load");
     assert_eq!(state.runs[0].last_applied_agent_state_sequence, None);
+    assert_eq!(
+        state.runs[0].cli_configuration_profile,
+        Some(CliConfigurationProfileIdentity {
+            profile_id: 1,
+            provider: AgentKind::Codex,
+            name: "Build identity".into(),
+        })
+    );
     let question_group = parse_grill_question_group(
             "❓ Q1: Which direction?\n➡️ Keep the current design\nA) Keep it\nB) Replace it\n❓ Q2: What should we document?",
         )
@@ -817,6 +975,7 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
     assert_eq!(reloaded.contexts[0].grill_defaults.effort, "xhigh");
     assert_eq!(reloaded.contexts[0].implement_defaults.model, "gpt-6-sol");
     assert_eq!(reloaded.contexts[0].implement_defaults.effort, "medium");
+    assert!(!reloaded.contexts[0].check_dirty_checkouts);
     assert_eq!(
         reloaded.runs[0].execution_profile,
         crate::domain::ExecutionProfile::Grill
@@ -886,6 +1045,8 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
                     fetched_at: 456,
                 },
                 discovery: DownstreamIssueDiscovery::StructuredEvent,
+                ordinal: Some(3),
+                blocked_by: vec!["https://github.com/acme/app/issues/6".into()],
             }],
         },
     );
@@ -905,6 +1066,8 @@ fn round_trips_context_grill_defaults_and_run_snapshot() {
             run_id: 1,
             action: GrillContinuationAction::ToTickets,
             discovery: DownstreamIssueDiscovery::StructuredEvent,
+            ordinal: Some(3),
+            blocked_by: vec!["https://github.com/acme/app/issues/6".into()],
         })
     );
 }
@@ -973,4 +1136,57 @@ fn preserves_settings_executable_paths_audit_history_and_sequences() {
         )
         .expect("audit sequence should load");
     assert_eq!(next_audit_id, 3);
+}
+
+#[test]
+fn classification_migration_preserves_existing_external_objects_and_attention_defaults() {
+    let directory = tempdir().expect("temporary directory should exist");
+    let database_path = directory.path().join("mission-manager.sqlite");
+    let store = SqliteStore::open(&database_path).expect("database should open");
+    drop(store);
+
+    // Rebuild the two tables with the previous enum constraints to model a database
+    // created by an earlier release, keeping the same stable table names.
+    let connection = rusqlite::Connection::open(&database_path).expect("database should reopen");
+    connection
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             DROP TABLE external_objects;
+             CREATE TABLE external_objects (
+                 id INTEGER PRIMARY KEY NOT NULL,
+                 provider TEXT NOT NULL CHECK (provider IN ('github', 'generic')),
+                 kind TEXT NOT NULL CHECK (kind IN ('issue', 'pull_request', 'generic')),
+                 external_key TEXT NOT NULL,
+                 canonical_url TEXT NOT NULL,
+                 UNIQUE (provider, external_key)
+             );
+             INSERT INTO external_objects VALUES
+                 (91, 'generic', 'generic', 'https://example.com/old', 'https://example.com/old');
+             DROP TABLE context_attention_defaults;
+             CREATE TABLE context_attention_defaults (
+                 context_id INTEGER NOT NULL REFERENCES contexts(id) ON DELETE CASCADE,
+                 object_kind TEXT NOT NULL CHECK (object_kind IN ('issue', 'pull_request', 'generic')),
+                 title_attention INTEGER NOT NULL,
+                 state_attention INTEGER NOT NULL,
+                 metadata_attention INTEGER NOT NULL,
+                 PRIMARY KEY (context_id, object_kind)
+             );
+             INSERT INTO context_attention_defaults VALUES (1, 'generic', 1, 0, 1);",
+        )
+        .expect("legacy schema should be written");
+    drop(connection);
+
+    let migrated = SqliteStore::open(&database_path)
+        .expect("legacy database should migrate")
+        .load_state()
+        .expect("migrated state should load");
+    assert_eq!(migrated.external_objects.len(), 1);
+    assert_eq!(migrated.external_objects[0].id, 91);
+    assert_eq!(
+        migrated.external_objects[0].external_key,
+        "https://example.com/old"
+    );
+    assert_eq!(migrated.attention_defaults.len(), 1);
+    assert_eq!(migrated.attention_defaults[0].policy.title, true);
+    assert_eq!(migrated.attention_defaults[0].policy.state, false);
 }

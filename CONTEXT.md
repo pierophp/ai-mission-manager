@@ -7,7 +7,7 @@ A personal control plane for work that is done by the user, delegated to AI codi
 ### Organising work
 
 **Context**:
-A top-level boundary isolating one area of work, along with its providers, repositories and Machines. A Context may have no execution Machine while being configured; once one is assigned, every Run and Worktree in that Context uses it. An Item belongs to exactly one Context.
+A top-level boundary isolating one area of work, along with its providers and repositories. A Context may have no execution Machine while being configured; once one is assigned, every Run and Worktree in that Context uses it. An Item belongs to exactly one Context.
 _Avoid_: workspace, tenant, account, area
 
 **Project**:
@@ -23,6 +23,14 @@ _Avoid_: task, ticket, issue, card, mission
 **External Object**:
 A single thing owned by an external system — a GitHub Issue, a pull request, a Jira work item. It exists once no matter how many Items refer to it.
 _Avoid_: ticket, remote item, upstream object
+
+**Spec**:
+An External Object or local Markdown document linked to an Item as the description of work to be done. It may have Tickets that break the work down for an Implementation Queue.
+_Avoid_: plan, parent issue
+
+**Ticket**:
+An External Object or local Markdown file linked to a Spec as one implementable piece of work, with its own order and blocking relationships for an Implementation Queue.
+_Avoid_: task, sub-issue
 
 **Link**:
 The pairing of one Item with one External Object, carrying the user's own state about it: which changes they care about, and how far they have reviewed.
@@ -43,8 +51,12 @@ The external program that owns terminal processes, sessions and Panes and keeps 
 _Avoid_: multiplexer, terminal, tmux
 
 **Machine**:
-An execution target reachable through the Terminal Runtime, whether the local Mac or a remote host.
+An execution target reachable through the Terminal Runtime, whether the local Mac or a remote host. A Machine is registered under one Context and may be assigned as the execution Machine for multiple Contexts.
 _Avoid_: host, server, node
+
+**Agent CLI Configuration Profile**:
+A named configuration directory for Claude Code or Codex on one Machine. Contexts assigned to that Machine can reuse its profiles independently for each provider.
+_Avoid_: Execution Profile, account
 
 **Run**:
 One attempt at doing work on an Item by a single agent, using a Repository checkout configured for the Item's Project, either directly or through one physical Worktree. Runs are historical records while they are retained, but finished Runs may be explicitly deleted as part of local cleanup; an active Run blocks deletion of its Item, Machine, Project, or Context.
@@ -55,11 +67,11 @@ A single terminal owned by the Terminal Runtime. A Pane running an agent is what
 _Avoid_: terminal, tab, window
 
 **Execution Profile**:
-The kind of instruction prepared for an agent when a Run starts — investigate, implement, review, or a custom prompt.
+The kind of instruction prepared for an agent when a Run starts — investigate, implement, review, grill, or a custom prompt.
 _Avoid_: mode, template, preset
 
 **Implementation Queue**:
-An ordered selection of open GitHub sub-issues from an Item's linked spec. It records the launch configuration, checkout approvals, and the Run attached to its first entry; only one active queue may exist per Item.
+An ordered selection of open Tickets linked to an Item's Spec, arranged by their captured order and blocking relationships. It records the launch configuration, checkout approvals, and the Run attached to its first entry; only one active queue may exist per Item.
 _Avoid_: batch, ticket batch
 
 ### Attention

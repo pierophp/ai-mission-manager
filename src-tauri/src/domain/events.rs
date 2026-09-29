@@ -4,13 +4,39 @@ pub enum Event {
     CreateContext {
         name: String,
     },
+    CreateContextConfiguration {
+        configuration: ContextConfiguration,
+    },
     UpdateContext {
         context_id: i64,
         name: String,
     },
+    UpdateContextConfiguration {
+        context_id: i64,
+        configuration: ContextConfiguration,
+    },
     SetContextExecutionMachine {
         context_id: i64,
         machine_id: Option<i64>,
+    },
+    CreateCliConfigurationProfile {
+        machine_id: i64,
+        provider: AgentKind,
+        name: String,
+        directory: String,
+        app_managed: bool,
+    },
+    SetContextCliConfigurationProfile {
+        context_id: i64,
+        provider: AgentKind,
+        profile_id: Option<i64>,
+    },
+    DeleteCliConfigurationProfile {
+        profile_id: i64,
+    },
+    SetContextDirtyCheckoutCheck {
+        context_id: i64,
+        enabled: bool,
     },
     SetContextGrillDefaults {
         context_id: i64,
@@ -298,6 +324,7 @@ pub enum Event {
     SetLinkPurpose {
         link_id: i64,
         purpose: LinkPurpose,
+        spec_external_object_id: Option<i64>,
     },
     SetLinkReviewAt {
         link_id: i64,
@@ -345,6 +372,17 @@ pub enum Effect {
     },
     UpdateContext {
         context: Context,
+    },
+    PersistContextConfiguration {
+        context: Context,
+        attention_defaults: Vec<ContextAttentionDefault>,
+    },
+    PersistCliConfigurationProfile {
+        profile: CliConfigurationProfile,
+        next_cli_profile_id: i64,
+    },
+    RemoveCliConfigurationProfile {
+        profile_id: i64,
     },
     PersistContextGrillDefaults {
         context: Context,

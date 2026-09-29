@@ -33,6 +33,7 @@ import type {
   GrillAgentCatalog,
   GrillAnswer,
   GrillConfiguration,
+  GrillLanguage,
   ItemView,
   Machine,
   Repository,
@@ -57,7 +58,7 @@ import { itemExecution, useFormIntent } from "./shared";
 /** Unsent Grill answers, keyed by question round, kept across Item switches. */
 export type GrillAnswerDrafts = Record<string, Record<number, string>>;
 
-const runForms = ["grill", "direct-run"] as const;
+const runForms = ["run"] as const;
 
 export function RunsTab({
   view,
@@ -91,12 +92,14 @@ export function RunsTab({
     contexts,
     machines,
   );
-  const [runForm, setRunForm] = useState<"grill" | "direct">();
+  const [runForm, setRunForm] = useState<"run">();
   const grillSubmissionLocks = useRef(new Set<string>());
 
   useEffect(() => {
     if (!focusedRunRequest) return;
-    const runCard = document.getElementById(`run-card-${focusedRunRequest.runId}`);
+    const runCard = document.getElementById(
+      `run-card-${focusedRunRequest.runId}`,
+    );
     runCard?.scrollIntoView({ behavior: "smooth", block: "center" });
     runCard?.focus({ preventScroll: true });
   }, [focusedRunRequest]);
@@ -105,11 +108,19 @@ export function RunsTab({
   const [runAgent, setRunAgent] = useState<AgentKind>("claude");
   const [runModel, setRunModel] = useState("claude-sonnet-4-5");
   const [runEffort, setRunEffort] = useState("high");
-  const [runProfile, setRunProfile] = useState<ExecutionProfile>("implement");
+  const [runProfile, setRunProfile] = useState<ExecutionProfile>("grill");
   const [includeRunNotes, setIncludeRunNotes] = useState(false);
   const [runCustomPrompt, setRunCustomPrompt] = useState("");
   const [runPrompt, setRunPrompt] = useState("");
   const [runPromptNeedsCompose, setRunPromptNeedsCompose] = useState(false);
+  const runPromptDrafts = useRef<
+    Partial<
+      Record<
+        Exclude<ExecutionProfile, "grill">,
+        { prompt: string; needsCompose: boolean }
+      >
+    >
+  >({});
   const [directRunWorkspaceId, setDirectRunWorkspaceId] = useState<number>();
   const [directRunRepositoryId, setDirectRunRepositoryId] = useState<number>();
   const [directRunPreview, setDirectRunPreview] = useState<DirectRunPreview>();
@@ -124,15 +135,19 @@ export function RunsTab({
   const [grillRunPreviewError, setGrillRunPreviewError] = useState<string>();
   const [grillAgent, setGrillAgent] =
     useState<GrillConfiguration["agent"]>("claude");
+  const [grillLanguage, setGrillLanguage] =
+    useState<GrillLanguage>("portuguese");
   const [grillModel, setGrillModel] = useState("claude-sonnet-4-5");
   const [grillEffort, setGrillEffort] = useState("high");
   const [grillInitialPrompt, setGrillInitialPrompt] = useState("");
   const [grillPromptPreview, setGrillPromptPreview] = useState("");
+  const [lastComposedGrillPrompt, setLastComposedGrillPrompt] = useState("");
+  const [grillPromptNeedsCompose, setGrillPromptNeedsCompose] = useState(true);
   const [grillDirtyConfirmed, setGrillDirtyConfirmed] = useState(false);
   const [grillSharedConfirmed, setGrillSharedConfirmed] = useState(false);
 
-  const activeGrillRun = view.runs.find(
-    (run) => run.execution_profile === "grill" && !isRunFinished(run),
+  const runsNewestFirst = [...view.runs].sort(
+    (left, right) => right.started_at - left.started_at || right.id - left.id,
   );
   const selectedGrillCatalog = grillModelCatalog.find(
     (catalog) => catalog.agent === grillAgent,
@@ -142,10 +157,7 @@ export function RunsTab({
   );
 
   function openRunForm(form: ItemForm) {
-    if (form === "grill" && !activeGrillRun) openGrillStart();
-    if (form === "direct-run" && view.workspaces[0]) {
-      void openDirectRunPreview(view.workspaces[0]);
-    }
+    if (form === "run") openRun();
   }
 
   useFormIntent(intent, runForms, openRunForm);
@@ -155,21 +167,34 @@ export function RunsTab({
     setDirectRunWorkspaceId(undefined);
     setDirectRunPreview(undefined);
     setRunPrompt("");
+    setRunPromptNeedsCompose(false);
+    runPromptDrafts.current = {};
     setGrillRunWorkspaceId(undefined);
     setGrillRunPreview(undefined);
     setGrillRunPreviewError(undefined);
     setGrillPromptPreview("");
+    setLastComposedGrillPrompt("");
+    setGrillPromptNeedsCompose(true);
+  }
+
+  function openRun() {
+    openGrillStart();
   }
 
   function openGrillStart() {
     const defaults = itemContext?.grill_defaults;
     const executionWorkspaceId = view.workspaces[0]?.id;
-    setRunForm("grill");
+    setRunForm("run");
+    setRunProfile("grill");
+    setRunCustomPrompt("");
     setGrillAgent(defaults?.agent ?? "claude");
+    setGrillLanguage("portuguese");
     setGrillModel(defaults?.model ?? "claude-sonnet-4-5");
     setGrillEffort(defaults?.effort ?? "high");
     setGrillInitialPrompt("");
     setGrillPromptPreview("");
+    setLastComposedGrillPrompt("");
+    setGrillPromptNeedsCompose(true);
     void refreshGrillRunPreview(executionWorkspaceId);
   }
 
@@ -206,20 +231,35 @@ export function RunsTab({
     if (!grillInitialPrompt.trim() || !selectedGrillModel) return;
     await whileSaving(async () => {
       try {
-        setGrillPromptPreview(
-          await workCommand.execute(
-            workActions.composeGrillPrompt(
-              view.item.id,
-              { agent: grillAgent, model: grillModel, effort: grillEffort },
-              grillInitialPrompt,
-            ),
-            false,
+        const prompt = await workCommand.execute(
+          workActions.composeGrillPrompt(
+            view.item.id,
+            { agent: grillAgent, model: grillModel, effort: grillEffort },
+            grillLanguage,
+            grillInitialPrompt,
           ),
+          false,
         );
+        setGrillPromptPreview(prompt);
+        setLastComposedGrillPrompt(prompt);
+        setGrillPromptNeedsCompose(false);
       } catch (composeError) {
         window.alert(errorMessage(composeError));
       }
     });
+  }
+
+  function handleComposeGrillPromptPreview() {
+    if (grillPromptPreview !== lastComposedGrillPrompt) {
+      confirm({
+        title: "Replace your edited Grill prompt?",
+        description: "Composing again will replace the full prompt you edited.",
+        confirmLabel: "Replace prompt",
+        onConfirm: () => void composeGrillPromptPreview(),
+      });
+      return;
+    }
+    void composeGrillPromptPreview();
   }
 
   async function handleStartGrillRun(event: FormEvent<HTMLFormElement>) {
@@ -229,7 +269,9 @@ export function RunsTab({
       !grillRunPreview ||
       !grillRunRepositoryId ||
       !selectedGrillModel ||
-      !grillInitialPrompt.trim()
+      !grillInitialPrompt.trim() ||
+      !grillPromptPreview.trim() ||
+      grillPromptNeedsCompose
     ) {
       return;
     }
@@ -245,12 +287,13 @@ export function RunsTab({
         workspaceId: grillRunWorkspaceId,
         primaryRepositoryId: grillRunRepositoryId,
         machineId: null,
+        language: grillLanguage,
         configuration: {
           agent: grillAgent,
           model: grillModel,
           effort: grillEffort,
         },
-        initialPrompt: grillInitialPrompt,
+        prompt: grillPromptPreview,
         expectedCheckouts: grillRunPreview.checkouts,
         allowDirty: grillRunPreview.dirtyRepositoryIds.length > 0,
         allowSharedCheckouts: grillRunPreview.sharedPaths.length > 0,
@@ -281,7 +324,10 @@ export function RunsTab({
     });
   }
 
-  async function handleContinueGrill(run: Run, action: GrillContinuationAction) {
+  async function handleContinueGrill(
+    run: Run,
+    action: GrillContinuationAction,
+  ) {
     await saveItem(workActions.continueGrill(run.id, action));
   }
 
@@ -293,41 +339,65 @@ export function RunsTab({
     };
   }
 
-  async function composeRunPromptPreview() {
+  function selectRunProfile(profile: ExecutionProfile) {
+    if (runProfile !== "grill") {
+      runPromptDrafts.current[runProfile] = {
+        prompt: runPrompt,
+        needsCompose: runPromptNeedsCompose,
+      };
+    }
+    setRunProfile(profile);
+    if (profile !== "grill") {
+      const draft = runPromptDrafts.current[profile];
+      setRunPrompt(draft?.prompt ?? "");
+      setRunPromptNeedsCompose(draft?.needsCompose ?? true);
+      const workspace = view.workspaces[0];
+      if (!directRunPreview && workspace) {
+        void openDirectRunPreview(workspace, profile);
+      }
+    }
+  }
+
+  async function composeRunPromptPreview(
+    profile: Exclude<ExecutionProfile, "grill"> = runProfile === "grill"
+      ? "implement"
+      : runProfile,
+  ) {
     if (!directRunWorkspaceId) return;
     await whileSaving(async () => {
       try {
-        setRunPrompt(
-          await workCommand.execute(
-            workActions.composeRunPrompt(
-              view.item.id,
-              runProfile,
-              runPromptSelection(),
-              runProfile === "custom" ? runCustomPrompt : null,
-            ),
-            false,
+        const prompt = await workCommand.execute(
+          workActions.composeRunPrompt(
+            view.item.id,
+            profile,
+            runPromptSelection(),
+            profile === "custom" ? runCustomPrompt : null,
           ),
+          false,
         );
+        setRunPrompt(prompt);
         setRunPromptNeedsCompose(false);
+        runPromptDrafts.current[profile] = { prompt, needsCompose: false };
       } catch (composeError) {
         window.alert(errorMessage(composeError));
       }
     });
   }
 
-  async function openDirectRunPreview(workspace: Workspace) {
+  async function openDirectRunPreview(
+    workspace: Workspace,
+    profile: Exclude<ExecutionProfile, "grill"> = "implement",
+  ) {
     const defaults = itemContext?.implement_defaults;
     setRunAgent(defaults?.agent ?? "claude");
     setRunModel(defaults?.model ?? "claude-sonnet-4-5");
     setRunEffort(defaults?.effort ?? "high");
     const includeNotes = Boolean(view.item.notes.trim());
-    setRunForm("direct");
     setDirectRunWorkspaceId(workspace.id);
     setDirectRunRepositoryId(undefined);
     setDirectRunPreview(undefined);
     setDirectRunDirtyConfirmed(false);
     setDirectRunSharedConfirmed(false);
-    setRunProfile("implement");
     setIncludeRunNotes(includeNotes);
     setRunCustomPrompt("");
     await whileSaving(async () => {
@@ -336,9 +406,9 @@ export function RunsTab({
           workCommand.execute(
             workActions.composeRunPrompt(
               view.item.id,
-              "implement",
+              profile,
               { includeObjective: true, includeNotes, externalObjectIds: [] },
-              null,
+              profile === "custom" ? runCustomPrompt : null,
             ),
             false,
           ),
@@ -349,6 +419,7 @@ export function RunsTab({
         ]);
         setRunPrompt(prompt);
         setRunPromptNeedsCompose(false);
+        runPromptDrafts.current[profile] = { prompt, needsCompose: false };
         setDirectRunPreview(preview);
       } catch (previewError) {
         closeRunForm();
@@ -369,7 +440,8 @@ export function RunsTab({
       return;
     }
     const dirtyConfirmed =
-      directRunPreview.dirtyRepositoryIds.length === 0 || directRunDirtyConfirmed;
+      directRunPreview.dirtyRepositoryIds.length === 0 ||
+      directRunDirtyConfirmed;
     const sharedConfirmed =
       directRunPreview.sharedPaths.length === 0 || directRunSharedConfirmed;
     if (!dirtyConfirmed || !sharedConfirmed) return;
@@ -381,7 +453,10 @@ export function RunsTab({
         primaryRepositoryId: directRunRepositoryId,
         machineId: null,
         agent: runAgent,
-        configuration: runProfile === "implement" ? { agent: runAgent, model: runModel, effort: runEffort } : undefined,
+        configuration:
+          runProfile === "implement"
+            ? { agent: runAgent, model: runModel, effort: runEffort }
+            : undefined,
         executionProfile: runProfile,
         prompt: runPrompt,
         promptSelection: runPromptSelection(),
@@ -423,7 +498,7 @@ export function RunsTab({
     });
   }
 
-  if (runForm === "grill") {
+  if (runForm === "run" && runProfile === "grill") {
     return (
       <form
         className="grid gap-4 rounded-lg border border-primary/30 bg-primary/5 p-4"
@@ -431,15 +506,38 @@ export function RunsTab({
       >
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h4 className="m-0 text-base font-medium">Start Grill Run</h4>
+            <h4 className="m-0 text-base font-medium">Start Run</h4>
             <p className="mt-1 text-sm text-muted-foreground">
-              The Run uses this Item’s Context defaults unless you override them here.
+              The Run uses this Item’s Context defaults unless you override them
+              here.
             </p>
           </div>
           {grillRunPreview && (
-            <Badge variant="outline">Machine: {grillRunPreview.machineName}</Badge>
+            <Badge variant="outline">
+              Machine: {grillRunPreview.machineName}
+            </Badge>
           )}
         </div>
+        <label className="grid gap-1.5 text-sm font-medium">
+          <span>Execution Profile</span>
+          <NativeSelect
+            value={runProfile}
+            onChange={(event) =>
+              selectRunProfile(event.target.value as ExecutionProfile)
+            }
+            disabled={isSaving}
+          >
+            <NativeSelectOption value="investigate">
+              Investigate
+            </NativeSelectOption>
+            <NativeSelectOption value="implement">Implement</NativeSelectOption>
+            <NativeSelectOption value="review">Review</NativeSelectOption>
+            <NativeSelectOption value="custom">
+              Custom prompt
+            </NativeSelectOption>
+            <NativeSelectOption value="grill">Grill</NativeSelectOption>
+          </NativeSelect>
+        </label>
         {itemRepositories.length === 0 && (
           <Alert variant="destructive">
             <AlertTitle>Project Repository required</AlertTitle>
@@ -491,7 +589,9 @@ export function RunsTab({
               <NativeSelect
                 value={grillRunRepositoryId ?? ""}
                 onChange={(event) =>
-                  setGrillRunRepositoryId(Number(event.target.value) || undefined)
+                  setGrillRunRepositoryId(
+                    Number(event.target.value) || undefined,
+                  )
                 }
                 disabled={isSaving}
               >
@@ -557,7 +657,8 @@ export function RunsTab({
             <NativeSelect
               value={grillAgent}
               onChange={(event) => {
-                const nextAgent = event.target.value as GrillConfiguration["agent"];
+                const nextAgent = event.target
+                  .value as GrillConfiguration["agent"];
                 const nextCatalog = grillModelCatalog.find(
                   (catalog) => catalog.agent === nextAgent,
                 );
@@ -565,7 +666,7 @@ export function RunsTab({
                 setGrillAgent(nextAgent);
                 setGrillModel(nextModel?.id ?? "");
                 setGrillEffort(nextModel?.efforts[0]?.id ?? "");
-                setGrillPromptPreview("");
+                setGrillPromptNeedsCompose(true);
               }}
               disabled={isSaving || grillModelCatalog.length === 0}
             >
@@ -586,7 +687,7 @@ export function RunsTab({
                 );
                 setGrillModel(event.target.value);
                 setGrillEffort(nextModel?.efforts[0]?.id ?? "");
-                setGrillPromptPreview("");
+                setGrillPromptNeedsCompose(true);
               }}
               disabled={isSaving || !selectedGrillCatalog}
             >
@@ -603,7 +704,7 @@ export function RunsTab({
               value={grillEffort}
               onChange={(event) => {
                 setGrillEffort(event.target.value);
-                setGrillPromptPreview("");
+                setGrillPromptNeedsCompose(true);
               }}
               disabled={isSaving || !selectedGrillModel}
             >
@@ -615,6 +716,40 @@ export function RunsTab({
             </NativeSelect>
           </label>
         </div>
+        <fieldset className="grid gap-2 text-sm font-medium" disabled={isSaving}>
+          <legend>Response language</legend>
+          <div className="inline-flex w-fit rounded-md border p-1">
+            {([
+              ["portuguese", "Português"],
+              ["english", "English"],
+            ] as const).map(([language, label]) => (
+              <label
+                className={cn(
+                  "cursor-pointer rounded px-3 py-1.5 text-sm transition-colors",
+                  grillLanguage === language
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
+                )}
+                key={language}
+              >
+                <input
+                  checked={grillLanguage === language}
+                  className="peer sr-only"
+                  name="grill-response-language"
+                  onChange={() => {
+                    setGrillLanguage(language);
+                    setGrillPromptNeedsCompose(true);
+                  }}
+                  type="radio"
+                  value={language}
+                />
+                <span className="peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-ring">
+                  {label}
+                </span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
         <label className="grid gap-1.5 text-sm font-medium">
           <span>Initial prompt</span>
           <Textarea
@@ -622,7 +757,7 @@ export function RunsTab({
             value={grillInitialPrompt}
             onChange={(event) => {
               setGrillInitialPrompt(event.target.value);
-              setGrillPromptPreview("");
+              setGrillPromptNeedsCompose(true);
             }}
             rows={3}
             placeholder="What decision, assumption, or plan should the Grill stress-test?"
@@ -631,8 +766,13 @@ export function RunsTab({
         </label>
         {grillPromptPreview && (
           <label className="grid gap-1.5 text-sm font-medium">
-            <span>Composed prompt preview</span>
-            <Textarea value={grillPromptPreview} rows={8} readOnly />
+            <span>Editable composed prompt</span>
+            <Textarea
+              value={grillPromptPreview}
+              onChange={(event) => setGrillPromptPreview(event.target.value)}
+              rows={8}
+              disabled={isSaving}
+            />
           </label>
         )}
         <div className="flex flex-wrap gap-2">
@@ -640,8 +780,10 @@ export function RunsTab({
             type="button"
             size="sm"
             variant="outline"
-            disabled={isSaving || !grillInitialPrompt.trim() || !selectedGrillModel}
-            onClick={() => void composeGrillPromptPreview()}
+            disabled={
+              isSaving || !grillInitialPrompt.trim() || !selectedGrillModel
+            }
+            onClick={handleComposeGrillPromptPreview}
           >
             Preview composed prompt
           </Button>
@@ -652,6 +794,8 @@ export function RunsTab({
               !grillRunPreview ||
               !grillRunRepositoryId ||
               !grillInitialPrompt.trim() ||
+              !grillPromptPreview.trim() ||
+              grillPromptNeedsCompose ||
               !selectedGrillModel ||
               ((grillRunPreview?.dirtyRepositoryIds.length ?? 0) > 0 &&
                 !grillDirtyConfirmed) ||
@@ -659,7 +803,7 @@ export function RunsTab({
                 !grillSharedConfirmed)
             }
           >
-            {isSaving ? "Starting…" : "Start Grill Run"}
+            {isSaving ? "Starting…" : "Start Run"}
           </Button>
           <Button
             type="button"
@@ -675,12 +819,12 @@ export function RunsTab({
     );
   }
 
-  if (runForm === "direct") {
+  if (runForm === "run" && runProfile !== "grill") {
     return (
       <div className="grid gap-4 rounded-lg border border-primary/30 bg-primary/5 p-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <h4 className="m-0 text-base font-medium">Start Direct Run</h4>
+            <h4 className="m-0 text-base font-medium">Start Run</h4>
             <p className="mt-1 text-sm text-muted-foreground">
               This Run will use{" "}
               {executionMachine?.name ?? "the Context execution Machine"}{" "}
@@ -688,7 +832,9 @@ export function RunsTab({
             </p>
           </div>
           {directRunPreview && (
-            <Badge variant="outline">Machine: {directRunPreview.machineName}</Badge>
+            <Badge variant="outline">
+              Machine: {directRunPreview.machineName}
+            </Badge>
           )}
         </div>
         {directRunPreview ? (
@@ -703,7 +849,9 @@ export function RunsTab({
                 autoFocus
                 value={directRunRepositoryId ?? ""}
                 onChange={(event) =>
-                  setDirectRunRepositoryId(Number(event.target.value) || undefined)
+                  setDirectRunRepositoryId(
+                    Number(event.target.value) || undefined,
+                  )
                 }
                 disabled={isSaving}
               >
@@ -724,8 +872,8 @@ export function RunsTab({
               <Alert>
                 <AlertTitle>Repositories are on different branches</AlertTitle>
                 <AlertDescription>
-                  {directRunPreview.currentBranches.join(", ")}. The Run will use
-                  each checkout&apos;s current branch without switching it.
+                  {directRunPreview.currentBranches.join(", ")}. The Run will
+                  use each checkout&apos;s current branch without switching it.
                 </AlertDescription>
               </Alert>
             )}
@@ -775,10 +923,20 @@ export function RunsTab({
                 <span>Agent</span>
                 <NativeSelect
                   value={runAgent}
-                  onChange={(event) => { const agent = event.target.value as AgentKind; const model = grillModelCatalog.find((catalog) => catalog.agent === agent)?.models[0]; setRunAgent(agent); setRunModel(model?.id ?? ""); setRunEffort(model?.efforts[0]?.id ?? ""); }}
+                  onChange={(event) => {
+                    const agent = event.target.value as AgentKind;
+                    const model = grillModelCatalog.find(
+                      (catalog) => catalog.agent === agent,
+                    )?.models[0];
+                    setRunAgent(agent);
+                    setRunModel(model?.id ?? "");
+                    setRunEffort(model?.efforts[0]?.id ?? "");
+                  }}
                   disabled={isSaving}
                 >
-                  <NativeSelectOption value="claude">Claude Code</NativeSelectOption>
+                  <NativeSelectOption value="claude">
+                    Claude Code
+                  </NativeSelectOption>
                   <NativeSelectOption value="codex">Codex</NativeSelectOption>
                 </NativeSelect>
               </label>
@@ -787,19 +945,69 @@ export function RunsTab({
                 <NativeSelect
                   value={runProfile}
                   onChange={(event) => {
-                    setRunProfile(event.target.value as ExecutionProfile);
-                    setRunPromptNeedsCompose(true);
+                    selectRunProfile(event.target.value as ExecutionProfile);
                   }}
                   disabled={isSaving}
                 >
-                  <NativeSelectOption value="investigate">Investigate</NativeSelectOption>
-                  <NativeSelectOption value="implement">Implement</NativeSelectOption>
+                  <NativeSelectOption value="investigate">
+                    Investigate
+                  </NativeSelectOption>
+                  <NativeSelectOption value="implement">
+                    Implement
+                  </NativeSelectOption>
                   <NativeSelectOption value="review">Review</NativeSelectOption>
-                  <NativeSelectOption value="custom">Custom prompt</NativeSelectOption>
+                  <NativeSelectOption value="custom">
+                    Custom prompt
+                  </NativeSelectOption>
+                  <NativeSelectOption value="grill">Grill</NativeSelectOption>
                 </NativeSelect>
               </label>
             </div>
-            {runProfile === "implement" && <div className="grid gap-3 md:grid-cols-2"><label className="grid gap-1.5 text-sm font-medium"><span>Model</span><NativeSelect value={runModel} onChange={(event) => { const model = grillModelCatalog.find((catalog) => catalog.agent === runAgent)?.models.find((candidate) => candidate.id === event.target.value); setRunModel(event.target.value); setRunEffort(model?.efforts[0]?.id ?? ""); }} disabled={isSaving}>{grillModelCatalog.find((catalog) => catalog.agent === runAgent)?.models.map((model) => <NativeSelectOption value={model.id} key={model.id}>{model.label} ({model.id})</NativeSelectOption>)}</NativeSelect></label><label className="grid gap-1.5 text-sm font-medium"><span>Effort</span><NativeSelect value={runEffort} onChange={(event) => setRunEffort(event.target.value)} disabled={isSaving}>{grillModelCatalog.find((catalog) => catalog.agent === runAgent)?.models.find((model) => model.id === runModel)?.efforts.map((effort) => <NativeSelectOption value={effort.id} key={effort.id}>{effort.label} ({effort.id})</NativeSelectOption>)}</NativeSelect></label></div>}
+            {runProfile === "implement" && (
+              <div className="grid gap-3 md:grid-cols-2">
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Model</span>
+                  <NativeSelect
+                    value={runModel}
+                    onChange={(event) => {
+                      const model = grillModelCatalog
+                        .find((catalog) => catalog.agent === runAgent)
+                        ?.models.find(
+                          (candidate) => candidate.id === event.target.value,
+                        );
+                      setRunModel(event.target.value);
+                      setRunEffort(model?.efforts[0]?.id ?? "");
+                    }}
+                    disabled={isSaving}
+                  >
+                    {grillModelCatalog
+                      .find((catalog) => catalog.agent === runAgent)
+                      ?.models.map((model) => (
+                        <NativeSelectOption value={model.id} key={model.id}>
+                          {model.label} ({model.id})
+                        </NativeSelectOption>
+                      ))}
+                  </NativeSelect>
+                </label>
+                <label className="grid gap-1.5 text-sm font-medium">
+                  <span>Effort</span>
+                  <NativeSelect
+                    value={runEffort}
+                    onChange={(event) => setRunEffort(event.target.value)}
+                    disabled={isSaving}
+                  >
+                    {grillModelCatalog
+                      .find((catalog) => catalog.agent === runAgent)
+                      ?.models.find((model) => model.id === runModel)
+                      ?.efforts.map((effort) => (
+                        <NativeSelectOption value={effort.id} key={effort.id}>
+                          {effort.label} ({effort.id})
+                        </NativeSelectOption>
+                      ))}
+                  </NativeSelect>
+                </label>
+              </div>
+            )}
             {runProfile === "custom" && (
               <label className="grid gap-1.5 text-sm font-medium">
                 <span>Custom prompt source</span>
@@ -808,6 +1016,10 @@ export function RunsTab({
                   onChange={(event) => {
                     setRunCustomPrompt(event.target.value);
                     setRunPromptNeedsCompose(true);
+                    runPromptDrafts.current.custom = {
+                      prompt: runPrompt,
+                      needsCompose: true,
+                    };
                   }}
                   rows={3}
                   placeholder="Tell the agent exactly what to do"
@@ -819,7 +1031,13 @@ export function RunsTab({
               <span>Editable composed prompt</span>
               <Textarea
                 value={runPrompt}
-                onChange={(event) => setRunPrompt(event.target.value)}
+                onChange={(event) => {
+                  setRunPrompt(event.target.value);
+                  runPromptDrafts.current[runProfile] = {
+                    prompt: event.target.value,
+                    needsCompose: runPromptNeedsCompose,
+                  };
+                }}
                 rows={6}
                 disabled={isSaving}
               />
@@ -847,7 +1065,7 @@ export function RunsTab({
                     !directRunSharedConfirmed)
                 }
               >
-                {isSaving ? "Starting…" : "Confirm and start Direct Run"}
+                {isSaving ? "Starting…" : "Start Run"}
               </Button>
               <Button
                 type="button"
@@ -876,28 +1094,18 @@ export function RunsTab({
           type="button"
           size="sm"
           variant="outline"
-          disabled={isSaving || Boolean(activeGrillRun)}
-          onClick={openGrillStart}
-        >
-          {activeGrillRun ? "Grill Run already active" : "Start Grill Run"}
-        </Button>
-        <Button
-          type="button"
-          size="sm"
-          variant="outline"
           disabled={isSaving || !view.workspaces[0]}
           onClick={() => {
-            const workspace = view.workspaces[0];
-            if (workspace) void openDirectRunPreview(workspace);
+            openRun();
           }}
         >
-          Start Direct Run
+          Start Run
         </Button>
       </div>
       {view.runs.length === 0 && (
         <span className="text-sm text-muted-foreground">No Runs yet.</span>
       )}
-      {view.runs.map((run) => {
+      {runsNewestFirst.map((run) => {
         const runRepository =
           run.repository_id === null
             ? run.direct_checkouts.find(
@@ -909,15 +1117,22 @@ export function RunsTab({
             ? view.worktrees.find(
                 (worktree) => worktree.path === run.working_directory,
               )
-            : view.worktrees.find((worktree) => worktree.id === run.worktree_id);
+            : view.worktrees.find(
+                (worktree) => worktree.id === run.worktree_id,
+              );
         const questionKey = grillQuestionKey(run);
         const persistedAnswers = Object.fromEntries(
-          run.grill_answers.map((answer) => [answer.questionNumber, answer.answer]),
+          run.grill_answers.map((answer) => [
+            answer.questionNumber,
+            answer.answer,
+          ]),
         );
         const answers = grillDrafts[questionKey] ?? persistedAnswers;
         const skipAction = nextGrillAction(run.grill_action);
         // A step that already ran is not offered again as the next action.
-        const nextActions = (["to-spec", "to-tickets", "implement"] as const).filter(
+        const nextActions = (
+          ["to-spec", "to-tickets", "implement"] as const
+        ).filter(
           (action) => !(action === "to-spec" && run.grill_action === "to-spec"),
         );
         return (
@@ -934,7 +1149,10 @@ export function RunsTab({
             <CardContent className="grid gap-2 pt-4">
               <div>
                 <strong className="block text-sm">
-                  Run #{run.id} · {run.agent === "claude" ? "Claude Code" : "Codex"}
+                  Run #{run.id} ·{" "}
+                  {run.agent === "claude" ? "Claude Code" : "Codex"}
+                  {run.cli_configuration_profile &&
+                    ` · ${run.cli_configuration_profile.name}`}
                 </strong>
                 <span className="text-xs text-muted-foreground">
                   {run.execution_profile} ·{" "}
@@ -943,7 +1161,8 @@ export function RunsTab({
                     : ""}
                   {machines.find((machine) => machine.id === run.machine_id)
                     ?.name ?? "Machine #" + run.machine_id}{" "}
-                  · {runStateLabel(run.state, run.execution_profile === "grill")}
+                  ·{" "}
+                  {runStateLabel(run.state, run.execution_profile === "grill")}
                   {run.execution_profile === "grill" && run.grill_phase
                     ? ` · ${grillPhaseLabel(run.grill_phase)}`
                     : ""}
@@ -967,7 +1186,8 @@ export function RunsTab({
                 Session {run.session_name} · Pane {run.pane_id}
               </span>
               {run.execution_profile === "grill" &&
-                (run.grill_phase === "starting" || run.grill_phase === "working") && (
+                (run.grill_phase === "starting" ||
+                  run.grill_phase === "working") && (
                   <div
                     className="flex items-center gap-2 text-sm text-muted-foreground"
                     aria-live="polite"
@@ -987,8 +1207,8 @@ export function RunsTab({
                     <div>
                       <strong className="block text-sm">Grill questions</strong>
                       <span className="text-xs text-muted-foreground">
-                        Answer the complete group once. Mission Manager will send
-                        one numbered response to the same Pane.
+                        Answer the complete group once. Mission Manager will
+                        send one numbered response to the same Pane.
                       </span>
                     </div>
                     {skipAction && (
@@ -1002,7 +1222,9 @@ export function RunsTab({
                             : `Leave these questions to their recommendations and continue with ${skipAction}.`
                         }
                         disabled={isSaving || run.pane_status !== "available"}
-                        onClick={() => void handleContinueGrill(run, skipAction)}
+                        onClick={() =>
+                          void handleContinueGrill(run, skipAction)
+                        }
                       >
                         Skip to {skipAction}
                       </Button>
@@ -1064,20 +1286,18 @@ export function RunsTab({
                       </span>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                      {nextActions.map(
-                        (action) => (
-                          <Button
-                            key={action}
-                            type="button"
-                            size="sm"
-                            variant="outline"
-                            disabled={isSaving || run.pane_status !== "available"}
-                            onClick={() => void handleContinueGrill(run, action)}
-                          >
-                            {action}
-                          </Button>
-                        ),
-                      )}
+                      {nextActions.map((action) => (
+                        <Button
+                          key={action}
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={isSaving || run.pane_status !== "available"}
+                          onClick={() => void handleContinueGrill(run, action)}
+                        >
+                          {action}
+                        </Button>
+                      ))}
                     </div>
                     {run.pane_status !== "available" && (
                       <span className="text-xs text-destructive">
@@ -1106,7 +1326,10 @@ export function RunsTab({
                     variant="outline"
                     disabled={isSaving}
                     onClick={() =>
-                      void saveItem(workActions.openExternalTerminal(run.id), false)
+                      void saveItem(
+                        workActions.openExternalTerminal(run.id),
+                        false,
+                      )
                     }
                   >
                     Open in Terminal
@@ -1159,7 +1382,10 @@ function CheckoutList({ preview }: { preview: DirectRunPreview }) {
     <div className="grid gap-2 rounded-md border p-3 text-sm">
       <p className="m-0 font-medium">Registered checkouts</p>
       {preview.checkoutDetails.map((checkout) => (
-        <div className="flex flex-wrap justify-between gap-2" key={checkout.repositoryId}>
+        <div
+          className="flex flex-wrap justify-between gap-2"
+          key={checkout.repositoryId}
+        >
           <span>
             {checkout.repositoryName} · {checkout.branch}
           </span>

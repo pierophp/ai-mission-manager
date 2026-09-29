@@ -22,7 +22,12 @@ export function ItemCard({
   const signals = itemSignals(view);
 
   return (
-    <Card size="sm" className="h-full">
+    <Card
+      size="sm"
+      className={
+        signals.runActive ? "h-full bg-primary/5 ring-primary/30" : "h-full"
+      }
+    >
       <CardHeader>
         <div className="flex items-start justify-between gap-2">
           <button

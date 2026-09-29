@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 
 use super::*;
 
@@ -107,16 +108,24 @@ pub struct DownstreamIssueCandidate {
     pub url: String,
     pub discovery: DownstreamIssueDiscovery,
     #[serde(default)]
+    pub ordinal: Option<usize>,
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
+    #[serde(default)]
     pub run_id: Option<i64>,
     #[serde(default)]
     pub action: Option<GrillContinuationAction>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct GithubIssueCreatedEvent {
+pub struct ExternalObjectCreatedEvent {
     #[serde(alias = "type", alias = "kind")]
     pub event: String,
     pub url: String,
+    #[serde(default)]
+    pub ordinal: Option<usize>,
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
     #[serde(default)]
     pub run_id: Option<i64>,
     #[serde(default)]
@@ -128,6 +137,10 @@ pub struct ConfirmedDownstreamIssue {
     pub object: ExternalObjectInput,
     pub snapshot: ExternalSnapshotData,
     pub discovery: DownstreamIssueDiscovery,
+    #[serde(default)]
+    pub ordinal: Option<usize>,
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,62 +148,118 @@ pub struct LinkProvenance {
     pub run_id: i64,
     pub action: GrillContinuationAction,
     pub discovery: DownstreamIssueDiscovery,
+    #[serde(default)]
+    pub ordinal: Option<usize>,
+    #[serde(default)]
+    pub blocked_by: Vec<String>,
 }
 
 const DOWNSTREAM_EVENT_PREFIX: &str = "AI_MISSION_MANAGER_EVENT ";
 
 pub fn discover_downstream_issue_candidates(output: &str) -> Vec<DownstreamIssueCandidate> {
-    let structured = output
-        .lines()
-        .filter_map(|line| {
-            let trimmed = strip_transcript_list_marker(line.trim());
-            let json = trimmed
-                .strip_prefix(DOWNSTREAM_EVENT_PREFIX)
-                .or_else(|| trimmed.starts_with('{').then_some(trimmed))?;
-            let event = serde_json::from_str::<GithubIssueCreatedEvent>(json).ok()?;
-            (event.event == "github.issue.created").then_some(DownstreamIssueCandidate {
-                url: event.url,
-                discovery: DownstreamIssueDiscovery::StructuredEvent,
-                run_id: event.run_id,
-                action: event.action,
-            })
+    let mut candidates = Vec::new();
+    let mut fallback_ordinal = 0;
+    for line in output.lines() {
+        if let Some(event) = parse_created_event(line) {
+            if matches!(
+                event.event.as_str(),
+                "external.object.created" | "github.issue.created"
+            ) {
+                let ordinal = event.ordinal.unwrap_or_else(|| {
+                    fallback_ordinal += 1;
+                    fallback_ordinal
+                });
+                fallback_ordinal = fallback_ordinal.max(ordinal);
+                candidates.push(DownstreamIssueCandidate {
+                    url: event.url,
+                    discovery: DownstreamIssueDiscovery::StructuredEvent,
+                    ordinal: Some(ordinal),
+                    blocked_by: event.blocked_by,
+                    run_id: event.run_id,
+                    action: event.action,
+                });
+            }
+        }
+        for token in line.split_whitespace() {
+            let url = strip_url_punctuation(token);
+            if is_recognized_capture_reference(url) {
+                fallback_ordinal += 1;
+                candidates.push(DownstreamIssueCandidate {
+                    url: url.to_owned(),
+                    discovery: DownstreamIssueDiscovery::OutputUrl,
+                    ordinal: Some(fallback_ordinal),
+                    blocked_by: Vec::new(),
+                    run_id: None,
+                    action: None,
+                });
+            }
+        }
+    }
+    unique_issue_candidates(candidates)
+}
+
+fn parse_created_event(line: &str) -> Option<ExternalObjectCreatedEvent> {
+    let line = strip_transcript_list_marker(line.trim());
+    let json = if let Some((_, event)) = line.split_once(DOWNSTREAM_EVENT_PREFIX) {
+        event.trim().trim_matches('`')
+    } else {
+        line.trim_matches('`').trim()
+    };
+    if !json.starts_with('{') {
+        return None;
+    }
+    serde_json::from_str(json).ok()
+}
+
+fn strip_url_punctuation(token: &str) -> &str {
+    token
+        .trim_matches(|character: char| {
+            matches!(
+                character,
+                '(' | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '<'
+                    | '>'
+                    | '"'
+                    | '\''
+                    | '`'
+                    | ','
+                    | ';'
+                    | ':'
+                    | '!'
+                    | '?'
+            )
         })
-        .collect::<Vec<_>>();
-    // Structured events come first so their Run and action provenance wins,
-    // but plain URLs still count: a wrapped or forgotten event line must not
-    // hide an Issue. Only Issues created after the action started are kept.
-    let urls = output.split_whitespace().filter_map(|token| {
-        let url = token
-            .trim_matches(|character: char| {
-                matches!(
-                    character,
-                    '(' | ')'
-                        | '['
-                        | ']'
-                        | '{'
-                        | '}'
-                        | '<'
-                        | '>'
-                        | '"'
-                        | '\''
-                        | '`'
-                        | '.'
-                        | ','
-                        | ';'
-                        | ':'
-                        | '!'
-                        | '?'
-                )
+        .trim_end_matches(['.', ',', ';', '!', '?'])
+        .trim_end_matches('/')
+}
+
+fn is_recognized_capture_reference(reference: &str) -> bool {
+    if reference.starts_with("https://") || reference.starts_with("file://") {
+        return crate::provider::classify_url(reference)
+            .is_ok_and(|object| object.provider != ExternalProvider::Generic)
+            || (reference.starts_with("file://")
+                && Path::new(reference.trim_start_matches("file://"))
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| {
+                        matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown")
+                    }));
+    }
+    let path = reference.trim_start_matches("file://");
+    (path.starts_with("/")
+        || path.starts_with("./")
+        || path.starts_with("../")
+        || path.starts_with(".scratch/"))
+        && Path::new(path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| {
+                matches!(extension.to_ascii_lowercase().as_str(), "md" | "markdown")
             })
-            .trim_end_matches('/');
-        is_github_issue_url(url).then_some(DownstreamIssueCandidate {
-            url: url.to_owned(),
-            discovery: DownstreamIssueDiscovery::OutputUrl,
-            run_id: None,
-            action: None,
-        })
-    });
-    unique_issue_candidates(structured.into_iter().chain(urls).collect())
 }
 
 fn strip_transcript_list_marker(line: &str) -> &str {
@@ -264,24 +333,56 @@ fn unique_issue_candidates(
         })
 }
 
-fn is_github_issue_url(url: &str) -> bool {
-    let parts = url.split('/').collect::<Vec<_>>();
-    parts.len() == 7
-        && parts[0] == "https:"
-        && (parts[2].eq_ignore_ascii_case("github.com")
-            || parts[2].eq_ignore_ascii_case("www.github.com"))
-        && !parts[3].is_empty()
-        && !parts[4].is_empty()
-        && parts[5] == "issues"
-        && parts[6].parse::<u64>().is_ok()
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GrillConfiguration {
     pub agent: AgentKind,
     pub model: String,
     pub effort: String,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GrillLanguage {
+    #[default]
+    Portuguese,
+    English,
+}
+
+impl GrillLanguage {
+    pub fn response_instruction(self) -> &'static str {
+        match self {
+            Self::Portuguese => "GRILL_RESPONSE_LANGUAGE=portuguese\nRespond to the user in Portuguese throughout this Grill Run, including every answer and continuation. Keep code, identifiers, proper names, and quoted source text in their original language when appropriate.",
+            Self::English => "GRILL_RESPONSE_LANGUAGE=english\nRespond to the user in English throughout this Grill Run, including every answer and continuation. Keep code, identifiers, proper names, and quoted source text in their original language when appropriate.",
+        }
+    }
+
+    pub fn enforce_prompt(self, prompt: &str) -> String {
+        let cleaned_prompt = prompt
+            .lines()
+            .filter(|line| {
+                !line.starts_with("GRILL_RESPONSE_LANGUAGE=")
+                    && !line
+                        .starts_with("Respond to the user in Portuguese throughout this Grill Run,")
+                    && !line
+                        .starts_with("Respond to the user in English throughout this Grill Run,")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "{}\n\n{}",
+            cleaned_prompt.trim(),
+            self.response_instruction()
+        )
+    }
+
+    pub fn from_run_prompt(prompt: &str) -> Self {
+        if prompt.contains("GRILL_RESPONSE_LANGUAGE=english") {
+            Self::English
+        } else {
+            Self::Portuguese
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

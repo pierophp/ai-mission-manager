@@ -3,7 +3,7 @@
 An agent must not execute its prompt until Mission Manager has persisted the Run and its real tmux Pane identity. Each launch therefore follows this sequence:
 
 1. Validate the Item, Context, execution Machine, Workspace, Repository or Worktree, and the permissions approved in the preview.
-2. Inspect the checkout once before launch. Direct and Grill compare branch and dirty state with the approved preview. Worktree validates the selected Worktree branch and Repository remote. Worktree has no run-specific dirty preview; its stored `is_dirty` value can be stale after user edits, so a dirty checkout does not block launch.
+2. Inspect the checkout once before launch. Direct and Grill compare branch and dirty state with the approved preview when the Context's `check_dirty_checkouts` setting is enabled. When disabled, they continue to validate branch and Repository identity but ignore dirty state. Worktree validates the selected Worktree branch and Repository remote. Worktree has no run-specific dirty preview; its stored `is_dirty` value can be stale after user edits, so a dirty checkout does not block launch.
 3. Run Machine preflight and create a tmux session whose shell waits on a channel tied to the Run id and session name.
 4. Record the Run through the domain decision and persistence seam using the real Pane id. The recorded state starts as `Unknown`.
 5. Release the shell with `tmux wait-for -S` only after the commit succeeds.

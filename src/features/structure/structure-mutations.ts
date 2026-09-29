@@ -7,10 +7,23 @@ export type StructureAction<TData> = () => Promise<TData>;
 
 export const structureActions = {
   createContext: (name: string) => () => structureAdapter.createContext(name),
+  createContextConfiguration: (
+    configuration: Parameters<typeof structureAdapter.createContextConfiguration>[0],
+  ) => () => structureAdapter.createContextConfiguration(configuration),
   updateContext: (contextId: number, name: string) =>
     () => structureAdapter.updateContext(contextId, name),
+  updateContextConfiguration: (
+    contextId: number,
+    configuration: Parameters<typeof structureAdapter.updateContextConfiguration>[1],
+  ) => () => structureAdapter.updateContextConfiguration(contextId, configuration),
   setContextExecutionMachine: (contextId: number, machineId: number | null) =>
     () => structureAdapter.setContextExecutionMachine(contextId, machineId),
+  createCliConfigurationProfile: (input: Parameters<typeof structureAdapter.createCliConfigurationProfile>[0]) =>
+    () => structureAdapter.createCliConfigurationProfile(input),
+  setContextCliConfigurationProfile: (contextId: number, provider: Parameters<typeof structureAdapter.setContextCliConfigurationProfile>[1], profileId: number | null) =>
+    () => structureAdapter.setContextCliConfigurationProfile(contextId, provider, profileId),
+  deleteCliConfigurationProfile: (profileId: number) =>
+    () => structureAdapter.deleteCliConfigurationProfile(profileId),
   createProject: (
     name: string,
     contextId: number,
@@ -105,6 +118,8 @@ export const structureActions = {
   ) => () => structureAdapter.setContextGrillDefaults(contextId, defaults),
   setContextImplementDefaults: (contextId: number, defaults: Parameters<typeof structureAdapter.setContextImplementDefaults>[1]) =>
     () => structureAdapter.setContextImplementDefaults(contextId, defaults),
+  setContextDirtyCheckoutCheck: (contextId: number, enabled: boolean) =>
+    () => structureAdapter.setContextDirtyCheckoutCheck(contextId, enabled),
   createItem: (title: string, contextId: number, projectId: number) =>
     () => structureAdapter.createItem(title, contextId, projectId),
   prepareReset: () => () => structureAdapter.prepareReset(),

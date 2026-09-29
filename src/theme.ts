@@ -1,13 +1,15 @@
 export type Theme = "light" | "dark";
+export type ThemePreference = Theme | "system";
 
 const themeStorageKey = "ai-mission-manager.theme";
+const darkSchemeQuery = "(prefers-color-scheme: dark)";
 
 function isTheme(value: string | null): value is Theme {
   return value === "light" || value === "dark";
 }
 
-export function loadStoredTheme(): Theme | undefined {
-  if (typeof window === "undefined") return undefined;
+export function loadThemePreference(): ThemePreference {
+  if (typeof window === "undefined") return "system";
 
   try {
     const storedTheme = window.localStorage.getItem(themeStorageKey);
@@ -16,16 +18,32 @@ export function loadStoredTheme(): Theme | undefined {
     // Use the system preference when local persistence is unavailable.
   }
 
-  return undefined;
+  return "system";
 }
 
-export function loadTheme(): Theme {
-  const storedTheme = loadStoredTheme();
-  if (storedTheme) return storedTheme;
-
+export function systemTheme(): Theme {
   if (typeof window === "undefined") return "light";
 
-  return window.matchMedia?.("(prefers-color-scheme: dark)")?.matches ? "dark" : "light";
+  return window.matchMedia?.(darkSchemeQuery)?.matches ? "dark" : "light";
+}
+
+export function resolveTheme(preference: ThemePreference, system: Theme): Theme {
+  return preference === "system" ? system : preference;
+}
+
+/** Calls `onChange` whenever the operating system switches color scheme. */
+export function watchSystemTheme(onChange: (theme: Theme) => void): () => void {
+  if (typeof window === "undefined" || !window.matchMedia) return () => {};
+
+  const query = window.matchMedia(darkSchemeQuery);
+  const listener = (event: MediaQueryListEvent) => onChange(event.matches ? "dark" : "light");
+  query.addEventListener("change", listener);
+  return () => query.removeEventListener("change", listener);
+}
+
+/** Reads a theme custom property off the document root, as the browser resolved it. */
+export function themeToken(name: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 }
 
 export function applyTheme(theme: Theme) {
@@ -34,21 +52,22 @@ export function applyTheme(theme: Theme) {
   document.documentElement.dataset.theme = theme;
   document
     .querySelector('meta[name="theme-color"]')
-    ?.setAttribute("content", theme === "dark" ? "#171411" : "#f7f4ee");
+    ?.setAttribute("content", themeToken("--background"));
 }
 
-export function saveTheme(theme: Theme) {
+export function saveThemePreference(preference: ThemePreference) {
   if (typeof window === "undefined") return;
 
   try {
-    window.localStorage.setItem(themeStorageKey, theme);
+    if (preference === "system") window.localStorage.removeItem(themeStorageKey);
+    else window.localStorage.setItem(themeStorageKey, preference);
   } catch {
     // The theme still applies for this session when local persistence is unavailable.
   }
 }
 
 export function initializeTheme(): Theme {
-  const theme = loadTheme();
+  const theme = resolveTheme(loadThemePreference(), systemTheme());
   applyTheme(theme);
   return theme;
 }

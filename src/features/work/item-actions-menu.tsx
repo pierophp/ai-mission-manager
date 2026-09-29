@@ -32,7 +32,6 @@ import {
   type ItemForm,
   activeRuns,
   displayItemIdentifier,
-  isRunFinished,
 } from "./item-signals";
 import type { ItemCommands } from "./use-item-commands";
 import { workActions } from "./work-mutations";
@@ -57,9 +56,6 @@ export function ItemActionsMenu({
     commands;
   const [deletionPreview, setDeletionPreview] = useState<ItemDeletionPreview>();
   const displayIdentifier = displayItemIdentifier(view.item.human_identifier);
-  const activeGrillRun = view.runs.find(
-    (run) => run.execution_profile === "grill" && !isRunFinished(run),
-  );
 
   function handleItemStatusChange(nextStatus: ItemStatus) {
     if (nextStatus === "Done" && view.item.status !== "Done") {
@@ -132,16 +128,10 @@ export function ItemActionsMenu({
         <DropdownMenuContent align="end" className="w-48">
           <DropdownMenuLabel>Item actions</DropdownMenuLabel>
           <DropdownMenuItem
-            disabled={isSaving || Boolean(activeGrillRun)}
-            onSelect={() => onOpenForm("grill")}
-          >
-            {activeGrillRun ? "Grill Run already active" : "Start Grill Run"}
-          </DropdownMenuItem>
-          <DropdownMenuItem
             disabled={isSaving || !view.workspaces[0]}
-            onSelect={() => onOpenForm("direct-run")}
+            onSelect={() => onOpenForm("run")}
           >
-            Start Direct Run
+            Start Run
           </DropdownMenuItem>
           <DropdownMenuItem
             disabled={isSaving}
@@ -205,7 +195,8 @@ export function ItemActionsMenu({
           <DialogContent className="max-h-[calc(100vh-2rem)] overflow-y-auto sm:max-w-2xl">
             <DialogHeader>
               <DialogTitle>
-                Delete {displayItemIdentifier(deletionPreview.plan.humanIdentifier)}?
+                Delete{" "}
+                {displayItemIdentifier(deletionPreview.plan.humanIdentifier)}?
               </DialogTitle>
               <DialogDescription>
                 This removes the Item and its local descendants. External Issues
@@ -224,7 +215,8 @@ export function ItemActionsMenu({
                   {deletionPreview.plan.orphanedExternalObjectIds.length}{" "}
                   orphaned External Object(s),{" "}
                   {deletionPreview.plan.orphanedSnapshotCount} snapshot(s), and{" "}
-                  {deletionPreview.plan.orphanedActivityCount} Activity record(s)
+                  {deletionPreview.plan.orphanedActivityCount} Activity
+                  record(s)
                 </li>
               </ul>
               {deletionPreview.blockers.length > 0 && (
@@ -233,7 +225,9 @@ export function ItemActionsMenu({
                   {deletionPreview.blockers.map((blocker) => (
                     <span key={blocker}>{blocker}</span>
                   ))}
-                  <span>Resolve each blocker, then create a fresh preview.</span>
+                  <span>
+                    Resolve each blocker, then create a fresh preview.
+                  </span>
                 </div>
               )}
             </div>

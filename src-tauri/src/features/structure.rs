@@ -16,12 +16,13 @@ use tauri::State;
 use crate::{
     app::{current_unix_seconds, MachineSettingsView, Runtime},
     domain::{
-        decide, normalize_machine_path, Context, ContextAttentionDefault, Event, ExecutionMode,
-        ExternalChangePolicy, ExternalObjectKind, Machine, MachineObservation, MachineTransport,
-        Project, ProjectDefaults, Repository, RepositoryLocation,
+        decide, normalize_machine_path, AgentKind, CliConfigurationProfile, Context,
+        ContextAttentionDefault, ContextConfiguration, Event, ExecutionMode, ExternalChangePolicy,
+        ExternalObjectKind, Machine, MachineObservation, MachineTransport, Project,
+        ProjectDefaults, Repository, RepositoryLocation,
     },
     git::GitCli,
-    terminal::{MachineReadiness, TerminalRuntime},
+    terminal::{run_machine_shell, shell_quote, MachineReadiness, TerminalRuntime},
 };
 
 use crate::features::deletion::{
@@ -97,6 +98,97 @@ pub(crate) fn list_machines(
     })
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CliProfileSettingsView {
+    pub profile: CliConfigurationProfile,
+    pub sign_in_command: Option<String>,
+}
+
+pub(crate) fn list_cli_configuration_profiles(
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Vec<CliProfileSettingsView>, String> {
+    locked(state, |runtime| runtime.list_cli_configuration_profiles())
+}
+
+pub(crate) fn create_cli_configuration_profile(
+    machine_id: i64,
+    provider: AgentKind,
+    name: String,
+    app_managed: bool,
+    existing_directory: Option<String>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<CliProfileSettingsView, String> {
+    locked(state, |runtime| {
+        runtime.create_cli_configuration_profile(
+            machine_id,
+            provider,
+            name,
+            app_managed,
+            existing_directory,
+        )
+    })
+}
+
+pub(crate) fn set_context_cli_configuration_profile(
+    context_id: i64,
+    provider: AgentKind,
+    profile_id: Option<i64>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    locked(state, |runtime| {
+        runtime.set_context_cli_configuration_profile(context_id, provider, profile_id)
+    })
+}
+
+pub(crate) fn delete_cli_configuration_profile(
+    profile_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    locked(state, |runtime| {
+        runtime.delete_cli_configuration_profile(profile_id)
+    })
+}
+
+fn cli_provider_configuration(provider: AgentKind) -> (&'static str, &'static str, &'static str) {
+    match provider {
+        AgentKind::Claude => ("claude", "CLAUDE_CONFIG_DIR", "claude"),
+        AgentKind::Codex => ("codex", "CODEX_HOME", "codex login"),
+    }
+}
+
+fn cli_sign_in_command(provider: AgentKind, directory: &str) -> String {
+    let (_, variable, cli_invocation) = cli_provider_configuration(provider);
+    if let Some(relative_path) = directory.strip_prefix("~/") {
+        format!("{variable}=\"$HOME/{relative_path}\" {cli_invocation}")
+    } else {
+        format!("{variable}={} {cli_invocation}", shell_quote(directory))
+    }
+}
+
+#[cfg(test)]
+mod cli_profile_tests {
+    use super::*;
+
+    #[test]
+    fn app_managed_sign_in_commands_target_the_official_provider_cli() {
+        assert_eq!(
+            cli_sign_in_command(
+                AgentKind::Claude,
+                "~/.config/ai-mission-manager/cli-profiles/claude/7"
+            ),
+            "CLAUDE_CONFIG_DIR=\"$HOME/.config/ai-mission-manager/cli-profiles/claude/7\" claude"
+        );
+        assert_eq!(
+            cli_sign_in_command(
+                AgentKind::Codex,
+                "~/.config/ai-mission-manager/cli-profiles/codex/8"
+            ),
+            "CODEX_HOME=\"$HOME/.config/ai-mission-manager/cli-profiles/codex/8\" codex login"
+        );
+    }
+}
+
 pub(crate) fn list_context_attention_defaults(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Vec<ContextAttentionDefault>, String> {
@@ -112,12 +204,31 @@ pub(crate) fn create_context(
     locked(state, |runtime| runtime.create_context(name))
 }
 
+pub(crate) fn create_context_configuration(
+    configuration: ContextConfiguration,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    locked(state, |runtime| {
+        runtime.create_context_configuration(configuration)
+    })
+}
+
 pub(crate) fn update_context(
     context_id: i64,
     name: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Context, String> {
     locked(state, |runtime| runtime.update_context(context_id, name))
+}
+
+pub(crate) fn update_context_configuration(
+    context_id: i64,
+    configuration: ContextConfiguration,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    locked(state, |runtime| {
+        runtime.update_context_configuration(context_id, configuration)
+    })
 }
 
 pub(crate) fn set_context_execution_machine(
@@ -147,6 +258,16 @@ pub(crate) fn set_context_implement_defaults(
 ) -> Result<Context, String> {
     locked(state, |runtime| {
         runtime.set_context_implement_defaults(context_id, defaults)
+    })
+}
+
+pub(crate) fn set_context_dirty_checkout_check(
+    context_id: i64,
+    enabled: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    locked(state, |runtime| {
+        runtime.set_context_dirty_checkout_check(context_id, enabled)
     })
 }
 
@@ -717,6 +838,25 @@ impl Runtime {
         Ok(context)
     }
 
+    pub(crate) fn create_context_configuration(
+        &mut self,
+        configuration: ContextConfiguration,
+    ) -> Result<Context, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::CreateContextConfiguration { configuration },
+        )
+        .map_err(|error| error.to_string())?;
+        let context = decision
+            .state
+            .contexts
+            .last()
+            .cloned()
+            .ok_or_else(|| "Context creation produced no Context".to_owned())?;
+        self.commit(decision)?;
+        Ok(context)
+    }
+
     pub(crate) fn update_context(
         &mut self,
         context_id: i64,
@@ -725,6 +865,30 @@ impl Runtime {
         let decision = decide(
             self.state.clone(),
             Event::UpdateContext { context_id, name },
+        )
+        .map_err(|error| error.to_string())?;
+        let context = decision
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .cloned()
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+        self.commit(decision)?;
+        Ok(context)
+    }
+
+    pub(crate) fn update_context_configuration(
+        &mut self,
+        context_id: i64,
+        configuration: ContextConfiguration,
+    ) -> Result<Context, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::UpdateContextConfiguration {
+                context_id,
+                configuration,
+            },
         )
         .map_err(|error| error.to_string())?;
         let context = decision
@@ -762,6 +926,116 @@ impl Runtime {
         Ok(context)
     }
 
+    pub(crate) fn list_cli_configuration_profiles(
+        &self,
+    ) -> Result<Vec<CliProfileSettingsView>, String> {
+        Ok(self
+            .state
+            .cli_configuration_profiles
+            .iter()
+            .cloned()
+            .map(|profile| CliProfileSettingsView {
+                sign_in_command: profile
+                    .app_managed
+                    .then(|| cli_sign_in_command(profile.provider, &profile.directory)),
+                profile,
+            })
+            .collect())
+    }
+
+    pub(crate) fn create_cli_configuration_profile(
+        &mut self,
+        machine_id: i64,
+        provider: AgentKind,
+        name: String,
+        app_managed: bool,
+        existing_directory: Option<String>,
+    ) -> Result<CliProfileSettingsView, String> {
+        let machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == machine_id)
+            .cloned()
+            .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
+        let profile_id = self.state.next_cli_profile_id;
+        let directory = if app_managed {
+            format!(
+                "~/.config/ai-mission-manager/cli-profiles/{}/{profile_id}",
+                cli_provider_configuration(provider).0
+            )
+        } else {
+            existing_directory.unwrap_or_default()
+        };
+        let decision = decide(
+            self.state.clone(),
+            Event::CreateCliConfigurationProfile {
+                machine_id,
+                provider,
+                name,
+                directory,
+                app_managed,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let profile = decision
+            .state
+            .cli_configuration_profiles
+            .last()
+            .cloned()
+            .ok_or_else(|| "CLI profile creation produced no profile".to_owned())?;
+        if app_managed {
+            let relative_path = profile
+                .directory
+                .strip_prefix("~/")
+                .expect("app-managed directories are home-relative");
+            run_machine_shell(&machine, &format!("mkdir -p -- \"$HOME/{relative_path}\""))?;
+        }
+        self.commit(decision)?;
+        Ok(CliProfileSettingsView {
+            sign_in_command: app_managed.then(|| cli_sign_in_command(provider, &profile.directory)),
+            profile,
+        })
+    }
+
+    pub(crate) fn set_context_cli_configuration_profile(
+        &mut self,
+        context_id: i64,
+        provider: AgentKind,
+        profile_id: Option<i64>,
+    ) -> Result<Context, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::SetContextCliConfigurationProfile {
+                context_id,
+                provider,
+                profile_id,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let context = decision
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .cloned()
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+        self.commit(decision)?;
+        Ok(context)
+    }
+
+    pub(crate) fn delete_cli_configuration_profile(
+        &mut self,
+        profile_id: i64,
+    ) -> Result<(), String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::DeleteCliConfigurationProfile { profile_id },
+        )
+        .map_err(|error| error.to_string())?;
+        self.commit(decision)
+    }
+
     pub(crate) fn set_context_grill_defaults(
         &mut self,
         context_id: i64,
@@ -796,6 +1070,30 @@ impl Runtime {
             Event::SetContextImplementDefaults {
                 context_id,
                 defaults,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let context = decision
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .cloned()
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+        self.commit(decision)?;
+        Ok(context)
+    }
+
+    pub(crate) fn set_context_dirty_checkout_check(
+        &mut self,
+        context_id: i64,
+        enabled: bool,
+    ) -> Result<Context, String> {
+        let decision = decide(
+            self.state.clone(),
+            Event::SetContextDirtyCheckoutCheck {
+                context_id,
+                enabled,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -1277,6 +1575,68 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn settings_can_register_select_and_delete_cli_profiles_with_context_aware_errors() {
+        let directory = tempdir().expect("temporary app directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        let machine = runtime
+            .register_machine(
+                1,
+                "Local machine".into(),
+                "default".into(),
+                MachineTransport::Local,
+            )
+            .expect("Machine should register");
+        runtime
+            .set_context_execution_machine(1, Some(machine.id))
+            .expect("Context should use the Machine");
+        let claude = runtime
+            .create_cli_configuration_profile(
+                machine.id,
+                AgentKind::Claude,
+                "Personal".into(),
+                false,
+                Some("/profiles/claude".into()),
+            )
+            .expect("existing Claude configuration should register");
+        let codex = runtime
+            .create_cli_configuration_profile(
+                machine.id,
+                AgentKind::Codex,
+                "Work".into(),
+                false,
+                Some("/profiles/codex".into()),
+            )
+            .expect("existing Codex configuration should register");
+        assert!(claude.sign_in_command.is_none());
+        assert!(codex.sign_in_command.is_none());
+        runtime
+            .set_context_cli_configuration_profile(1, AgentKind::Claude, Some(claude.profile.id))
+            .expect("Claude profile should be selectable");
+        runtime
+            .set_context_cli_configuration_profile(1, AgentKind::Codex, Some(codex.profile.id))
+            .expect("Codex selection should be independent");
+
+        let listed = runtime
+            .list_cli_configuration_profiles()
+            .expect("settings should list profiles");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].profile.directory, "/profiles/claude");
+        let error = runtime
+            .delete_cli_configuration_profile(claude.profile.id)
+            .expect_err("an assigned profile cannot be deleted");
+        assert!(error.contains("Personal"));
+
+        runtime
+            .set_context_cli_configuration_profile(1, AgentKind::Claude, None)
+            .expect("profile selection can be unset");
+        runtime
+            .delete_cli_configuration_profile(claude.profile.id)
+            .expect("an unassigned profile can be deleted");
+        assert_eq!(runtime.list_cli_configuration_profiles().unwrap().len(), 1);
+    }
 
     #[test]
     fn repository_cleanup_keeps_preview_and_confirmation_as_separate_guards() {

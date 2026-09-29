@@ -106,10 +106,15 @@ impl Runtime {
         &mut self,
         link_id: i64,
         purpose: LinkPurpose,
+        spec_external_object_id: Option<i64>,
     ) -> Result<ExternalLinkView, String> {
         let decision = decide(
             self.state.clone(),
-            Event::SetLinkPurpose { link_id, purpose },
+            Event::SetLinkPurpose {
+                link_id,
+                purpose,
+                spec_external_object_id,
+            },
         )
         .map_err(|error| error.to_string())?;
         let link = decision

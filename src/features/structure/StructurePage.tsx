@@ -1,7 +1,8 @@
 import { type FormEvent, useEffect, useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useBlocker } from "@tanstack/react-router";
 import { open } from "@tauri-apps/plugin-dialog";
+import { Monitor, Moon, Sun } from "lucide-react";
 
 import { Alert, AlertDescription } from "../../components/ui/alert";
 import { useAppShell } from "../../components/app-shell";
@@ -13,7 +14,6 @@ import {
   CardHeader,
   CardTitle,
 } from "../../components/ui/card";
-import { Checkbox } from "../../components/ui/checkbox";
 import { ConfirmationDialog } from "../../components/ui/confirmation-dialog";
 import {
   Dialog,
@@ -27,11 +27,13 @@ import {
 } from "../../components/ui/dialog";
 import { EmptyDescription } from "../../components/ui/empty";
 import { Input } from "../../components/ui/input";
+import { ToggleGroup, ToggleGroupItem } from "../../components/ui/toggle-group";
 import {
   NativeSelect,
   NativeSelectOption,
 } from "../../components/ui/native-select";
 import { errorMessage } from "../../runtime/errors";
+import { ContextEditor } from "./ContextEditor";
 import { invalidateStructureQueries } from "../../runtime/query-invalidation";
 import {
   structureKeys,
@@ -55,11 +57,8 @@ import {
 import type {
   Context,
   AgentHookReadiness,
-  ExternalChangePolicy,
-  ExternalObjectKind,
   ItemStatus,
   ExecutionMode,
-  GrillConfiguration,
   MachineDeletionPreview,
   Machine,
   MachineTransport,
@@ -68,19 +67,13 @@ import type {
   RepositoryDeletionPreview,
   ResetLocalDataPreview,
 } from "../../runtime/types";
+import type { ThemePreference } from "../../theme";
 import {
-  externalObjectKindLabel,
   flattenHome,
   uniqueItems,
 } from "../work/work-utils";
 
 const itemStatuses: ItemStatus[] = ["Inbox", "Active", "Waiting", "Done"];
-const objectKinds: ExternalObjectKind[] = ["issue", "pull_request", "generic"];
-const defaultAttentionPolicy: ExternalChangePolicy = {
-  title: true,
-  state: true,
-  metadata: true,
-};
 
 function hookReadinessLabel(agent: string, readiness?: AgentHookReadiness): string {
   if (!readiness || readiness.provisioned === null || readiness.current === null) {
@@ -122,9 +115,7 @@ type SettingsSection =
   | "projects"
   | "repositories"
   | "machines"
-  | "attention"
-  | "grill"
-  | "implement"
+  | "appearance"
   | "reset";
 
 type AddDialog = "context" | "project" | "repository" | "machine";
@@ -139,15 +130,19 @@ const settingsSections = [
   { id: "projects", label: "Projects", path: "/settings/projects" },
   { id: "repositories", label: "Repositories", path: "/settings/repositories" },
   { id: "machines", label: "Machines", path: "/settings/machines" },
-  { id: "attention", label: "Attention defaults", path: "/settings/attention" },
-  { id: "grill", label: "Grill defaults", path: "/settings/grill" },
-  { id: "implement", label: "Implement defaults", path: "/settings/implement" },
+  { id: "appearance", label: "Appearance", path: "/settings/appearance" },
   { id: "reset", label: "Reset local data", path: "/settings/reset" },
 ] as const;
 
+const themeOptions: { value: ThemePreference; label: string; Icon: typeof Sun }[] = [
+  { value: "light", label: "Light", Icon: Sun },
+  { value: "dark", label: "Dark", Icon: Moon },
+  { value: "system", label: "System", Icon: Monitor },
+];
+
 export function StructurePage({ section }: { section: SettingsSection }) {
   const activeSection = section;
-  const { closeTerminal } = useAppShell();
+  const { closeTerminal, themePreference, setThemePreference } = useAppShell();
   const queryClient = useQueryClient();
   const structureCommand = useStructureCommand();
   const structure = useStructureData().data;
@@ -159,6 +154,7 @@ export function StructurePage({ section }: { section: SettingsSection }) {
     repositories,
     repositoryLocations,
     machines,
+    cliConfigurationProfiles,
     attentionDefaults,
     grillModelCatalog,
   } = structure;
@@ -169,7 +165,6 @@ export function StructurePage({ section }: { section: SettingsSection }) {
 
   const [selectedContextId, setSelectedContextId] = useState<number>();
   const [selectedProjectId, setSelectedProjectId] = useState<number>();
-  const [contextName, setContextName] = useState("");
   const [projectName, setProjectName] = useState("");
   const [projectDefaultStatus, setProjectDefaultStatus] =
     useState<ItemStatus>("Inbox");
@@ -195,16 +190,11 @@ export function StructurePage({ section }: { section: SettingsSection }) {
   const [machineKnownHostsFile, setMachineKnownHostsFile] = useState("");
   const [machineStrictHostKeyChecking, setMachineStrictHostKeyChecking] =
     useState("accept-new");
-  const [attentionObjectKind, setAttentionObjectKind] =
-    useState<ExternalObjectKind>("pull_request");
-  const [attentionDefaultPolicy, setAttentionDefaultPolicy] =
-    useState<ExternalChangePolicy>(defaultAttentionPolicy);
-  const [grillAgent, setGrillAgent] = useState<GrillConfiguration["agent"]>("claude");
-  const [grillModel, setGrillModel] = useState("claude-sonnet-4-5");
-  const [grillEffort, setGrillEffort] = useState("high");
-  const [implementAgent, setImplementAgent] = useState<GrillConfiguration["agent"]>("claude");
-  const [implementModel, setImplementModel] = useState("claude-sonnet-4-5");
-  const [implementEffort, setImplementEffort] = useState("high");
+  const [cliProfileProvider, setCliProfileProvider] = useState<"claude" | "codex">("claude");
+  const [cliProfileName, setCliProfileName] = useState("");
+  const [cliProfileAppManaged, setCliProfileAppManaged] = useState(true);
+  const [cliProfileDirectory, setCliProfileDirectory] = useState("");
+  const [cliProfileMachineId, setCliProfileMachineId] = useState<number>();
   const [repositoryDeletionPreview, setRepositoryDeletionPreview] =
     useState<RepositoryDeletionPreview>();
   const [parentDeletionPreview, setParentDeletionPreview] =
@@ -218,6 +208,9 @@ export function StructurePage({ section }: { section: SettingsSection }) {
   const [isSaving, setIsSaving] = useState(false);
   const [addDialog, setAddDialog] = useState<AddDialog>();
   const [editDialog, setEditDialog] = useState<EditDialog>();
+  const [editingContextId, setEditingContextId] = useState<number>();
+  const [creatingContext, setCreatingContext] = useState(false);
+  const [contextEditorDirty, setContextEditorDirty] = useState(false);
 
   const selectedProjects = projects.filter(
     (project) => project.context_id === selectedContextId,
@@ -234,6 +227,9 @@ export function StructurePage({ section }: { section: SettingsSection }) {
   const selectedExecutionMachine = machines.find(
     (machine) => machine.id === selectedContext?.execution_machine_id,
   );
+  const selectedProfileMachine = selectedMachines.find((machine) => machine.id === cliProfileMachineId)
+    ?? selectedExecutionMachine
+    ?? selectedMachines[0];
 
   useEffect(() => {
     const nextContextId =
@@ -260,24 +256,26 @@ export function StructurePage({ section }: { section: SettingsSection }) {
   }, [contexts, machines, projects, repositoryMachineId, selectedContextId, selectedProjectId, selectedMachines]);
 
   useEffect(() => {
-    const configured = attentionDefaults.find(
-      (attentionDefault) =>
-        attentionDefault.context_id === selectedContextId &&
-        attentionDefault.object_kind === attentionObjectKind,
-    );
-    setAttentionDefaultPolicy(configured?.policy ?? defaultAttentionPolicy);
-  }, [attentionDefaults, attentionObjectKind, selectedContextId]);
+    if (!contextEditorDirty) return;
+    const handleBeforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    return () => window.removeEventListener("beforeunload", handleBeforeUnload);
+  }, [contextEditorDirty]);
 
-  useEffect(() => {
-    const context = contexts.find((candidate) => candidate.id === selectedContextId);
-    if (!context) return;
-    setGrillAgent(context.grill_defaults.agent);
-    setGrillModel(context.grill_defaults.model);
-    setGrillEffort(context.grill_defaults.effort);
-    setImplementAgent(context.implement_defaults.agent);
-    setImplementModel(context.implement_defaults.model);
-    setImplementEffort(context.implement_defaults.effort);
-  }, [contexts, selectedContextId]);
+  useBlocker({
+    shouldBlockFn: () => {
+      if (!contextEditorDirty) return false;
+      if (!window.confirm("Discard unsaved Context changes?")) return true;
+      setEditingContextId(undefined);
+      setCreatingContext(false);
+      setContextEditorDirty(false);
+      return false;
+    },
+    enableBeforeUnload: false,
+  });
 
   async function refreshAfterEdit() {
     await invalidateStructureQueries(queryClient);
@@ -295,9 +293,43 @@ export function StructurePage({ section }: { section: SettingsSection }) {
   }
 
   function openEditContext(context: Context) {
-    setContextName(context.name);
-    setEditDialog({ kind: "context", id: context.id });
+    if (contextEditorDirty && !window.confirm("Discard unsaved Context changes?")) return;
+    setEditingContextId(context.id);
+    setCreatingContext(false);
+    setSelectedContextId(context.id);
     setAddDialog(undefined);
+    setContextEditorDirty(false);
+  }
+
+  function closeContextEditor() {
+    if (contextEditorDirty && !window.confirm("Discard unsaved Context changes?")) return;
+    setEditingContextId(undefined);
+    setCreatingContext(false);
+    setContextEditorDirty(false);
+  }
+
+  function openCreateContext() {
+    if (contextEditorDirty && !window.confirm("Discard unsaved Context changes?")) return;
+    setEditingContextId(undefined);
+    setCreatingContext(true);
+    setAddDialog(undefined);
+    setEditDialog(undefined);
+    setContextEditorDirty(false);
+  }
+
+  async function saveContextConfiguration(contextId: number, configuration: Parameters<typeof structureActions.updateContextConfiguration>[1]) {
+    setIsSaving(true);
+    try {
+      await structureCommand.execute(structureActions.updateContextConfiguration(contextId, configuration));
+      await refreshAfterEdit();
+      setSelectedContextId(contextId);
+      setEditingContextId(undefined);
+      setCreatingContext(false);
+      setContextEditorDirty(false);
+      setError(undefined);
+    } finally {
+      setIsSaving(false);
+    }
   }
 
   function openEditProject(project: (typeof projects)[number]) {
@@ -356,31 +388,20 @@ export function StructurePage({ section }: { section: SettingsSection }) {
     setAddDialog(undefined);
   }
 
-  async function handleCreateContext(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!contextName.trim()) return;
-
-    const editingContextId = editDialog?.kind === "context" ? editDialog.id : undefined;
+  async function createContextConfiguration(configuration: Parameters<typeof structureActions.createContextConfiguration>[0]) {
     setIsSaving(true);
     try {
-      const context = editingContextId
-        ? await structureCommand.execute(
-            structureActions.updateContext(editingContextId, contextName.trim()),
-          )
-        : await structureCommand.execute(
-            structureActions.createContext(contextName.trim()),
-          );
+      const context = await structureCommand.execute(
+        structureActions.createContextConfiguration(configuration),
+      );
       await refreshAfterEdit();
-      if (!editingContextId) {
-        setSelectedContextId(context.id);
-        setSelectedProjectId(undefined);
-      }
-      setContextName("");
+      setSelectedContextId(context.id);
+      setSelectedProjectId(undefined);
+      setCreatingContext(false);
       setAddDialog(undefined);
       setEditDialog(undefined);
+      setContextEditorDirty(false);
       setError(undefined);
-    } catch (saveError) {
-      setError(errorMessage(saveError));
     } finally {
       setIsSaving(false);
     }
@@ -772,20 +793,34 @@ export function StructurePage({ section }: { section: SettingsSection }) {
     }
   }
 
-  async function handleSetContextExecutionMachine(machineId: number | null) {
-    if (!selectedContextId) return;
+  async function handleCreateCliProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!selectedProfileMachine || !cliProfileName.trim()) return;
     setIsSaving(true);
     try {
-      await structureCommand.execute(
-        structureActions.setContextExecutionMachine(selectedContextId, machineId),
-      );
+      await structureCommand.execute(structureActions.createCliConfigurationProfile({
+        machineId: selectedProfileMachine.id,
+        provider: cliProfileProvider,
+        name: cliProfileName,
+        appManaged: cliProfileAppManaged,
+        existingDirectory: cliProfileAppManaged ? null : cliProfileDirectory,
+      }));
+      setCliProfileName("");
+      setCliProfileDirectory("");
       await refreshAfterEdit();
       setError(undefined);
-    } catch (saveError) {
-      setError(errorMessage(saveError));
-    } finally {
-      setIsSaving(false);
-    }
+    } catch (saveError) { setError(errorMessage(saveError)); }
+    finally { setIsSaving(false); }
+  }
+
+  async function handleDeleteCliProfile(profileId: number) {
+    setIsSaving(true);
+    try {
+      await structureCommand.execute(structureActions.deleteCliConfigurationProfile(profileId));
+      await refreshAfterEdit();
+      setError(undefined);
+    } catch (deleteError) { setError(errorMessage(deleteError)); }
+    finally { setIsSaving(false); }
   }
 
   async function handlePrepareMachineDeletion(machineId: number) {
@@ -841,71 +876,6 @@ export function StructurePage({ section }: { section: SettingsSection }) {
     }
   }
 
-  async function saveAttentionDefault(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!selectedContextId) return;
-
-    setIsSaving(true);
-    try {
-      await structureCommand.execute(
-        structureActions.setAttentionDefault(
-          selectedContextId,
-          attentionObjectKind,
-          attentionDefaultPolicy,
-        ),
-      );
-      await refreshAfterEdit();
-      setError(undefined);
-    } catch (saveError) {
-      setError(errorMessage(saveError));
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function saveGrillDefaults(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!selectedContextId) return;
-
-    setIsSaving(true);
-    try {
-      await structureCommand.execute(
-        structureActions.setContextGrillDefaults(selectedContextId, {
-          agent: grillAgent,
-          model: grillModel,
-          effort: grillEffort,
-        }),
-      );
-      await refreshAfterEdit();
-      setError(undefined);
-    } catch (saveError) {
-      setError(errorMessage(saveError));
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function saveImplementDefaults(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!selectedContextId) return;
-    setIsSaving(true);
-    try {
-      await structureCommand.execute(structureActions.setContextImplementDefaults(selectedContextId, { agent: implementAgent, model: implementModel, effort: implementEffort }));
-      await refreshAfterEdit();
-      setError(undefined);
-    } catch (saveError) { setError(errorMessage(saveError)); }
-    finally { setIsSaving(false); }
-  }
-
-  const selectedGrillCatalog = grillModelCatalog.find(
-    (catalog) => catalog.agent === grillAgent,
-  );
-  const selectedGrillModel = selectedGrillCatalog?.models.find(
-    (model) => model.id === grillModel,
-  );
-  const selectedImplementCatalog = grillModelCatalog.find((catalog) => catalog.agent === implementAgent);
-  const selectedImplementModel = selectedImplementCatalog?.models.find((model) => model.id === implementModel);
-  const isEditingContext = editDialog?.kind === "context";
   const isEditingProject = editDialog?.kind === "project";
   const isEditingRepository = editDialog?.kind === "repository";
   const isEditingMachine = editDialog?.kind === "machine";
@@ -1018,26 +988,13 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                     <CardTitle>Contexts</CardTitle>
                     <CardDescription>A Context owns its Projects and Machines.</CardDescription>
                   </div>
-                  <Dialog open={addDialog === "context" || isEditingContext} onOpenChange={(open) => { if (open) { setAddDialog("context"); setEditDialog(undefined); } else { setAddDialog(undefined); setEditDialog(undefined); } }}>
-                    <DialogTrigger asChild>
-                      <Button type="button">Add Context</Button>
-                    </DialogTrigger>
-                    <DialogContent className="sm:max-w-lg">
-                      <form className="grid gap-4" onSubmit={handleCreateContext}>
-                        <DialogHeader>
-                          <DialogTitle>{isEditingContext ? "Edit Context" : "Add Context"}</DialogTitle>
-                          <DialogDescription>{isEditingContext ? "Update the name of this Context." : "Create a new boundary for Projects, Machines, and Items."}</DialogDescription>
-                        </DialogHeader>
-                        <Field label="Context name">
-                          <Input value={contextName} onChange={(event) => setContextName(event.target.value)} placeholder="Work" disabled={isSaving} autoFocus />
-                        </Field>
-                        <DialogFooter>
-                          <DialogClose asChild><Button type="button" variant="outline">Cancel</Button></DialogClose>
-                          <Button type="submit" disabled={isSaving || !contextName.trim()}>{isEditingContext ? "Save changes" : "Add Context"}</Button>
-                        </DialogFooter>
-                      </form>
-                    </DialogContent>
-                  </Dialog>
+                  <Button
+                    type="button"
+                    onClick={openCreateContext}
+                    disabled={isSaving || creatingContext}
+                  >
+                    Add Context
+                  </Button>
                 </div>
               </CardHeader>
               <CardContent className="p-4">
@@ -1045,12 +1002,39 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                   {contexts.length === 0 ? (
                     <EmptyDescription>No Contexts have been created yet.</EmptyDescription>
                   ) : contexts.map((context) => (
-                    <EntityRow key={context.id} title={context.name} detail={`${projects.filter((project) => project.context_id === context.id).length} Projects`}>
+                    <EntityRow key={context.id} title={context.name} detail={`${projects.filter((project) => project.context_id === context.id).length} Projects`} selected={context.id === selectedContextId}>
                       <Button type="button" variant="ghost" size="sm" disabled={isSaving} onClick={() => openEditContext(context)}>Edit</Button>
-                      <Button type="button" variant="outline" size="sm" disabled={isSaving} onClick={() => void handlePrepareContextDeletion(context.id)}>Delete</Button>
+                      <Button type="button" variant="outline" size="sm" disabled={isSaving || Boolean(editingContextId) || creatingContext} onClick={() => void handlePrepareContextDeletion(context.id)}>Delete</Button>
                     </EntityRow>
                   ))}
                 </EntityList>
+                {contexts.map((context) => context.id === editingContextId && (
+                  <ContextEditor
+                    key={context.id}
+                    context={context}
+                    attentionDefaults={attentionDefaults}
+                    machines={machines}
+                    profiles={cliConfigurationProfiles}
+                    catalog={grillModelCatalog}
+                    isSaving={isSaving}
+                    onSave={(configuration) => saveContextConfiguration(context.id, configuration)}
+                    onCancel={closeContextEditor}
+                    onDirtyChange={setContextEditorDirty}
+                  />
+                ))}
+                {creatingContext && (
+                  <ContextEditor
+                    context={undefined}
+                    attentionDefaults={attentionDefaults}
+                    machines={machines}
+                    profiles={cliConfigurationProfiles}
+                    catalog={grillModelCatalog}
+                    isSaving={isSaving}
+                    onSave={createContextConfiguration}
+                    onCancel={closeContextEditor}
+                    onDirtyChange={setContextEditorDirty}
+                  />
+                )}
               </CardContent>
             </Card>
           )}
@@ -1100,6 +1084,23 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                     </EntityRow>
                   ))}
                 </EntityList>
+                <section className="mt-5 grid gap-4 border-t border-border/70 pt-4" aria-label="CLI configuration profiles">
+                  <div><h3 className="m-0 text-sm font-semibold">CLI configuration profiles</h3><p className="mb-0 mt-1 text-xs text-muted-foreground">Profiles stay on their owning Machine. App-managed profiles get a dedicated directory and a copyable sign-in command.</p></div>
+                  <Field label="Machine"><NativeSelect value={selectedProfileMachine?.id ?? ""} onChange={(event) => setCliProfileMachineId(Number(event.target.value) || undefined)} disabled={isSaving || selectedMachines.length === 0}><NativeSelectOption value="">Choose a Machine</NativeSelectOption>{selectedMachines.map((machine) => <NativeSelectOption value={machine.id} key={machine.id}>{machine.name}</NativeSelectOption>)}</NativeSelect></Field>
+                  <EntityList>
+                    {cliConfigurationProfiles.filter(({ profile }) => profile.machineId === selectedProfileMachine?.id).map(({ profile, signInCommand }) => <EntityRow key={profile.id} title={`${profile.name} · ${profile.provider === "claude" ? "Claude Code" : "Codex"}`} detail={`${profile.appManaged ? "App-managed" : "Existing directory"} · ${profile.directory}`}>
+                      {signInCommand && <Button type="button" size="sm" variant="ghost" disabled={isSaving} onClick={() => void navigator.clipboard.writeText(signInCommand).catch((copyError) => setError(errorMessage(copyError)))}>Copy sign-in command</Button>}
+                      <Button type="button" size="sm" variant="outline" disabled={isSaving} onClick={() => void handleDeleteCliProfile(profile.id)}>Delete</Button>
+                    </EntityRow>)}
+                  </EntityList>
+                  {selectedProfileMachine && <form className="grid gap-3 sm:grid-cols-2" onSubmit={(event) => void handleCreateCliProfile(event)}>
+                    <Field label="Provider"><NativeSelect value={cliProfileProvider} onChange={(event) => setCliProfileProvider(event.target.value as "claude" | "codex")} disabled={isSaving}><NativeSelectOption value="claude">Claude Code</NativeSelectOption><NativeSelectOption value="codex">Codex</NativeSelectOption></NativeSelect></Field>
+                    <Field label="Profile name"><Input value={cliProfileName} onChange={(event) => setCliProfileName(event.target.value)} placeholder="Work" disabled={isSaving} /></Field>
+                    <Field label="Directory"><NativeSelect value={cliProfileAppManaged ? "managed" : "existing"} onChange={(event) => setCliProfileAppManaged(event.target.value === "managed")} disabled={isSaving}><NativeSelectOption value="managed">Create an app-managed directory</NativeSelectOption><NativeSelectOption value="existing">Use an existing directory</NativeSelectOption></NativeSelect></Field>
+                    {!cliProfileAppManaged && <Field label="Existing configuration directory"><Input value={cliProfileDirectory} onChange={(event) => setCliProfileDirectory(event.target.value)} placeholder="~/.claude-work" disabled={isSaving} /></Field>}
+                    <div className="sm:col-span-2"><Button type="submit" disabled={isSaving || !cliProfileName.trim() || (!cliProfileAppManaged && !cliProfileDirectory.trim())}>Create profile</Button></div>
+                  </form>}
+                </section>
               </CardContent>
             </Card>
           )}
@@ -1179,29 +1180,6 @@ export function StructurePage({ section }: { section: SettingsSection }) {
                 </div>
               </CardHeader>
               <CardContent className="p-4">
-                <div className="mb-4 grid gap-2 rounded-md border p-3">
-                  <Field label="Context execution Machine">
-                    <NativeSelect
-                      value={selectedExecutionMachine?.id ?? ""}
-                      onChange={(event) =>
-                        void handleSetContextExecutionMachine(
-                          Number(event.target.value) || null,
-                        )
-                      }
-                      disabled={isSaving || !selectedContextId}
-                    >
-                      <NativeSelectOption value="">No Machine configured</NativeSelectOption>
-                      {selectedMachines.map((machine) => (
-                        <NativeSelectOption value={machine.id} key={machine.id}>
-                          {machine.name} · {machine.last_observed}
-                        </NativeSelectOption>
-                      ))}
-                    </NativeSelect>
-                  </Field>
-                  <p className="m-0 text-xs text-muted-foreground">
-                    Every Run and Worktree for this Context uses this Machine. Configure a checkout for each Repository there before starting work.
-                  </p>
-                </div>
                 <EntityList>
                   {selectedMachines.length === 0 ? <EmptyDescription>No Machines are registered in this Context.</EmptyDescription> : selectedMachines.map((machine) => (
                     <EntityRow key={machine.id} title={`${machine.name} · ${machine.transport.kind === "ssh" ? "SSH" : "Local"}`} detail={machineReadinessDetail(machine)}>
@@ -1213,11 +1191,40 @@ export function StructurePage({ section }: { section: SettingsSection }) {
             </Card>
           )}
 
-          {activeSection === "attention" && <Card><CardHeader className="border-b border-border/70"><CardTitle>Attention defaults</CardTitle><CardDescription>Choose which External Object changes interrupt Links in a Context.</CardDescription></CardHeader><CardContent className="space-y-4 p-4"><form className="grid gap-4 lg:grid-cols-[1fr_1fr_2fr_auto] lg:items-end" onSubmit={saveAttentionDefault}><ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} /><Field label="External Object type"><NativeSelect value={attentionObjectKind} onChange={(event) => setAttentionObjectKind(event.target.value as ExternalObjectKind)} disabled={isSaving}>{objectKinds.map((kind) => <NativeSelectOption value={kind} key={kind}>{externalObjectKindLabel(kind)}</NativeSelectOption>)}</NativeSelect></Field><div className="flex flex-wrap gap-4 pb-1">{(["title", "state", "metadata"] as const).map((kind) => <label className="flex items-center gap-2 text-sm" key={kind}><Checkbox checked={attentionDefaultPolicy[kind]} onCheckedChange={(checked) => setAttentionDefaultPolicy((current) => ({ ...current, [kind]: checked === true }))} disabled={isSaving} />{kind[0].toUpperCase() + kind.slice(1)} changes</label>)}</div><Button type="submit" disabled={isSaving || !selectedContextId}>Save defaults</Button></form></CardContent></Card>}
 
-          {activeSection === "grill" && <Card><CardHeader className="border-b border-border/70"><CardTitle>Grill defaults</CardTitle><CardDescription>Context-scoped agent, model, and effort defaults for starting a Grill Run from an Item.</CardDescription></CardHeader><CardContent className="space-y-4 p-4"><form className="grid gap-4 lg:grid-cols-[1fr_1fr_1fr_1fr_auto] lg:items-end" onSubmit={saveGrillDefaults}><ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} /><Field label="Agent"><NativeSelect value={grillAgent} onChange={(event) => { const nextAgent = event.target.value as GrillConfiguration["agent"]; const nextCatalog = grillModelCatalog.find((catalog) => catalog.agent === nextAgent); const nextModel = nextCatalog?.models[0]; setGrillAgent(nextAgent); setGrillModel(nextModel?.id ?? ""); setGrillEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || grillModelCatalog.length === 0}>{grillModelCatalog.map((catalog) => <NativeSelectOption value={catalog.agent} key={catalog.agent}>{catalog.agent === "claude" ? "Claude Code" : "Codex"}</NativeSelectOption>)}</NativeSelect></Field><Field label="Model"><NativeSelect value={grillModel} onChange={(event) => { const nextModel = selectedGrillCatalog?.models.find((model) => model.id === event.target.value); setGrillModel(event.target.value); setGrillEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || !selectedGrillCatalog}>{selectedGrillCatalog?.models.map((model) => <NativeSelectOption value={model.id} key={model.id}>{model.label} ({model.id})</NativeSelectOption>)}</NativeSelect></Field><Field label="Effort"><NativeSelect value={grillEffort} onChange={(event) => setGrillEffort(event.target.value)} disabled={isSaving || !selectedGrillModel}>{selectedGrillModel?.efforts.map((effort) => <NativeSelectOption value={effort.id} key={effort.id}>{effort.label} ({effort.id})</NativeSelectOption>)}</NativeSelect></Field><Button type="submit" disabled={isSaving || !selectedContextId || !selectedGrillModel}>Save defaults</Button></form></CardContent></Card>}
 
-          {activeSection === "implement" && <Card><CardHeader className="border-b border-border/70"><CardTitle>Implement defaults</CardTitle><CardDescription>Context-scoped agent, model, and effort defaults for Direct Implement Runs.</CardDescription></CardHeader><CardContent className="space-y-4 p-4"><form className="grid gap-4 lg:grid-cols-[1fr_1fr_1fr_1fr_auto] lg:items-end" onSubmit={saveImplementDefaults}><ContextSelect contexts={contexts} value={selectedContextId} onChange={handleContextChange} disabled={isSaving} /><Field label="Agent"><NativeSelect value={implementAgent} onChange={(event) => { const nextAgent = event.target.value as GrillConfiguration["agent"]; const nextCatalog = grillModelCatalog.find((catalog) => catalog.agent === nextAgent); const nextModel = nextCatalog?.models[0]; setImplementAgent(nextAgent); setImplementModel(nextModel?.id ?? ""); setImplementEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || grillModelCatalog.length === 0}>{grillModelCatalog.map((catalog) => <NativeSelectOption value={catalog.agent} key={catalog.agent}>{catalog.agent === "claude" ? "Claude Code" : "Codex"}</NativeSelectOption>)}</NativeSelect></Field><Field label="Model"><NativeSelect value={implementModel} onChange={(event) => { const nextModel = selectedImplementCatalog?.models.find((model) => model.id === event.target.value); setImplementModel(event.target.value); setImplementEffort(nextModel?.efforts[0]?.id ?? ""); }} disabled={isSaving || !selectedImplementCatalog}>{selectedImplementCatalog?.models.map((model) => <NativeSelectOption value={model.id} key={model.id}>{model.label} ({model.id})</NativeSelectOption>)}</NativeSelect></Field><Field label="Effort"><NativeSelect value={implementEffort} onChange={(event) => setImplementEffort(event.target.value)} disabled={isSaving || !selectedImplementModel}>{selectedImplementModel?.efforts.map((effort) => <NativeSelectOption value={effort.id} key={effort.id}>{effort.label} ({effort.id})</NativeSelectOption>)}</NativeSelect></Field><Button type="submit" disabled={isSaving || !selectedContextId || !selectedImplementModel}>Save defaults</Button></form></CardContent></Card>}
+
+          {activeSection === "appearance" && (
+            <Card>
+              <CardHeader className="border-b border-border/70">
+                <CardTitle>Appearance</CardTitle>
+                <CardDescription>Choose a color theme. System follows your operating system.</CardDescription>
+              </CardHeader>
+              <CardContent className="p-4">
+                <ToggleGroup
+                  type="single"
+                  variant="outline"
+                  spacing={0}
+                  aria-label="Theme"
+                  value={themePreference}
+                  onValueChange={(value) => {
+                    if (value) setThemePreference(value as ThemePreference);
+                  }}
+                >
+                  {themeOptions.map(({ value, label, Icon }) => (
+                    <ToggleGroupItem
+                      key={value}
+                      value={value}
+                      className="gap-1.5 px-3 data-[state=on]:bg-primary data-[state=on]:text-primary-foreground data-[state=on]:hover:bg-primary/90"
+                    >
+                      <Icon aria-hidden="true" />
+                      {label}
+                    </ToggleGroupItem>
+                  ))}
+                </ToggleGroup>
+              </CardContent>
+            </Card>
+          )}
 
           {activeSection === "reset" && <Card className="border-destructive/30 bg-destructive/5"><CardHeader><CardTitle>Reset all local data</CardTitle><CardDescription>Remove Mission Manager&apos;s local working model, cached External Objects, and Activity history. Provider-owned Issues and pull requests are never deleted.</CardDescription></CardHeader><CardContent className="space-y-4"><Button type="button" variant="destructive" disabled={isSaving} onClick={() => void handlePrepareReset()}>Review reset impact</Button>{resetLocalDataPreview && <ResetLocalDataPreviewCard preview={resetLocalDataPreview} disabled={isSaving} onConfirm={() => void handleReset()} onCancel={() => setResetLocalDataPreview(undefined)} />}</CardContent></Card>}
         </div>
@@ -1320,9 +1327,16 @@ function EntityList({ children }: { children: React.ReactNode }) {
   return <div className="grid gap-2">{children}</div>;
 }
 
-function EntityRow({ title, detail, children }: { title: string; detail: string; children: React.ReactNode }) {
+function EntityRow({ title, detail, children, selected = false }: { title: string; detail: string; children: React.ReactNode; selected?: boolean }) {
   return (
-    <div className="flex flex-wrap items-start gap-3 rounded-lg border border-border/70 p-3">
+    <div
+      data-selected={selected || undefined}
+      className={`flex flex-wrap items-start gap-3 rounded-lg border p-3 ${
+        selected
+          ? "border-primary bg-primary/5"
+          : "border-border/70"
+      }`}
+    >
       <div className="min-w-0 flex-1">
         <div className="font-medium">{title}</div>
         <div className="truncate text-sm text-muted-foreground">{detail}</div>

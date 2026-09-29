@@ -6,6 +6,45 @@ use super::projections::{
 };
 use super::*;
 
+fn selected_cli_configuration_profile(
+    state: &DomainState,
+    context_id: i64,
+    provider: AgentKind,
+) -> Option<CliConfigurationProfileIdentity> {
+    let context = state
+        .contexts
+        .iter()
+        .find(|context| context.id == context_id)?;
+    let profile_id = context.cli_configuration_profile_id(provider)?;
+    let profile = state
+        .cli_configuration_profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)?;
+    Some(CliConfigurationProfileIdentity {
+        profile_id: profile.id,
+        provider: profile.provider,
+        name: profile.name.clone(),
+    })
+}
+
+fn detach_ticket_links_from_spec(
+    state: &mut DomainState,
+    item_id: i64,
+    spec_external_object_id: i64,
+) -> Vec<Link> {
+    state
+        .links
+        .iter_mut()
+        .filter(|link| {
+            link.item_id == item_id && link.spec_external_object_id == Some(spec_external_object_id)
+        })
+        .map(|link| {
+            link.spec_external_object_id = None;
+            link.clone()
+        })
+        .collect()
+}
+
 pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainError> {
     match event {
         Event::CreateContext { name } => {
@@ -24,8 +63,17 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 id,
                 name,
                 execution_machine_id: None,
+                claude_profile_id: None,
+                codex_profile_id: None,
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                gh_executable_path: None,
+                twg_executable_path: None,
+                az_executable_path: None,
+                atlassian_site: None,
+                azure_devops_organization: None,
+                bitbucket_workspace: None,
             };
             let project = Project {
                 id: project_id,
@@ -53,6 +101,33 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 ],
             })
         }
+        Event::CreateContextConfiguration { mut configuration } => {
+            let name = clean_name(configuration.name.clone(), DomainError::EmptyContextName)?;
+            configuration.name = name.clone();
+            let created = decide(state, Event::CreateContext { name })?;
+            let context_id = created
+                .state
+                .contexts
+                .last()
+                .map(|context| context.id)
+                .ok_or(DomainError::SequenceExhausted)?;
+            for attention_default in &mut configuration.attention_defaults {
+                attention_default.context_id = context_id;
+            }
+            let configured = decide(
+                created.state,
+                Event::UpdateContextConfiguration {
+                    context_id,
+                    configuration,
+                },
+            )?;
+            let mut effects = created.effects;
+            effects.extend(configured.effects);
+            Ok(Decision {
+                state: configured.state,
+                effects,
+            })
+        }
         Event::UpdateContext { context_id, name } => {
             let name = clean_name(name, DomainError::EmptyContextName)?;
             if state
@@ -72,6 +147,138 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             Ok(Decision {
                 state,
                 effects: vec![Effect::UpdateContext { context }],
+            })
+        }
+        Event::UpdateContextConfiguration {
+            context_id,
+            mut configuration,
+        } => {
+            configuration.name = clean_name(configuration.name, DomainError::EmptyContextName)?;
+            let ContextConfiguration {
+                name,
+                execution_machine_id,
+                claude_profile_id,
+                codex_profile_id,
+                check_dirty_checkouts,
+                grill_defaults,
+                implement_defaults,
+                gh_executable_path,
+                twg_executable_path,
+                az_executable_path,
+                atlassian_site,
+                azure_devops_organization,
+                bitbucket_workspace,
+                attention_defaults,
+            } = configuration;
+            if state
+                .contexts
+                .iter()
+                .any(|context| context.id != context_id && context.name == name)
+            {
+                return Err(DomainError::ContextNameTaken { name });
+            }
+            let existing = state
+                .contexts
+                .iter()
+                .find(|context| context.id == context_id)
+                .cloned()
+                .ok_or(DomainError::ContextNotFound { context_id })?;
+            if existing.execution_machine_id != execution_machine_id {
+                let active_run_ids = state
+                    .runs
+                    .iter()
+                    .filter(|run| {
+                        run_is_active(run)
+                            && item_context_id(&state, run.item_id).is_ok_and(|id| id == context_id)
+                    })
+                    .map(|run| run.id)
+                    .collect::<Vec<_>>();
+                if !active_run_ids.is_empty() {
+                    return Err(DomainError::ContextHasActiveRuns {
+                        context_id,
+                        run_ids: active_run_ids,
+                    });
+                }
+            }
+            if let Some(machine_id) = execution_machine_id {
+                if !state
+                    .machines
+                    .iter()
+                    .any(|machine| machine.id == machine_id)
+                {
+                    return Err(DomainError::MachineNotFound { machine_id });
+                }
+            }
+            if let Some(profile_id) = claude_profile_id {
+                validate_context_profile(
+                    &state,
+                    execution_machine_id,
+                    AgentKind::Claude,
+                    profile_id,
+                )?;
+            }
+            if let Some(profile_id) = codex_profile_id {
+                validate_context_profile(
+                    &state,
+                    execution_machine_id,
+                    AgentKind::Codex,
+                    profile_id,
+                )?;
+            }
+            validate_grill_configuration(&grill_defaults)?;
+            validate_grill_configuration(&implement_defaults)?;
+            if attention_defaults.len() != 3
+                || attention_defaults
+                    .iter()
+                    .any(|policy| policy.context_id != context_id)
+                || ![
+                    ExternalObjectKind::Issue,
+                    ExternalObjectKind::PullRequest,
+                    ExternalObjectKind::Generic,
+                ]
+                .iter()
+                .all(|kind| {
+                    attention_defaults
+                        .iter()
+                        .filter(|policy| policy.object_kind == *kind)
+                        .count()
+                        == 1
+                })
+            {
+                return Err(DomainError::InvalidContextAttentionDefaults);
+            }
+
+            let context = state
+                .contexts
+                .iter_mut()
+                .find(|context| context.id == context_id)
+                .expect("the Context was checked above");
+            context.name = name;
+            context.execution_machine_id = execution_machine_id;
+            context.claude_profile_id = claude_profile_id;
+            context.codex_profile_id = codex_profile_id;
+            context.check_dirty_checkouts = check_dirty_checkouts;
+            context.grill_defaults = grill_defaults;
+            context.implement_defaults = implement_defaults;
+            context.gh_executable_path = clean_optional_identifier(gh_executable_path);
+            context.twg_executable_path = clean_optional_identifier(twg_executable_path);
+            context.az_executable_path = clean_optional_identifier(az_executable_path);
+            context.atlassian_site = clean_optional_identifier(atlassian_site);
+            context.azure_devops_organization =
+                clean_optional_identifier(azure_devops_organization);
+            context.bitbucket_workspace = clean_optional_identifier(bitbucket_workspace);
+            let context = context.clone();
+            state
+                .attention_defaults
+                .retain(|policy| policy.context_id != context_id);
+            state.attention_defaults.extend(attention_defaults.clone());
+
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistContextConfiguration {
+                    context,
+                    attention_defaults,
+                }],
             })
         }
         Event::SetContextExecutionMachine {
@@ -101,18 +308,41 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     });
                 }
             }
+            let uses_local_tracker = state.external_objects.iter().any(|object| {
+                object.external_key.starts_with("local:")
+                    && state.links.iter().any(|link| {
+                        link.external_object_id == object.id
+                            && item_context_id(&state, link.item_id)
+                                .is_ok_and(|id| id == context_id)
+                    })
+            });
+            if uses_local_tracker {
+                let machine = machine_id.and_then(|machine_id| {
+                    state
+                        .machines
+                        .iter()
+                        .find(|machine| machine.id == machine_id)
+                });
+                if machine
+                    .is_none_or(|machine| !matches!(machine.transport, MachineTransport::Local))
+                {
+                    return Err(DomainError::LocalTrackerRequiresLocalExecutionMachine {
+                        context_id,
+                    });
+                }
+            }
             if let Some(machine_id) = machine_id {
-                let machine = state
+                state
                     .machines
                     .iter()
                     .find(|machine| machine.id == machine_id)
                     .ok_or(DomainError::MachineNotFound { machine_id })?;
-                if machine.context_id != context_id {
-                    return Err(DomainError::MachineContextMismatch {
-                        machine_id,
-                        context_id,
-                    });
-                }
+            }
+            if let Some(profile_id) = context.claude_profile_id {
+                validate_context_profile(&state, machine_id, AgentKind::Claude, profile_id)?;
+            }
+            if let Some(profile_id) = context.codex_profile_id {
+                validate_context_profile(&state, machine_id, AgentKind::Codex, profile_id)?;
             }
             let context = state
                 .contexts
@@ -120,6 +350,121 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .find(|context| context.id == context_id)
                 .expect("the Context was checked above");
             context.execution_machine_id = machine_id;
+            let context = context.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::UpdateContext { context }],
+            })
+        }
+        Event::CreateCliConfigurationProfile {
+            machine_id,
+            provider,
+            name,
+            directory,
+            app_managed,
+        } => {
+            let name = clean_name(name, DomainError::EmptyCliConfigurationProfileName)?;
+            let directory = clean_name(
+                directory,
+                DomainError::EmptyCliConfigurationProfileDirectory,
+            )?;
+            if !state
+                .machines
+                .iter()
+                .any(|machine| machine.id == machine_id)
+            {
+                return Err(DomainError::CliConfigurationProfileMachineNotFound { machine_id });
+            }
+            if state.cli_configuration_profiles.iter().any(|profile| {
+                profile.machine_id == machine_id
+                    && profile.provider == provider
+                    && profile.name == name
+            }) {
+                return Err(DomainError::CliConfigurationProfileAlreadyExists { machine_id, name });
+            }
+            let id = state.next_cli_profile_id;
+            let next_cli_profile_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+            let profile = CliConfigurationProfile {
+                id,
+                machine_id,
+                provider,
+                name,
+                directory,
+                app_managed,
+            };
+            state.next_cli_profile_id = next_cli_profile_id;
+            state.cli_configuration_profiles.push(profile.clone());
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistCliConfigurationProfile {
+                    profile,
+                    next_cli_profile_id,
+                }],
+            })
+        }
+        Event::SetContextCliConfigurationProfile {
+            context_id,
+            provider,
+            profile_id,
+        } => {
+            let execution_machine_id = state
+                .contexts
+                .iter()
+                .find(|context| context.id == context_id)
+                .ok_or(DomainError::ContextNotFound { context_id })?
+                .execution_machine_id;
+            if let Some(profile_id) = profile_id {
+                validate_context_profile(&state, execution_machine_id, provider, profile_id)?;
+            }
+            let context = state
+                .contexts
+                .iter_mut()
+                .find(|context| context.id == context_id)
+                .expect("the Context was checked above");
+            match provider {
+                AgentKind::Claude => context.claude_profile_id = profile_id,
+                AgentKind::Codex => context.codex_profile_id = profile_id,
+            }
+            let context = context.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::UpdateContext { context }],
+            })
+        }
+        Event::DeleteCliConfigurationProfile { profile_id } => {
+            let profile_position = state
+                .cli_configuration_profiles
+                .iter()
+                .position(|profile| profile.id == profile_id)
+                .ok_or(DomainError::CliConfigurationProfileNotFound { profile_id })?;
+            let contexts = state
+                .contexts
+                .iter()
+                .filter(|context| {
+                    context.claude_profile_id == Some(profile_id)
+                        || context.codex_profile_id == Some(profile_id)
+                })
+                .map(|context| context.name.clone())
+                .collect::<Vec<_>>();
+            if !contexts.is_empty() {
+                return Err(DomainError::CliConfigurationProfileInUse { contexts });
+            }
+            state.cli_configuration_profiles.remove(profile_position);
+            Ok(Decision {
+                state,
+                effects: vec![Effect::RemoveCliConfigurationProfile { profile_id }],
+            })
+        }
+        Event::SetContextDirtyCheckoutCheck {
+            context_id,
+            enabled,
+        } => {
+            let context = state
+                .contexts
+                .iter_mut()
+                .find(|context| context.id == context_id)
+                .ok_or(DomainError::ContextNotFound { context_id })?;
+            context.check_dirty_checkouts = enabled;
             let context = context.clone();
             Ok(Decision {
                 state,
@@ -553,8 +898,17 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 id: context_id,
                 name: "Personal".into(),
                 execution_machine_id: None,
+                claude_profile_id: None,
+                codex_profile_id: None,
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                gh_executable_path: None,
+                twg_executable_path: None,
+                az_executable_path: None,
+                atlassian_site: None,
+                azure_devops_organization: None,
+                bitbucket_workspace: None,
             };
             let project = Project {
                 id: project_id,
@@ -883,6 +1237,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             state
                 .machines
                 .retain(|machine| !machine_ids.contains(&machine.id));
+            state
+                .cli_configuration_profiles
+                .retain(|profile| !machine_ids.contains(&profile.machine_id));
             state.relationships.retain(|relation| {
                 !item_ids.contains(&relation.from_item_id)
                     && !item_ids.contains(&relation.to_item_id)
@@ -972,11 +1329,17 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             for context in &mut state.contexts {
                 if context.execution_machine_id == Some(machine_id) {
                     context.execution_machine_id = None;
+                    context.claude_profile_id = None;
+                    context.codex_profile_id = None;
                     effects.push(Effect::UpdateContext {
                         context: context.clone(),
                     });
                 }
             }
+
+            state
+                .cli_configuration_profiles
+                .retain(|profile| profile.machine_id != machine_id);
 
             state.runs.retain(|run| run.machine_id != machine_id);
             effects.extend(
@@ -1433,6 +1796,11 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .cloned()
                 .ok_or(DomainError::LinkNotFound { link_id })?;
             let external_object_id = link.external_object_id;
+            let detached_ticket_links = if link.purpose == LinkPurpose::ToSpec {
+                detach_ticket_links_from_spec(&mut state, link.item_id, external_object_id)
+            } else {
+                Vec::new()
+            };
             state.links.retain(|candidate| candidate.id != link_id);
             let orphaned = !state
                 .links
@@ -1450,10 +1818,14 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     .retain(|activity| activity.external_object_id != external_object_id);
             }
 
-            let mut effects = vec![Effect::RemoveLink {
+            let mut effects = detached_ticket_links
+                .into_iter()
+                .map(|link| Effect::PersistLinkState { link })
+                .collect::<Vec<_>>();
+            effects.push(Effect::RemoveLink {
                 link_id,
                 external_object_id,
-            }];
+            });
             if orphaned {
                 effects.push(Effect::RemoveExternalObject { external_object_id });
             }
@@ -1602,7 +1974,13 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .filter(|checkout| checkout.is_dirty)
                 .map(|checkout| checkout.repository_id)
                 .collect::<Vec<_>>();
-            if !allow_dirty && !dirty_repository_ids.is_empty() {
+            let check_dirty_checkouts = state
+                .contexts
+                .iter()
+                .find(|context| context.id == context_id)
+                .ok_or(DomainError::ContextNotFound { context_id })?
+                .check_dirty_checkouts;
+            if check_dirty_checkouts && !allow_dirty && !dirty_repository_ids.is_empty() {
                 return Err(DomainError::DirectRunDirtyCheckouts {
                     repository_ids: dirty_repository_ids,
                 });
@@ -1709,6 +2087,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 worktree_id: None,
                 machine_id,
                 agent,
+                cli_configuration_profile: selected_cli_configuration_profile(
+                    &state, context_id, agent,
+                ),
                 execution_profile,
                 model: configuration
                     .as_ref()
@@ -1859,6 +2240,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 worktree_id: Some(worktree_id),
                 machine_id,
                 agent,
+                cli_configuration_profile: selected_cli_configuration_profile(
+                    &state, context_id, agent,
+                ),
                 execution_profile,
                 model: None,
                 effort: None,
@@ -1952,16 +2336,6 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 });
             }
             ensure_context_execution_machine(&state, context_id, machine_id)?;
-            if let Some(run) = state.runs.iter().find(|run| {
-                run.item_id == item_id
-                    && run.execution_profile == ExecutionProfile::Grill
-                    && run_is_active(run)
-            }) {
-                return Err(DomainError::ActiveGrillRun {
-                    item_id,
-                    run_id: run.id,
-                });
-            }
             let prompt = clean_name(prompt, DomainError::EmptyRunPrompt)?;
             if skill_snapshot.trim().is_empty() {
                 return Err(DomainError::EmptyGrillSkillSnapshot);
@@ -2024,6 +2398,11 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 worktree_id: None,
                 machine_id,
                 agent: configuration.agent,
+                cli_configuration_profile: selected_cli_configuration_profile(
+                    &state,
+                    context_id,
+                    configuration.agent,
+                ),
                 execution_profile: ExecutionProfile::Grill,
                 model: Some(configuration.model),
                 effort: Some(configuration.effort),
@@ -2157,6 +2536,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 worktree_id,
                 machine_id,
                 agent,
+                cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::CustomPrompt,
                 model: None,
                 effort: None,
@@ -2299,6 +2679,20 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             ticket_closed,
             checkout_clean,
         } => {
+            let queue_item_id = state
+                .implementation_queues
+                .iter()
+                .find(|queue| queue.id == queue_id)
+                .map(|queue| queue.item_id)
+                .ok_or(DomainError::ImplementationQueueNotFound { queue_id })?;
+            let context_id = item_context_id(&state, queue_item_id)?;
+            let check_dirty_checkouts = state
+                .contexts
+                .iter()
+                .find(|context| context.id == context_id)
+                .ok_or(DomainError::ContextNotFound { context_id })?
+                .check_dirty_checkouts;
+            let checkout_clean = checkout_clean || !check_dirty_checkouts;
             let queue = state
                 .implementation_queues
                 .iter_mut()
@@ -2516,14 +2910,30 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             }
 
             let mut effects = Vec::new();
+            // to-tickets objects are currently created by the selected tracker
+            // skill in the Run, then captured here. ProviderDispatch only owns
+            // GitHub's explicit create API; keep parentage as local Link state
+            // so capture never depends on reading a provider relation back.
+            let parent_spec_external_object_id = (action == GrillContinuationAction::ToTickets)
+                .then(|| {
+                    state
+                        .links
+                        .iter()
+                        .find(|link| {
+                            link.item_id == run.item_id && link.purpose == LinkPurpose::ToSpec
+                        })
+                        .map(|link| link.external_object_id)
+                })
+                .flatten();
             for issue in issues {
-                if issue.object.provider != ExternalProvider::GitHub
-                    || issue.object.kind != ExternalObjectKind::Issue
+                if (issue.object.provider == ExternalProvider::Generic
+                    && !issue.object.external_key.starts_with("local:"))
                     || issue.object.external_key.trim().is_empty()
                     || issue.object.canonical_url.trim().is_empty()
                 {
                     continue;
                 }
+                let object_identity = (issue.object.provider, issue.object.external_key.clone());
                 effects.extend(link_external_object(
                     &mut state,
                     run.item_id,
@@ -2533,9 +2943,59 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                         run_id,
                         action,
                         discovery: issue.discovery,
+                        ordinal: issue.ordinal,
+                        blocked_by: issue.blocked_by,
                     }),
                     true,
                 )?);
+                let external_object_id = state
+                    .external_objects
+                    .iter()
+                    .find(|object| {
+                        object.provider == object_identity.0
+                            && object.external_key == object_identity.1
+                    })
+                    .map(|object| object.id);
+                let captured_purpose = external_object_id
+                    .and_then(|id| state.external_objects.iter().find(|object| object.id == id))
+                    .map(|object| match action {
+                        GrillContinuationAction::ToSpec
+                            if super::implementation_queue::is_implementation_spec_object(
+                                object,
+                            ) =>
+                        {
+                            LinkPurpose::ToSpec
+                        }
+                        GrillContinuationAction::ToTickets
+                            if super::implementation_queue::is_implementation_ticket_object(
+                                object,
+                            ) =>
+                        {
+                            LinkPurpose::ToTickets
+                        }
+                        _ => LinkPurpose::Others,
+                    })
+                    .unwrap_or(LinkPurpose::Others);
+                if let Some(link) = external_object_id.and_then(|external_object_id| {
+                    state.links.iter_mut().find(|link| {
+                        link.item_id == run.item_id && link.external_object_id == external_object_id
+                    })
+                }) {
+                    let purpose = captured_purpose;
+                    let spec_external_object_id = if purpose == LinkPurpose::ToTickets {
+                        parent_spec_external_object_id
+                            .filter(|spec_id| *spec_id != link.external_object_id)
+                    } else {
+                        None
+                    };
+                    if link.purpose != purpose
+                        || link.spec_external_object_id != spec_external_object_id
+                    {
+                        link.purpose = purpose;
+                        link.spec_external_object_id = spec_external_object_id;
+                        effects.push(Effect::PersistLinkState { link: link.clone() });
+                    }
+                }
             }
 
             Ok(Decision { state, effects })
@@ -2832,23 +3292,51 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::PersistLinkState { link }],
             })
         }
-        Event::SetLinkPurpose { link_id, purpose } => {
-            let external_object_id = state
+        Event::SetLinkPurpose {
+            link_id,
+            purpose,
+            spec_external_object_id,
+        } => {
+            let link_details = state
                 .links
                 .iter()
                 .find(|link| link.id == link_id)
-                .map(|link| link.external_object_id)
+                .map(|link| (link.external_object_id, link.item_id))
                 .ok_or(DomainError::LinkNotFound { link_id })?;
+            let (external_object_id, item_id) = link_details;
             if purpose == LinkPurpose::ToSpec {
                 let object = state
                     .external_objects
                     .iter()
                     .find(|object| object.id == external_object_id)
                     .ok_or(DomainError::ExternalObjectNotFound { external_object_id })?;
-                if object.provider != ExternalProvider::GitHub
-                    || object.kind != ExternalObjectKind::Issue
-                {
+                if !super::implementation_queue::is_implementation_spec_object(object) {
                     return Err(DomainError::LinkCannotBeSpec);
+                }
+            }
+            if purpose == LinkPurpose::ToTickets {
+                let object = state
+                    .external_objects
+                    .iter()
+                    .find(|object| object.id == external_object_id)
+                    .ok_or(DomainError::ExternalObjectNotFound { external_object_id })?;
+                if !super::implementation_queue::is_implementation_ticket_object(object) {
+                    return Err(DomainError::LinkCannotBeTicket);
+                }
+                if let Some(spec_external_object_id) = spec_external_object_id {
+                    let spec_link = state.links.iter().find(|candidate| {
+                        candidate.item_id == item_id
+                            && candidate.external_object_id == spec_external_object_id
+                            && candidate.external_object_id != external_object_id
+                            && candidate.purpose == LinkPurpose::ToSpec
+                    });
+                    let spec_object = state.external_objects.iter().find(|object| {
+                        object.id == spec_external_object_id
+                            && super::implementation_queue::is_implementation_spec_object(object)
+                    });
+                    if spec_link.is_none() || spec_object.is_none() {
+                        return Err(DomainError::LinkCannotBeTicketForSpec);
+                    }
                 }
             }
             let link = state
@@ -2857,12 +3345,24 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .find(|link| link.id == link_id)
                 .ok_or(DomainError::LinkNotFound { link_id })?;
             link.purpose = purpose;
+            link.spec_external_object_id = if purpose == LinkPurpose::ToTickets {
+                spec_external_object_id
+            } else {
+                None
+            };
             let link = link.clone();
+            let mut effects = vec![Effect::PersistLinkState { link: link.clone() }];
+            if purpose != LinkPurpose::ToSpec {
+                for ticket_link in
+                    detach_ticket_links_from_spec(&mut state, item_id, external_object_id)
+                {
+                    effects.push(Effect::PersistLinkState {
+                        link: ticket_link.clone(),
+                    });
+                }
+            }
 
-            Ok(Decision {
-                state,
-                effects: vec![Effect::PersistLinkState { link }],
-            })
+            Ok(Decision { state, effects })
         }
         Event::SetLinkReviewAt { link_id, review_at } => {
             let link = state
@@ -3013,6 +3513,50 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             })
         }
     }
+}
+
+fn clean_optional_identifier(value: Option<String>) -> Option<String> {
+    value.and_then(|value| {
+        let value = value.trim();
+        (!value.is_empty()).then(|| value.to_owned())
+    })
+}
+
+fn validate_context_profile(
+    state: &DomainState,
+    execution_machine_id: Option<i64>,
+    provider: AgentKind,
+    profile_id: i64,
+) -> Result<(), DomainError> {
+    let profile = state
+        .cli_configuration_profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+        .ok_or(DomainError::CliConfigurationProfileNotFound { profile_id })?;
+    if profile.provider != provider {
+        return Err(DomainError::CliConfigurationProfileProviderMismatch {
+            profile_id,
+            profile_provider: profile.provider,
+            requested_provider: provider,
+        });
+    }
+    let machine_id =
+        execution_machine_id.ok_or(DomainError::CliConfigurationProfileMachineMismatch {
+            profile_id,
+            machine_id: profile.machine_id,
+        })?;
+    state
+        .machines
+        .iter()
+        .find(|machine| machine.id == machine_id)
+        .ok_or(DomainError::MachineNotFound { machine_id })?;
+    if profile.machine_id != machine_id {
+        return Err(DomainError::CliConfigurationProfileMachineMismatch {
+            profile_id,
+            machine_id,
+        });
+    }
+    Ok(())
 }
 
 fn queue_finish_observation_effects(state: &DomainState, run: &Run) -> Vec<Effect> {

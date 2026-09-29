@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { RefreshCwIcon } from "lucide-react";
+import { ExternalUrlLink } from "../../../components/ExternalUrlLink";
 import {
   Alert,
   AlertDescription,
@@ -16,18 +17,17 @@ import {
 } from "../../../components/ui/native-select";
 import { Spinner } from "../../../components/ui/spinner";
 import { errorMessage } from "../../../runtime/errors";
-import type { Context, DirectRunPreview, ExternalLinkView, GrillAgentCatalog, GrillConfiguration, ImplementationQueueStart, ItemView, Repository } from "../../../runtime/types";
+import type { Context, DirectRunPreview, ExternalLinkView, GrillAgentCatalog, GrillConfiguration, ImplementationQueueStart, ItemView, Repository, SubIssue } from "../../../runtime/types";
 import type { ImplementationQueuePauseReason } from "../../../runtime/types";
 import { useIssueDocumentQuery } from "../work-queries";
 import type { ItemCommands } from "../use-item-commands";
 import { workActions } from "../work-mutations";
 import { itemExecution } from "./shared";
 import { SectionLabel } from "./shared";
+import { ConfluenceHtml } from "./ConfluenceHtml";
+import { orderImplementationTickets, ticketIsOpen } from "./spec-queue";
 
-/**
- * A spec read fresh from GitHub: the tickets that break it down (its native
- * sub-issues) first, then its description.
- */
+/** A Spec read fresh from its provider, followed by captured ticket Links. */
 export function SpecTab({
   view,
   specs,
@@ -105,7 +105,7 @@ function SpecDocument({
   const document = useIssueDocumentQuery(spec.object.id);
   const linkedUrls = new Set(view.links.map((link) => link.object.canonical_url));
   const number = spec.snapshot?.metadata.find((entry) => entry.key === "number")?.value;
-  const [selected, setSelected] = useState<number[]>([]);
+  const [selected, setSelected] = useState<string[]>([]);
   const [launchOpen, setLaunchOpen] = useState(false);
   const [configuration, setConfiguration] = useState<GrillConfiguration>({ agent: "claude", model: "claude-sonnet-4-5", effort: "high" });
   const [preview, setPreview] = useState<DirectRunPreview>();
@@ -118,9 +118,57 @@ function SpecDocument({
   const activeQueue = view.implementation_queues.find((queue) => queue.active);
   const specActiveQueue = specQueues.find((queue) => queue.active);
   const progressQueue = specActiveQueue ?? specQueues.at(-1);
-  const openTickets = document.data?.subIssues.filter((ticket) => ticket.state.toLowerCase() === "open") ?? [];
-  const allSelected = openTickets.length > 0 && openTickets.every((ticket) => selected.includes(ticket.number));
-  const selectedTickets = useMemo(() => document.data?.subIssues.filter((ticket) => ticket.state.toLowerCase() === "open" && selected.includes(ticket.number)) ?? [], [document.data?.subIssues, selected]);
+  const tickets = useMemo(() => {
+    const nativeTickets = document.data?.subIssues ?? [];
+    const capturedLinks = view.links.filter((link) =>
+        link.link.purpose === "to-tickets" &&
+        link.link.spec_external_object_id === spec.object.id,
+      );
+    const usedCapturedLinks = new Set<number>();
+    const native = nativeTickets.map((ticket) => {
+      const captured = capturedLinks.find((link) =>
+        link.object.canonical_url === ticket.url || link.object.external_key === ticket.url,
+      );
+      if (!captured) {
+        return { ...ticket, blockedBy: [], ordinal: Number.MAX_SAFE_INTEGER };
+      }
+      usedCapturedLinks.add(captured.object.id);
+      return {
+        ...ticket,
+        title: captured.snapshot?.title ?? ticket.title,
+        state: captured.snapshot?.state ?? ticket.state,
+        url: captured.object.canonical_url,
+        blockedBy: captured.link.provenance?.blocked_by ?? [],
+        ordinal: captured.link.provenance?.ordinal ?? Number.MAX_SAFE_INTEGER,
+      };
+    });
+    const captured = capturedLinks
+      .filter((link) => !usedCapturedLinks.has(link.object.id))
+      .flatMap((link): (SubIssue & { blockedBy: string[]; ordinal: number })[] => {
+        const metadataId = link.snapshot?.metadata.find((entry) =>
+          ["number", "id", "key"].includes(entry.key.toLowerCase()),
+        )?.value;
+        const urlId = link.object.canonical_url.match(/(?:issues|pull|pull-requests|edit|pullrequest)\/([A-Za-z]+-)?(\d+)\/?$/i)?.[2];
+        const fileId = link.object.external_key.match(/(?:^|\/)(\d+)[-_]/)?.[1];
+        const number = Number((metadataId?.match(/\d+$/)?.[0]) ?? urlId ?? fileId);
+        if (!Number.isSafeInteger(number) || number <= 0) return [];
+        return [{
+          number,
+          title: link.snapshot?.title ?? link.object.canonical_url,
+          state: link.snapshot?.state ?? "open",
+          url: link.object.canonical_url,
+          blockedBy: link.link.provenance?.blocked_by ?? [],
+          ordinal: link.link.provenance?.ordinal ?? Number.MAX_SAFE_INTEGER,
+        }];
+      });
+    return [...native, ...captured]
+      .sort((left, right) => left.ordinal - right.ordinal || left.number - right.number);
+  }, [document.data?.subIssues, spec.object.id, view.links]);
+  const openTickets = tickets.filter((ticket) => ticketIsOpen(ticket.state));
+  const allSelected = openTickets.length > 0 && openTickets.every((ticket) => selected.includes(ticket.url));
+  const selectedTickets = useMemo(() => {
+    return orderImplementationTickets(tickets, selected);
+  }, [selected, tickets]);
   const agentCatalog = modelCatalog.find((catalog) => catalog.agent === configuration.agent);
   const modelCatalogItem = agentCatalog?.models.find((model) => model.id === configuration.model);
 
@@ -177,15 +225,13 @@ function SpecDocument({
     <article className="grid gap-5">
       <header className="flex flex-wrap items-start justify-between gap-3">
         <div className="grid gap-1">
-          <a
+          <ExternalUrlLink
             href={spec.object.canonical_url}
-            target="_blank"
-            rel="noreferrer"
             className="font-heading text-base font-medium underline-offset-4 hover:underline"
           >
             {number ? `#${number} · ` : ""}
             {spec.snapshot?.title ?? spec.object.canonical_url}
-          </a>
+          </ExternalUrlLink>
           <span className="text-xs text-muted-foreground">
             {spec.snapshot?.state ?? "Not fetched"}
             {spec.link.provenance && ` · Created by Run #${spec.link.provenance.run_id}`}
@@ -205,7 +251,7 @@ function SpecDocument({
 
       {document.isPending ? (
         <p className="flex items-center gap-2 text-sm text-muted-foreground">
-          <Spinner /> Reading the spec from GitHub…
+          <Spinner /> Reading the Spec…
         </p>
       ) : document.isError ? (
         <Alert variant="destructive">
@@ -215,10 +261,10 @@ function SpecDocument({
       ) : (
         <>
           <section className="grid gap-2" aria-label="Tickets">
-            <SectionLabel>Tickets · {document.data.subIssues.length}</SectionLabel>
+            <SectionLabel>Tickets · {tickets.length}</SectionLabel>
             <div className="flex items-center justify-between gap-3">
               <label className="flex items-center gap-2 text-sm">
-                <Checkbox checked={allSelected} disabled={openTickets.length === 0 || Boolean(activeQueue)} onCheckedChange={(checked) => setSelected(checked ? openTickets.map((ticket) => ticket.number) : [])} />
+                <Checkbox checked={allSelected} disabled={openTickets.length === 0 || Boolean(activeQueue)} onCheckedChange={(checked) => setSelected(checked ? openTickets.map((ticket) => ticket.url) : [])} />
                 Select all open tickets
               </label>
               <Button type="button" size="sm" disabled={!selectedTickets.length || Boolean(activeQueue) || !view.workspaces.length} onClick={() => void openLaunch()}>
@@ -266,36 +312,34 @@ function SpecDocument({
                 <div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={() => setLaunchOpen(false)}>Cancel</Button><Button type="button" disabled={!preview || !repositoryId || (Boolean(preview.dirtyRepositoryIds.length) && !dirtyConsent) || (Boolean(preview.sharedPaths.length) && !sharedConsent)} onClick={() => void startQueue()}>Start first ticket</Button></div>
               </section>
             )}
-            {document.data.subIssues.length === 0 ? (
+            {tickets.length === 0 ? (
               <span className="text-sm text-muted-foreground">
                 No tickets yet. Run to-tickets to break this spec down.
               </span>
             ) : (
               <ul className="grid gap-1.5">
-                {document.data.subIssues.map((ticket) => (
+                {tickets.map((ticket) => (
                   <li
                     key={ticket.url}
                     className="flex flex-wrap items-center gap-2 rounded-md border px-3 py-2 text-sm"
                   >
-                    <Checkbox aria-label={`Select ticket #${ticket.number}`} checked={selected.includes(ticket.number)} disabled={ticket.state.toLowerCase() !== "open" || Boolean(activeQueue)} onCheckedChange={(checked) => setSelected((current) => checked ? [...current, ticket.number] : current.filter((number) => number !== ticket.number))} />
-                    <Badge variant={ticket.state === "open" ? "secondary" : "outline"}>
-                      {ticket.state === "open" ? "Open" : "Closed"}
+                    <Checkbox aria-label={`Select ticket #${ticket.number}`} checked={selectedTickets.some((selectedTicket) => selectedTicket.url === ticket.url)} disabled={!ticketIsOpen(ticket.state) || Boolean(activeQueue)} onCheckedChange={(checked) => setSelected((current) => checked ? [...new Set([...current, ticket.url])] : current.filter((url) => url !== ticket.url))} />
+                    <Badge variant={ticketIsOpen(ticket.state) ? "secondary" : "outline"}>
+                      {ticket.state || (ticketIsOpen(ticket.state) ? "Open" : "Closed")}
                     </Badge>
-                    <a
+                    <ExternalUrlLink
                       href={ticket.url}
-                      target="_blank"
-                      rel="noreferrer"
                       className="min-w-0 flex-1 underline-offset-4 hover:underline"
                     >
                       <span className="text-muted-foreground">#{ticket.number}</span>{" "}
                       {ticket.title}
-                    </a>
+                    </ExternalUrlLink>
                     {!linkedUrls.has(ticket.url) && (
                       <span className="text-xs text-muted-foreground">
                         Not linked to this Item
                       </span>
                     )}
-                    {progressQueue?.entries.find((entry) => entry.ticketNumber === ticket.number) && (() => { const entry = progressQueue.entries.find((candidate) => candidate.ticketNumber === ticket.number)!; const run = entry.runId ? view.runs.find((candidate) => candidate.id === entry.runId) : undefined; return entry.done ? <Badge variant="secondary">Done</Badge> : entry.skipped ? <Badge variant="outline">Skipped</Badge> : progressQueue.pausedReason && entry.runId ? <Badge variant="destructive">Paused · {queuePauseLabel(progressQueue.pausedReason)}</Badge> : entry.runId && run?.state === "finished" ? <Badge variant="outline">Waiting · Run #{entry.runId}</Badge> : entry.runId ? <Button type="button" size="sm" variant="ghost" onClick={() => onOpenRun(entry.runId!)}>Running · Run #{entry.runId}</Button> : specActiveQueue ? <Badge variant="outline">Queued</Badge> : null; })()}
+                    {progressQueue?.entries.find((entry) => entry.ticketUrl === ticket.url) && (() => { const entry = progressQueue.entries.find((candidate) => candidate.ticketUrl === ticket.url)!; const run = entry.runId ? view.runs.find((candidate) => candidate.id === entry.runId) : undefined; return entry.done ? <Badge variant="secondary">Done</Badge> : entry.skipped ? <Badge variant="outline">Skipped</Badge> : progressQueue.pausedReason && entry.runId ? <Badge variant="destructive">Paused · {queuePauseLabel(progressQueue.pausedReason)}</Badge> : entry.runId && run?.state === "finished" ? <Badge variant="outline">Waiting · Run #{entry.runId}</Badge> : entry.runId ? <Button type="button" size="sm" variant="ghost" onClick={() => onOpenRun(entry.runId!)}>Running · Run #{entry.runId}</Button> : specActiveQueue ? <Badge variant="outline">Queued</Badge> : null; })()}
                   </li>
                 ))}
               </ul>
@@ -304,14 +348,19 @@ function SpecDocument({
 
           <section className="grid gap-2" aria-label="Description">
             <SectionLabel>Description</SectionLabel>
-            {document.data.body.trim() ? (
+            {document.data.body.trim() ? document.data.bodyFormat === "html" ? (
+              <ConfluenceHtml html={document.data.body} />
+            ) : (
               <div className="spec-markdown">
                 <Markdown
                   remarkPlugins={[remarkGfm]}
                   components={{
-                    a: ({ node: _node, ...props }) => (
-                      <a {...props} target="_blank" rel="noreferrer" />
-                    ),
+                    a: ({ node: _node, ...props }) =>
+                      props.href ? (
+                        <ExternalUrlLink {...props} href={props.href} />
+                      ) : (
+                        <a {...props} />
+                      ),
                   }}
                 >
                   {document.data.body}

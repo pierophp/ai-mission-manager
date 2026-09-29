@@ -9,7 +9,11 @@ export const workKeys = {
   home: (contextId: number | undefined) =>
     [...workKeys.all, "home", { contextId: contextId ?? null }] as const,
   search: (query: string, contextId: number | undefined) =>
-    [...workKeys.all, "search", { query, contextId: contextId ?? null }] as const,
+    [
+      ...workKeys.all,
+      "search",
+      { query, contextId: contextId ?? null },
+    ] as const,
   runSuggestions: () => [...workKeys.all, "runSuggestions"] as const,
 };
 
@@ -42,19 +46,60 @@ export const runSuggestionsQueryOptions = () =>
   });
 
 /**
- * Specs are read from GitHub on demand. They live outside `workKeys` so saving
- * an Item does not refetch them; the Spec tab refreshes them explicitly.
+ * Specs are read from their provider when the Spec tab opens. They live outside
+ * `workKeys` so saving an Item does not refetch them.
  */
 export const issueDocumentQueryOptions = (externalObjectId: number) =>
   queryOptions({
     queryKey: ["issueDocument", externalObjectId] as const,
     queryFn: () => workAdapter.fetchIssueDocument(externalObjectId),
-    staleTime: 5 * 60_000,
+    staleTime: 0,
+    refetchOnMount: "always" as const,
     retry: false,
+  });
+
+export const externalDocumentQueryOptions = (
+  externalObjectId: number,
+  enabled = true,
+) =>
+  queryOptions({
+    queryKey: ["externalDocument", externalObjectId] as const,
+    queryFn: () => workAdapter.fetchExternalDocument(externalObjectId),
+    staleTime: 0,
+    refetchOnMount: "always" as const,
+    retry: false,
+    enabled,
+  });
+
+export const externalCommentsQueryOptions = (
+  externalObjectId: number,
+  enabled = true,
+) =>
+  queryOptions({
+    queryKey: ["externalComments", externalObjectId] as const,
+    queryFn: () => workAdapter.fetchExternalComments(externalObjectId),
+    staleTime: 0,
+    refetchOnMount: "always" as const,
+    retry: false,
+    enabled,
   });
 
 export function useIssueDocumentQuery(externalObjectId: number) {
   return useQuery(issueDocumentQueryOptions(externalObjectId));
+}
+
+export function useExternalDocumentQuery(
+  externalObjectId: number,
+  enabled = true,
+) {
+  return useQuery(externalDocumentQueryOptions(externalObjectId, enabled));
+}
+
+export function useExternalCommentsQuery(
+  externalObjectId: number,
+  enabled = true,
+) {
+  return useQuery(externalCommentsQueryOptions(externalObjectId, enabled));
 }
 
 export const activityKeys = {

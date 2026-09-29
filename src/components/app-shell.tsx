@@ -1,7 +1,6 @@
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { createContext, useContext } from "react";
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
-import { Moon, Sun } from "lucide-react";
 
 import { useHealthStatusQuery, useSetupStateQuery } from "../features/setup/setup-queries";
 import {
@@ -11,10 +10,13 @@ import {
 import { useStructureData } from "../features/structure/structure-queries";
 import {
   applyTheme,
-  loadStoredTheme,
-  loadTheme,
-  saveTheme,
+  loadThemePreference,
+  resolveTheme,
+  saveThemePreference,
+  systemTheme,
   type Theme,
+  type ThemePreference,
+  watchSystemTheme,
 } from "../theme";
 import { errorMessage } from "../runtime/errors";
 import type {
@@ -41,6 +43,8 @@ import { appShellLayoutClassName } from "./app-shell-layout";
 type AppShellContextValue = {
   openTerminal: (runId: number, pane: PaneTab) => void;
   closeTerminal: () => void;
+  themePreference: ThemePreference;
+  setThemePreference: (preference: ThemePreference) => void;
 };
 
 const AppShellContext = createContext<AppShellContextValue | undefined>(
@@ -58,27 +62,11 @@ type AppTab = "work" | "settings" | "activity";
 const appTabs: {
   id: AppTab;
   label: string;
-  description: string;
   path: "/work" | "/settings/contexts" | "/activity";
 }[] = [
-  {
-    id: "work",
-    label: "Work",
-    description: "One calm view of what needs your attention, what is moving, and what is waiting.",
-    path: "/work",
-  },
-  {
-    id: "settings",
-    label: "Settings",
-    description: "Contexts, Projects, Repositories, Machines, and defaults for your work.",
-    path: "/settings/contexts",
-  },
-  {
-    id: "activity",
-    label: "Activity",
-    description: "A record of the actions the app has taken and the changes it has observed.",
-    path: "/activity",
-  },
+  { id: "work", label: "Work", path: "/work" },
+  { id: "settings", label: "Settings", path: "/settings/contexts" },
+  { id: "activity", label: "Activity", path: "/activity" },
 ];
 
 const outlineButtonClass =
@@ -96,8 +84,9 @@ export function AppShell() {
   const [setupProvider, setSetupProvider] = useState<ProviderChoice>("github");
   const [error, setError] = useState<string>();
   const [showHealthDetails, setShowHealthDetails] = useState(false);
-  const [theme, setTheme] = useState<Theme>(loadTheme);
-  const themePreferenceRef = useRef<Theme | undefined>(loadStoredTheme());
+  const [themePreference, setThemePreference] = useState<ThemePreference>(loadThemePreference);
+  const [currentSystemTheme, setCurrentSystemTheme] = useState<Theme>(systemTheme);
+  const theme = resolveTheme(themePreference, currentSystemTheme);
   const [terminalRequest, setTerminalRequest] = useState<{
     runId: number;
     pane: PaneTab;
@@ -118,16 +107,16 @@ export function AppShell() {
   });
   const activeTab = appTabForPath(pathname);
   const activeTabDetails = appTabs.find((tab) => tab.id === activeTab) ?? appTabs[0];
-  const isDarkTheme = theme === "dark";
-  const themeToggleLabel = isDarkTheme ? "Switch to light mode" : "Switch to dark mode";
-  const themeModeLabel = isDarkTheme ? "Light mode" : "Dark mode";
   const runtimeState = healthStatus?.runtime.state ?? "unavailable";
+  const runtimeLabel = healthStatus ? dependencyStateLabel(healthStatus.runtime.state) : "Checking";
+  const providerLabel = healthStatus ? dependencyStateLabel(healthStatus.provider.state) : "Checking";
   const isSaving = setupMutation.isPending;
   const isCheckingDependencies = healthMutation.isPending;
 
+  useEffect(() => watchSystemTheme(setCurrentSystemTheme), []);
+
   useEffect(() => {
     applyTheme(theme);
-    if (themePreferenceRef.current) saveTheme(theme);
   }, [theme]);
 
   useEffect(() => {
@@ -155,62 +144,35 @@ export function AppShell() {
 
   return (
     <main className={appShellLayoutClassName}>
-      <header className="flex items-start justify-between gap-6 max-[510px]:flex-col">
-        <div>
-          <p className="mb-2.5 text-[0.72rem] font-bold uppercase tracking-[0.14em] text-primary">
-            AI Mission Manager
-          </p>
-          <h1 className="font-heading text-4xl leading-[0.95] font-medium tracking-[-0.035em] sm:text-6xl">
-            {activeTabDetails.label}
-          </h1>
-          <p className="mt-3.5 max-w-[620px] text-base leading-relaxed text-muted-foreground">
-            {activeTabDetails.description}
-          </p>
-        </div>
-        <div className="flex items-start gap-3.5 max-[510px]:w-full max-[510px]:flex-wrap">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className={`h-[34px] gap-1.5 px-2.5 text-xs ${outlineButtonClass}`}
-            aria-label={themeToggleLabel}
-            aria-pressed={isDarkTheme}
-            onClick={() => {
-              const nextTheme = isDarkTheme ? "light" : "dark";
-              themePreferenceRef.current = nextTheme;
-              setTheme(nextTheme);
-            }}
-          >
-            {isDarkTheme ? <Sun aria-hidden="true" /> : <Moon aria-hidden="true" />}
-            <span>{themeModeLabel}</span>
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            className="h-auto min-h-8 gap-2 px-2 text-xs text-muted-foreground hover:bg-secondary hover:text-primary max-[510px]:whitespace-normal"
-            aria-label="Runtime and provider health"
-            aria-expanded={showHealthDetails}
-            onClick={() => setShowHealthDetails((current) => !current)}
-          >
-            <span
-              aria-hidden="true"
-              className={`size-2 shrink-0 rounded-full ring-4 ${
-                runtimeState === "available"
-                  ? "bg-emerald-500 ring-emerald-500/15"
-                  : runtimeState === "unavailable"
-                    ? "bg-destructive ring-destructive/15"
-                    : "bg-amber-500 ring-amber-500/15"
-              }`}
-            />
-            <span>Runtime: {healthStatus ? dependencyStateLabel(healthStatus.runtime.state) : "Checking"}</span>
-            <span className="text-muted-foreground/60">·</span>
-            <span>GitHub: {healthStatus ? dependencyStateLabel(healthStatus.provider.state) : "Checking"}</span>
-          </Button>
-        </div>
-      </header>
+      <h1 className="sr-only">{activeTabDetails.label}</h1>
 
-      <TabNavigation activeTab={activeTab} />
+      <TabNavigation activeTab={activeTab}>
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-auto min-h-8 shrink-0 gap-2 px-2 text-xs text-muted-foreground hover:bg-secondary hover:text-primary"
+          aria-label={`Runtime and provider health. Runtime: ${runtimeLabel}, GitHub: ${providerLabel}`}
+          aria-expanded={showHealthDetails}
+          onClick={() => setShowHealthDetails((current) => !current)}
+        >
+          <span
+            aria-hidden="true"
+            className={`size-2 shrink-0 rounded-full ring-4 ${
+              runtimeState === "available"
+                ? "bg-emerald-500 ring-emerald-500/15"
+                : runtimeState === "unavailable"
+                  ? "bg-destructive ring-destructive/15"
+                  : "bg-amber-500 ring-amber-500/15"
+            }`}
+          />
+          <span aria-hidden="true" className="flex gap-2 max-[510px]:hidden">
+            <span>Runtime: {runtimeLabel}</span>
+            <span className="text-muted-foreground/60">·</span>
+            <span>GitHub: {providerLabel}</span>
+          </span>
+        </Button>
+      </TabNavigation>
 
       {showHealthDetails && setupState?.completed && healthStatus && (
         <HealthDetails
@@ -269,6 +231,11 @@ export function AppShell() {
         value={{
           openTerminal: (runId, pane) => setTerminalRequest({ runId, pane }),
           closeTerminal: () => setTerminalRequest(undefined),
+          themePreference,
+          setThemePreference: (preference) => {
+            saveThemePreference(preference);
+            setThemePreference(preference);
+          },
         }}
       >
         <Outlet />
@@ -287,10 +254,16 @@ function ErrorAlert({ message }: { message: string }) {
   );
 }
 
-function TabNavigation({ activeTab }: { activeTab: AppTab }) {
+function TabNavigation({
+  activeTab,
+  children,
+}: {
+  activeTab: AppTab;
+  children: ReactNode;
+}) {
   return (
-    <nav className="mt-8 border-b border-border" aria-label="Main sections">
-      <div className="flex gap-6 overflow-x-auto">
+    <div className="flex items-center justify-between gap-4 border-b border-border">
+      <nav className="flex min-w-0 gap-6 overflow-x-auto" aria-label="Main sections">
         {appTabs.map((tab) => (
           <Button
             asChild
@@ -308,8 +281,9 @@ function TabNavigation({ activeTab }: { activeTab: AppTab }) {
             </Link>
           </Button>
         ))}
-      </div>
-    </nav>
+      </nav>
+      {children}
+    </div>
   );
 }
 

@@ -56,7 +56,12 @@ fn runtime_with_grill_run(
         effort: "high".into(),
     };
     let prompt = runtime
-        .compose_grill_prompt(item.id, configuration.clone(), "Test prompt".into())
+        .compose_grill_prompt(
+            item.id,
+            configuration.clone(),
+            crate::domain::GrillLanguage::default(),
+            "Test prompt".into(),
+        )
         .expect("Grill prompt should compose");
     let decision = decide(
         runtime.state.clone(),
@@ -89,6 +94,93 @@ fn runtime_with_grill_run(
         .expect("Grill Run should remain available")
         .id;
     (runtime, run_id)
+}
+
+#[test]
+fn grill_capture_resolves_local_markdown_against_repository_checkout_for_worktree_run() {
+    use crate::domain::GrillContinuationAction;
+
+    let database = tempdir().expect("temporary database directory should exist");
+    let checkout = tempdir().expect("temporary checkout should exist");
+    let worktree = tempdir().expect("temporary Worktree should exist");
+    let scratch = checkout.path().join(".scratch");
+    std::fs::create_dir_all(&scratch).expect("scratch directory should be created");
+    std::fs::write(scratch.join("spec.md"), "# Captured local Spec\n")
+        .expect("local Markdown should be written");
+    let worktree_scratch = worktree.path().join(".scratch");
+    std::fs::create_dir_all(&worktree_scratch).expect("Worktree scratch directory should exist");
+    std::fs::write(
+        worktree_scratch.join("spec.md"),
+        "# Worktree copy, not the tracker file\n",
+    )
+    .expect("Worktree Markdown should be written");
+    let (mut runtime, run_id) = runtime_with_grill_run(
+        &database.path().join("capture.db"),
+        crate::terminal::FakeTerminalRuntime::new([(
+            1,
+            crate::terminal::FakeMachineOutcome::Available,
+        )]),
+    );
+    let run = runtime
+        .state
+        .runs
+        .iter_mut()
+        .find(|run| run.id == run_id)
+        .expect("Grill Run should exist");
+    let repository_id = run.direct_checkouts[0].repository_id;
+    let machine_id = run.machine_id;
+    run.direct_checkouts.clear();
+    run.worktree_id = Some(99);
+    run.working_directory = worktree.path().to_string_lossy().into_owned();
+    run.grill_action = Some(GrillContinuationAction::ToSpec);
+    run.grill_action_started_at = Some(1);
+    let item_id = run.item_id;
+    runtime
+        .state
+        .repository_locations
+        .push(crate::domain::RepositoryLocation {
+            repository_id,
+            machine_id,
+            checkout_path: checkout.path().to_string_lossy().into_owned(),
+            worktree_root: worktree.path().to_string_lossy().into_owned(),
+        });
+    let transcript = format!(
+        "AI_MISSION_MANAGER_EVENT {{\"event\":\"external.object.created\",\"url\":\".scratch/spec.md\",\"run_id\":{run_id},\"action\":\"to-spec\"}}"
+    );
+
+    runtime
+        .capture_downstream_issues(run_id, &transcript)
+        .expect("local Markdown capture should succeed");
+
+    assert_eq!(runtime.state.links.len(), 1);
+    assert_eq!(runtime.state.links[0].item_id, item_id);
+    assert_eq!(
+        runtime.state.external_objects[0].provider,
+        ExternalProvider::Generic
+    );
+    assert_eq!(
+        runtime.state.external_objects[0].external_key,
+        format!("local:{repository_id}#.scratch/spec.md",)
+    );
+    assert_eq!(
+        runtime.state.external_objects[0].canonical_url,
+        format!(
+            "file://{}",
+            checkout
+                .path()
+                .canonicalize()
+                .expect("main Repository checkout should resolve")
+                .join(".scratch/spec.md")
+                .display()
+        )
+    );
+    assert_eq!(
+        runtime.state.links[0]
+            .provenance
+            .as_ref()
+            .map(|provenance| provenance.action),
+        Some(GrillContinuationAction::ToSpec)
+    );
 }
 
 fn init_test_repository(path: &Path, remote_url: &str, branch: &str) {
@@ -400,7 +492,7 @@ fn link_purpose_setting_persists_and_round_trips_through_runtime() {
     runtime.commit(link).expect("the Link should persist");
 
     let marked = runtime
-        .set_link_purpose(1, crate::domain::LinkPurpose::ToSpec)
+        .set_link_purpose(1, crate::domain::LinkPurpose::ToSpec, None)
         .expect("the Link can be marked as a Spec");
     assert_eq!(marked.link.purpose, crate::domain::LinkPurpose::ToSpec);
     drop(runtime);
@@ -411,11 +503,11 @@ fn link_purpose_setting_persists_and_round_trips_through_runtime() {
         crate::domain::LinkPurpose::ToSpec
     );
     let unmarked = reopened
-        .set_link_purpose(1, crate::domain::LinkPurpose::ToTickets)
+        .set_link_purpose(1, crate::domain::LinkPurpose::ToTickets, None)
         .expect("the Link type can change to tickets");
     assert_eq!(unmarked.link.purpose, crate::domain::LinkPurpose::ToTickets);
     let other = reopened
-        .set_link_purpose(1, crate::domain::LinkPurpose::Others)
+        .set_link_purpose(1, crate::domain::LinkPurpose::Others, None)
         .expect("the Link type can change to others");
     assert_eq!(other.link.purpose, crate::domain::LinkPurpose::Others);
 }
@@ -439,6 +531,7 @@ fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
         item_id: 1,
         machine_id: 1,
         agent: crate::domain::AgentKind::Claude,
+        cli_configuration_profile: None,
         execution_profile: crate::domain::ExecutionProfile::Implement,
         model: None,
         effort: None,
@@ -802,11 +895,23 @@ fn a_failed_run_preflight_never_calls_the_agent_launcher() {
         let checkout = directory.path().join("checkout");
         let fake = FakeTerminalRuntime::new([(1, outcome)]);
         let commands = fake.command_log();
-        let (runtime, item, workspace, _, worktree) = runtime_for_run_launch(
+        let (mut runtime, item, workspace, _, worktree) = runtime_for_run_launch(
             &directory.path().join("mission-manager.sqlite"),
             &checkout,
             fake,
         );
+        runtime
+            .state
+            .cli_configuration_profiles
+            .push(crate::domain::CliConfigurationProfile {
+                id: 1,
+                machine_id: 1,
+                provider: AgentKind::Claude,
+                name: "Selected profile".into(),
+                directory: "/profiles/claude".into(),
+                app_managed: false,
+            });
+        runtime.state.contexts[0].claude_profile_id = Some(1);
         let state = Mutex::new(runtime);
         let error = tauri::async_runtime::block_on(runs::start_worktree_run_with_state(
             item.id,
@@ -835,12 +940,66 @@ fn a_failed_run_preflight_never_calls_the_agent_launcher() {
                 machine_id: 1,
                 agent: AgentKind::Claude,
                 run_id: 1,
+                ..
             }
         )));
         assert!(!recorded
             .iter()
             .any(|command| matches!(command, FakeTerminalCommand::LaunchAgent { .. })));
     }
+}
+
+#[test]
+fn selected_profile_for_the_wrong_provider_blocks_before_preflight() {
+    use crate::{
+        domain::{AgentKind, ExecutionProfile, RunPromptSelection},
+        terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime},
+    };
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let checkout = directory.path().join("checkout");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+    let commands = fake.command_log();
+    let (mut runtime, item, workspace, _, worktree) = runtime_for_run_launch(
+        &directory.path().join("mission-manager.sqlite"),
+        &checkout,
+        fake,
+    );
+    runtime
+        .state
+        .cli_configuration_profiles
+        .push(crate::domain::CliConfigurationProfile {
+            id: 1,
+            machine_id: 1,
+            provider: AgentKind::Codex,
+            name: "Codex profile".into(),
+            directory: "/profiles/codex".into(),
+            app_managed: false,
+        });
+    runtime.state.contexts[0].claude_profile_id = Some(1);
+    let state = Mutex::new(runtime);
+
+    let error = tauri::async_runtime::block_on(runs::start_worktree_run_with_state(
+        item.id,
+        workspace.id,
+        worktree.id,
+        AgentKind::Claude,
+        ExecutionProfile::Implement,
+        "Implement the change".into(),
+        RunPromptSelection {
+            include_objective: true,
+            include_notes: false,
+            external_object_ids: Vec::new(),
+        },
+        &state,
+    ))
+    .expect_err("a profile for another provider must block the Run");
+
+    assert!(error.contains("Selected Claude Code configuration profile 1 is unavailable"));
+    assert!(!commands.lock().unwrap().iter().any(|command| matches!(
+        command,
+        FakeTerminalCommand::PreflightAgentRun { .. } | FakeTerminalCommand::LaunchAgent { .. }
+    )));
 }
 
 #[test]
@@ -911,137 +1070,338 @@ fn direct_grill_and_worktree_runs_are_persisted_before_their_gate_is_released() 
         Worktree,
     }
 
-    for flow in [Flow::Direct, Flow::Grill, Flow::Worktree] {
-        let directory = tempdir().expect("temporary app directory should exist");
-        let checkout = directory.path().join("checkout");
-        let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
-        let blocked_release = fake.block_launch_release();
-        let commands = fake.command_log();
-        let (runtime, item, workspace, repository, worktree) = runtime_for_run_launch(
-            &directory.path().join("mission-manager.sqlite"),
-            &checkout,
-            fake,
-        );
-        let expected_checkout = RunCheckout {
-            repository_id: repository.id,
-            path: checkout.to_string_lossy().into_owned(),
-            branch: "feature/run-gate".into(),
-            is_dirty: false,
-        };
-        let state = Arc::new(Mutex::new(runtime));
-        let worker_state = Arc::clone(&state);
-        let worker = thread::spawn(move || {
-            tauri::async_runtime::block_on(async move {
-                let selection = RunPromptSelection {
-                    include_objective: true,
-                    include_notes: false,
-                    external_object_ids: Vec::new(),
-                };
-                match flow {
-                    Flow::Direct => {
-                        runs::start_direct_run_with_state(
-                            item.id,
-                            workspace.id,
-                            None,
-                            repository.id,
-                            AgentKind::Claude,
-                            Some(GrillConfiguration {
-                                agent: AgentKind::Claude,
-                                model: "claude-sonnet-4-5".into(),
-                                effort: "high".into(),
-                            }),
-                            ExecutionProfile::Implement,
-                            "Implement the change".into(),
-                            selection,
-                            vec![expected_checkout],
-                            false,
-                            false,
-                            &worker_state,
-                        )
-                        .await
-                    }
-                    Flow::Grill => {
-                        runs::start_grill_run_with_state(
-                            item.id,
-                            workspace.id,
-                            None,
-                            repository.id,
-                            GrillConfiguration {
-                                agent: AgentKind::Claude,
-                                model: "claude-sonnet-4-5".into(),
-                                effort: "high".into(),
-                            },
-                            "Check the launch flow".into(),
-                            vec![expected_checkout],
-                            false,
-                            false,
-                            &worker_state,
-                        )
-                        .await
-                    }
-                    Flow::Worktree => {
-                        runs::start_worktree_run_with_state(
-                            item.id,
-                            workspace.id,
-                            worktree.id,
-                            AgentKind::Claude,
-                            ExecutionProfile::Implement,
-                            "Implement the change".into(),
-                            selection,
-                            &worker_state,
-                        )
-                        .await
-                    }
-                }
-            })
-        });
-
-        if !blocked_release.wait_until_started(Duration::from_secs(5)) {
-            blocked_release.release();
-            let worker_result = worker
-                .join()
-                .expect("Run launch worker should finish without blocking");
-            panic!(
-                "flow={flow:?} did not reach release: result={worker_result:?}, commands={:?}",
-                commands.lock().unwrap(),
+    for agent in [AgentKind::Claude, AgentKind::Codex] {
+        for flow in [Flow::Direct, Flow::Grill, Flow::Worktree] {
+            let directory = tempdir().expect("temporary app directory should exist");
+            let checkout = directory.path().join("checkout");
+            let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+            let blocked_release = fake.block_launch_release();
+            let commands = fake.command_log();
+            let (mut runtime, item, workspace, repository, worktree) = runtime_for_run_launch(
+                &directory.path().join("mission-manager.sqlite"),
+                &checkout,
+                fake,
             );
-        }
-        {
-            let runtime = state
-                .lock()
-                .expect("Runtime should remain lockable during the blocked release");
-            assert_eq!(runtime.state.runs.len(), 1);
-            assert_eq!(runtime.state.runs[0].state, RunState::Unknown);
-            assert_eq!(runtime.state.runs[0].pane_id, "%fake-1");
-            if matches!(flow, Flow::Direct) {
-                assert_eq!(
-                    runtime.state.runs[0].model.as_deref(),
-                    Some("claude-sonnet-4-5")
-                );
-                assert_eq!(runtime.state.runs[0].effort.as_deref(), Some("high"));
+            runtime
+                .state
+                .cli_configuration_profiles
+                .push(crate::domain::CliConfigurationProfile {
+                    id: 1,
+                    machine_id: 1,
+                    provider: agent,
+                    name: format!("{agent:?} profile"),
+                    directory: format!("/profiles/{}", agent.slug()),
+                    app_managed: false,
+                });
+            match agent {
+                AgentKind::Claude => runtime.state.contexts[0].claude_profile_id = Some(1),
+                AgentKind::Codex => runtime.state.contexts[0].codex_profile_id = Some(1),
             }
-        }
-        blocked_release.release();
-        let run = worker
-            .join()
-            .expect("Run launch worker should finish")
-            .expect("Run launch should succeed");
-        assert_eq!(run.state, RunState::Unknown);
+            let expected_checkout = RunCheckout {
+                repository_id: repository.id,
+                path: checkout.to_string_lossy().into_owned(),
+                branch: "feature/run-gate".into(),
+                is_dirty: false,
+            };
+            let grill_configuration = GrillConfiguration {
+                agent,
+                model: if agent == AgentKind::Claude {
+                    "claude-sonnet-4-5"
+                } else {
+                    "gpt-6-luna"
+                }
+                .into(),
+                effort: if agent == AgentKind::Claude {
+                    "high"
+                } else {
+                    "xhigh"
+                }
+                .into(),
+            };
+            let state = Arc::new(Mutex::new(runtime));
+            let worker_state = Arc::clone(&state);
+            let worker = thread::spawn(move || {
+                tauri::async_runtime::block_on(async move {
+                    let selection = RunPromptSelection {
+                        include_objective: true,
+                        include_notes: false,
+                        external_object_ids: Vec::new(),
+                    };
+                    match flow {
+                        Flow::Direct => {
+                            runs::start_direct_run_with_state(
+                                item.id,
+                                workspace.id,
+                                None,
+                                repository.id,
+                                agent,
+                                Some(grill_configuration.clone()),
+                                ExecutionProfile::Implement,
+                                "Implement the change".into(),
+                                selection,
+                                vec![expected_checkout],
+                                false,
+                                false,
+                                &worker_state,
+                            )
+                            .await
+                        }
+                        Flow::Grill => {
+                            runs::start_grill_run_with_state(
+                                item.id,
+                                workspace.id,
+                                None,
+                                repository.id,
+                                grill_configuration,
+                                crate::domain::GrillLanguage::default(),
+                                "Check the launch flow".into(),
+                                vec![expected_checkout],
+                                false,
+                                false,
+                                &worker_state,
+                            )
+                            .await
+                        }
+                        Flow::Worktree => {
+                            runs::start_worktree_run_with_state(
+                                item.id,
+                                workspace.id,
+                                worktree.id,
+                                agent,
+                                ExecutionProfile::Implement,
+                                "Implement the change".into(),
+                                selection,
+                                &worker_state,
+                            )
+                            .await
+                        }
+                    }
+                })
+            });
 
-        let recorded = commands
-            .lock()
-            .expect("fake command log should remain available")
-            .clone();
-        let launch_index = recorded
-            .iter()
-            .position(|command| matches!(command, FakeTerminalCommand::LaunchAgent { .. }))
-            .expect("gated session should be created");
-        let release_index = recorded
-            .iter()
-            .position(|command| matches!(command, FakeTerminalCommand::ReleaseAgentLaunch { .. }))
-            .expect("gated session should be released");
-        assert!(launch_index < release_index);
+            if !blocked_release.wait_until_started(Duration::from_secs(5)) {
+                blocked_release.release();
+                let worker_result = worker
+                    .join()
+                    .expect("Run launch worker should finish without blocking");
+                panic!(
+                    "flow={flow:?} did not reach release: result={worker_result:?}, commands={:?}",
+                    commands.lock().unwrap(),
+                );
+            }
+            {
+                let runtime = state
+                    .lock()
+                    .expect("Runtime should remain lockable during the blocked release");
+                assert_eq!(runtime.state.runs.len(), 1);
+                assert_eq!(runtime.state.runs[0].state, RunState::Unknown);
+                assert_eq!(runtime.state.runs[0].pane_id, "%fake-1");
+                if matches!(flow, Flow::Direct) {
+                    assert_eq!(
+                        runtime.state.runs[0].model.as_deref(),
+                        Some(if agent == AgentKind::Claude {
+                            "claude-sonnet-4-5"
+                        } else {
+                            "gpt-6-luna"
+                        })
+                    );
+                    assert_eq!(
+                        runtime.state.runs[0].effort.as_deref(),
+                        Some(if agent == AgentKind::Claude {
+                            "high"
+                        } else {
+                            "xhigh"
+                        })
+                    );
+                }
+                assert_eq!(
+                    runtime.state.runs[0]
+                        .cli_configuration_profile
+                        .as_ref()
+                        .map(|profile| profile.profile_id),
+                    Some(1)
+                );
+            }
+            blocked_release.release();
+            let run = worker
+                .join()
+                .expect("Run launch worker should finish")
+                .expect("Run launch should succeed");
+            assert_eq!(run.state, RunState::Unknown);
+
+            let recorded = commands
+                .lock()
+                .expect("fake command log should remain available")
+                .clone();
+            assert!(recorded.iter().any(|command| matches!(command,
+            FakeTerminalCommand::PreflightAgentRun { agent: observed_agent, profile: Some(profile), .. }
+                if *observed_agent == agent && profile.id == 1
+        )));
+            assert!(recorded.iter().any(|command| matches!(command,
+                FakeTerminalCommand::LaunchAgent { profile_directory: Some(directory), .. }
+                    if directory == Path::new(&format!("/profiles/{}", agent.slug()))
+            )));
+            let launch_index = recorded
+                .iter()
+                .position(|command| matches!(command, FakeTerminalCommand::LaunchAgent { .. }))
+                .expect("gated session should be created");
+            let release_index = recorded
+                .iter()
+                .position(|command| {
+                    matches!(command, FakeTerminalCommand::ReleaseAgentLaunch { .. })
+                })
+                .expect("gated session should be released");
+            assert!(launch_index < release_index);
+        }
     }
+}
+
+#[test]
+fn first_and_advancing_queue_launches_deliver_the_local_implement_prompt() {
+    use crate::{
+        domain::{
+            decide, AgentKind, Event, ExecutionProfile, GrillConfiguration,
+            ImplementationQueueEntry, ImplementationQueueStart, LinkPurpose, RunCheckout,
+            RunPromptSelection,
+        },
+        terminal::{FakeMachineOutcome, FakeTerminalRuntime},
+    };
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let checkout = directory.path().join("checkout");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+    let (runtime, item, workspace, repository, _) = runtime_for_run_launch(
+        &directory.path().join("mission-manager.sqlite"),
+        &checkout,
+        fake,
+    );
+    let state = Mutex::new(runtime);
+    let spec = decide(
+        state.lock().unwrap().state.clone(),
+        Event::LinkExternalObject {
+            item_id: item.id,
+            object: ExternalObjectInput {
+                provider: ExternalProvider::GitHub,
+                kind: ExternalObjectKind::Issue,
+                external_key: "owner/repo#87".into(),
+                canonical_url: "https://github.com/o/r/issues/87".into(),
+            },
+            snapshot: None,
+        },
+    )
+    .expect("spec issue should link");
+    state
+        .lock()
+        .unwrap()
+        .commit(spec)
+        .expect("spec link should persist");
+    state
+        .lock()
+        .unwrap()
+        .set_link_purpose(1, LinkPurpose::ToSpec, None)
+        .expect("linked issue should be markable as the spec");
+
+    let selection = RunPromptSelection {
+        include_objective: true,
+        include_notes: false,
+        external_object_ids: Vec::new(),
+    };
+    let checkouts = vec![RunCheckout {
+        repository_id: repository.id,
+        path: checkout.to_string_lossy().into_owned(),
+        branch: "feature/run-gate".into(),
+        is_dirty: false,
+    }];
+    let configuration = GrillConfiguration {
+        agent: AgentKind::Claude,
+        model: "claude-sonnet-4-5".into(),
+        effort: "high".into(),
+    };
+    let queue = ImplementationQueueStart {
+        spec_external_object_id: 1,
+        spec_url: "https://github.com/o/r/issues/87".into(),
+        entries: vec![
+            ImplementationQueueEntry {
+                position: 0,
+                ticket_number: 42,
+                ticket_title: "First issue".into(),
+                ticket_url: "https://github.com/o/r/issues/42".into(),
+                ticket_state: "open".into(),
+                run_id: None,
+                done: false,
+                skipped: false,
+            },
+            ImplementationQueueEntry {
+                position: 1,
+                ticket_number: 43,
+                ticket_title: "Next issue".into(),
+                ticket_url: "https://github.com/o/r/issues/43".into(),
+                ticket_state: "open".into(),
+                run_id: None,
+                done: false,
+                skipped: false,
+            },
+        ],
+    };
+
+    let first_run = tauri::async_runtime::block_on(runs::start_direct_run_with_queue_state(
+        item.id,
+        workspace.id,
+        None,
+        repository.id,
+        AgentKind::Claude,
+        Some(configuration),
+        Some(queue),
+        ExecutionProfile::Implement,
+        "ignored queue seed prompt".into(),
+        selection,
+        checkouts,
+        false,
+        false,
+        &state,
+    ))
+    .expect("initial queue Run should launch");
+
+    {
+        let mut runtime = state.lock().unwrap();
+        assert_local_implementation_queue_prompt(
+            &runtime.state.runs[0].prompt,
+            42,
+            "https://github.com/o/r/issues/42",
+        );
+        runtime.state.runs[0].state = crate::domain::RunState::Finished;
+    }
+
+    tauri::async_runtime::block_on(runs::launch_implementation_queue_entry_with_state(
+        1,
+        1,
+        first_run.id,
+        &state,
+    ))
+    .expect("advancing queue Run should launch");
+    let runtime = state.lock().unwrap();
+    assert_eq!(runtime.state.runs.len(), 2);
+    assert_local_implementation_queue_prompt(
+        &runtime.state.runs[1].prompt,
+        43,
+        "https://github.com/o/r/issues/43",
+    );
+}
+
+fn assert_local_implementation_queue_prompt(prompt: &str, ticket_number: i64, ticket_url: &str) {
+    assert!(prompt.starts_with("Implement the work described by the user in the spec or tickets."));
+    assert!(prompt.contains("Run typechecking regularly, single test files regularly"));
+    assert!(!prompt.contains("name: implement"));
+    assert!(prompt.contains(&format!("## Ticket #{ticket_number}")));
+    assert!(prompt.contains(ticket_url));
+    assert!(prompt.contains("Parent spec: https://github.com/o/r/issues/87"));
+    assert!(prompt.contains(&format!(
+        "Read the ticket using `gh issue view {ticket_number} --comments` before making changes."
+    )));
+    assert!(prompt.contains(&format!(
+        "Reference #{ticket_number} in the commit message and close this sub-issue when the work is complete."
+    )));
+    assert!(prompt.contains("Never close the parent spec or any other issue."));
 }
 
 #[test]
@@ -1064,6 +1424,7 @@ fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
         include_notes: false,
         external_object_ids: Vec::new(),
     };
+    let edited_grill_prompt = "Edited composed Grill prompt\nUse the revised assumptions.";
 
     for flow in [Flow::Direct, Flow::Grill, Flow::Worktree] {
         let directory = tempdir().expect("temporary app directory should exist");
@@ -1118,7 +1479,8 @@ fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
                             model: "claude-sonnet-4-5".into(),
                             effort: "high".into(),
                         },
-                        "Check the launch flow".into(),
+                        crate::domain::GrillLanguage::default(),
+                        edited_grill_prompt.into(),
                         vec![expected_checkout.clone()],
                         false,
                         false,
@@ -1144,6 +1506,10 @@ fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
         .unwrap_or_else(|error| panic!("flow={flow:?}: {error}"));
 
         assert_eq!(state.lock().unwrap().state.runs[0].id, run.id);
+        if matches!(flow, Flow::Grill) {
+            assert!(run.prompt.starts_with(edited_grill_prompt));
+            assert!(run.prompt.contains("GRILL_RESPONSE_LANGUAGE=portuguese"));
+        }
         match flow {
             Flow::Direct | Flow::Grill => {
                 assert!(checkout.join(".fake-terminal-launch-dirt").exists());

@@ -125,12 +125,17 @@ export function ItemDetailPanel({
     event.preventDefault();
     const nextTitle = titleDraft.trim();
     if (!nextTitle || nextTitle === view.item.title) return;
-    const result = await saveItem(workActions.setItemTitle(view.item.id, nextTitle));
+    const result = await saveItem(
+      workActions.setItemTitle(view.item.id, nextTitle),
+    );
     if (result) setIsRenaming(false);
   }
 
   function openQueueRun(runId: number) {
-    setFocusedQueueRun((current) => ({ runId, request: (current?.request ?? 0) + 1 }));
+    setFocusedQueueRun((current) => ({
+      runId,
+      request: (current?.request ?? 0) + 1,
+    }));
     onTabChange("runs");
   }
 
@@ -259,7 +264,11 @@ export function ItemDetailPanel({
         </TabsList>
         <div className="min-h-0 flex-1 overflow-y-auto p-4">
           {/* Tabs stay mounted so drafts survive switching between them. */}
-          <TabsContent value="overview" forceMount className="data-[state=inactive]:hidden">
+          <TabsContent
+            value="overview"
+            forceMount
+            className="data-[state=inactive]:hidden"
+          >
             <OverviewTab
               view={view}
               allItems={allItems}
@@ -269,12 +278,24 @@ export function ItemDetailPanel({
             />
           </TabsContent>
           {specs.length > 0 && (
-            // Not kept mounted: it reads GitHub, so it loads only when opened.
+            // Not kept mounted: it reads the selected Spec from its provider.
             <TabsContent value="spec">
-              <SpecTab view={view} specs={specs} repositories={repositories} contexts={contexts} modelCatalog={grillModelCatalog} commands={commands} onOpenRun={openQueueRun} />
+              <SpecTab
+                view={view}
+                specs={specs}
+                repositories={repositories}
+                contexts={contexts}
+                modelCatalog={grillModelCatalog}
+                commands={commands}
+                onOpenRun={openQueueRun}
+              />
             </TabsContent>
           )}
-          <TabsContent value="runs" forceMount className="data-[state=inactive]:hidden">
+          <TabsContent
+            value="runs"
+            forceMount
+            className="data-[state=inactive]:hidden"
+          >
             <RunsTab
               view={view}
               repositories={repositories}
@@ -289,7 +310,11 @@ export function ItemDetailPanel({
               focusedRunRequest={focusedQueueRun}
             />
           </TabsContent>
-          <TabsContent value="repositories" forceMount className="data-[state=inactive]:hidden">
+          <TabsContent
+            value="repositories"
+            forceMount
+            className="data-[state=inactive]:hidden"
+          >
             <RepositoriesTab
               view={view}
               repositories={repositories}
@@ -298,9 +323,14 @@ export function ItemDetailPanel({
               commands={commands}
             />
           </TabsContent>
-          <TabsContent value="links" forceMount className="data-[state=inactive]:hidden">
+          <TabsContent
+            value="links"
+            forceMount
+            className="data-[state=inactive]:hidden"
+          >
             <LinksTab
               view={view}
+              isActive={activeTab === "links"}
               repositories={repositories}
               commands={commands}
               intent={intent}

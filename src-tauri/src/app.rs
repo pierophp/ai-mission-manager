@@ -19,15 +19,15 @@ use crate::domain::Event;
 use crate::{
     dependencies::resolve_executable,
     domain::{
-        ActivityTabView, AgentKind, AuditEntry, Context, ContextAttentionDefault, DomainState,
-        ExecutionMode, ExecutionProfile, ExternalChangePolicy, ExternalLinkView,
-        ExternalObjectKind, ExternalSnapshot, GrillAnswer, GrillConfiguration,
-        GrillContinuationAction, HomeView, Item, ItemRelation, ItemRelationKind, ItemStatus,
-        ItemView, LinkPurpose, Machine, MachineTransport, Project, Repository, Run, RunCheckout,
-        RunPromptSelection, RunState, RunSuggestion, Worktree,
+        ActivityTabView, AgentKind, AuditEntry, Context, ContextAttentionDefault,
+        ContextConfiguration, DomainState, ExecutionMode, ExecutionProfile, ExternalChangePolicy,
+        ExternalLinkView, ExternalObjectKind, ExternalSnapshot, GrillAnswer, GrillConfiguration,
+        GrillContinuationAction, GrillLanguage, HomeView, Item, ItemRelation, ItemRelationKind,
+        ItemStatus, ItemView, LinkPurpose, Machine, MachineTransport, Project, Repository, Run,
+        RunCheckout, RunPromptSelection, RunState, RunSuggestion, Worktree,
     },
     persistence::SqliteStore,
-    provider::{resolve_gh_executable, IssueDocument},
+    provider::IssueDocument,
     terminal::{MachineReadiness, PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime},
 };
 
@@ -44,7 +44,6 @@ pub(crate) use crate::features::work::{ExternalLinkAction, PollResult};
 pub struct Runtime {
     pub(crate) store: SqliteStore,
     pub(crate) state: DomainState,
-    pub(crate) gh_executable_path: Option<PathBuf>,
     pub(crate) pending_worktree_removals: HashMap<i64, WorktreeRemovalReport>,
     pub(crate) pending_item_deletion: Option<ItemDeletionPreview>,
     pub(crate) pending_external_object_deletion: Option<ExternalObjectDeletionPreview>,
@@ -124,23 +123,11 @@ impl Runtime {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .join("agent-state");
-        let mut store = SqliteStore::open(&database_path).map_err(|error| error.to_string())?;
+        let store = SqliteStore::open(&database_path).map_err(|error| error.to_string())?;
         let state = store.load_state().map_err(|error| error.to_string())?;
-        let configured_gh_path = store
-            .gh_executable_path()
-            .map_err(|error| error.to_string())?;
-        let gh_executable_path = resolve_gh_executable(configured_gh_path.as_deref()).ok();
-        if gh_executable_path != configured_gh_path {
-            if let Some(path) = gh_executable_path.as_deref() {
-                store
-                    .set_gh_executable_path(path)
-                    .map_err(|error| error.to_string())?;
-            }
-        }
         let mut runtime = Self {
             store,
             state,
-            gh_executable_path,
             pending_worktree_removals: HashMap::new(),
             pending_item_deletion: None,
             pending_external_object_deletion: None,
@@ -424,6 +411,15 @@ pub fn set_context_implement_defaults(
     crate::features::structure::set_context_implement_defaults(context_id, defaults, state)
 }
 
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_context_dirty_checkout_check(
+    context_id: i64,
+    enabled: bool,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    crate::features::structure::set_context_dirty_checkout_check(context_id, enabled, state)
+}
+
 #[tauri::command]
 pub fn list_projects(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Project>, String> {
     crate::features::structure::list_projects(state)
@@ -444,6 +440,52 @@ pub fn list_repository_locations(
 #[tauri::command]
 pub fn list_machines(state: State<'_, Mutex<Runtime>>) -> Result<Vec<MachineSettingsView>, String> {
     crate::features::structure::list_machines(state)
+}
+
+#[tauri::command]
+pub fn list_cli_configuration_profiles(
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Vec<crate::features::structure::CliProfileSettingsView>, String> {
+    crate::features::structure::list_cli_configuration_profiles(state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn create_cli_configuration_profile(
+    machine_id: i64,
+    provider: AgentKind,
+    name: String,
+    app_managed: bool,
+    existing_directory: Option<String>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<crate::features::structure::CliProfileSettingsView, String> {
+    crate::features::structure::create_cli_configuration_profile(
+        machine_id,
+        provider,
+        name,
+        app_managed,
+        existing_directory,
+        state,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn set_context_cli_configuration_profile(
+    context_id: i64,
+    provider: AgentKind,
+    profile_id: Option<i64>,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    crate::features::structure::set_context_cli_configuration_profile(
+        context_id, provider, profile_id, state,
+    )
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn delete_cli_configuration_profile(
+    profile_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<(), String> {
+    crate::features::structure::delete_cli_configuration_profile(profile_id, state)
 }
 
 #[tauri::command]
@@ -489,10 +531,17 @@ pub fn compose_run_prompt(
 pub fn compose_grill_prompt(
     item_id: i64,
     configuration: GrillConfiguration,
+    language: GrillLanguage,
     initial_prompt: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<String, String> {
-    crate::features::work::compose_grill_prompt(item_id, configuration, initial_prompt, state)
+    crate::features::work::compose_grill_prompt(
+        item_id,
+        configuration,
+        language,
+        initial_prompt,
+        state,
+    )
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -560,7 +609,8 @@ pub async fn start_grill_run(
     machine_id: Option<i64>,
     primary_repository_id: i64,
     configuration: GrillConfiguration,
-    initial_prompt: String,
+    language: GrillLanguage,
+    prompt: String,
     expected_checkouts: Vec<RunCheckout>,
     allow_dirty: bool,
     allow_shared_checkouts: bool,
@@ -572,7 +622,8 @@ pub async fn start_grill_run(
         machine_id,
         primary_repository_id,
         configuration,
-        initial_prompt,
+        language,
+        prompt,
         expected_checkouts,
         allow_dirty,
         allow_shared_checkouts,
@@ -816,12 +867,29 @@ pub fn create_context(name: String, state: State<'_, Mutex<Runtime>>) -> Result<
 }
 
 #[tauri::command(rename_all = "camelCase")]
+pub fn create_context_configuration(
+    configuration: ContextConfiguration,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    crate::features::structure::create_context_configuration(configuration, state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub fn update_context(
     context_id: i64,
     name: String,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Context, String> {
     crate::features::structure::update_context(context_id, name, state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub fn update_context_configuration(
+    context_id: i64,
+    configuration: ContextConfiguration,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Context, String> {
+    crate::features::structure::update_context_configuration(context_id, configuration, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1299,6 +1367,22 @@ pub async fn fetch_issue_document(
     crate::features::work::fetch_issue_document(external_object_id, state).await
 }
 
+#[tauri::command]
+pub async fn fetch_external_comments(
+    external_object_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<Vec<crate::provider::ExternalComment>, String> {
+    crate::features::work::fetch_external_comments(external_object_id, state).await
+}
+
+#[tauri::command]
+pub async fn fetch_external_document(
+    external_object_id: i64,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<String, String> {
+    crate::features::work::fetch_external_document(external_object_id, state).await
+}
+
 #[tauri::command(rename_all = "camelCase")]
 pub async fn refresh_external_object(
     external_object_id: i64,
@@ -1325,9 +1409,10 @@ pub fn set_link_attention_policy(
 pub fn set_link_purpose(
     link_id: i64,
     purpose: LinkPurpose,
+    spec_external_object_id: Option<i64>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ExternalLinkView, String> {
-    crate::features::work::set_link_purpose(link_id, purpose, state)
+    crate::features::work::set_link_purpose(link_id, purpose, spec_external_object_id, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1433,6 +1518,7 @@ mod tests {
             worktree_id: None,
             machine_id: 1,
             agent: AgentKind::Claude,
+            cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
             model: None,
             effort: None,
@@ -1456,6 +1542,227 @@ mod tests {
             grill_action_started_at: None,
         });
         runtime
+    }
+
+    fn configure_test_context_gh(runtime: &mut Runtime, executable: &Path) {
+        runtime
+            .store
+            .set_context_gh_executable_path(1, executable)
+            .expect("fake Context gh path should persist");
+        runtime.state.contexts[0].gh_executable_path =
+            Some(executable.to_string_lossy().into_owned());
+    }
+
+    #[test]
+    fn failed_context_configuration_write_preserves_runtime_and_database_state() {
+        let directory = tempdir().expect("temporary directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        let previous_context = runtime.state.contexts[0].clone();
+        let previous_defaults = runtime.state.attention_defaults.clone();
+        rusqlite::Connection::open(&database)
+            .expect("database should reopen")
+            .execute_batch(
+                "CREATE TRIGGER reject_context_attention
+                 BEFORE INSERT ON context_attention_defaults
+                 BEGIN SELECT RAISE(ABORT, 'forced configuration failure'); END;",
+            )
+            .expect("failure trigger should be created");
+
+        let attention_defaults = [
+            ExternalObjectKind::Issue,
+            ExternalObjectKind::PullRequest,
+            ExternalObjectKind::Generic,
+        ]
+        .into_iter()
+        .map(|object_kind| ContextAttentionDefault {
+            context_id: previous_context.id,
+            object_kind,
+            policy: ExternalChangePolicy {
+                title: false,
+                state: true,
+                metadata: false,
+            },
+        })
+        .collect();
+        let result = runtime.update_context_configuration(
+            previous_context.id,
+            ContextConfiguration {
+                name: "Changed Context".into(),
+                execution_machine_id: previous_context.execution_machine_id,
+                claude_profile_id: previous_context.claude_profile_id,
+                codex_profile_id: previous_context.codex_profile_id,
+                check_dirty_checkouts: !previous_context.check_dirty_checkouts,
+                grill_defaults: previous_context.grill_defaults.clone(),
+                implement_defaults: previous_context.implement_defaults.clone(),
+                attention_defaults,
+                ..ContextConfiguration::default()
+            },
+        );
+
+        assert!(result.is_err());
+        assert_eq!(runtime.state.contexts[0], previous_context);
+        assert_eq!(runtime.state.attention_defaults, previous_defaults);
+        let persisted = runtime
+            .store
+            .load_state()
+            .expect("stored state should reload");
+        assert_eq!(persisted.contexts[0], previous_context);
+        assert_eq!(persisted.attention_defaults, previous_defaults);
+    }
+
+    #[test]
+    fn context_configuration_save_round_trips_the_complete_update() {
+        let directory = tempdir().expect("temporary directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        let previous_context = runtime.state.contexts[0].clone();
+        let attention_defaults = [
+            ExternalObjectKind::Generic,
+            ExternalObjectKind::Issue,
+            ExternalObjectKind::PullRequest,
+        ]
+        .into_iter()
+        .map(|object_kind| ContextAttentionDefault {
+            context_id: previous_context.id,
+            object_kind,
+            policy: ExternalChangePolicy {
+                title: true,
+                state: object_kind != ExternalObjectKind::PullRequest,
+                metadata: false,
+            },
+        })
+        .collect::<Vec<_>>();
+        let updated = runtime
+            .update_context_configuration(
+                previous_context.id,
+                ContextConfiguration {
+                    name: "Edited Context".into(),
+                    execution_machine_id: None,
+                    claude_profile_id: None,
+                    codex_profile_id: None,
+                    check_dirty_checkouts: false,
+                    grill_defaults: previous_context.grill_defaults,
+                    implement_defaults: previous_context.implement_defaults,
+                    attention_defaults: attention_defaults.clone(),
+                    ..ContextConfiguration::default()
+                },
+            )
+            .expect("the aggregate Context edit should persist");
+
+        assert_eq!(updated.name, "Edited Context");
+        assert_eq!(runtime.state.attention_defaults, attention_defaults);
+        let persisted = runtime
+            .store
+            .load_state()
+            .expect("stored state should reload");
+        assert_eq!(persisted.contexts[0], updated);
+        assert_eq!(persisted.attention_defaults, attention_defaults);
+    }
+
+    #[test]
+    fn context_creation_saves_configuration_and_default_project_together() {
+        let directory = tempdir().expect("temporary directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        let attention_defaults = [
+            ExternalObjectKind::Issue,
+            ExternalObjectKind::PullRequest,
+            ExternalObjectKind::Generic,
+        ]
+        .into_iter()
+        .map(|object_kind| ContextAttentionDefault {
+            context_id: 0,
+            object_kind,
+            policy: ExternalChangePolicy {
+                title: false,
+                state: true,
+                metadata: false,
+            },
+        })
+        .collect::<Vec<_>>();
+        let grill_defaults = GrillConfiguration {
+            agent: AgentKind::Codex,
+            model: "gpt-6-sol".into(),
+            effort: "high".into(),
+        };
+
+        let created = runtime
+            .create_context_configuration(ContextConfiguration {
+                name: "  Research  ".into(),
+                execution_machine_id: None,
+                claude_profile_id: None,
+                codex_profile_id: None,
+                check_dirty_checkouts: false,
+                grill_defaults: grill_defaults.clone(),
+                implement_defaults: GrillConfiguration::default(),
+                attention_defaults: attention_defaults.clone(),
+                ..ContextConfiguration::default()
+            })
+            .expect("the complete Context setup should save");
+
+        assert_eq!(created.name, "Research");
+        assert!(!created.check_dirty_checkouts);
+        assert_eq!(created.grill_defaults, grill_defaults);
+        assert_eq!(runtime.state.projects[1].name, "Default");
+        assert_eq!(runtime.state.attention_defaults.len(), 3);
+        let persisted = runtime.store.load_state().expect("state should reload");
+        assert_eq!(persisted.contexts[1], created);
+        assert_eq!(persisted.projects[1], runtime.state.projects[1]);
+        assert_eq!(persisted.attention_defaults.len(), 3);
+        assert!(persisted.attention_defaults.iter().all(|persisted| {
+            runtime
+                .state
+                .attention_defaults
+                .iter()
+                .any(|expected| expected == persisted)
+        }));
+    }
+
+    #[test]
+    fn failed_context_creation_rolls_back_the_context_settings_and_default_project() {
+        let directory = tempdir().expect("temporary directory should exist");
+        let database = directory.path().join("mission-manager.sqlite");
+        let mut runtime = Runtime::open(&database).expect("runtime should open");
+        let original_state = runtime.state.clone();
+        rusqlite::Connection::open(&database)
+            .expect("database should reopen")
+            .execute_batch(
+                "CREATE TRIGGER reject_default_project
+                 BEFORE INSERT ON projects WHEN NEW.name = 'Default'
+                 BEGIN SELECT RAISE(ABORT, 'forced project failure'); END;",
+            )
+            .expect("failure trigger should be created");
+
+        let result = runtime.create_context_configuration(ContextConfiguration {
+            name: "Research".into(),
+            execution_machine_id: None,
+            claude_profile_id: None,
+            codex_profile_id: None,
+            check_dirty_checkouts: false,
+            grill_defaults: GrillConfiguration::default(),
+            implement_defaults: GrillConfiguration::default(),
+            attention_defaults: [
+                ExternalObjectKind::Issue,
+                ExternalObjectKind::PullRequest,
+                ExternalObjectKind::Generic,
+            ]
+            .into_iter()
+            .map(|object_kind| ContextAttentionDefault {
+                context_id: 0,
+                object_kind,
+                policy: ExternalChangePolicy::all(),
+            })
+            .collect(),
+            ..ContextConfiguration::default()
+        });
+
+        assert!(result.is_err());
+        assert_eq!(runtime.state, original_state);
+        assert_eq!(
+            runtime.store.load_state().expect("state should reload"),
+            original_state
+        );
     }
 
     #[test]
@@ -1602,6 +1909,7 @@ mod tests {
             item_id: 1,
             machine_id: 1,
             agent: AgentKind::Claude,
+            cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
             model: None,
             effort: None,
@@ -1703,6 +2011,7 @@ mod tests {
             item_id: 1,
             machine_id: 1,
             agent: AgentKind::Claude,
+            cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
             model: None,
             effort: None,
@@ -1761,6 +2070,7 @@ mod tests {
             item_id: 1,
             machine_id: 1,
             agent: AgentKind::Claude,
+            cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
             model: None,
             effort: None,
@@ -1843,6 +2153,7 @@ mod tests {
                 item_id: 1,
                 machine_id: 1,
                 agent: AgentKind::Claude,
+                cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::Implement,
                 model: None,
                 effort: None,
@@ -1873,6 +2184,7 @@ mod tests {
                 item_id: 1,
                 machine_id: 1,
                 agent: AgentKind::Codex,
+                cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::Review,
                 model: None,
                 effort: None,
@@ -1903,6 +2215,7 @@ mod tests {
                 item_id: 1,
                 machine_id: 1,
                 agent: AgentKind::Claude,
+                cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::Investigate,
                 model: None,
                 effort: None,
@@ -1977,6 +2290,7 @@ mod tests {
             item_id: 1,
             machine_id,
             agent: AgentKind::Claude,
+            cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
             model: None,
             effort: None,
@@ -2222,6 +2536,7 @@ mod tests {
             item_id: item.id,
             machine_id: machine.id,
             agent: AgentKind::Claude,
+            cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
             model: None,
             effort: None,
@@ -2603,6 +2918,7 @@ mod tests {
             item_id: 1,
             machine_id: 1,
             agent: AgentKind::Claude,
+            cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Grill,
             model: Some("claude-sonnet-4-5".into()),
             effort: Some("high".into()),
@@ -2712,13 +3028,8 @@ fi
         fs::write(&executable, script).expect("fake gh should be written");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
             .expect("fake gh should be executable");
-        let mut store = SqliteStore::open(&database).expect("database should open");
-        store
-            .set_gh_executable_path(&executable)
-            .expect("fake gh path should persist");
-        drop(store);
-
         let mut runtime = Runtime::open(&database).expect("runtime should open");
+        configure_test_context_gh(&mut runtime, &executable);
         runtime
             .create_item("Keep this Item".into(), 1, 1)
             .expect("Item should be created");
@@ -2865,13 +3176,8 @@ fi
         fs::write(&executable, script).expect("fake gh should be written");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
             .expect("fake gh should be executable");
-        let mut store = SqliteStore::open(&database).expect("database should open");
-        store
-            .set_gh_executable_path(&executable)
-            .expect("fake gh path should persist");
-        drop(store);
-
         let mut runtime = Runtime::open(&database).expect("runtime should open");
+        configure_test_context_gh(&mut runtime, &executable);
         runtime
             .create_item("Keep this Item".into(), 1, 1)
             .expect("Item should be created");
@@ -2909,13 +3215,8 @@ exit 1
         fs::write(&executable, script).expect("fake gh should be written");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
             .expect("fake gh should be executable");
-        let mut store = SqliteStore::open(&database).expect("database should open");
-        store
-            .set_gh_executable_path(&executable)
-            .expect("fake gh path should persist");
-        drop(store);
-
         let mut runtime = Runtime::open(&database).expect("runtime should open");
+        configure_test_context_gh(&mut runtime, &executable);
         runtime
             .create_item("Capture downstream work".into(), 1, 1)
             .expect("Item should be created");
@@ -2927,6 +3228,7 @@ exit 1
             worktree_id: None,
             machine_id: 1,
             agent: AgentKind::Claude,
+            cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Grill,
             model: None,
             effort: None,
@@ -2972,6 +3274,8 @@ https://example.com/unrelated"#;
                 run_id: 1,
                 action: GrillContinuationAction::ToTickets,
                 discovery: crate::domain::DownstreamIssueDiscovery::StructuredEvent,
+                ordinal: Some(1),
+                blocked_by: vec![],
             })
         );
     }
@@ -2994,15 +3298,10 @@ exit 1
         fs::write(&executable, script).expect("fake gh should be written");
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o755))
             .expect("fake gh should be executable");
-        let mut store = SqliteStore::open(&database).expect("database should open");
-        store
-            .set_gh_executable_path(&executable)
-            .expect("fake gh path should persist");
-        drop(store);
-
         let terminal = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
         terminal.set_transcript_capture_failure(1, "%1", "Pane disappeared during capture");
         let mut runtime = runtime_with_single_reconciliation_run(&database, terminal);
+        configure_test_context_gh(&mut runtime, &executable);
         let run = &mut runtime.state.runs[0];
         run.execution_profile = ExecutionProfile::Grill;
         run.grill_action = Some(GrillContinuationAction::ToTickets);
@@ -3021,6 +3320,8 @@ exit 1
                 run_id: 1,
                 action: GrillContinuationAction::ToTickets,
                 discovery: crate::domain::DownstreamIssueDiscovery::StructuredEvent,
+                ordinal: Some(1),
+                blocked_by: vec![],
             })
         );
     }

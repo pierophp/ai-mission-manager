@@ -126,22 +126,10 @@ const settingsMachinesRoute = createRoute({
   component: () => <StructurePage section="machines" />,
 });
 
-const settingsAttentionRoute = createRoute({
+const settingsAppearanceRoute = createRoute({
   getParentRoute: () => rootRoute,
-  path: "/settings/attention",
-  component: () => <StructurePage section="attention" />,
-});
-
-const settingsGrillRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/settings/grill",
-  component: () => <StructurePage section="grill" />,
-});
-
-const settingsImplementRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/settings/implement",
-  component: () => <StructurePage section="implement" />,
+  path: "/settings/appearance",
+  component: () => <StructurePage section="appearance" />,
 });
 
 const settingsResetRoute = createRoute({
@@ -168,9 +156,7 @@ const routeTree = rootRoute.addChildren([
   settingsProjectsRoute,
   settingsRepositoriesRoute,
   settingsMachinesRoute,
-  settingsAttentionRoute,
-  settingsGrillRoute,
-  settingsImplementRoute,
+  settingsAppearanceRoute,
   settingsResetRoute,
   activityRoute,
 ]);

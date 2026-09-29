@@ -5,9 +5,11 @@ import type {
   ExternalObjectDeletionPreview,
   ExternalObjectDeletionResult,
   ExternalSnapshot,
+  ExternalComment,
   DirectRunPreview,
   GrillAnswer,
   GrillConfiguration,
+  GrillLanguage,
   HomeView,
   Item,
   ItemDeletionPreview,
@@ -131,11 +133,14 @@ export const workAdapter = {
     confirmed: boolean,
     destructiveConfirmed: boolean,
   ) =>
-    command<{ worktreeId: number; branchPreserved: boolean }>("remove_worktree", {
-      worktreeId,
-      confirmed,
-      destructiveConfirmed,
-    }),
+    command<{ worktreeId: number; branchPreserved: boolean }>(
+      "remove_worktree",
+      {
+        worktreeId,
+        confirmed,
+        destructiveConfirmed,
+      },
+    ),
   stopRun: (runId: number) => command<Run>("stop_run", { runId }),
   finishRun: (runId: number) => command<Run>("finish_run", { runId }),
   submitGrillAnswers: (runId: number, answers: GrillAnswer[]) =>
@@ -177,11 +182,13 @@ export const workAdapter = {
   composeGrillPrompt: (
     itemId: number,
     configuration: GrillConfiguration,
+    language: GrillLanguage,
     initialPrompt: string,
   ) =>
     command<string>("compose_grill_prompt", {
       itemId,
       configuration,
+      language,
       initialPrompt,
     }),
   startDirectRun: ({
@@ -228,16 +235,20 @@ export const workAdapter = {
       allowDirty,
       allowSharedCheckouts,
     }),
-  checkImplementationQueue: (queueId: number) => command<void>("check_implementation_queue", { queueId }),
-  skipImplementationQueueEntry: (queueId: number) => command<void>("skip_implementation_queue_entry", { queueId }),
-  cancelImplementationQueue: (queueId: number) => command<void>("cancel_implementation_queue", { queueId }),
+  checkImplementationQueue: (queueId: number) =>
+    command<void>("check_implementation_queue", { queueId }),
+  skipImplementationQueueEntry: (queueId: number) =>
+    command<void>("skip_implementation_queue_entry", { queueId }),
+  cancelImplementationQueue: (queueId: number) =>
+    command<void>("cancel_implementation_queue", { queueId }),
   startGrillRun: ({
     itemId,
     workspaceId,
     primaryRepositoryId,
     machineId,
     configuration,
-    initialPrompt,
+    language,
+    prompt,
     expectedCheckouts,
     allowDirty,
     allowSharedCheckouts,
@@ -247,7 +258,8 @@ export const workAdapter = {
     primaryRepositoryId: number;
     machineId: number | null;
     configuration: GrillConfiguration;
-    initialPrompt: string;
+    language: GrillLanguage;
+    prompt: string;
     expectedCheckouts: RunCheckout[];
     allowDirty: boolean;
     allowSharedCheckouts: boolean;
@@ -258,7 +270,8 @@ export const workAdapter = {
       primaryRepositoryId,
       machineId,
       configuration,
-      initialPrompt,
+      language,
+      prompt,
       expectedCheckouts,
       allowDirty,
       allowSharedCheckouts,
@@ -293,7 +306,16 @@ export const workAdapter = {
     command<ExternalSnapshot>("refresh_external_object", { externalObjectId }),
   fetchIssueDocument: (externalObjectId: number) =>
     command<IssueDocument>("fetch_issue_document", { externalObjectId }),
-  createGithubIssue: (itemId: number, repositoryId: number, title: string, body: string) =>
+  fetchExternalDocument: (externalObjectId: number) =>
+    command<string>("fetch_external_document", { externalObjectId }),
+  fetchExternalComments: (externalObjectId: number) =>
+    command<ExternalComment[]>("fetch_external_comments", { externalObjectId }),
+  createGithubIssue: (
+    itemId: number,
+    repositoryId: number,
+    title: string,
+    body: string,
+  ) =>
     command<ExternalLinkAction>("create_github_issue", {
       itemId,
       repositoryId,
@@ -303,11 +325,18 @@ export const workAdapter = {
   setLinkAttentionPolicy: (
     linkId: number,
     policy: ExternalLinkView["link"]["attention_policy"],
-  ) => command<ExternalLinkView>("set_link_attention_policy", { linkId, policy }),
+  ) =>
+    command<ExternalLinkView>("set_link_attention_policy", { linkId, policy }),
   setLinkPurpose: (
     linkId: number,
     purpose: ExternalLinkView["link"]["purpose"],
-  ) => command<ExternalLinkView>("set_link_purpose", { linkId, purpose }),
+    specExternalObjectId: number | null,
+  ) =>
+    command<ExternalLinkView>("set_link_purpose", {
+      linkId,
+      purpose,
+      specExternalObjectId,
+    }),
   markLinkReviewed: (linkId: number) =>
     command<ExternalLinkView>("mark_link_reviewed", { linkId }),
   setLinkWatchUntil: (linkId: number, watchUntil: string | null) =>

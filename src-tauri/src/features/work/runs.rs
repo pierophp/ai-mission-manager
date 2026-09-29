@@ -461,7 +461,16 @@ pub(crate) async fn advance_finished_implementation_queue(
         Arc::clone(&runtime.implementation_queue_lock)
     };
     let _serial_guard = serial.lock().await;
-    let (queue, entry, run, machine, terminal, gh_path) = {
+    let (
+        queue,
+        run,
+        machine,
+        terminal,
+        ticket_object,
+        provider_config,
+        local_ticket_path,
+        check_dirty_checkouts,
+    ) = {
         let runtime = state
             .lock()
             .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
@@ -503,72 +512,117 @@ pub(crate) async fn advance_finished_implementation_queue(
         else {
             return Ok(());
         };
+        let context_id = runtime.item_context_id(queue.item_id)?;
+        let context = runtime
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+        let check_dirty_checkouts = context.check_dirty_checkouts;
+        let ticket_object = runtime
+            .state
+            .external_objects
+            .iter()
+            .find(|object| object.canonical_url == entry.ticket_url)
+            .map(|object| crate::domain::ExternalObjectInput {
+                provider: object.provider,
+                kind: object.kind,
+                external_key: object.external_key.clone(),
+                canonical_url: object.canonical_url.clone(),
+            })
+            .or_else(|| crate::provider::classify_url(&entry.ticket_url).ok())
+            .ok_or_else(|| format!("Queue ticket URL is not recognized: {}", entry.ticket_url))?;
+        let local_ticket_path = if ticket_object.external_key.starts_with("local:") {
+            Some(runtime.local_markdown_path_for_object(context_id, &ticket_object.external_key)?)
+        } else {
+            None
+        };
+        let provider_config = if local_ticket_path.is_some() {
+            (None, None, None, None)
+        } else {
+            runtime.configured_provider(context_id, ticket_object.provider)?
+        };
         (
             queue,
-            entry,
             run,
             machine,
             Arc::clone(&runtime.terminal_runtime),
-            runtime.gh_executable_path.clone(),
+            ticket_object,
+            provider_config,
+            local_ticket_path,
+            check_dirty_checkouts,
         )
     };
-    let ticket_url = entry.ticket_url.clone();
     let checkouts = run.direct_checkouts.clone();
     let worker_machine = machine.clone();
     let (ticket_closed, checkout_clean) =
         tauri::async_runtime::spawn_blocking(move || -> Result<(bool, bool), String> {
-            let gh = crate::provider::GithubCli::new(
-                crate::provider::resolve_gh_executable(gh_path.as_deref())
-                    .map_err(|error| error.to_string())?,
-            );
-            let object =
-                crate::provider::classify_url(&ticket_url).map_err(|error| error.to_string())?;
-            let ticket = gh
-                .fetch(&object, current_unix_seconds())
-                .map_err(|error| error.to_string())?;
-            let ticket_closed = ticket.state.eq_ignore_ascii_case("closed");
-            let git = GitCli::system();
+            let ticket = if let Some(path) = local_ticket_path.as_deref() {
+                super::external::read_local_markdown_snapshot(path)?
+            } else {
+                let (executable, site, workspace, organization) = provider_config;
+                ProviderDispatch::new(ticket_object.provider, executable)
+                    .with_site(site)
+                    .with_workspace(workspace)
+                    .with_organization(organization)
+                    .fetch_snapshot(&ticket_object, current_unix_seconds())
+                    .map_err(|error| error.to_string())?
+            };
+            let ticket_closed = !crate::domain::implementation_ticket_is_open(&ticket.state);
             let mut clean = true;
-            for checkout in checkouts {
-                let inspection = git
-                    .inspect_checkout_on_machine(&worker_machine, Path::new(&checkout.path))
-                    .map_err(|error| error.to_string())?;
-                clean &= !inspection.is_dirty;
+            if check_dirty_checkouts {
+                let git = GitCli::system();
+                for checkout in checkouts {
+                    let inspection = git
+                        .inspect_checkout_on_machine(&worker_machine, Path::new(&checkout.path))
+                        .map_err(|error| error.to_string())?;
+                    clean &= !inspection.is_dirty;
+                }
             }
             Ok((ticket_closed, clean))
         })
         .await
         .map_err(|error| format!("Implementation Queue inspection worker failed: {error}"))??;
-    let decision = decide(
-        state
-            .lock()
-            .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-            .state
-            .clone(),
-        Event::AdvanceImplementationQueue {
-            queue_id: queue.id,
-            run_id,
-            ticket_closed,
-            checkout_clean,
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    let should_close = decision.effects.iter().any(|effect| {
-        matches!(
-            effect,
-            crate::domain::Effect::CloseImplementationRunSession { .. }
-        )
-    });
-    let next_position = decision.effects.iter().find_map(|effect| match effect {
-        crate::domain::Effect::LaunchImplementationQueueEntry { position, .. } => Some(*position),
-        _ => None,
-    });
-    {
+    let (should_close, next_position) = {
         let mut runtime = state
             .lock()
             .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let context_id = runtime.item_context_id(queue.item_id)?;
+        let current_context = runtime
+            .state
+            .contexts
+            .iter()
+            .find(|context| context.id == context_id)
+            .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+        if current_context.check_dirty_checkouts != check_dirty_checkouts {
+            return Err("Context dirty checkout setting changed while the queue was checked; check it again".into());
+        }
+        let decision = decide(
+            runtime.state.clone(),
+            Event::AdvanceImplementationQueue {
+                queue_id: queue.id,
+                run_id,
+                ticket_closed,
+                checkout_clean,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        let should_close = decision.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                crate::domain::Effect::CloseImplementationRunSession { .. }
+            )
+        });
+        let next_position = decision.effects.iter().find_map(|effect| match effect {
+            crate::domain::Effect::LaunchImplementationQueueEntry { position, .. } => {
+                Some(*position)
+            }
+            _ => None,
+        });
         runtime.commit(decision)?;
-    }
+        (should_close, next_position)
+    };
     if should_close {
         let worker_terminal = Arc::clone(&terminal);
         let close_machine = machine.clone();
@@ -703,7 +757,7 @@ pub(crate) async fn check_implementation_queue_with_state(
     launch_implementation_queue_entry_with_state(queue_id, position, source_run_id, state).await
 }
 
-async fn launch_implementation_queue_entry_with_state(
+pub(super) async fn launch_implementation_queue_entry_with_state(
     queue_id: i64,
     position: i64,
     source_run_id: i64,
@@ -1215,7 +1269,7 @@ fn confirm_downstream_issues(
     action: GrillContinuationAction,
     action_started_at: Option<i64>,
     transcript: &str,
-    executable: impl FnOnce() -> Option<PathBuf>,
+    config: &DownstreamCaptureConfig,
 ) -> Vec<ConfirmedDownstreamIssue> {
     if !matches!(
         action,
@@ -1237,32 +1291,56 @@ fn confirm_downstream_issues(
     if candidates.is_empty() {
         return Vec::new();
     }
-    let Some(executable) = executable() else {
-        return Vec::new();
-    };
-    let github = GithubCli::new(executable);
     let mut confirmed = Vec::new();
     for candidate in candidates {
-        let object = match classify_url(&candidate.url) {
-            Ok(object)
-                if object.provider == ExternalProvider::GitHub
-                    && object.kind == ExternalObjectKind::Issue =>
+        let local = config
+            .local_checkouts
+            .iter()
+            .find_map(|(repository_id, root)| {
+                classify_local_markdown(*repository_id, root, &candidate.url)
+            });
+        let object = match local.or_else(|| classify_url(&candidate.url).ok()) {
+            Some(object)
+                if object.provider != ExternalProvider::Generic
+                    || object.external_key.starts_with("local:") =>
             {
                 object
             }
-            Ok(_) | Err(_) => continue,
+            _ => continue,
         };
-        let snapshot = match github.fetch(&object, current_unix_seconds()) {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                eprintln!(
-                    "Could not confirm downstream GitHub Issue {} for Run {run_id}: {error}",
-                    candidate.url
-                );
-                continue;
+        let snapshot = if object.external_key.starts_with("local:") {
+            let title = object
+                .external_key
+                .split('#')
+                .nth(1)
+                .and_then(|relative| Path::new(relative).file_stem())
+                .and_then(|stem| stem.to_str())
+                .unwrap_or("Local Markdown")
+                .to_owned();
+            crate::domain::ExternalSnapshotData {
+                title,
+                state: "open".into(),
+                metadata: Vec::new(),
+                fetched_at: current_unix_seconds(),
+            }
+        } else {
+            match config
+                .dispatch(object.provider)
+                .fetch_snapshot(&object, current_unix_seconds())
+            {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    eprintln!(
+                        "Could not confirm downstream object {} for Run {run_id}: {error}",
+                        candidate.url
+                    );
+                    continue;
+                }
             }
         };
-        if !downstream_issue_is_new(&snapshot, action_started_at) {
+        if object.provider == ExternalProvider::GitHub
+            && !downstream_issue_is_new(&snapshot, action_started_at)
+        {
             continue;
         }
         if confirmed.iter().any(|issue: &ConfirmedDownstreamIssue| {
@@ -1274,9 +1352,67 @@ fn confirm_downstream_issues(
             object,
             snapshot,
             discovery: candidate.discovery,
+            ordinal: candidate.ordinal,
+            blocked_by: candidate.blocked_by,
         });
     }
     confirmed
+}
+
+#[derive(Clone, Default)]
+struct DownstreamCaptureConfig {
+    gh_executable_path: Option<PathBuf>,
+    twg_executable_path: Option<PathBuf>,
+    az_executable_path: Option<PathBuf>,
+    atlassian_site: Option<String>,
+    bitbucket_workspace: Option<String>,
+    azure_devops_organization: Option<String>,
+    local_checkouts: Vec<(i64, PathBuf)>,
+}
+
+fn push_unique_local_checkout(
+    checkouts: &mut Vec<(i64, PathBuf)>,
+    repository_id: i64,
+    path: PathBuf,
+) {
+    let identity = path.canonicalize().unwrap_or_else(|_| path.clone());
+    if !checkouts
+        .iter()
+        .any(|(existing_repository_id, existing_path)| {
+            *existing_repository_id == repository_id
+                && existing_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| existing_path.clone())
+                    == identity
+        })
+    {
+        checkouts.push((repository_id, path));
+    }
+}
+
+impl DownstreamCaptureConfig {
+    fn dispatch(&self, provider: ExternalProvider) -> ProviderDispatch {
+        let (executable, site, workspace, organization) = match provider {
+            ExternalProvider::GitHub => (self.gh_executable_path.clone(), None, None, None),
+            ExternalProvider::Atlassian => (
+                self.twg_executable_path.clone(),
+                self.atlassian_site.clone(),
+                self.bitbucket_workspace.clone(),
+                None,
+            ),
+            ExternalProvider::AzureDevOps => (
+                self.az_executable_path.clone(),
+                None,
+                None,
+                self.azure_devops_organization.clone(),
+            ),
+            ExternalProvider::Generic => (None, None, None, None),
+        };
+        ProviderDispatch::new(provider, executable)
+            .with_site(site)
+            .with_workspace(workspace)
+            .with_organization(organization)
+    }
 }
 
 fn downstream_confirmation_transcript<'a>(
@@ -1318,7 +1454,6 @@ pub(crate) struct ReconciliationSnapshot {
     runs: Vec<ReconciliationRunIdentity>,
     machines: Vec<Machine>,
     terminal_runtime: Arc<dyn crate::terminal::TerminalRuntime>,
-    gh_executable_path: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -1332,6 +1467,7 @@ struct ReconciliationRunIdentity {
     grill_action: Option<GrillContinuationAction>,
     grill_action_started_at: Option<i64>,
     transcript: String,
+    capture_config: DownstreamCaptureConfig,
 }
 
 struct MachineReconciliationObservation {
@@ -1405,12 +1541,7 @@ impl ReconciliationSnapshot {
                         action,
                         run.grill_action_started_at,
                         transcript,
-                        || {
-                            self.gh_executable_path
-                                .as_deref()
-                                .map(PathBuf::from)
-                                .or_else(|| resolve_gh_executable(None).ok())
-                        },
+                        &run.capture_config,
                     ),
                     _ => Vec::new(),
                 };
@@ -2271,6 +2402,7 @@ struct DirectCheckoutSnapshot {
     workspace: Workspace,
     machine_id_request: Option<i64>,
     machine: Machine,
+    check_dirty_checkouts: bool,
     repositories: Vec<(Repository, RepositoryLocation, PathBuf)>,
 }
 
@@ -2388,12 +2520,21 @@ fn direct_checkout_snapshot(
         };
         inputs.push((repository, location, path));
     }
+    let context_id = runtime.item_context_id(item_id)?;
+    let context = runtime
+        .state
+        .contexts
+        .iter()
+        .find(|context| context.id == context_id)
+        .ok_or_else(|| format!("Context {context_id} does not exist"))?;
+    let check_dirty_checkouts = context.check_dirty_checkouts;
     Ok(DirectCheckoutSnapshot {
         item_id,
         item_project_id: item.project_id,
         workspace,
         machine_id_request: machine_id,
         machine,
+        check_dirty_checkouts,
         repositories: inputs,
     })
 }
@@ -2433,6 +2574,7 @@ impl Runtime {
             return false;
         };
         if context.execution_machine_id != Some(snapshot.machine.id)
+            || context.check_dirty_checkouts != snapshot.check_dirty_checkouts
             || snapshot
                 .machine_id_request
                 .is_some_and(|requested| requested != snapshot.machine.id)
@@ -2471,6 +2613,7 @@ impl Runtime {
             &self.state,
             observation.snapshot.workspace.id,
             observation.snapshot.machine,
+            observation.snapshot.check_dirty_checkouts,
             observation.checkouts,
         )
     }
@@ -2480,6 +2623,7 @@ fn build_direct_run_preview(
     state: &crate::domain::DomainState,
     workspace_id: i64,
     machine: Machine,
+    check_dirty_checkouts: bool,
     checkout_details: Vec<DirectRunCheckoutPreview>,
 ) -> Result<DirectRunPreview, String> {
     let checkouts = checkout_details
@@ -2491,11 +2635,15 @@ fn build_direct_run_preview(
             is_dirty: checkout.is_dirty,
         })
         .collect::<Vec<_>>();
-    let dirty_repository_ids = checkouts
-        .iter()
-        .filter(|checkout| checkout.is_dirty)
-        .map(|checkout| checkout.repository_id)
-        .collect::<Vec<_>>();
+    let dirty_repository_ids = if check_dirty_checkouts {
+        checkouts
+            .iter()
+            .filter(|checkout| checkout.is_dirty)
+            .map(|checkout| checkout.repository_id)
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let mut shared_runs = Vec::new();
     let mut shared_paths = Vec::new();
     for run in state.runs.iter().filter(|run| {
@@ -2585,7 +2733,7 @@ enum RunLaunchInput {
         machine_id: Option<i64>,
         primary_repository_id: i64,
         configuration: GrillConfiguration,
-        initial_prompt: String,
+        prompt: String,
         expected_checkouts: Vec<RunCheckout>,
         allow_dirty: bool,
         allow_shared_checkouts: bool,
@@ -2652,6 +2800,7 @@ struct RunLaunchSnapshot {
     context: Context,
     workspace: Workspace,
     machine: Machine,
+    cli_configuration_profile: Option<crate::domain::CliConfigurationProfile>,
     terminal_runtime: Arc<dyn TerminalRuntime>,
     preferred_executable: Option<PathBuf>,
     input: RunLaunchInput,
@@ -2707,7 +2856,7 @@ impl RunLaunchSnapshot {
                     prompt_selection: prompt_selection.clone(),
                     checkouts,
                     repository_id: *primary_repository_id,
-                    allow_dirty: *allow_dirty,
+                    allow_dirty: *allow_dirty || !self.context.check_dirty_checkouts,
                     allow_shared_checkouts: *allow_shared_checkouts,
                 }
             }
@@ -2848,7 +2997,11 @@ impl RunLaunchSnapshot {
                         is_dirty: checkout.is_dirty,
                     })
                     .collect::<Vec<_>>();
-                if &checkouts != expected_checkouts {
+                if !run_checkout_previews_match(
+                    expected_checkouts,
+                    &checkouts,
+                    self.context.check_dirty_checkouts,
+                ) {
                     return Err(match &self.input {
                         RunLaunchInput::Direct { .. } => "A Direct checkout changed after the preview (branch or dirty state); review the Direct Run preview again before starting".into(),
                         _ => "A Grill checkout changed after the preview (branch or dirty state); review the Grill preview again before starting".into(),
@@ -2920,6 +3073,7 @@ impl RunLaunchSnapshot {
                 &self.state,
                 self.machine.id,
                 &checkouts,
+                self.context.check_dirty_checkouts,
                 *allow_dirty,
                 *allow_shared_checkouts,
             )?;
@@ -2941,14 +3095,29 @@ fn machine_execution_identity_matches(current: &Machine, expected: &Machine) -> 
         && current.transport == expected.transport
 }
 
+fn run_checkout_previews_match(
+    expected: &[RunCheckout],
+    observed: &[RunCheckout],
+    check_dirty_checkouts: bool,
+) -> bool {
+    expected.len() == observed.len()
+        && expected.iter().zip(observed).all(|(expected, observed)| {
+            expected.repository_id == observed.repository_id
+                && expected.path == observed.path
+                && expected.branch == observed.branch
+                && (!check_dirty_checkouts || expected.is_dirty == observed.is_dirty)
+        })
+}
+
 fn validate_grill_launch_approvals(
     state: &DomainState,
     machine_id: i64,
     checkouts: &[RunCheckout],
+    check_dirty_checkouts: bool,
     allow_dirty: bool,
     allow_shared_checkouts: bool,
 ) -> Result<(), String> {
-    if !allow_dirty {
+    if check_dirty_checkouts && !allow_dirty {
         let dirty_repository_ids = checkouts
             .iter()
             .filter(|checkout| checkout.is_dirty)
@@ -3102,6 +3271,28 @@ fn run_launch_snapshot(
         .find(|context| context.id == project.context_id)
         .cloned()
         .ok_or_else(|| format!("Context {} does not exist", project.context_id))?;
+    let profile_id = context.cli_configuration_profile_id(input.agent());
+    let cli_configuration_profile = profile_id
+        .map(|profile_id| {
+            runtime
+                .state
+                .cli_configuration_profiles
+                .iter()
+                .find(|profile| {
+                    profile.id == profile_id
+                        && profile.machine_id == machine.id
+                        && profile.provider == input.agent()
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    format!(
+                        "Selected {} configuration profile {profile_id} is unavailable on Machine {}",
+                        agent_display_name(input.agent()),
+                        machine.name
+                    )
+                })
+        })
+        .transpose()?;
     let workspace = direct_checkout
         .as_ref()
         .map(|snapshot| snapshot.workspace.clone())
@@ -3116,17 +3307,10 @@ fn run_launch_snapshot(
     );
     let gate_channel = format!("mission-launch-{run_id}-{session_name}");
     let prompt = match &input {
-        RunLaunchInput::Grill {
-            configuration,
-            initial_prompt,
-            ..
-        } => build_grill_prompt(
-            &runtime.state,
-            input.item_id(),
-            configuration,
-            initial_prompt,
-        )
-        .map_err(|error| error.to_string())?,
+        RunLaunchInput::Grill { prompt, .. } => {
+            crate::domain::clean_name(prompt.clone(), crate::domain::DomainError::EmptyRunPrompt)
+                .map_err(|error| error.to_string())?
+        }
         RunLaunchInput::Direct {
             implementation_queue: Some(queue),
             ..
@@ -3149,6 +3333,7 @@ fn run_launch_snapshot(
         context,
         workspace,
         machine: machine.clone(),
+        cli_configuration_profile,
         terminal_runtime: Arc::clone(&runtime.terminal_runtime),
         preferred_executable,
         input,
@@ -3175,6 +3360,7 @@ fn run_launch_snapshot(
             &runtime.state,
             snapshot.machine.id,
             &checkout_values,
+            snapshot.context.check_dirty_checkouts,
             *allow_dirty,
             *allow_shared_checkouts,
         )?;
@@ -3214,11 +3400,13 @@ async fn start_run_with_state(
         let terminal_runtime = Arc::clone(&preflight_snapshot.terminal_runtime);
         let machine = preflight_snapshot.machine.clone();
         let preferred_executable = preflight_snapshot.preferred_executable.clone();
+        let profile = preflight_snapshot.cli_configuration_profile.clone();
         terminal_runtime.preflight_agent_run(
             &machine,
             preflight_snapshot.input.agent(),
             preflight_snapshot.run_id,
             preferred_executable.as_deref(),
+            profile.as_ref(),
         )
     })
     .await
@@ -3291,6 +3479,7 @@ async fn start_run_with_state(
         )?;
     }
     let (executable, state_file) = preflight_values?;
+    let profile_directory = preflight_result.profile_directory.clone();
     {
         let runtime = state
             .lock()
@@ -3329,6 +3518,7 @@ async fn start_run_with_state(
             agent,
             model: model.as_deref(),
             effort: effort.as_deref(),
+            profile_directory: profile_directory.as_deref(),
         };
         terminal_runtime.launch_agent(
             &machine,
@@ -3357,6 +3547,7 @@ async fn start_run_with_state(
                         &runtime.state,
                         observation.snapshot.machine.id,
                         &observation.checkouts,
+                        observation.snapshot.context.check_dirty_checkouts,
                         *allow_dirty,
                         *allow_shared_checkouts,
                     ),
@@ -3522,12 +3713,14 @@ pub(crate) async fn start_grill_run_with_state(
     machine_id: Option<i64>,
     primary_repository_id: i64,
     configuration: GrillConfiguration,
-    initial_prompt: String,
+    language: GrillLanguage,
+    prompt: String,
     expected_checkouts: Vec<RunCheckout>,
     allow_dirty: bool,
     allow_shared_checkouts: bool,
     state: &Mutex<Runtime>,
 ) -> Result<Run, String> {
+    let prompt = language.enforce_prompt(&prompt);
     start_run_with_state(
         RunLaunchInput::Grill {
             item_id,
@@ -3535,7 +3728,7 @@ pub(crate) async fn start_grill_run_with_state(
             machine_id,
             primary_repository_id,
             configuration,
-            initial_prompt,
+            prompt,
             expected_checkouts,
             allow_dirty,
             allow_shared_checkouts,
@@ -3572,6 +3765,74 @@ pub(crate) async fn start_worktree_run_with_state(
 }
 
 impl Runtime {
+    fn downstream_capture_config(&self, run: &Run) -> DownstreamCaptureConfig {
+        let item = self.state.items.iter().find(|item| item.id == run.item_id);
+        let context = self
+            .item_context_id(run.item_id)
+            .ok()
+            .and_then(|context_id| {
+                self.state
+                    .contexts
+                    .iter()
+                    .find(|context| context.id == context_id)
+            });
+        let local_machine = self
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == run.machine_id)
+            .is_some_and(|machine| matches!(machine.transport, MachineTransport::Local));
+        let mut local_checkouts = Vec::new();
+        if local_machine {
+            if let Some(project_id) = item.map(|item| item.project_id) {
+                for repository in self
+                    .state
+                    .repositories
+                    .iter()
+                    .filter(|repository| repository.project_id == project_id)
+                {
+                    for location in self.state.repository_locations.iter().filter(|location| {
+                        location.repository_id == repository.id
+                            && location.machine_id == run.machine_id
+                    }) {
+                        push_unique_local_checkout(
+                            &mut local_checkouts,
+                            repository.id,
+                            PathBuf::from(&location.checkout_path),
+                        );
+                    }
+                }
+                // Worktree Runs intentionally resolve local tracker paths from
+                // the registered Repository checkout above, never the Worktree.
+                if run.worktree_id.is_none() {
+                    for checkout in &run.direct_checkouts {
+                        push_unique_local_checkout(
+                            &mut local_checkouts,
+                            checkout.repository_id,
+                            PathBuf::from(&checkout.path),
+                        );
+                    }
+                }
+            }
+        }
+        DownstreamCaptureConfig {
+            gh_executable_path: context
+                .and_then(|context| context.gh_executable_path.as_deref())
+                .map(PathBuf::from),
+            twg_executable_path: context
+                .and_then(|context| context.twg_executable_path.as_deref())
+                .map(PathBuf::from),
+            az_executable_path: context
+                .and_then(|context| context.az_executable_path.as_deref())
+                .map(PathBuf::from),
+            atlassian_site: context.and_then(|context| context.atlassian_site.clone()),
+            bitbucket_workspace: context.and_then(|context| context.bitbucket_workspace.clone()),
+            azure_devops_organization: context
+                .and_then(|context| context.azure_devops_organization.clone()),
+            local_checkouts,
+        }
+    }
+
     pub(crate) fn reconciliation_snapshot(&self) -> ReconciliationSnapshot {
         let runs = self
             .state
@@ -3587,6 +3848,7 @@ impl Runtime {
                 grill_action: run.grill_action,
                 grill_action_started_at: run.grill_action_started_at,
                 transcript: run.transcript.clone(),
+                capture_config: self.downstream_capture_config(run),
             })
             .collect::<Vec<_>>();
         let mut machine_ids = HashSet::new();
@@ -3607,7 +3869,6 @@ impl Runtime {
             runs,
             machines,
             terminal_runtime: Arc::clone(&self.terminal_runtime),
-            gh_executable_path: self.gh_executable_path.clone(),
         }
     }
 
@@ -3768,10 +4029,17 @@ impl Runtime {
         &self,
         item_id: i64,
         configuration: GrillConfiguration,
+        language: GrillLanguage,
         initial_prompt: String,
     ) -> Result<String, String> {
-        build_grill_prompt(&self.state, item_id, &configuration, &initial_prompt)
-            .map_err(|error| error.to_string())
+        build_grill_prompt(
+            &self.state,
+            item_id,
+            &configuration,
+            language,
+            &initial_prompt,
+        )
+        .map_err(|error| error.to_string())
     }
 
     #[cfg(test)]
@@ -3987,20 +4255,13 @@ impl Runtime {
             return Ok(());
         }
 
+        let config = self.downstream_capture_config(&run);
         let confirmed = confirm_downstream_issues(
             run_id,
             action,
             run.grill_action_started_at,
             transcript,
-            || match self.gh_executable_path() {
-                Ok(executable) => Some(executable),
-                Err(error) => {
-                    eprintln!(
-                        "Could not confirm downstream GitHub Issues for Run {run_id}: {error}"
-                    );
-                    None
-                }
-            },
+            &config,
         );
         self.apply_confirmed_downstream_issues(run_id, Some(action), confirmed)
             .map(|_| ())
@@ -4222,10 +4483,9 @@ fn agent_display_name(agent: AgentKind) -> &'static str {
 mod identity_tests {
     use super::{
         direct_repository_identity_set_matches, downstream_confirmation_transcript,
-        grill_transcript_identity_matches, implementation_queue_entry_prompt,
-        DeferredTerminalEvent, TerminalCallbackGate,
+        grill_transcript_identity_matches, DeferredTerminalEvent, TerminalCallbackGate,
     };
-    use crate::domain::{ImplementationQueueEntry, Repository, RepositoryLocation};
+    use crate::domain::{Repository, RepositoryLocation};
     use crate::{
         agent_state::AgentStateRecord,
         app::Runtime,
@@ -4235,44 +4495,6 @@ mod identity_tests {
         path::PathBuf,
         sync::{Arc, Mutex},
     };
-
-    #[test]
-    fn first_and_advanced_queue_runs_receive_the_local_implement_skill() {
-        let entries = [
-            ImplementationQueueEntry {
-                position: 0,
-                ticket_number: 42,
-                ticket_title: "First issue".into(),
-                ticket_url: "https://github.com/o/r/issues/42".into(),
-                ticket_state: "open".into(),
-                run_id: None,
-                done: false,
-                skipped: false,
-            },
-            ImplementationQueueEntry {
-                position: 1,
-                ticket_number: 43,
-                ticket_title: "Next issue".into(),
-                ticket_url: "https://github.com/o/r/issues/43".into(),
-                ticket_state: "open".into(),
-                run_id: None,
-                done: false,
-                skipped: false,
-            },
-        ];
-
-        for entry in entries {
-            let prompt =
-                implementation_queue_entry_prompt(&entry, "https://github.com/o/r/issues/87");
-
-            assert!(
-                prompt.contains("Implement the work described by the user in the spec or tickets.")
-            );
-            assert!(prompt.contains("Run typechecking regularly, single test files regularly"));
-            assert!(prompt.contains(&entry.ticket_url));
-            assert!(!prompt.contains("name: implement"));
-        }
-    }
 
     #[test]
     fn direct_checkout_snapshot_rejects_a_new_project_repository() {

@@ -4,15 +4,46 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Context {
     pub id: i64,
     pub name: String,
     #[serde(default)]
     pub execution_machine_id: Option<i64>,
+    #[serde(default)]
+    pub claude_profile_id: Option<i64>,
+    #[serde(default)]
+    pub codex_profile_id: Option<i64>,
+    #[serde(default = "dirty_checkout_check_default")]
+    pub check_dirty_checkouts: bool,
     pub grill_defaults: GrillConfiguration,
     #[serde(default)]
     pub implement_defaults: GrillConfiguration,
+    #[serde(default)]
+    pub gh_executable_path: Option<String>,
+    #[serde(default)]
+    pub twg_executable_path: Option<String>,
+    #[serde(default)]
+    pub az_executable_path: Option<String>,
+    #[serde(default)]
+    pub atlassian_site: Option<String>,
+    #[serde(default)]
+    pub azure_devops_organization: Option<String>,
+    #[serde(default)]
+    pub bitbucket_workspace: Option<String>,
+}
+
+impl Context {
+    pub fn cli_configuration_profile_id(&self, provider: AgentKind) -> Option<i64> {
+        match provider {
+            AgentKind::Claude => self.claude_profile_id,
+            AgentKind::Codex => self.codex_profile_id,
+        }
+    }
+}
+
+fn dirty_checkout_check_default() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,6 +260,25 @@ pub struct Machine {
     pub last_observed_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliConfigurationProfile {
+    pub id: i64,
+    pub machine_id: i64,
+    pub provider: AgentKind,
+    pub name: String,
+    pub directory: String,
+    pub app_managed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CliConfigurationProfileIdentity {
+    pub profile_id: i64,
+    pub provider: AgentKind,
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentKind {
     #[serde(rename = "claude")]
@@ -310,6 +360,8 @@ pub struct Run {
     pub worktree_id: Option<i64>,
     pub machine_id: i64,
     pub agent: AgentKind,
+    #[serde(default)]
+    pub cli_configuration_profile: Option<CliConfigurationProfileIdentity>,
     pub execution_profile: ExecutionProfile,
     #[serde(default)]
     pub model: Option<String>,
@@ -415,6 +467,10 @@ pub struct Item {
 pub enum ExternalProvider {
     #[serde(rename = "github")]
     GitHub,
+    #[serde(rename = "atlassian")]
+    Atlassian,
+    #[serde(rename = "azure_dev_ops")]
+    AzureDevOps,
     #[serde(rename = "generic")]
     Generic,
 }
@@ -425,6 +481,8 @@ pub enum ExternalObjectKind {
     Issue,
     #[serde(rename = "pull_request")]
     PullRequest,
+    #[serde(rename = "document")]
+    Document,
     #[serde(rename = "generic")]
     Generic,
 }
@@ -546,6 +604,25 @@ pub struct ContextAttentionDefault {
     pub policy: ExternalChangePolicy,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContextConfiguration {
+    pub name: String,
+    pub execution_machine_id: Option<i64>,
+    pub claude_profile_id: Option<i64>,
+    pub codex_profile_id: Option<i64>,
+    pub check_dirty_checkouts: bool,
+    pub grill_defaults: GrillConfiguration,
+    pub implement_defaults: GrillConfiguration,
+    pub gh_executable_path: Option<String>,
+    pub twg_executable_path: Option<String>,
+    pub az_executable_path: Option<String>,
+    pub atlassian_site: Option<String>,
+    pub azure_devops_organization: Option<String>,
+    pub bitbucket_workspace: Option<String>,
+    pub attention_defaults: Vec<ContextAttentionDefault>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Link {
     pub id: i64,
@@ -557,6 +634,8 @@ pub struct Link {
     pub review_at: Option<String>,
     #[serde(default)]
     pub purpose: LinkPurpose,
+    #[serde(default)]
+    pub spec_external_object_id: Option<i64>,
     #[serde(default)]
     pub provenance: Option<LinkProvenance>,
 }
@@ -1092,6 +1171,7 @@ pub struct DomainState {
     pub next_workspace_id: i64,
     pub next_worktree_id: i64,
     pub next_machine_id: i64,
+    pub next_cli_profile_id: i64,
     pub next_run_id: i64,
     pub next_external_object_id: i64,
     pub next_link_id: i64,
@@ -1105,6 +1185,8 @@ pub struct DomainState {
     pub workspaces: Vec<Workspace>,
     pub worktrees: Vec<Worktree>,
     pub machines: Vec<Machine>,
+    #[serde(default)]
+    pub cli_configuration_profiles: Vec<CliConfigurationProfile>,
     pub runs: Vec<Run>,
     #[serde(default)]
     pub implementation_queues: Vec<ImplementationQueue>,

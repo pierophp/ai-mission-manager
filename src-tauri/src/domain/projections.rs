@@ -611,6 +611,7 @@ pub fn compose_grill_prompt(
     state: &DomainState,
     item_id: i64,
     configuration: &GrillConfiguration,
+    language: GrillLanguage,
     initial_prompt: &str,
 ) -> Result<String, DomainError> {
     validate_grill_configuration(configuration)?;
@@ -640,7 +641,8 @@ pub fn compose_grill_prompt(
         }
     }
     Ok(format!(
-        "You are starting a Grill Run.\n\nGrill configuration: agent={}, model={}, effort={}.\n\nGrilling skill snapshot:\n{}\n\n{}\n\nRelevant Item context:\n{}\n\nUser's initial prompt:\n{}",
+        "You are starting a Grill Run.\n\n{}\n\nGrill configuration: agent={}, model={}, effort={}.\n\nGrilling skill snapshot:\n{}\n\n{}\n\nRelevant Item context:\n{}\n\nUser's initial prompt:\n{}",
+        language.response_instruction(),
         serde_json::to_string(&configuration.agent).unwrap_or_else(|_| "unknown".into()),
         configuration.model,
         configuration.effort,
@@ -702,6 +704,9 @@ pub fn compose_grill_continuation_prompt(
     };
 
     let mut sections = vec![
+        GrillLanguage::from_run_prompt(&run.prompt)
+            .response_instruction()
+            .to_owned(),
         "Continue the existing Grill Run in the same Run and Pane. The Grill conversation is already in your context; use it as the primary source.".to_owned(),
         format!("Selected downstream action: {}", action.as_str()),
         format!(
@@ -739,12 +744,16 @@ pub fn compose_grill_continuation_prompt(
         action.as_str()
     ));
     sections.push(GRILL_OUTPUT_CONTRACT.to_owned());
-    sections.push(format!(
-        "Mission Manager links the Issues you create to the Item. Right after creating each GitHub Issue, print one line on its own with its canonical URL (one line per Issue, no line breaks inside it):\nAI_MISSION_MANAGER_EVENT {{\"event\":\"github.issue.created\",\"url\":\"https://github.com/<owner>/<repo>/issues/<number>\",\"run_id\":{},\"action\":\"{}\"}}",
-        run.id,
-        action.as_str(),
-    ));
+    sections.push(downstream_issue_event_instruction(run.id, action));
     Ok(sections.join("\n\n"))
+}
+
+fn downstream_issue_event_instruction(run_id: i64, action: GrillContinuationAction) -> String {
+    format!(
+        "Mission Manager links the work objects you create to the Item. For to-tickets, set each ticket's native parent to the Spec when the tracker supports it; treat that relation write as best-effort, so a rejection must not stop creation. Mission Manager records the parent locally and never reads tracker relations back. Immediately after creating each object, print one JSON event on a line by itself. Use its canonical URL, or its local Markdown path for files under a registered checkout. Keep objects in publication order; use a 1-based ordinal for each ticket and list any tickets it is blocked by as their URLs or paths in blocked_by. Example: AI_MISSION_MANAGER_EVENT {{\"event\":\"external.object.created\",\"url\":\"<canonical URL or local path>\",\"ordinal\":1,\"blocked_by\":[],\"run_id\":{},\"action\":\"{}\"}}",
+        run_id,
+        action.as_str(),
+    )
 }
 
 /// The pending question group of a step the user moved on from.
@@ -1085,6 +1094,7 @@ pub(crate) fn link_external_object(
                 .as_ref()
                 .map(|provenance| LinkPurpose::from(provenance.action))
                 .unwrap_or_default(),
+            spec_external_object_id: None,
             provenance,
         };
         state.next_link_id = next_link_id;

@@ -12,13 +12,7 @@ export const itemDetailTabs = [
 export type ItemDetailTab = (typeof itemDetailTabs)[number];
 
 /** Forms an Item action opens inside the Item detail panel. */
-export type ItemForm =
-  | "grill"
-  | "direct-run"
-  | "rename"
-  | "reminder"
-  | "link"
-  | "issue";
+export type ItemForm = "run" | "rename" | "reminder" | "link" | "issue";
 
 /**
  * A request to open a form, carried to the panel once. The nonce lets the same
@@ -27,7 +21,7 @@ export type ItemForm =
 export type ItemIntent = { itemId: number; form: ItemForm; nonce: number };
 
 export function tabForForm(form: ItemForm): ItemDetailTab | undefined {
-  if (form === "grill" || form === "direct-run") return "runs";
+  if (form === "run") return "runs";
   if (form === "reminder") return "overview";
   if (form === "link" || form === "issue") return "links";
   return undefined;
@@ -61,6 +55,26 @@ export function grillQuestionKey(run: Run): string {
 export function activeRuns(view: ItemView): Run[] {
   return view.runs.filter(
     (run) => !isRunFinished(run) && run.pane_status !== "missing",
+  );
+}
+
+/** External Objects whose Link can serve as an Implementation Queue Spec. */
+export function supportsImplementationSpec(link: ExternalLinkView): boolean {
+  const { object } = link;
+  return (
+    (object.provider === "github" && object.kind === "issue") ||
+    (object.provider === "atlassian" && ["document", "issue"].includes(object.kind)) ||
+    (object.provider === "generic" && object.external_key.startsWith("local:"))
+  );
+}
+
+/** External Objects whose Link can serve as a queued ticket. */
+export function supportsImplementationTicket(link: ExternalLinkView): boolean {
+  const { object } = link;
+  return (
+    (object.provider === "github" && object.kind === "issue") ||
+    (object.provider === "atlassian" && object.kind === "issue") ||
+    (object.provider === "generic" && object.external_key.startsWith("local:"))
   );
 }
 
@@ -105,16 +119,15 @@ export function nextGrillAction(
 }
 
 /**
- * The Item's Specs: GitHub Issues explicitly marked on their Link, newest
- * first.
+ * The Item's Specs: supported Spec Objects explicitly marked on their Link,
+ * newest first.
  */
 export function itemSpecs(view: ItemView): ExternalLinkView[] {
   return view.links
     .filter(
       (link) =>
         link.link.purpose === "to-spec" &&
-        link.object.provider === "github" &&
-        link.object.kind === "issue",
+        supportsImplementationSpec(link),
     )
     .sort((left, right) => right.link.id - left.link.id);
 }

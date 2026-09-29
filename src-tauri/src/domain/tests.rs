@@ -23,7 +23,321 @@ mod implementation_queue_tests {
         assert!(!prompt.contains("name: implement"));
     }
 
-    fn state() -> DomainState {
+    #[test]
+    fn context_can_disable_dirty_checkout_checks() {
+        let decision = decide(
+            state(),
+            Event::SetContextDirtyCheckoutCheck {
+                context_id: 1,
+                enabled: false,
+            },
+        )
+        .expect("a Context can update its dirty checkout check setting");
+
+        assert!(!decision.state.contexts[0].check_dirty_checkouts);
+        assert!(matches!(
+            decision.effects.as_slice(),
+            [Effect::UpdateContext { context }] if !context.check_dirty_checkouts
+        ));
+    }
+
+    #[test]
+    fn context_configuration_is_updated_as_one_domain_change() {
+        let mut initial = state();
+        initial.attention_defaults = vec![ContextAttentionDefault {
+            context_id: 1,
+            object_kind: ExternalObjectKind::Issue,
+            policy: ExternalChangePolicy::all(),
+        }];
+        let grill_defaults = GrillConfiguration {
+            agent: AgentKind::Codex,
+            model: "gpt-6-sol".into(),
+            effort: "high".into(),
+        };
+        let implement_defaults = GrillConfiguration {
+            agent: AgentKind::Claude,
+            model: "claude-sonnet-4-5".into(),
+            effort: "medium".into(),
+        };
+        let policies = vec![
+            ContextAttentionDefault {
+                context_id: 1,
+                object_kind: ExternalObjectKind::Issue,
+                policy: ExternalChangePolicy {
+                    title: true,
+                    state: false,
+                    metadata: true,
+                },
+            },
+            ContextAttentionDefault {
+                context_id: 1,
+                object_kind: ExternalObjectKind::PullRequest,
+                policy: ExternalChangePolicy {
+                    title: false,
+                    state: true,
+                    metadata: false,
+                },
+            },
+            ContextAttentionDefault {
+                context_id: 1,
+                object_kind: ExternalObjectKind::Generic,
+                policy: ExternalChangePolicy {
+                    title: true,
+                    state: true,
+                    metadata: false,
+                },
+            },
+        ];
+
+        let decision = decide(
+            initial,
+            Event::UpdateContextConfiguration {
+                context_id: 1,
+                configuration: ContextConfiguration {
+                    name: "  Renamed Context  ".into(),
+                    execution_machine_id: None,
+                    claude_profile_id: None,
+                    codex_profile_id: None,
+                    check_dirty_checkouts: false,
+                    grill_defaults: grill_defaults.clone(),
+                    implement_defaults: implement_defaults.clone(),
+                    attention_defaults: policies.clone(),
+                    ..ContextConfiguration::default()
+                },
+            },
+        )
+        .expect("a valid complete Context configuration can be updated");
+
+        let context = &decision.state.contexts[0];
+        assert_eq!(context.name, "Renamed Context");
+        assert_eq!(context.execution_machine_id, None);
+        assert!(!context.check_dirty_checkouts);
+        assert_eq!(context.grill_defaults, grill_defaults);
+        assert_eq!(context.implement_defaults, implement_defaults);
+        assert_eq!(decision.state.attention_defaults, policies);
+        assert!(decision.state.projects == state().projects);
+        assert!(matches!(
+            decision.effects.as_slice(),
+            [Effect::PersistContextConfiguration { .. }]
+        ));
+    }
+
+    #[test]
+    fn context_creation_applies_the_complete_configuration_with_its_default_project() {
+        let configuration = ContextConfiguration {
+            name: "  Research  ".into(),
+            execution_machine_id: None,
+            claude_profile_id: None,
+            codex_profile_id: None,
+            check_dirty_checkouts: false,
+            grill_defaults: GrillConfiguration::default(),
+            implement_defaults: GrillConfiguration::default(),
+            attention_defaults: [
+                ExternalObjectKind::Issue,
+                ExternalObjectKind::PullRequest,
+                ExternalObjectKind::Generic,
+            ]
+            .into_iter()
+            .map(|object_kind| ContextAttentionDefault {
+                context_id: 0,
+                object_kind,
+                policy: ExternalChangePolicy::all(),
+            })
+            .collect(),
+            ..ContextConfiguration::default()
+        };
+
+        let decision = decide(state(), Event::CreateContextConfiguration { configuration })
+            .expect("a valid Context and its configuration can be created together");
+
+        assert_eq!(decision.state.contexts[1].name, "Research");
+        assert!(!decision.state.contexts[1].check_dirty_checkouts);
+        assert_eq!(decision.state.projects.len(), 2);
+        assert_eq!(decision.state.projects[1].name, "Default");
+        assert_eq!(decision.state.projects[1].context_id, 2);
+        assert_eq!(decision.state.attention_defaults.len(), 3);
+        assert!(decision
+            .state
+            .attention_defaults
+            .iter()
+            .all(|policy| policy.context_id == 2));
+        assert_eq!(decision.effects.len(), 3);
+        assert!(decision
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PersistContext { .. })));
+        assert!(decision
+            .effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::PersistProject { .. })));
+        assert!(decision.effects.iter().any(|effect| matches!(
+                    effect,
+                    Effect::PersistContextConfiguration {
+                        attention_defaults,
+                        ..
+        } if attention_defaults.len() == 3
+                )));
+    }
+
+    #[test]
+    fn context_creation_rejects_invalid_configuration_as_one_transition() {
+        let initial = state();
+        let original = initial.clone();
+        let result = decide(
+            initial,
+            Event::CreateContextConfiguration {
+                configuration: ContextConfiguration {
+                    name: "Research".into(),
+                    execution_machine_id: None,
+                    claude_profile_id: None,
+                    codex_profile_id: None,
+                    check_dirty_checkouts: true,
+                    grill_defaults: GrillConfiguration {
+                        agent: AgentKind::Claude,
+                        model: "unsupported-model".into(),
+                        effort: "high".into(),
+                    },
+                    implement_defaults: GrillConfiguration::default(),
+                    attention_defaults: [
+                        ExternalObjectKind::Issue,
+                        ExternalObjectKind::PullRequest,
+                        ExternalObjectKind::Generic,
+                    ]
+                    .into_iter()
+                    .map(|object_kind| ContextAttentionDefault {
+                        context_id: 0,
+                        object_kind,
+                        policy: ExternalChangePolicy::all(),
+                    })
+                    .collect(),
+                    ..ContextConfiguration::default()
+                },
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(DomainError::InvalidGrillConfiguration { .. })
+        ));
+        assert_eq!(original.contexts.len(), 1);
+        assert_eq!(original.projects.len(), 1);
+    }
+
+    #[test]
+    fn direct_run_records_the_context_selected_cli_profile_identity() {
+        let mut initial = state();
+        initial.contexts[0].claude_profile_id = Some(7);
+        initial
+            .cli_configuration_profiles
+            .push(CliConfigurationProfile {
+                id: 7,
+                machine_id: 1,
+                provider: AgentKind::Claude,
+                name: "Personal Claude".into(),
+                directory: "/profiles/claude-personal".into(),
+                app_managed: false,
+            });
+
+        let started = decide(initial, event("open"))
+            .expect("a Run can start with the Context's selected profile");
+
+        let expected_identity = CliConfigurationProfileIdentity {
+            profile_id: 7,
+            provider: AgentKind::Claude,
+            name: "Personal Claude".into(),
+        };
+        assert_eq!(
+            started.state.runs[0].cli_configuration_profile,
+            Some(expected_identity.clone())
+        );
+
+        let reassigned = decide(
+            started.state,
+            Event::SetContextCliConfigurationProfile {
+                context_id: 1,
+                provider: AgentKind::Claude,
+                profile_id: None,
+            },
+        )
+        .expect("the Context can later clear its profile selection");
+        assert_eq!(
+            reassigned.state.runs[0].cli_configuration_profile,
+            Some(expected_identity)
+        );
+    }
+
+    #[test]
+    fn new_contexts_check_dirty_checkouts_by_default() {
+        let decision = decide(
+            state(),
+            Event::CreateContext {
+                name: "Another context".into(),
+            },
+        )
+        .expect("a new Context should be created");
+
+        assert!(decision.state.contexts[1].check_dirty_checkouts);
+        assert_eq!(decision.state.contexts[1].claude_profile_id, None);
+        assert_eq!(decision.state.contexts[1].codex_profile_id, None);
+    }
+
+    #[test]
+    fn disabled_context_setting_allows_a_direct_run_with_dirty_checkout() {
+        let setting = decide(
+            state(),
+            Event::SetContextDirtyCheckoutCheck {
+                context_id: 1,
+                enabled: false,
+            },
+        )
+        .unwrap();
+        let mut dirty_run = event("open");
+        if let Event::StartDirectRun { checkouts, .. } = &mut dirty_run {
+            checkouts[0].is_dirty = true;
+        }
+
+        assert!(decide(setting.state, dirty_run).is_ok());
+    }
+
+    #[test]
+    fn disabled_context_setting_allows_queue_advancement_with_dirty_checkout() {
+        let started = decide(state(), event("open")).unwrap();
+        let finished = decide(
+            started.state,
+            Event::ApplyAgentStateReport {
+                run_id: 1,
+                state: RunState::Finished,
+                sequence: Some(1),
+            },
+        )
+        .unwrap();
+        let setting = decide(
+            finished.state,
+            Event::SetContextDirtyCheckoutCheck {
+                context_id: 1,
+                enabled: false,
+            },
+        )
+        .unwrap();
+        let advanced = decide(
+            setting.state,
+            Event::AdvanceImplementationQueue {
+                queue_id: 1,
+                run_id: 1,
+                ticket_closed: true,
+                checkout_clean: false,
+            },
+        )
+        .unwrap();
+
+        assert!(advanced.state.implementation_queues[0].entries[0].done);
+        assert!(advanced.effects.iter().any(|effect| matches!(
+            effect,
+            Effect::LaunchImplementationQueueEntry { position: 1, .. }
+        )));
+    }
+
+    pub(super) fn state() -> DomainState {
         DomainState {
             next_context_id: 2,
             next_project_id: 2,
@@ -33,6 +347,7 @@ mod implementation_queue_tests {
             next_workspace_id: 2,
             next_worktree_id: 1,
             next_machine_id: 2,
+            next_cli_profile_id: 1,
             next_run_id: 1,
             next_external_object_id: 2,
             next_link_id: 2,
@@ -42,8 +357,12 @@ mod implementation_queue_tests {
                 id: 1,
                 name: "Context".into(),
                 execution_machine_id: Some(1),
+                claude_profile_id: None,
+                codex_profile_id: None,
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                ..Context::default()
             }],
             projects: vec![Project {
                 id: 1,
@@ -88,6 +407,7 @@ mod implementation_queue_tests {
                 last_observed: MachineObservation::Available,
                 last_observed_at: None,
             }],
+            cli_configuration_profiles: vec![],
             runs: vec![],
             implementation_queues: vec![],
             relationships: vec![],
@@ -106,7 +426,8 @@ mod implementation_queue_tests {
                 attention_policy: None,
                 watch_until: None,
                 review_at: None,
-                purpose: LinkPurpose::Others,
+                purpose: LinkPurpose::ToSpec,
+                spec_external_object_id: None,
                 provenance: None,
             }],
             snapshots: vec![],
@@ -200,6 +521,90 @@ mod implementation_queue_tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn implementation_queue_accepts_atlassian_and_local_specs_but_requires_the_spec_link() {
+        let cases = [
+            (
+                ExternalProvider::Atlassian,
+                ExternalObjectKind::Document,
+                "confluence:acme#123",
+                "https://acme.atlassian.net/wiki/spaces/ENG/pages/123/spec",
+                "https://acme.atlassian.net/browse/APP-42",
+            ),
+            (
+                ExternalProvider::Generic,
+                ExternalObjectKind::Generic,
+                "local:9#.scratch/feature/spec.md",
+                "file:///repo/.scratch/feature/spec.md",
+                "local:9#.scratch/feature/issues/01-ticket.md",
+            ),
+        ];
+        for (provider, kind, key, spec_url, ticket_url) in cases {
+            let mut initial = state();
+            initial.external_objects[0].provider = provider;
+            initial.external_objects[0].kind = kind;
+            initial.external_objects[0].external_key = key.into();
+            initial.external_objects[0].canonical_url = spec_url.into();
+            let start = || {
+                let mut start = event("open");
+                if let Event::StartDirectRun {
+                    implementation_queue: Some(queue),
+                    ..
+                } = &mut start
+                {
+                    queue.spec_url = spec_url.into();
+                    queue.entries[0].ticket_url = ticket_url.into();
+                }
+                start
+            };
+            let queued = decide(initial.clone(), start())
+                .unwrap_or_else(|error| panic!("{provider:?} queue should start: {error}"));
+            assert_eq!(queued.state.implementation_queues[0].spec_url, spec_url);
+
+            initial.links[0].purpose = LinkPurpose::Others;
+            assert!(matches!(
+                decide(initial, start()),
+                Err(DomainError::ImplementationSpecNotLinked)
+            ));
+        }
+    }
+
+    #[test]
+    fn azure_devops_work_items_are_rejected_as_queue_specs_and_tickets() {
+        let mut initial = state();
+        initial.external_objects[0].provider = ExternalProvider::AzureDevOps;
+        initial.external_objects[0].kind = ExternalObjectKind::Issue;
+        initial.external_objects[0].external_key = "ado:acme/apps#23".into();
+        initial.external_objects[0].canonical_url =
+            "https://dev.azure.com/acme/apps/_workitems/edit/23".into();
+        let mut spec_start = event("open");
+        if let Event::StartDirectRun {
+            implementation_queue: Some(queue),
+            ..
+        } = &mut spec_start
+        {
+            queue.spec_url = initial.external_objects[0].canonical_url.clone();
+        }
+        assert!(matches!(
+            decide(initial, spec_start),
+            Err(DomainError::ImplementationSpecNotFound)
+        ));
+
+        let mut ticket_start = event("open");
+        if let Event::StartDirectRun {
+            implementation_queue: Some(queue),
+            ..
+        } = &mut ticket_start
+        {
+            queue.entries[0].ticket_url =
+                "https://dev.azure.com/acme/apps/_workitems/edit/42".into();
+        }
+        assert!(matches!(
+            decide(state(), ticket_start),
+            Err(DomainError::InvalidImplementationQueueEntries)
+        ));
     }
 
     #[test]
@@ -536,6 +941,195 @@ mod implementation_queue_tests {
     }
 }
 
+mod cli_configuration_profile_tests {
+    use super::*;
+
+    fn state() -> DomainState {
+        implementation_queue_tests::state()
+    }
+
+    #[test]
+    fn profiles_are_machine_scoped_and_context_selections_are_independent() {
+        let state = state();
+        let state = decide(
+            state,
+            Event::CreateCliConfigurationProfile {
+                machine_id: 1,
+                provider: AgentKind::Claude,
+                name: "Personal Claude".into(),
+                directory: "/profiles/claude-personal".into(),
+                app_managed: true,
+            },
+        )
+        .unwrap()
+        .state;
+        let state = decide(
+            state,
+            Event::CreateCliConfigurationProfile {
+                machine_id: 1,
+                provider: AgentKind::Codex,
+                name: "Work Codex".into(),
+                directory: "/profiles/codex-work".into(),
+                app_managed: false,
+            },
+        )
+        .unwrap()
+        .state;
+        let selected_claude = decide(
+            state,
+            Event::SetContextCliConfigurationProfile {
+                context_id: 1,
+                provider: AgentKind::Claude,
+                profile_id: Some(1),
+            },
+        )
+        .unwrap()
+        .state;
+        let selected_both = decide(
+            selected_claude,
+            Event::SetContextCliConfigurationProfile {
+                context_id: 1,
+                provider: AgentKind::Codex,
+                profile_id: Some(2),
+            },
+        )
+        .unwrap()
+        .state;
+
+        assert_eq!(selected_both.contexts[0].claude_profile_id, Some(1));
+        assert_eq!(selected_both.contexts[0].codex_profile_id, Some(2));
+        assert!(matches!(
+            decide(selected_both, Event::DeleteCliConfigurationProfile { profile_id: 1 }),
+            Err(DomainError::CliConfigurationProfileInUse { contexts }) if contexts == vec!["Context".to_owned()]
+        ));
+    }
+
+    #[test]
+    fn context_cannot_select_a_profile_from_another_machine_or_provider() {
+        let state = state();
+        let state = decide(
+            state,
+            Event::CreateCliConfigurationProfile {
+                machine_id: 1,
+                provider: AgentKind::Claude,
+                name: "Claude".into(),
+                directory: "/profiles/claude".into(),
+                app_managed: false,
+            },
+        )
+        .unwrap()
+        .state;
+
+        assert!(matches!(
+            decide(
+                state.clone(),
+                Event::SetContextCliConfigurationProfile {
+                    context_id: 1,
+                    provider: AgentKind::Codex,
+                    profile_id: Some(1),
+                }
+            ),
+            Err(DomainError::CliConfigurationProfileProviderMismatch { .. })
+        ));
+        let other_context = decide(
+            state,
+            Event::CreateContext {
+                name: "Other".into(),
+            },
+        )
+        .unwrap()
+        .state;
+        let other_context = decide(
+            other_context,
+            Event::RegisterMachine {
+                context_id: 2,
+                name: "Other Machine".into(),
+                socket_name: "other".into(),
+                transport: MachineTransport::Local,
+            },
+        )
+        .unwrap()
+        .state;
+        let other_context = decide(
+            other_context,
+            Event::SetContextExecutionMachine {
+                context_id: 2,
+                machine_id: Some(2),
+            },
+        )
+        .unwrap()
+        .state;
+        assert!(matches!(
+            decide(
+                other_context,
+                Event::SetContextCliConfigurationProfile {
+                    context_id: 2,
+                    provider: AgentKind::Claude,
+                    profile_id: Some(1),
+                }
+            ),
+            Err(DomainError::CliConfigurationProfileMachineMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn contexts_assigned_to_the_same_machine_can_reuse_its_profile() {
+        let state = state();
+        let state = decide(
+            state,
+            Event::CreateContext {
+                name: "Shared".into(),
+            },
+        )
+        .unwrap()
+        .state;
+        let state = decide(
+            state,
+            Event::SetContextExecutionMachine {
+                context_id: 2,
+                machine_id: Some(1),
+            },
+        )
+        .expect("a Context can share an execution Machine")
+        .state;
+        let state = decide(
+            state,
+            Event::CreateCliConfigurationProfile {
+                machine_id: 1,
+                provider: AgentKind::Claude,
+                name: "Shared Claude".into(),
+                directory: "/profiles/claude".into(),
+                app_managed: true,
+            },
+        )
+        .unwrap()
+        .state;
+        let state = decide(
+            state,
+            Event::SetContextCliConfigurationProfile {
+                context_id: 1,
+                provider: AgentKind::Claude,
+                profile_id: Some(1),
+            },
+        )
+        .unwrap()
+        .state;
+        let state = decide(
+            state,
+            Event::SetContextCliConfigurationProfile {
+                context_id: 2,
+                provider: AgentKind::Claude,
+                profile_id: Some(1),
+            },
+        )
+        .unwrap()
+        .state;
+
+        assert_eq!(state.contexts[0].claude_profile_id, Some(1));
+        assert_eq!(state.contexts[1].claude_profile_id, Some(1));
+    }
+}
+
 mod context_execution_machine_tests {
     use super::*;
 
@@ -549,6 +1143,7 @@ mod context_execution_machine_tests {
             next_workspace_id: 1,
             next_worktree_id: 1,
             next_machine_id: 3,
+            next_cli_profile_id: 1,
             next_run_id: 1,
             next_external_object_id: 1,
             next_link_id: 1,
@@ -559,15 +1154,23 @@ mod context_execution_machine_tests {
                     id: 1,
                     name: "Unconfigured".into(),
                     execution_machine_id: None,
+                    claude_profile_id: None,
+                    codex_profile_id: None,
+                    check_dirty_checkouts: true,
                     grill_defaults: GrillConfiguration::default(),
                     implement_defaults: GrillConfiguration::default(),
+                    ..Context::default()
                 },
                 Context {
                     id: 2,
                     name: "Other".into(),
                     execution_machine_id: None,
+                    claude_profile_id: None,
+                    codex_profile_id: None,
+                    check_dirty_checkouts: true,
                     grill_defaults: GrillConfiguration::default(),
                     implement_defaults: GrillConfiguration::default(),
+                    ..Context::default()
                 },
             ],
             projects: Vec::new(),
@@ -596,6 +1199,7 @@ mod context_execution_machine_tests {
                     last_observed_at: None,
                 },
             ],
+            cli_configuration_profiles: Vec::new(),
             runs: Vec::new(),
             implementation_queues: Vec::new(),
             relationships: Vec::new(),
@@ -633,17 +1237,101 @@ mod context_execution_machine_tests {
     }
 
     #[test]
-    fn a_context_cannot_select_a_machine_owned_by_another_context() {
-        let error = decide(
+    fn a_context_can_share_an_execution_machine_registered_by_another_context() {
+        let decision = decide(
             state(),
             Event::SetContextExecutionMachine {
                 context_id: 1,
                 machine_id: Some(2),
             },
         )
-        .expect_err("execution Machines must belong to their Context");
+        .expect("Contexts can share execution Machines");
 
-        assert!(matches!(error, DomainError::MachineContextMismatch { .. }));
+        assert_eq!(decision.state.contexts[0].execution_machine_id, Some(2));
+    }
+
+    #[test]
+    fn aggregate_machine_change_requires_incompatible_profiles_to_be_cleared_in_the_same_edit() {
+        let state = decide(
+            state(),
+            Event::CreateCliConfigurationProfile {
+                machine_id: 1,
+                provider: AgentKind::Claude,
+                name: "Work profile".into(),
+                directory: "/profiles/work".into(),
+                app_managed: true,
+            },
+        )
+        .expect("the profile should be created")
+        .state;
+        let state = decide(
+            state,
+            Event::SetContextExecutionMachine {
+                context_id: 1,
+                machine_id: Some(1),
+            },
+        )
+        .unwrap()
+        .state;
+        let state = decide(
+            state,
+            Event::SetContextCliConfigurationProfile {
+                context_id: 1,
+                provider: AgentKind::Claude,
+                profile_id: Some(1),
+            },
+        )
+        .unwrap()
+        .state;
+        let attention_defaults = [
+            ExternalObjectKind::Issue,
+            ExternalObjectKind::PullRequest,
+            ExternalObjectKind::Generic,
+        ]
+        .into_iter()
+        .map(|object_kind| ContextAttentionDefault {
+            context_id: 1,
+            object_kind,
+            policy: ExternalChangePolicy::all(),
+        })
+        .collect();
+        let configuration = ContextConfiguration {
+            name: "Unconfigured".into(),
+            execution_machine_id: Some(2),
+            claude_profile_id: None,
+            codex_profile_id: None,
+            check_dirty_checkouts: true,
+            grill_defaults: GrillConfiguration::default(),
+            implement_defaults: GrillConfiguration::default(),
+            attention_defaults,
+            ..ContextConfiguration::default()
+        };
+
+        let accepted = decide(
+            state.clone(),
+            Event::UpdateContextConfiguration {
+                context_id: 1,
+                configuration: configuration.clone(),
+            },
+        )
+        .expect("the user can replace the Machine and clear its profile in one edit");
+        assert_eq!(accepted.state.contexts[0].execution_machine_id, Some(2));
+        assert_eq!(accepted.state.contexts[0].claude_profile_id, None);
+
+        let incompatible = decide(
+            state,
+            Event::UpdateContextConfiguration {
+                context_id: 1,
+                configuration: ContextConfiguration {
+                    claude_profile_id: Some(1),
+                    ..configuration
+                },
+            },
+        );
+        assert!(matches!(
+            incompatible,
+            Err(DomainError::CliConfigurationProfileMachineMismatch { .. })
+        ));
     }
 }
 
@@ -660,6 +1348,7 @@ mod machine_deletion_tests {
             next_workspace_id: 2,
             next_worktree_id: 2,
             next_machine_id: 2,
+            next_cli_profile_id: 1,
             next_run_id: 2,
             next_external_object_id: 1,
             next_link_id: 1,
@@ -669,8 +1358,12 @@ mod machine_deletion_tests {
                 id: 1,
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
+                claude_profile_id: None,
+                codex_profile_id: None,
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                ..Context::default()
             }],
             projects: vec![Project {
                 id: 1,
@@ -729,6 +1422,7 @@ mod machine_deletion_tests {
                 last_observed: MachineObservation::Available,
                 last_observed_at: None,
             }],
+            cli_configuration_profiles: vec![],
             runs: vec![Run {
                 id: 1,
                 item_id: 1,
@@ -737,6 +1431,7 @@ mod machine_deletion_tests {
                 worktree_id: Some(1),
                 machine_id: 1,
                 agent: AgentKind::Claude,
+                cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::Implement,
                 model: None,
                 effort: None,
@@ -841,6 +1536,44 @@ mod machine_deletion_tests {
     }
 
     #[test]
+    fn aggregate_context_edit_cannot_change_machine_while_a_run_is_active() {
+        let current = state();
+        let context = current.contexts[0].clone();
+        let attention_defaults = [
+            ExternalObjectKind::Issue,
+            ExternalObjectKind::PullRequest,
+            ExternalObjectKind::Generic,
+        ]
+        .into_iter()
+        .map(|object_kind| ContextAttentionDefault {
+            context_id: context.id,
+            object_kind,
+            policy: ExternalChangePolicy::all(),
+        })
+        .collect();
+        let error = decide(
+            current,
+            Event::UpdateContextConfiguration {
+                context_id: context.id,
+                configuration: ContextConfiguration {
+                    name: context.name,
+                    execution_machine_id: None,
+                    claude_profile_id: None,
+                    codex_profile_id: None,
+                    check_dirty_checkouts: context.check_dirty_checkouts,
+                    grill_defaults: context.grill_defaults,
+                    implement_defaults: context.implement_defaults,
+                    attention_defaults,
+                    ..ContextConfiguration::default()
+                },
+            },
+        )
+        .expect_err("an active Run prevents a Machine change in the aggregate edit");
+
+        assert!(matches!(error, DomainError::ContextHasActiveRuns { .. }));
+    }
+
+    #[test]
     fn changing_a_context_machine_keeps_old_worktrees_on_their_machine() {
         let mut state = state();
         state.runs.clear();
@@ -883,6 +1616,7 @@ mod workspace_contract_tests {
             next_workspace_id: 1,
             next_worktree_id: 1,
             next_machine_id: 2,
+            next_cli_profile_id: 1,
             next_run_id: 1,
             next_external_object_id: 1,
             next_link_id: 1,
@@ -892,8 +1626,12 @@ mod workspace_contract_tests {
                 id: 1,
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
+                claude_profile_id: None,
+                codex_profile_id: None,
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                ..Context::default()
             }],
             projects: vec![Project {
                 id: 1,
@@ -929,6 +1667,7 @@ mod workspace_contract_tests {
                 last_observed: MachineObservation::Available,
                 last_observed_at: None,
             }],
+            cli_configuration_profiles: Vec::new(),
             runs: Vec::new(),
             implementation_queues: Vec::new(),
             relationships: Vec::new(),
@@ -1034,6 +1773,7 @@ mod workspace_contract_tests {
             next_workspace_id: 2,
             next_worktree_id: 1,
             next_machine_id: 3,
+            next_cli_profile_id: 1,
             next_run_id: 1,
             next_external_object_id: 1,
             next_link_id: 1,
@@ -1043,8 +1783,12 @@ mod workspace_contract_tests {
                 id: 1,
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
+                claude_profile_id: None,
+                codex_profile_id: None,
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                ..Context::default()
             }],
             projects: vec![Project {
                 id: 1,
@@ -1113,6 +1857,7 @@ mod workspace_contract_tests {
                     last_observed_at: None,
                 },
             ],
+            cli_configuration_profiles: Vec::new(),
             runs: Vec::new(),
             implementation_queues: Vec::new(),
             relationships: Vec::new(),
@@ -1185,6 +1930,7 @@ mod grill_contract_tests {
             next_workspace_id: 2,
             next_worktree_id: 1,
             next_machine_id: 2,
+            next_cli_profile_id: 1,
             next_run_id: 1,
             next_external_object_id: 1,
             next_link_id: 1,
@@ -1194,8 +1940,12 @@ mod grill_contract_tests {
                 id: 1,
                 name: "Personal".into(),
                 execution_machine_id: Some(1),
+                claude_profile_id: None,
+                codex_profile_id: None,
+                check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                ..Context::default()
             }],
             projects: vec![Project {
                 id: 1,
@@ -1245,6 +1995,7 @@ mod grill_contract_tests {
                 last_observed: MachineObservation::Available,
                 last_observed_at: None,
             }],
+            cli_configuration_profiles: Vec::new(),
             runs: Vec::new(),
             implementation_queues: Vec::new(),
             relationships: Vec::new(),
@@ -1261,6 +2012,7 @@ mod grill_contract_tests {
             &state(),
             1,
             &configuration,
+            GrillLanguage::default(),
             "Stress-test this architecture decision.",
         )
         .expect("the Grill prompt should be composable");
@@ -1416,17 +2168,32 @@ mod grill_contract_tests {
     }
 
     #[test]
-    fn an_item_cannot_start_a_second_active_grill_run() {
+    fn an_item_can_start_a_second_active_grill_run() {
         let configuration = GrillConfiguration::default();
         let first = decide(state(), start_event(configuration.clone()))
             .expect("the first Grill should start");
-        let error = decide(first.state, start_event(configuration))
-            .expect_err("a second active Grill must be rejected");
+        let mut second_event = start_event(configuration);
+        if let Event::StartGrillRun {
+            session_name,
+            pane_id,
+            started_at,
+            ..
+        } = &mut second_event
+        {
+            *session_name = "mission-item-1-run-2".into();
+            *pane_id = "%2".into();
+            *started_at = 124;
+        }
 
-        assert!(matches!(
-            error,
-            DomainError::ActiveGrillRun { item_id: 1, .. }
-        ));
+        let second = decide(first.state, second_event)
+            .expect("another Grill can start while the first is active");
+
+        assert_eq!(second.state.runs.len(), 2);
+        assert!(second
+            .state
+            .runs
+            .iter()
+            .all(|run| run.execution_profile == ExecutionProfile::Grill));
     }
 
     #[test]
@@ -1857,7 +2624,7 @@ mod grill_contract_tests {
     }
 
     #[test]
-    fn a_completed_grill_stays_active_until_the_user_finishes_it() {
+    fn a_completed_grill_can_coexist_with_a_new_grill_until_finished() {
         let started = decide(state(), start_event(GrillConfiguration::default()))
             .expect("the Grill should start");
         let awaiting = decide(
@@ -1874,16 +2641,26 @@ mod grill_contract_tests {
             awaiting.state.runs[0].grill_phase,
             Some(GrillPhase::AwaitingNextAction)
         );
-        let error = decide(awaiting.state, start_event(GrillConfiguration::default()))
-            .expect_err("an awaiting Grill still occupies the Item");
-        assert!(matches!(
-            error,
-            DomainError::ActiveGrillRun { item_id: 1, .. }
-        ));
+        let mut second_event = start_event(GrillConfiguration::default());
+        if let Event::StartGrillRun {
+            session_name,
+            pane_id,
+            started_at,
+            ..
+        } = &mut second_event
+        {
+            *session_name = "mission-item-1-run-2".into();
+            *pane_id = "%2".into();
+            *started_at = 124;
+        }
+        let second = decide(awaiting.state, second_event)
+            .expect("another Grill can start while this one awaits its next action");
+
+        assert_eq!(second.state.runs.len(), 2);
     }
 
     #[test]
-    fn downstream_prompt_contains_the_selected_skill_item_context_and_decisions() {
+    fn downstream_prompt_injects_the_skill_and_preserves_only_needed_context() {
         let started = decide(state(), start_event(GrillConfiguration::default()))
             .expect("the Grill should start");
         let transcript = decide(
@@ -1944,20 +2721,33 @@ mod grill_contract_tests {
             };
             assert!(prompt.contains(expected_instruction));
             assert!(!prompt.contains(&format!("name: {}", action.as_str())));
-            assert!(prompt.contains("Decide the next architecture"));
-            assert!(prompt.contains("The decision must stay reversible."));
             assert!(
                 !prompt.contains("❓ Q1: Which decision should we keep?"),
                 "the Pane transcript is already in the agent's context"
             );
-            assert!(prompt.contains("Q1: Keep the reversible design"));
-            assert!(prompt.contains("docs/agents/issue-tracker.md"));
             assert!(prompt.contains(GRILL_OUTPUT_CONTRACT));
             assert!(prompt.contains(action.as_str()));
-            assert!(prompt.contains("same Run and Pane"));
             assert!(prompt.contains("AI_MISSION_MANAGER_EVENT"));
-            assert!(prompt.contains("github.issue.created"));
+            assert!(prompt.contains("external.object.created"));
             assert!(prompt.contains("\"run_id\":1"));
+            if action == GrillContinuationAction::Implement {
+                assert!(prompt.contains("Decide the next architecture"));
+                assert!(prompt.contains("The decision must stay reversible."));
+                assert!(prompt.contains("Q1: Keep the reversible design"));
+                assert!(prompt.contains("docs/agents/issue-tracker.md"));
+                assert!(prompt.contains("same Run and Pane"));
+            } else {
+                assert!(prompt.contains("Relevant Item context:"));
+                assert!(prompt.contains("Recorded Grill decisions:"));
+                assert!(prompt.contains("same Run and Pane"));
+                if matches!(
+                    action,
+                    GrillContinuationAction::ToSpec | GrillContinuationAction::ToTickets
+                ) {
+                    assert!(prompt.contains("docs/agents/issue-tracker.md"));
+                    assert!(!prompt.contains("Spec created earlier in this Run"));
+                }
+            }
         }
     }
 
@@ -2239,7 +3029,7 @@ mod grill_contract_tests {
     #[test]
     fn downstream_issue_discovery_keeps_structured_provenance_and_plain_issue_urls() {
         let structured = discover_downstream_issue_candidates(
-            r#"AI_MISSION_MANAGER_EVENT {"event":"github.issue.created","url":"https://github.com/acme/app/issues/7","run_id":1,"action":"to-tickets"}
+            r#"AI_MISSION_MANAGER_EVENT {"event":"external.object.created","url":"https://github.com/acme/app/issues/7","ordinal":1,"blocked_by":[],"run_id":1,"action":"to-tickets"}
 https://github.com/acme/app/issues/8
 https://example.com/unrelated"#,
         );
@@ -2250,6 +3040,8 @@ https://example.com/unrelated"#,
             DownstreamIssueDiscovery::StructuredEvent
         );
         assert_eq!(structured[0].run_id, Some(1));
+        assert_eq!(structured[0].ordinal, Some(1));
+        assert!(structured[0].blocked_by.is_empty());
         assert_eq!(
             structured[0].action,
             Some(GrillContinuationAction::ToTickets)
@@ -2268,7 +3060,7 @@ https://example.com/unrelated"#,
     #[test]
     fn downstream_issue_discovery_keeps_structured_provenance_with_a_transcript_bullet() {
         let candidates = discover_downstream_issue_candidates(
-            "• AI_MISSION_MANAGER_EVENT {\"event\":\"github.issue.created\",\"url\":\"https://github.com/acme/app/issues/92\",\"run_id\":18,\"action\":\"to-spec\"}\nhttps://github.com/acme/app/issues/92",
+            "• AI_MISSION_MANAGER_EVENT {\"event\":\"external.object.created\",\"url\":\"https://github.com/acme/app/issues/92\",\"run_id\":18,\"action\":\"to-spec\"}\nhttps://github.com/acme/app/issues/92",
         );
 
         assert_eq!(candidates.len(), 1);
@@ -2278,6 +3070,39 @@ https://example.com/unrelated"#,
         );
         assert_eq!(candidates[0].run_id, Some(18));
         assert_eq!(candidates[0].action, Some(GrillContinuationAction::ToSpec));
+    }
+
+    #[test]
+    fn downstream_capture_discovers_other_providers_and_local_markdown_from_transcripts() {
+        let candidates = discover_downstream_issue_candidates(
+            "• AI_MISSION_MANAGER_EVENT {\"event\":\"external.object.created\",\"url\":\"https://acme.atlassian.net/browse/OPS-41\",\"ordinal\":2,\"blocked_by\":[\"https://dev.azure.com/acme/Platform/_workitems/edit/17\"],\"run_id\":9,\"action\":\"to-tickets\"}\n> https://dev.azure.com/acme/Platform/_workitems/edit/17\n.scratch/spec.md\nCreated object: `AI_MISSION_MANAGER_EVENT {\"event\":\"external.object.created\",\"url\":\"https://acme.atlassian.net/browse/OPS-42\",\"run_id\":9,\"action\":\"to-tickets\"}`",
+        );
+        assert_eq!(candidates.len(), 4);
+        assert_eq!(
+            candidates[0].url,
+            "https://acme.atlassian.net/browse/OPS-41"
+        );
+        assert_eq!(candidates[0].ordinal, Some(2));
+        assert_eq!(
+            candidates[0].blocked_by,
+            ["https://dev.azure.com/acme/Platform/_workitems/edit/17"]
+        );
+        assert_eq!(candidates[0].run_id, Some(9));
+        assert_eq!(
+            candidates[1].url,
+            "https://dev.azure.com/acme/Platform/_workitems/edit/17"
+        );
+        assert_eq!(candidates[2].url, ".scratch/spec.md");
+        assert_eq!(candidates[2].discovery, DownstreamIssueDiscovery::OutputUrl);
+        assert_eq!(
+            candidates[3].url,
+            "https://acme.atlassian.net/browse/OPS-42"
+        );
+        assert_eq!(
+            candidates[3].discovery,
+            DownstreamIssueDiscovery::StructuredEvent
+        );
+        assert_eq!(candidates[3].run_id, Some(9));
     }
 
     #[test]
@@ -2299,6 +3124,7 @@ https://example.com/unrelated"#,
             watch_until: None,
             review_at: None,
             purpose: LinkPurpose::Others,
+            spec_external_object_id: None,
             provenance: None,
         });
         let marked = decide(
@@ -2306,6 +3132,7 @@ https://example.com/unrelated"#,
             Event::SetLinkPurpose {
                 link_id: 1,
                 purpose: LinkPurpose::ToSpec,
+                spec_external_object_id: None,
             },
         )
         .expect("an Item's linked GitHub Issue can be marked as a Spec");
@@ -2316,6 +3143,7 @@ https://example.com/unrelated"#,
             Event::SetLinkPurpose {
                 link_id: 1,
                 purpose: LinkPurpose::Others,
+                spec_external_object_id: None,
             },
         )
         .expect("the Link purpose can change to others");
@@ -2323,7 +3151,7 @@ https://example.com/unrelated"#,
     }
 
     #[test]
-    fn only_a_github_issue_can_be_marked_as_spec() {
+    fn pull_requests_cannot_be_marked_as_spec() {
         let mut initial_state = state();
         initial_state.external_objects.push(ExternalObject {
             id: 1,
@@ -2341,6 +3169,7 @@ https://example.com/unrelated"#,
             watch_until: None,
             review_at: None,
             purpose: LinkPurpose::Others,
+            spec_external_object_id: None,
             provenance: None,
         });
 
@@ -2349,10 +3178,60 @@ https://example.com/unrelated"#,
             Event::SetLinkPurpose {
                 link_id: 1,
                 purpose: LinkPurpose::ToSpec,
+                spec_external_object_id: None,
             },
         )
         .expect_err("a pull request cannot be an Issue Spec");
         assert_eq!(error, DomainError::LinkCannotBeSpec);
+    }
+
+    #[test]
+    fn azure_devops_work_items_can_only_be_regular_links() {
+        let linked_work_item = || {
+            let mut initial = state();
+            initial.external_objects.push(ExternalObject {
+                id: 1,
+                provider: ExternalProvider::AzureDevOps,
+                kind: ExternalObjectKind::Issue,
+                external_key: "ado:acme/platform#17".into(),
+                canonical_url: "https://dev.azure.com/acme/platform/_workitems/edit/17".into(),
+            });
+            initial.links.push(Link {
+                id: 1,
+                item_id: 1,
+                external_object_id: 1,
+                reviewed_activity_id: 0,
+                attention_policy: None,
+                watch_until: None,
+                review_at: None,
+                purpose: LinkPurpose::Others,
+                spec_external_object_id: None,
+                provenance: None,
+            });
+            initial
+        };
+
+        let spec_error = decide(
+            linked_work_item(),
+            Event::SetLinkPurpose {
+                link_id: 1,
+                purpose: LinkPurpose::ToSpec,
+                spec_external_object_id: None,
+            },
+        )
+        .expect_err("Azure DevOps work items cannot be Specs");
+        assert_eq!(spec_error, DomainError::LinkCannotBeSpec);
+
+        let ticket_error = decide(
+            linked_work_item(),
+            Event::SetLinkPurpose {
+                link_id: 1,
+                purpose: LinkPurpose::ToTickets,
+                spec_external_object_id: None,
+            },
+        )
+        .expect_err("Azure DevOps work items cannot be queue tickets");
+        assert_eq!(ticket_error, DomainError::LinkCannotBeTicket);
     }
 
     fn waiting_for_answers_state() -> DomainState {
@@ -2617,7 +3496,9 @@ https://example.com/unrelated"#,
             },
         )
         .expect("to-tickets should continue the Run");
-        let issue = confirmed_downstream_issue("https://github.com/acme/app/issues/7");
+        let mut issue = confirmed_downstream_issue("https://github.com/acme/app/issues/7");
+        issue.ordinal = Some(2);
+        issue.blocked_by = vec!["https://github.com/acme/app/issues/6".into()];
         let second_item = decide(
             continued.state,
             Event::CreateItem {
@@ -2660,6 +3541,8 @@ https://example.com/unrelated"#,
                 run_id: 1,
                 action: GrillContinuationAction::ToTickets,
                 discovery: DownstreamIssueDiscovery::StructuredEvent,
+                ordinal: Some(2),
+                blocked_by: vec!["https://github.com/acme/app/issues/6".into()],
             })
         );
 
@@ -2675,6 +3558,180 @@ https://example.com/unrelated"#,
         assert_eq!(second.state.external_objects.len(), 1);
         assert_eq!(second.state.links.len(), 2);
         assert!(second.effects.is_empty());
+    }
+
+    #[test]
+    fn downstream_capture_links_atlassian_azure_devops_and_local_markdown_objects() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let awaiting = decide(
+            started.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the Grill should finish");
+        let continued = decide(
+            awaiting.state,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToSpec,
+                started_at: 100,
+            },
+        )
+        .expect("to-spec should continue the Run");
+        let mut atlassian = confirmed_downstream_issue("https://github.com/acme/app/issues/7");
+        atlassian.object = crate::provider::classify_url(
+            "https://acme.atlassian.net/wiki/spaces/ENG/pages/456/Runbook",
+        )
+        .expect("Confluence URL should classify");
+        let mut azure = confirmed_downstream_issue("https://github.com/acme/app/issues/8");
+        azure.object =
+            crate::provider::classify_url("https://dev.azure.com/acme/Platform/_workitems/edit/17")
+                .expect("Azure DevOps URL should classify");
+        let mut local = confirmed_downstream_issue("https://github.com/acme/app/issues/9");
+        local.object = ExternalObjectInput {
+            provider: ExternalProvider::Generic,
+            kind: ExternalObjectKind::Generic,
+            external_key: "local:9#.scratch/spec.md".into(),
+            canonical_url: "file:///repo/.scratch/spec.md".into(),
+        };
+
+        let captured = decide(
+            continued.state,
+            Event::CaptureDownstreamIssues {
+                run_id: 1,
+                action: GrillContinuationAction::ToSpec,
+                issues: vec![atlassian, azure, local],
+            },
+        )
+        .expect("all classified provider outputs should become Item Links");
+
+        assert_eq!(captured.state.external_objects.len(), 3);
+        assert_eq!(captured.state.links.len(), 3);
+        let azure_object_id = captured
+            .state
+            .external_objects
+            .iter()
+            .find(|object| object.provider == ExternalProvider::AzureDevOps)
+            .expect("Azure DevOps should remain a captured External Object")
+            .id;
+        let azure_link = captured
+            .state
+            .links
+            .iter()
+            .find(|link| link.external_object_id == azure_object_id)
+            .expect("Azure DevOps should remain linked to the Item");
+        assert_eq!(azure_link.purpose, LinkPurpose::Others);
+        assert_eq!(
+            azure_link
+                .provenance
+                .as_ref()
+                .map(|provenance| provenance.action),
+            Some(GrillContinuationAction::ToSpec)
+        );
+        assert_eq!(
+            captured
+                .state
+                .links
+                .iter()
+                .filter(|link| link.external_object_id != azure_object_id)
+                .filter(|link| link.purpose == LinkPurpose::ToSpec)
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn downstream_ticket_parentage_is_recorded_locally_without_provider_relation_reads() {
+        let started = decide(state(), start_event(GrillConfiguration::default()))
+            .expect("the Grill should start");
+        let spec = crate::provider::classify_url(
+            "https://acme.atlassian.net/wiki/spaces/ENG/pages/456/Runbook",
+        )
+        .expect("Confluence Spec should classify");
+        let linked_spec = decide(
+            started.state,
+            Event::LinkExternalObject {
+                item_id: 1,
+                object: spec,
+                snapshot: None,
+            },
+        )
+        .expect("the local Spec Link should be created");
+        let marked_spec = decide(
+            linked_spec.state,
+            Event::SetLinkPurpose {
+                link_id: 1,
+                purpose: LinkPurpose::ToSpec,
+                spec_external_object_id: None,
+            },
+        )
+        .expect("the Link should be recorded as the Item Spec");
+        let awaiting = decide(
+            marked_spec.state,
+            Event::UpdateRunState {
+                run_id: 1,
+                state: RunState::Finished,
+            },
+        )
+        .expect("the Grill should finish");
+        let continued = decide(
+            awaiting.state,
+            Event::ContinueGrill {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                started_at: 100,
+            },
+        )
+        .expect("to-tickets should continue the Run");
+        let ticket = confirmed_downstream_issue("https://github.com/acme/app/issues/7");
+        let mut azure = confirmed_downstream_issue("https://github.com/acme/app/issues/17");
+        azure.object =
+            crate::provider::classify_url("https://dev.azure.com/acme/Platform/_workitems/edit/17")
+                .expect("Azure DevOps work item should classify");
+
+        let captured = decide(
+            continued.state,
+            Event::CaptureDownstreamIssues {
+                run_id: 1,
+                action: GrillContinuationAction::ToTickets,
+                issues: vec![ticket, azure],
+            },
+        )
+        .expect("capturing a ticket should not need provider relation reads");
+
+        assert_eq!(captured.state.links.len(), 3);
+        let ticket_link = captured
+            .state
+            .links
+            .iter()
+            .find(|link| link.purpose == LinkPurpose::ToTickets)
+            .expect("captured ticket Link should exist");
+        assert_eq!(ticket_link.spec_external_object_id, Some(1));
+        let azure_object_id = captured
+            .state
+            .external_objects
+            .iter()
+            .find(|object| object.provider == ExternalProvider::AzureDevOps)
+            .expect("Azure work item should remain captured")
+            .id;
+        let azure_link = captured
+            .state
+            .links
+            .iter()
+            .find(|link| link.external_object_id == azure_object_id)
+            .expect("Azure work item should remain linked");
+        assert_eq!(azure_link.purpose, LinkPurpose::Others);
+        assert_eq!(azure_link.spec_external_object_id, None);
+        assert_eq!(
+            azure_link
+                .provenance
+                .as_ref()
+                .map(|provenance| provenance.action),
+            Some(GrillContinuationAction::ToTickets)
+        );
     }
 
     #[test]
@@ -2743,6 +3800,8 @@ https://example.com/unrelated"#,
                 fetched_at: 123,
             },
             discovery: DownstreamIssueDiscovery::StructuredEvent,
+            ordinal: None,
+            blocked_by: vec![],
         }
     }
 }

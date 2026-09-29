@@ -22,7 +22,7 @@ pub enum DomainError {
     ImplementationQueueContainsClosedTicket,
     #[error("Implementation Queue configuration is missing")]
     ImplementationQueueConfigurationMissing,
-    #[error("Implementation spec does not exist or is not a GitHub Issue")]
+    #[error("Implementation spec does not exist or is not supported by an Implementation Queue")]
     ImplementationSpecNotFound,
     #[error("Implementation spec is not linked to the Item")]
     ImplementationSpecNotLinked,
@@ -40,6 +40,8 @@ pub enum DomainError {
     EmptyReminderAt,
     #[error("Context name already exists: {name}")]
     ContextNameTaken { name: String },
+    #[error("Context attention defaults must contain one policy for Issue, Pull Request, and generic External Objects")]
+    InvalidContextAttentionDefaults,
     #[error("Project name already exists in Context {context_id}: {name}")]
     ProjectNameTaken { context_id: i64, name: String },
     #[error("Context {context_id} does not exist")]
@@ -154,10 +156,32 @@ pub enum DomainError {
     MachineNameTaken { context_id: i64, name: String },
     #[error("Machine {machine_id} does not exist")]
     MachineNotFound { machine_id: i64 },
+    #[error("CLI configuration profile name cannot be blank")]
+    EmptyCliConfigurationProfileName,
+    #[error("CLI configuration profile directory cannot be blank")]
+    EmptyCliConfigurationProfileDirectory,
+    #[error("Machine {machine_id} does not exist")]
+    CliConfigurationProfileMachineNotFound { machine_id: i64 },
+    #[error("CLI configuration profile {profile_id} does not exist")]
+    CliConfigurationProfileNotFound { profile_id: i64 },
+    #[error("CLI configuration profile {profile_id} belongs to another Machine")]
+    CliConfigurationProfileMachineMismatch { profile_id: i64, machine_id: i64 },
+    #[error("CLI configuration profile {profile_id} is for {profile_provider:?}, not {requested_provider:?}")]
+    CliConfigurationProfileProviderMismatch {
+        profile_id: i64,
+        profile_provider: AgentKind,
+        requested_provider: AgentKind,
+    },
+    #[error("CLI configuration profile is selected by Contexts: {contexts:?}")]
+    CliConfigurationProfileInUse { contexts: Vec<String> },
+    #[error("CLI configuration profile name already exists on Machine {machine_id}: {name}")]
+    CliConfigurationProfileAlreadyExists { machine_id: i64, name: String },
     #[error("Machine {machine_id} belongs to another Context")]
     MachineContextMismatch { machine_id: i64, context_id: i64 },
     #[error("Context {context_id} has no execution Machine configured")]
     ContextHasNoExecutionMachine { context_id: i64 },
+    #[error("local Markdown tracker in Context {context_id} requires a local execution Machine because its files are read from the Repository's main checkout")]
+    LocalTrackerRequiresLocalExecutionMachine { context_id: i64 },
     #[error(
         "Machine {machine_id} is not the execution Machine configured for Context {context_id}"
     )]
@@ -203,8 +227,6 @@ pub enum DomainError {
         model: String,
         effort: String,
     },
-    #[error("Item {item_id} already has an active Grill Run {run_id}")]
-    ActiveGrillRun { item_id: i64, run_id: i64 },
     #[error("a Grill skill snapshot cannot be blank")]
     EmptyGrillSkillSnapshot,
     #[error("a Grill answer cannot be blank")]
@@ -272,8 +294,12 @@ pub enum DomainError {
     LinkAlreadyExists,
     #[error("Link {link_id} does not exist")]
     LinkNotFound { link_id: i64 },
-    #[error("Only a GitHub Issue can have the Spec Link purpose")]
+    #[error("This External Object cannot have the Spec Link purpose")]
     LinkCannotBeSpec,
+    #[error("This External Object cannot have the Tickets Link purpose")]
+    LinkCannotBeTicket,
+    #[error("A ticket must reference a supported Spec on the same Item")]
+    LinkCannotBeTicketForSpec,
     #[error("Reminder {reminder_id} does not exist on Item {item_id}")]
     ReminderNotFound { item_id: i64, reminder_id: i64 },
 }

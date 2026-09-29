@@ -6,6 +6,7 @@ import "@xterm/xterm/css/xterm.css";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import { errorMessage } from "../../runtime/errors";
+import { themeToken } from "../../theme";
 import { terminalRuntimeAdapter } from "../../runtime/adapters";
 import type {
   PaneTab,
@@ -51,9 +52,9 @@ export function EmbeddedTerminal({
       fontFamily: "SFMono-Regular, Menlo, Monaco, Consolas, monospace",
       fontSize: 13,
       theme: {
-        background: "#201c19",
-        foreground: "#f7f0e6",
-        cursor: "#efb28e",
+        background: themeToken("--terminal-bg"),
+        foreground: themeToken("--terminal-foreground"),
+        cursor: themeToken("--terminal-cursor"),
       },
     });
     const fitAddon = new FitAddon();
