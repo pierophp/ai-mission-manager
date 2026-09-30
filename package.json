@@ -13,10 +13,11 @@
     "tauri:dev": "tauri dev",
     "tauri:dev:devtools": "AI_MISSION_MANAGER_OPEN_DEVTOOLS=true tauri dev",
     "tauri:build": "tauri build",
-    "tauri:build-open": "npm run tauri:build && npm run tauri:open",
+    "tauri:build-open": "cargo clean --manifest-path src-tauri/Cargo.toml && npm run tauri:build && npm run tauri:open",
     "tauri:open": "./src-tauri/target/release/ai-mission-manager",
     "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck && npm run build"
+    "check:pstack-vendor": "node scripts/check-pstack-vendor.mjs",
+    "test": "node --test scripts/check-pstack-vendor.test.mjs && npm run check:pstack-vendor && npm run typecheck && npm run build"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",
