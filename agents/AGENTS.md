@@ -1,8 +1,8 @@
 # App-owned skills
 
-Every skill in `skills/` is **self-contained**: the app injects only its `SKILL.md` into a run prompt, so everything the skill needs lives in that one file.
+For the `matt-pocock` Workflow, every skill in `skills/` is **self-contained**: the app injects only its `SKILL.md` into a Run prompt, so everything the skill needs lives in that one file. The `pstack` Workflow is the exception: the app writes its full skill tree to the Execution Machine and the prompt references files by path, preserving the tree's cross-file references and scripts.
 
-When a skill needs material from another skill, copy that material into its own `SKILL.md`, trimmed to what this skill uses. Never reference another skill by name, slash command, or path, and never point to a sibling file; neither reaches the agent at run time.
+For `matt-pocock` skills, when a skill needs material from another skill, copy that material into its own `SKILL.md`, trimmed to what this skill uses. Never reference another skill by name, slash command, or path, and never point to a sibling file; neither reaches the agent at run time.
 
 Every skill is **generic**: it runs against whatever repository the user targets, so it names roles ("the issue tracker", "the triage label", "the test suite") rather than a specific platform, tool, or command. The concrete choice comes from the target repository's own configuration or from the app's run prompt.
 

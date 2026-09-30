@@ -6,6 +6,7 @@ import type {
   CliProfileSettingsView,
   ContextAttentionDefault,
   GrillAgentCatalog,
+  GrillModelCatalogSnapshot,
   Machine,
   Project,
   Repository,
@@ -21,6 +22,8 @@ export type StructureData = {
   cliConfigurationProfiles: CliProfileSettingsView[];
   attentionDefaults: ContextAttentionDefault[];
   grillModelCatalog: GrillAgentCatalog[];
+  grillModelCatalogStatus: GrillModelCatalogSnapshot["codexStatus"];
+  grillModelCatalogError: string | null;
 };
 
 export const structureKeys = {
@@ -81,6 +84,8 @@ export const structureQueryOptions = {
       queryKey: structureKeys.grillModelCatalog(),
       queryFn: structureAdapter.listGrillModelCatalog,
       staleTime: structureStaleTime,
+      refetchInterval: (query) =>
+        query.state.data?.codexStatus === "refreshing" ? 2_000 : 60 * 60 * 1000,
     }),
 };
 
@@ -103,7 +108,9 @@ export function useStructureData() {
       machines: machines.data ?? [],
       cliConfigurationProfiles: cliConfigurationProfiles.data ?? [],
       attentionDefaults: attentionDefaults.data ?? [],
-      grillModelCatalog: grillModelCatalog.data ?? [],
+      grillModelCatalog: grillModelCatalog.data?.catalogs ?? [],
+      grillModelCatalogStatus: grillModelCatalog.data?.codexStatus ?? "refreshing",
+      grillModelCatalogError: grillModelCatalog.data?.codexError ?? null,
     } satisfies StructureData,
     isPending: [contexts, projects, repositories, repositoryLocations, machines, cliConfigurationProfiles, attentionDefaults, grillModelCatalog].some(
       (query) => query.isPending,
@@ -117,5 +124,9 @@ export function useStructureData() {
       cliConfigurationProfiles.error ??
       attentionDefaults.error ??
       grillModelCatalog.error,
+    retryGrillModelCatalog: async () => {
+      await structureAdapter.refreshGrillModelCatalog();
+      await grillModelCatalog.refetch();
+    },
   };
 }

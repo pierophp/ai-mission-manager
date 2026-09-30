@@ -118,6 +118,7 @@ pub enum Event {
         title: String,
         context_id: i64,
         project_id: i64,
+        notes: String,
     },
     CreateWorkspace {
         item_id: i64,
@@ -178,6 +179,7 @@ pub enum Event {
         agent: AgentKind,
         configuration: Option<GrillConfiguration>,
         execution_profile: ExecutionProfile,
+        workflow: Workflow,
         prompt: String,
         working_directory: String,
         session_name: String,
@@ -196,7 +198,9 @@ pub enum Event {
         worktree_id: i64,
         machine_id: i64,
         agent: AgentKind,
+        configuration: Option<GrillConfiguration>,
         execution_profile: ExecutionProfile,
+        workflow: Workflow,
         prompt: String,
         working_directory: String,
         session_name: String,
@@ -279,6 +283,21 @@ pub enum Event {
         run_id: i64,
         transcript: String,
         question_group: Option<GrillQuestionGroup>,
+    },
+    ReportRunPullRequest {
+        run_id: i64,
+        object: ExternalObjectInput,
+    },
+    RecordRunAttention {
+        run_id: i64,
+        summary: String,
+    },
+    RecordRunPlan {
+        run_id: i64,
+        path: String,
+    },
+    GoPlan {
+        run_id: i64,
     },
     RecordGrillAnswers {
         run_id: i64,
@@ -483,6 +502,9 @@ pub enum Effect {
         run: Run,
     },
     PersistRunTranscript {
+        run: Run,
+    },
+    PersistRunReports {
         run: Run,
     },
     PersistGrillAnswers {

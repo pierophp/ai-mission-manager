@@ -7,12 +7,12 @@
 
 use std::sync::Mutex;
 
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::{
     app::Runtime,
     dependencies::{check_command, DependencyState, DependencyStatus},
-    domain,
+    features::model_catalog,
     terminal::probe_local_runtime,
 };
 
@@ -39,8 +39,18 @@ pub struct HealthStatus {
     pub checked_at: i64,
 }
 
-pub(crate) fn list_grill_model_catalog() -> Vec<domain::GrillAgentCatalog> {
-    domain::grill_model_catalog()
+pub(crate) fn list_grill_model_catalog(
+    app: AppHandle,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<model_catalog::GrillModelCatalogSnapshot, String> {
+    let runtime = state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+    model_catalog::list(app, &runtime)
+}
+
+pub(crate) fn refresh_grill_model_catalog(app: AppHandle) {
+    model_catalog::refresh(app);
 }
 
 pub(crate) fn get_setup_state(state: State<'_, Mutex<Runtime>>) -> Result<SetupState, String> {

@@ -8,6 +8,8 @@
 
 pub(crate) mod activity;
 pub(crate) mod deletion;
+pub(crate) mod model_catalog;
+pub(crate) mod plan_usage;
 pub(crate) mod setup;
 pub(crate) mod structure;
 pub(crate) mod work;

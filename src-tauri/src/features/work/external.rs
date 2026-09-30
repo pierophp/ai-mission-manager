@@ -563,7 +563,7 @@ exit 1
 
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         runtime
-            .create_item("Issue target".into(), 1, 1)
+            .create_item("Issue target".into(), 1, 1, String::new())
             .expect("Item should be created");
         runtime
             .register_machine(
@@ -580,6 +580,7 @@ exit 1
             agent: crate::domain::AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: crate::domain::ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -596,6 +597,8 @@ exit 1
             worktree_id: None,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -603,6 +606,8 @@ exit 1
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         });
         runtime
             .register_repository(
@@ -817,7 +822,7 @@ exit 1
             )
             .expect("second Project should be created");
         let second_item = runtime
-            .create_item("ADO work item".into(), second_context.id, second_project.id)
+            .create_item("ADO work item".into(), second_context.id, second_project.id, String::new())
             .expect("second Item should be created");
         let third_context = runtime
             .create_context("Third Context".into())
@@ -834,6 +839,7 @@ exit 1
                 "Failing Jira work item".into(),
                 third_context.id,
                 third_project.id,
+                String::new(),
             )
             .expect("third Item should be created");
         let fourth_context = runtime
@@ -851,10 +857,11 @@ exit 1
                 "Failing Jira work item".into(),
                 fourth_context.id,
                 fourth_project.id,
+                String::new(),
             )
             .expect("fourth Item should be created");
         let first_item = runtime
-            .create_item("First Jira work item".into(), 1, 1)
+            .create_item("First Jira work item".into(), 1, 1, String::new())
             .expect("first Item should be created");
         {
             let first_context = runtime
@@ -2328,7 +2335,7 @@ mod local_markdown_tests {
         let mut runtime = Runtime::open(&directory.path().join("mission-manager.sqlite"))
             .expect("runtime should open");
         let item = runtime
-            .create_item("Local Markdown feature".into(), 1, 1)
+            .create_item("Local Markdown feature".into(), 1, 1, String::new())
             .expect("Item should be created");
         let machine = runtime
             .register_machine(

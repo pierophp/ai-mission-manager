@@ -389,8 +389,30 @@ pub fn list_contexts(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Context>, S
 }
 
 #[tauri::command]
-pub fn list_grill_model_catalog() -> Vec<crate::domain::GrillAgentCatalog> {
-    crate::features::setup::list_grill_model_catalog()
+pub fn list_grill_model_catalog(
+    app: AppHandle,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<crate::features::model_catalog::GrillModelCatalogSnapshot, String> {
+    crate::features::setup::list_grill_model_catalog(app, state)
+}
+
+#[tauri::command]
+pub fn refresh_grill_model_catalog(app: AppHandle) {
+    crate::features::setup::refresh_grill_model_catalog(app)
+}
+
+#[tauri::command]
+pub fn list_plan_usage(
+    app: AppHandle,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<crate::features::plan_usage::PlanUsageSnapshot, String> {
+    let runtime = state.lock().map_err(|error| error.to_string())?;
+    crate::features::plan_usage::list(app, &runtime)
+}
+
+#[tauri::command]
+pub fn refresh_plan_usage(app: AppHandle) {
+    crate::features::plan_usage::refresh(app)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -511,20 +533,24 @@ pub fn get_health_status(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn compose_run_prompt(
+pub async fn compose_run_prompt(
     item_id: i64,
     execution_profile: ExecutionProfile,
     prompt_selection: RunPromptSelection,
-    custom_prompt: Option<String>,
+    language: Option<GrillLanguage>,
+    initial_prompt: Option<String>,
+    workflow: crate::domain::Workflow,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<String, String> {
     crate::features::work::compose_run_prompt(
         item_id,
         execution_profile,
         prompt_selection,
-        custom_prompt,
+        language,
+        initial_prompt,
+        workflow,
         state,
-    )
+    ).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -575,6 +601,7 @@ pub async fn start_direct_run(
     configuration: Option<GrillConfiguration>,
     implementation_queue: Option<crate::domain::ImplementationQueueStart>,
     execution_profile: ExecutionProfile,
+    workflow: crate::domain::Workflow,
     prompt: String,
     prompt_selection: RunPromptSelection,
     expected_checkouts: Vec<RunCheckout>,
@@ -591,6 +618,7 @@ pub async fn start_direct_run(
         configuration,
         implementation_queue,
         execution_profile,
+        workflow,
         prompt,
         prompt_selection,
         expected_checkouts,
@@ -639,7 +667,9 @@ pub async fn start_worktree_run(
     workspace_id: i64,
     worktree_id: i64,
     agent: AgentKind,
+    configuration: Option<GrillConfiguration>,
     execution_profile: ExecutionProfile,
+    workflow: crate::domain::Workflow,
     prompt: String,
     prompt_selection: RunPromptSelection,
     state: State<'_, Mutex<Runtime>>,
@@ -649,7 +679,9 @@ pub async fn start_worktree_run(
         workspace_id,
         worktree_id,
         agent,
+        configuration,
         execution_profile,
+        workflow,
         prompt,
         prompt_selection,
         state,
@@ -756,6 +788,11 @@ pub async fn continue_grill(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
     crate::features::work::continue_grill(run_id, action, state).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn go_plan(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
+    crate::features::work::go_plan(run_id, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1270,9 +1307,10 @@ pub fn create_item(
     title: String,
     context_id: i64,
     project_id: i64,
+    notes: Option<String>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Item, String> {
-    crate::features::work::create_item(title, context_id, project_id, state)
+    crate::features::work::create_item(title, context_id, project_id, notes, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1480,7 +1518,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         grill_skill_snapshot, parse_grill_question_group, search_items, AuditAction, GrillPhase,
-        MachineObservation, ProjectDefaults, RunPaneStatus,
+        MachineObservation, ProjectDefaults, PstackRoleTable, RunPaneStatus,
     };
     use crate::features::deletion::RESET_CONFIRMATION_PHRASE;
     use crate::persistence::SqliteStore;
@@ -1499,7 +1537,7 @@ mod tests {
         let mut runtime = Runtime::open_with_terminal_runtime(database, terminal)
             .expect("runtime should open with the fake terminal runtime");
         runtime
-            .create_item("Reconcile this Run".into(), 1, 1)
+            .create_item("Reconcile this Run".into(), 1, 1, String::new())
             .expect("the Run Item should be created");
         runtime.state.machines.push(Machine {
             id: 1,
@@ -1520,6 +1558,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -1533,6 +1572,8 @@ mod tests {
             pane_status: RunPaneStatus::Unknown,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -1540,6 +1581,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         });
         runtime
     }
@@ -1595,6 +1638,9 @@ mod tests {
                 check_dirty_checkouts: !previous_context.check_dirty_checkouts,
                 grill_defaults: previous_context.grill_defaults.clone(),
                 implement_defaults: previous_context.implement_defaults.clone(),
+                default_workflow: crate::domain::Workflow::MattPocock,
+                pstack_defaults: GrillConfiguration::default(),
+                pstack_roles: PstackRoleTable::default(),
                 attention_defaults,
                 ..ContextConfiguration::default()
             },
@@ -1644,6 +1690,9 @@ mod tests {
                     check_dirty_checkouts: false,
                     grill_defaults: previous_context.grill_defaults,
                     implement_defaults: previous_context.implement_defaults,
+                    default_workflow: crate::domain::Workflow::MattPocock,
+                    pstack_defaults: GrillConfiguration::default(),
+                    pstack_roles: PstackRoleTable::default(),
                     attention_defaults: attention_defaults.clone(),
                     ..ContextConfiguration::default()
                 },
@@ -1696,6 +1745,9 @@ mod tests {
                 check_dirty_checkouts: false,
                 grill_defaults: grill_defaults.clone(),
                 implement_defaults: GrillConfiguration::default(),
+                default_workflow: crate::domain::Workflow::MattPocock,
+                pstack_defaults: GrillConfiguration::default(),
+                pstack_roles: PstackRoleTable::default(),
                 attention_defaults: attention_defaults.clone(),
                 ..ContextConfiguration::default()
             })
@@ -1742,6 +1794,9 @@ mod tests {
             check_dirty_checkouts: false,
             grill_defaults: GrillConfiguration::default(),
             implement_defaults: GrillConfiguration::default(),
+            default_workflow: crate::domain::Workflow::MattPocock,
+            pstack_defaults: GrillConfiguration::default(),
+            pstack_roles: PstackRoleTable::default(),
             attention_defaults: [
                 ExternalObjectKind::Issue,
                 ExternalObjectKind::PullRequest,
@@ -1785,7 +1840,12 @@ mod tests {
             )
             .expect("second Repository should register");
         runtime
-            .create_item("Keep two lines of work reusable".into(), 1, 1)
+            .create_item(
+                "Keep two lines of work reusable".into(),
+                1,
+                1,
+                String::new(),
+            )
             .expect("Item should be created");
 
         assert_eq!(runtime.state.workspaces.len(), 1);
@@ -1902,7 +1962,7 @@ mod tests {
         let database = directory.path().join("mission-manager.sqlite");
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         runtime
-            .create_item("Keep the agent running".into(), 1, 1)
+            .create_item("Keep the agent running".into(), 1, 1, String::new())
             .expect("Item should be created");
         runtime.state.runs.push(Run {
             id: 1,
@@ -1911,6 +1971,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -1927,6 +1988,8 @@ mod tests {
             worktree_id: None,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -1934,6 +1997,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         });
 
         let item = runtime
@@ -2013,6 +2078,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -2029,6 +2095,8 @@ mod tests {
             worktree_id: None,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -2036,6 +2104,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         });
 
         let stopped = runtime
@@ -2072,6 +2142,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -2088,6 +2159,8 @@ mod tests {
             worktree_id: None,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -2095,6 +2168,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         });
 
         let error = runtime
@@ -2155,6 +2230,7 @@ mod tests {
                 agent: AgentKind::Claude,
                 cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::Implement,
+                workflow: crate::domain::Workflow::MattPocock,
                 model: None,
                 effort: None,
                 skill_snapshot: None,
@@ -2171,6 +2247,8 @@ mod tests {
                 worktree_id: None,
                 direct_checkouts: Vec::new(),
                 transcript: String::new(),
+                reported_pull_requests: Vec::new(),
+                attention_summary: None,
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_decisions: Vec::new(),
@@ -2178,6 +2256,8 @@ mod tests {
                 grill_phase: None,
                 grill_action: None,
                 grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
             },
             Run {
                 id: 2,
@@ -2186,6 +2266,7 @@ mod tests {
                 agent: AgentKind::Codex,
                 cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::Review,
+                workflow: crate::domain::Workflow::MattPocock,
                 model: None,
                 effort: None,
                 skill_snapshot: None,
@@ -2202,6 +2283,8 @@ mod tests {
                 worktree_id: None,
                 direct_checkouts: Vec::new(),
                 transcript: String::new(),
+                reported_pull_requests: Vec::new(),
+                attention_summary: None,
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_decisions: Vec::new(),
@@ -2209,6 +2292,8 @@ mod tests {
                 grill_phase: None,
                 grill_action: None,
                 grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
             },
             Run {
                 id: 3,
@@ -2217,6 +2302,7 @@ mod tests {
                 agent: AgentKind::Claude,
                 cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::Investigate,
+                workflow: crate::domain::Workflow::MattPocock,
                 model: None,
                 effort: None,
                 skill_snapshot: None,
@@ -2233,6 +2319,8 @@ mod tests {
                 worktree_id: None,
                 direct_checkouts: Vec::new(),
                 transcript: String::new(),
+                reported_pull_requests: Vec::new(),
+                attention_summary: None,
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_decisions: Vec::new(),
@@ -2240,6 +2328,8 @@ mod tests {
                 grill_phase: None,
                 grill_action: None,
                 grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
             },
         ]);
 
@@ -2292,6 +2382,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -2308,6 +2399,8 @@ mod tests {
             worktree_id: None,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -2315,6 +2408,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         };
         runtime.state.runs.extend([
             make_run(1, 1, "%1"),
@@ -2514,7 +2609,7 @@ mod tests {
         let database = directory.path().join("mission-manager.sqlite");
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         let item = runtime
-            .create_item("Recover remote Run".into(), 1, 1)
+            .create_item("Recover remote Run".into(), 1, 1, String::new())
             .expect("the Item should be persisted");
         let machine = runtime
             .register_machine(
@@ -2538,6 +2633,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -2554,6 +2650,8 @@ mod tests {
             worktree_id: None,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -2561,6 +2659,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         };
         runtime
             .store
@@ -2695,7 +2795,7 @@ mod tests {
                     },
                     1,
                 )
-                .and_then(|_| runtime.create_item("Concurrent Item".into(), 1, 1));
+                .and_then(|_| runtime.create_item("Concurrent Item".into(), 1, 1, String::new()));
             created_tx
                 .send(result.is_ok())
                 .expect("the Item creation result should be received");
@@ -2920,6 +3020,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Grill,
+            workflow: crate::domain::Workflow::MattPocock,
             model: Some("claude-sonnet-4-5".into()),
             effort: Some("high".into()),
             skill_snapshot: Some(grill_skill_snapshot().into()),
@@ -2941,6 +3042,8 @@ mod tests {
                 is_dirty: false,
             }],
             transcript: "saved transcript".into(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: Some(question_group),
             grill_answers: vec![GrillAnswer {
                 question_number: 1,
@@ -2954,6 +3057,8 @@ mod tests {
             grill_phase: Some(GrillPhase::Working),
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         });
 
         runtime
@@ -3031,7 +3136,7 @@ fi
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         configure_test_context_gh(&mut runtime, &executable);
         runtime
-            .create_item("Keep this Item".into(), 1, 1)
+            .create_item("Keep this Item".into(), 1, 1, String::new())
             .expect("Item should be created");
         runtime
             .update_item(
@@ -3043,7 +3148,7 @@ fi
             )
             .expect("Item notes should be saved");
         runtime
-            .create_item("Related Item".into(), 1, 1)
+            .create_item("Related Item".into(), 1, 1, String::new())
             .expect("related Item should be created");
         runtime
             .set_item_relation(1, 2, ItemRelationKind::Blocks)
@@ -3102,7 +3207,7 @@ fi
 
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         runtime
-            .create_item("Item in the original Project".into(), 1, 1)
+            .create_item("Item in the original Project".into(), 1, 1, String::new())
             .expect("Item should be created");
         let other_project = runtime
             .create_project("Another Project".into(), 1, ProjectDefaults::default())
@@ -3179,7 +3284,7 @@ fi
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         configure_test_context_gh(&mut runtime, &executable);
         runtime
-            .create_item("Keep this Item".into(), 1, 1)
+            .create_item("Keep this Item".into(), 1, 1, String::new())
             .expect("Item should be created");
         let repository = runtime
             .register_repository(
@@ -3218,7 +3323,7 @@ exit 1
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         configure_test_context_gh(&mut runtime, &executable);
         runtime
-            .create_item("Capture downstream work".into(), 1, 1)
+            .create_item("Capture downstream work".into(), 1, 1, String::new())
             .expect("Item should be created");
         runtime.state.runs.push(Run {
             id: 1,
@@ -3230,6 +3335,7 @@ exit 1
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Grill,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -3243,6 +3349,8 @@ exit 1
             pane_status: RunPaneStatus::Available,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -3250,6 +3358,8 @@ exit 1
             grill_phase: Some(GrillPhase::Working),
             grill_action: Some(GrillContinuationAction::ToTickets),
             grill_action_started_at: Some(0),
+            plan_phase: None,
+            plan_path: None,
         });
 
         let output = r#"AI_MISSION_MANAGER_EVENT {"event":"github.issue.created","url":"https://github.com/acme/app/issues/7","run_id":1,"action":"to-tickets"}
@@ -3332,7 +3442,7 @@ exit 1
         let database = directory.path().join("mission-manager.sqlite");
         let mut runtime = Runtime::open(&database).expect("runtime should open");
         runtime
-            .create_item("Delete after review".into(), 1, 1)
+            .create_item("Delete after review".into(), 1, 1, String::new())
             .expect("Item should be created");
 
         let preview = runtime
@@ -3388,7 +3498,7 @@ exit 1
             )
             .expect("Project should be created");
         runtime
-            .create_item("Delete this Project graph".into(), 2, 3)
+            .create_item("Delete this Project graph".into(), 2, 3, String::new())
             .expect("Item should be created");
 
         let preview = runtime
@@ -3556,7 +3666,6 @@ exit 1
             123,
             RunPromptSelection {
                 include_objective: true,
-                include_notes: false,
                 external_object_ids: vec![19],
             },
         );

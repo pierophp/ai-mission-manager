@@ -36,7 +36,6 @@ export function EmbeddedTerminal({
   const snapshotInstallingRef = useRef(false);
   const pendingOutputRef = useRef(new Map<number, TerminalOutputEvent[]>());
   const pendingExitRef = useRef(new Map<number, TerminalExitEvent[]>());
-  const terminalId = `run-${runId}`;
   const [activePane, setActivePane] = useState(initialPane);
   const [panes, setPanes] = useState<PaneTab[]>([initialPane]);
   const [status, setStatus] = useState("Attaching…");
@@ -46,6 +45,7 @@ export function EmbeddedTerminal({
     const container = terminalContainerRef.current;
     if (!container) return;
 
+    const terminalId = `run-${runId}-${crypto.randomUUID()}`;
     let disposed = false;
     const terminal = new Terminal({
       cursorBlink: true,
@@ -246,7 +246,7 @@ export function EmbeddedTerminal({
       unlisteners.forEach((unlisten) => unlisten());
       void terminalRuntimeAdapter.close(terminalId).catch(() => undefined);
     };
-  }, [initialPane, terminalId, runId]);
+  }, [initialPane, runId]);
 
   return (
     <section

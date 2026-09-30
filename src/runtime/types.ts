@@ -4,6 +4,7 @@ import type {
   Run,
   RunPaneStatus,
   RunState,
+  Workflow,
 } from "./execution-types";
 import type { RunCheckout } from "./execution-types";
 
@@ -16,6 +17,9 @@ export type Context = {
   check_dirty_checkouts: boolean;
   grill_defaults: GrillConfiguration;
   implement_defaults: GrillConfiguration;
+  default_workflow: Workflow;
+  pstack_defaults: GrillConfiguration;
+  pstack_roles: PstackRoleTable;
   gh_executable_path: string | null;
   twg_executable_path: string | null;
   az_executable_path: string | null;
@@ -32,6 +36,9 @@ export type ContextConfiguration = {
   checkDirtyCheckouts: boolean;
   grillDefaults: GrillConfiguration;
   implementDefaults: GrillConfiguration;
+  defaultWorkflow: Workflow;
+  pstackDefaults: GrillConfiguration;
+  pstackRoles: PstackRoleTable;
   ghExecutablePath: string | null;
   twgExecutablePath: string | null;
   azExecutablePath: string | null;
@@ -46,6 +53,19 @@ export type GrillConfiguration = {
   model: string;
   effort: string;
 };
+
+export type PstackRole =
+  | "code-delegate"
+  | "judge-and-prose"
+  | "review-panel"
+  | "explorers";
+
+export type PstackRoleConfiguration = {
+  role: PstackRole;
+  configuration: GrillConfiguration;
+};
+
+export type PstackRoleTable = PstackRoleConfiguration[];
 
 export type GrillLanguage = "portuguese" | "english";
 
@@ -63,6 +83,13 @@ export type GrillModel = {
 export type GrillAgentCatalog = {
   agent: AgentKind;
   models: GrillModel[];
+};
+
+export type GrillModelCatalogSnapshot = {
+  catalogs: GrillAgentCatalog[];
+  codexStatus: "ready" | "refreshing" | "error";
+  codexError: string | null;
+  codexFetchedAt: number | null;
 };
 
 export type ProviderChoice = "github" | "none";
@@ -237,6 +264,8 @@ export type AgentHookReadiness = {
 export type MachineReadiness = {
   reachable: boolean | null;
   tmuxAvailable: boolean | null;
+  bunAvailable: boolean | null;
+  bunError: string | null;
   claudeExecutableResolved: boolean | null;
   codexExecutableResolved: boolean | null;
   stateDirectoryWritable: boolean | null;
@@ -750,3 +779,37 @@ export type ContextAttentionDefault = {
 
 export type * from "./execution-types";
 export type * from "./terminal-types";
+
+export type PlanUsageRefreshStatus = "ready" | "refreshing" | "never";
+
+export type ProfileUsageState =
+  | "ready"
+  | "signedOut"
+  | "machineUnreachable"
+  | "notReported";
+
+export type UsageWindow = {
+  id: string;
+  label: string;
+  usedPercent: number;
+  resetsAt: number | null;
+};
+
+export type ProfilePlanUsage = {
+  profileId: number;
+  profileName: string;
+  provider: AgentKind;
+  machineId: number;
+  machineName: string;
+  state: ProfileUsageState;
+  detail: string | null;
+  plan: string | null;
+  observedAt: number | null;
+  windows: UsageWindow[];
+};
+
+export type PlanUsageSnapshot = {
+  profiles: ProfilePlanUsage[];
+  fetchedAt: number | null;
+  status: PlanUsageRefreshStatus;
+};

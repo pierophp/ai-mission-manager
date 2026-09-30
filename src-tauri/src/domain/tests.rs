@@ -11,9 +11,9 @@ mod implementation_queue_tests {
             ExecutionProfile::Implement,
             &RunPromptSelection {
                 include_objective: true,
-                include_notes: false,
                 external_object_ids: vec![],
             },
+            None,
             None,
         )
         .expect("the direct Implement prompt should compose");
@@ -21,6 +21,148 @@ mod implementation_queue_tests {
         assert!(prompt.contains("Implement the work described by the user in the spec or tickets."));
         assert!(prompt.contains("Run typechecking regularly, single test files regularly"));
         assert!(!prompt.contains("name: implement"));
+    }
+
+    fn no_selection() -> RunPromptSelection {
+        RunPromptSelection {
+            include_objective: true,
+            external_object_ids: vec![],
+        }
+    }
+
+    #[test]
+    fn custom_prompt_uses_the_initial_prompt_as_its_instruction() {
+        let prompt = compose_run_prompt(
+            &state(),
+            1,
+            ExecutionProfile::CustomPrompt,
+            &no_selection(),
+            None,
+            Some("  Rename the module.  "),
+        )
+        .expect("a Custom prompt with text should compose");
+
+        assert!(prompt.starts_with("Rename the module."));
+        assert!(!prompt.contains("User's initial prompt"));
+    }
+
+    #[test]
+    fn custom_prompt_requires_an_initial_prompt() {
+        for initial_prompt in [None, Some(""), Some("   ")] {
+            assert_eq!(
+                compose_run_prompt(
+                    &state(),
+                    1,
+                    ExecutionProfile::CustomPrompt,
+                    &no_selection(),
+                    None,
+                    initial_prompt,
+                ),
+                Err(DomainError::EmptyRunPrompt)
+            );
+        }
+    }
+
+    #[test]
+    fn direct_profiles_append_the_initial_prompt_and_response_language() {
+        let prompt = compose_run_prompt(
+            &state(),
+            1,
+            ExecutionProfile::Investigate,
+            &no_selection(),
+            Some(GrillLanguage::English),
+            Some("Focus on the SSH path."),
+        )
+        .expect("an Investigate prompt should compose");
+
+        assert!(prompt.starts_with(GrillLanguage::English.run_response_instruction()));
+        assert!(prompt.ends_with("User's initial prompt:\nFocus on the SSH path."));
+    }
+
+    #[test]
+    fn autonomous_pstack_prompt_references_the_tree_and_carries_the_run_contract() {
+        let prompt = compose_pstack_prompt(
+            &state(),
+            1,
+            ExecutionProfile::Autonomous,
+            "/home/runner/.local/share/ai-mission-manager/pstack/abc123",
+            GrillLanguage::English,
+            Some("Fix the SSH launch gate."),
+        ).expect("pstack prompt composes");
+        assert!(prompt.contains("/home/runner/.local/share/ai-mission-manager/pstack/abc123/skills/poteto-mode/SKILL.md"));
+        assert!(prompt.contains("/roles/context-1-"));
+        assert!(prompt.contains("Item: Work"));
+        assert!(prompt.contains("Initial Prompt:\nFix the SSH launch gate."));
+        assert!(prompt.contains("Respond to the user in English"));
+        assert!(prompt.contains("Write commits and pull requests in English."));
+        assert!(prompt.contains("AI_MISSION_MANAGER_EVENT"));
+        assert!(prompt.contains("pull_request.opened"));
+        assert!(prompt.contains("attention.final"));
+        assert!(prompt.contains("Spec: https://github.com/o/r/issues/87"));
+        assert!(!prompt.contains("New task? Playbook match or rigor needed"));
+    }
+
+    #[test]
+    fn pstack_review_prompt_uses_interrogate_roles_and_is_read_only() {
+        let prompt = compose_pstack_prompt(
+            &state(),
+            1,
+            ExecutionProfile::PstackReview,
+            "/opt/pstack",
+            GrillLanguage::English,
+            Some("Review https://github.com/acme/repo/pull/42"),
+        )
+        .expect("pstack review prompt composes");
+
+        assert!(prompt.contains("/opt/pstack/skills/interrogate/SKILL.md"));
+        assert!(prompt.contains("/roles/context-1-"));
+        assert!(prompt.contains("Review panel"));
+        assert!(prompt.contains("read-only reviewers"));
+        assert!(prompt.contains("do not edit files, commit, push, or apply suggested changes"));
+        assert!(prompt.contains("Synthesize the reviewers' findings into a verdict"));
+        assert!(prompt.contains("Review https://github.com/acme/repo/pull/42"));
+        assert!(!prompt.contains("poteto-mode"));
+    }
+
+    #[test]
+    fn grill_prompt_leaves_item_notes_to_the_initial_prompt() {
+        let mut state = state();
+        state.items[0].notes = "Only the prefilled prompt carries these notes.".into();
+        let prompt = compose_grill_prompt(
+            &state,
+            1,
+            &GrillConfiguration {
+                agent: AgentKind::Claude,
+                model: "claude-sonnet-4-5".into(),
+                effort: "high".into(),
+            },
+            GrillLanguage::default(),
+            "Stress-test the plan.",
+        )
+        .expect("the Grill prompt should compose");
+
+        assert!(!prompt.contains("Only the prefilled prompt carries these notes."));
+    }
+
+    #[test]
+    fn item_creation_keeps_its_notes() {
+        let decision = decide(
+            state(),
+            Event::CreateItem {
+                title: "Capture with notes".into(),
+                context_id: 1,
+                project_id: 1,
+                notes: "Start from the SSH incident.".into(),
+            },
+        )
+        .expect("an Item with notes should be created");
+
+        let item = decision.state.items.last().expect("the Item exists");
+        assert_eq!(item.notes, "Start from the SSH incident.");
+        assert!(matches!(
+            decision.effects.as_slice(),
+            [Effect::PersistItem { item, .. }] if item.notes == "Start from the SSH incident."
+        ));
     }
 
     #[test]
@@ -101,6 +243,9 @@ mod implementation_queue_tests {
                     check_dirty_checkouts: false,
                     grill_defaults: grill_defaults.clone(),
                     implement_defaults: implement_defaults.clone(),
+                    default_workflow: Workflow::MattPocock,
+                    pstack_defaults: GrillConfiguration::default(),
+                    pstack_roles: PstackRoleTable::default(),
                     attention_defaults: policies.clone(),
                     ..ContextConfiguration::default()
                 },
@@ -132,6 +277,9 @@ mod implementation_queue_tests {
             check_dirty_checkouts: false,
             grill_defaults: GrillConfiguration::default(),
             implement_defaults: GrillConfiguration::default(),
+            default_workflow: Workflow::Pstack,
+            pstack_defaults: GrillConfiguration::default(),
+            pstack_roles: PstackRoleTable::default(),
             attention_defaults: [
                 ExternalObjectKind::Issue,
                 ExternalObjectKind::PullRequest,
@@ -151,6 +299,11 @@ mod implementation_queue_tests {
             .expect("a valid Context and its configuration can be created together");
 
         assert_eq!(decision.state.contexts[1].name, "Research");
+        assert_eq!(decision.state.contexts[1].default_workflow, Workflow::Pstack);
+        assert_eq!(
+            decision.state.contexts[1].pstack_defaults,
+            GrillConfiguration::default()
+        );
         assert!(!decision.state.contexts[1].check_dirty_checkouts);
         assert_eq!(decision.state.projects.len(), 2);
         assert_eq!(decision.state.projects[1].name, "Default");
@@ -282,6 +435,26 @@ mod implementation_queue_tests {
     }
 
     #[test]
+    fn any_direct_profile_records_its_model_configuration() {
+        let mut review_run = event("open");
+        if let Event::StartDirectRun {
+            execution_profile,
+            implementation_queue,
+            ..
+        } = &mut review_run
+        {
+            *execution_profile = ExecutionProfile::Review;
+            *implementation_queue = None;
+        }
+
+        let decision = decide(state(), review_run).expect("a Review Run may choose its model");
+        let run = decision.state.runs.last().expect("the Run is recorded");
+        let configuration = GrillConfiguration::default();
+        assert_eq!(run.model.as_deref(), Some(configuration.model.as_str()));
+        assert_eq!(run.effort.as_deref(), Some(configuration.effort.as_str()));
+    }
+
+    #[test]
     fn disabled_context_setting_allows_a_direct_run_with_dirty_checkout() {
         let setting = decide(
             state(),
@@ -361,6 +534,9 @@ mod implementation_queue_tests {
                 codex_profile_id: None,
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
+                default_workflow: Workflow::MattPocock,
+                pstack_defaults: GrillConfiguration::default(),
+                pstack_roles: PstackRoleTable::default(),
                 implement_defaults: GrillConfiguration::default(),
                 ..Context::default()
             }],
@@ -444,6 +620,7 @@ mod implementation_queue_tests {
             agent: AgentKind::Claude,
             configuration: Some(GrillConfiguration::default()),
             execution_profile: ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             prompt: "ignored by queue projection".into(),
             working_directory: "/repo".into(),
             session_name: "session".into(),
@@ -451,7 +628,6 @@ mod implementation_queue_tests {
             started_at: 1,
             prompt_selection: RunPromptSelection {
                 include_objective: true,
-                include_notes: false,
                 external_object_ids: vec![],
             },
             checkouts: vec![RunCheckout {
@@ -510,7 +686,7 @@ mod implementation_queue_tests {
         );
         assert_eq!(
             decision.state.runs[0].model.as_deref(),
-            Some("claude-sonnet-4-5")
+            Some(GrillConfiguration::default().model.as_str())
         );
         assert_eq!(decision.state.runs[0].effort.as_deref(), Some("high"));
         assert_eq!(
@@ -521,6 +697,160 @@ mod implementation_queue_tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn pstack_rejects_execution_profiles_outside_its_workflow() {
+        let mut event = event("open");
+        if let Event::StartDirectRun { workflow, .. } = &mut event {
+            *workflow = Workflow::Pstack;
+        }
+        assert!(matches!(
+            decide(state(), event),
+            Err(DomainError::ExecutionProfileNotInWorkflow {
+                workflow: Workflow::Pstack,
+                execution_profile: ExecutionProfile::Implement,
+            })
+        ));
+    }
+
+    #[test]
+    fn pstack_review_profile_is_distinct_and_only_valid_in_pstack() {
+        let mut pstack_event = event("open");
+        if let Event::StartDirectRun { workflow, execution_profile, implementation_queue, .. } = &mut pstack_event {
+            *workflow = Workflow::Pstack;
+            *execution_profile = ExecutionProfile::PstackReview;
+            *implementation_queue = None;
+        }
+        let started = decide(state(), pstack_event).expect("pstack Review is valid");
+        let run = started.state.runs.last().expect("Run is recorded");
+        assert_eq!(run.execution_profile, ExecutionProfile::PstackReview);
+        assert_ne!(run.execution_profile, ExecutionProfile::Review);
+
+        let mut matt_event = event("open");
+        if let Event::StartDirectRun { execution_profile, implementation_queue, .. } = &mut matt_event {
+            *execution_profile = ExecutionProfile::PstackReview;
+            *implementation_queue = None;
+        }
+        assert!(matches!(
+            decide(state(), matt_event),
+            Err(DomainError::ExecutionProfileNotInWorkflow {
+                workflow: Workflow::MattPocock,
+                execution_profile: ExecutionProfile::PstackReview,
+            })
+        ));
+    }
+
+    #[test]
+    fn autonomous_pstack_run_records_the_vendor_snapshot() {
+        let mut event = event("open");
+        if let Event::StartDirectRun { workflow, execution_profile, implementation_queue, .. } = &mut event {
+            *workflow = Workflow::Pstack;
+            *execution_profile = ExecutionProfile::Autonomous;
+            *implementation_queue = None;
+        }
+        let decision = decide(state(), event).expect("Autonomous pstack launch is valid");
+        let run = decision.state.runs.last().expect("Run is recorded");
+        let snapshot = run.skill_snapshot.as_deref().expect("pstack snapshot is stored");
+        assert!(snapshot.contains(crate::pstack::PSTACK_VERSION));
+        assert!(snapshot.contains(crate::pstack::PSTACK_UPSTREAM_COMMIT));
+        assert!(snapshot.contains(crate::pstack::PSTACK_TREE_HASH));
+    }
+
+    #[test]
+    fn pstack_reports_link_pull_requests_and_store_attention_without_changing_item_state() {
+        let mut start = event("open");
+        if let Event::StartDirectRun { workflow, execution_profile, implementation_queue, .. } = &mut start {
+            *workflow = Workflow::Pstack;
+            *execution_profile = ExecutionProfile::Autonomous;
+            *implementation_queue = None;
+        }
+        let started = decide(state(), start).expect("pstack Run should start");
+        let item_status = started.state.items[0].status;
+        let object = ExternalObjectInput {
+            provider: ExternalProvider::GitHub,
+            kind: ExternalObjectKind::PullRequest,
+            external_key: "owner/repo#42".into(),
+            canonical_url: "https://github.com/owner/repo/pull/42".into(),
+        };
+        let reported = decide(
+            started.state,
+            Event::ReportRunPullRequest { run_id: 1, object },
+        )
+        .expect("Pull Request report should be accepted");
+
+        assert_eq!(reported.state.items[0].status, item_status);
+        assert_eq!(reported.state.links.len(), 2);
+        assert_eq!(
+            reported.state.runs[0].reported_pull_requests,
+            ["https://github.com/owner/repo/pull/42"]
+        );
+        let duplicate = decide(
+            reported.state,
+            Event::ReportRunPullRequest {
+                run_id: 1,
+                object: ExternalObjectInput {
+                    provider: ExternalProvider::GitHub,
+                    kind: ExternalObjectKind::PullRequest,
+                    external_key: "owner/repo#42".into(),
+                    canonical_url: "https://github.com/owner/repo/pull/42".into(),
+                },
+            },
+        )
+        .expect("repeated pane capture should be idempotent");
+        assert!(duplicate.effects.is_empty());
+
+        let attention = decide(
+            duplicate.state,
+            Event::RecordRunAttention {
+                run_id: 1,
+                summary: "Review the authentication edge case".into(),
+            },
+        )
+        .expect("final Attention report should be accepted");
+        assert_eq!(attention.state.items[0].status, item_status);
+        assert_eq!(
+            attention.state.runs[0].attention_summary.as_deref(),
+            Some("Review the authentication edge case")
+        );
+    }
+
+    #[test]
+    fn generated_pstack_role_instructions_call_the_other_cli_with_context_profile() {
+        let state = state();
+        let context = &state.contexts[0];
+        let codex_profile = CliConfigurationProfile {
+            id: 42,
+            machine_id: 1,
+            provider: AgentKind::Codex,
+            name: "Codex Work".into(),
+            directory: "/home/runner/profiles/codex".into(),
+            app_managed: true,
+        };
+        let file = compose_pstack_role_file(
+            AgentKind::Claude,
+            &context.pstack_roles,
+            None,
+            Some(&codex_profile),
+        );
+        assert!(file.contains("## Review panel"));
+        assert!(file.contains("codex exec --model gpt-6-sol"));
+        assert!(file.contains("CODEX_HOME='/home/runner/profiles/codex'"));
+        assert!(file.contains("Context CLI profile #42"));
+        assert!(file.contains("Spawn this role inside the active claude harness"));
+    }
+
+    #[test]
+    fn blocked_pstack_run_is_projected_into_needs_attention() {
+        let started = decide(state(), event("open")).unwrap();
+        let mut state = started.state;
+        state.runs[0].workflow = Workflow::Pstack;
+        state.runs[0].state = RunState::Blocked;
+
+        let attention = attention_entries(&state, None, "999");
+        assert!(attention.iter().any(|entry| {
+            entry.kind == AttentionEntryKind::BlockedRun && entry.run_id == Some(1)
+        }));
     }
 
     #[test]
@@ -1158,6 +1488,9 @@ mod context_execution_machine_tests {
                     codex_profile_id: None,
                     check_dirty_checkouts: true,
                     grill_defaults: GrillConfiguration::default(),
+                    default_workflow: Workflow::MattPocock,
+                    pstack_defaults: GrillConfiguration::default(),
+                    pstack_roles: PstackRoleTable::default(),
                     implement_defaults: GrillConfiguration::default(),
                     ..Context::default()
                 },
@@ -1169,6 +1502,9 @@ mod context_execution_machine_tests {
                     codex_profile_id: None,
                     check_dirty_checkouts: true,
                     grill_defaults: GrillConfiguration::default(),
+                    default_workflow: Workflow::MattPocock,
+                    pstack_defaults: GrillConfiguration::default(),
+                    pstack_roles: PstackRoleTable::default(),
                     implement_defaults: GrillConfiguration::default(),
                     ..Context::default()
                 },
@@ -1303,6 +1639,9 @@ mod context_execution_machine_tests {
             check_dirty_checkouts: true,
             grill_defaults: GrillConfiguration::default(),
             implement_defaults: GrillConfiguration::default(),
+            default_workflow: Workflow::MattPocock,
+            pstack_defaults: GrillConfiguration::default(),
+            pstack_roles: PstackRoleTable::default(),
             attention_defaults,
             ..ContextConfiguration::default()
         };
@@ -1362,6 +1701,9 @@ mod machine_deletion_tests {
                 codex_profile_id: None,
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
+                default_workflow: Workflow::MattPocock,
+                pstack_defaults: GrillConfiguration::default(),
+                pstack_roles: PstackRoleTable::default(),
                 implement_defaults: GrillConfiguration::default(),
                 ..Context::default()
             }],
@@ -1433,6 +1775,7 @@ mod machine_deletion_tests {
                 agent: AgentKind::Claude,
                 cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::Implement,
+                workflow: crate::domain::Workflow::MattPocock,
                 model: None,
                 effort: None,
                 skill_snapshot: None,
@@ -1446,6 +1789,8 @@ mod machine_deletion_tests {
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: Vec::new(),
                 transcript: String::new(),
+                reported_pull_requests: Vec::new(),
+                attention_summary: None,
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_decisions: Vec::new(),
@@ -1453,6 +1798,8 @@ mod machine_deletion_tests {
                 grill_phase: None,
                 grill_action: None,
                 grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
             }],
             implementation_queues: Vec::new(),
             relationships: Vec::new(),
@@ -1630,6 +1977,9 @@ mod workspace_contract_tests {
                 codex_profile_id: None,
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
+                default_workflow: Workflow::MattPocock,
+                pstack_defaults: GrillConfiguration::default(),
+                pstack_roles: PstackRoleTable::default(),
                 implement_defaults: GrillConfiguration::default(),
                 ..Context::default()
             }],
@@ -1787,6 +2137,9 @@ mod workspace_contract_tests {
                 codex_profile_id: None,
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
+                default_workflow: Workflow::MattPocock,
+                pstack_defaults: GrillConfiguration::default(),
+                pstack_roles: PstackRoleTable::default(),
                 implement_defaults: GrillConfiguration::default(),
                 ..Context::default()
             }],
@@ -1944,6 +2297,9 @@ mod grill_contract_tests {
                 codex_profile_id: None,
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
+                default_workflow: Workflow::MattPocock,
+                pstack_defaults: GrillConfiguration::default(),
+                pstack_roles: PstackRoleTable::default(),
                 implement_defaults: GrillConfiguration::default(),
                 ..Context::default()
             }],
@@ -2037,15 +2393,124 @@ mod grill_contract_tests {
         }
     }
 
+    fn start_plan_event() -> Event {
+        Event::StartDirectRun {
+            item_id: 1,
+            workspace_id: 1,
+            machine_id: 1,
+            agent: AgentKind::Claude,
+            configuration: Some(GrillConfiguration::default()),
+            execution_profile: ExecutionProfile::Plan,
+            workflow: Workflow::Pstack,
+            prompt: "Plan prompt".into(),
+            working_directory: "/tmp/mission-manager".into(),
+            session_name: "plan-run".into(),
+            pane_id: "%plan".into(),
+            started_at: 123,
+            prompt_selection: RunPromptSelection { include_objective: true, external_object_ids: Vec::new() },
+            checkouts: vec![RunCheckout { repository_id: 1, path: "/tmp/mission-manager".into(), branch: "main".into(), is_dirty: false }],
+            repository_id: 1,
+            allow_dirty: false,
+            allow_shared_checkouts: false,
+            implementation_queue: None,
+        }
+    }
+
     #[test]
-    fn grill_catalog_rejects_an_effort_not_supported_by_the_selected_model() {
+    fn a_plan_run_waits_for_go_then_continues_when_its_pane_is_available() {
+        let started = decide(state(), start_plan_event()).expect("Plan runs are valid for pstack");
+        let finished = decide(started.state, Event::UpdateRunState { run_id: 1, state: RunState::Finished })
+            .expect("the Plan run should finish");
+        assert_eq!(finished.state.runs[0].plan_phase, Some(PlanPhase::AwaitingGo));
+        let recorded = decide(finished.state, Event::RecordRunPlan { run_id: 1, path: "docs/plan.md".into() })
+            .expect("the plan path should be recorded");
+        assert_eq!(recorded.state.runs[0].plan_path.as_deref(), Some("docs/plan.md"));
+        let continued = decide(recorded.state, Event::GoPlan { run_id: 1 }).expect("Go should resume the Run");
+        assert_eq!(continued.state.runs[0].state, RunState::Working);
+        assert_eq!(continued.state.runs[0].plan_phase, Some(PlanPhase::Executing));
+    }
+
+    #[test]
+    fn a_plan_run_offers_go_once_and_finishes_after_executing_the_plan() {
+        let started = decide(state(), start_plan_event()).unwrap();
+        let finished = decide(started.state, Event::UpdateRunState { run_id: 1, state: RunState::Finished }).unwrap();
+        assert!(run_is_active(&finished.state.runs[0]), "Awaiting Go keeps the Run active");
+        let continued = decide(finished.state, Event::GoPlan { run_id: 1 }).unwrap();
+
+        let executed = decide(continued.state, Event::UpdateRunState { run_id: 1, state: RunState::Finished }).unwrap();
+        let run = &executed.state.runs[0];
+        assert_eq!(run.plan_phase, Some(PlanPhase::Executing));
+        assert!(run_is_finished(run), "the executed plan ends the Run");
+        assert!(matches!(
+            decide(executed.state.clone(), Event::GoPlan { run_id: 1 }),
+            Err(DomainError::PlanGoNotAvailable { .. })
+        ));
+        let closed = decide(executed.state, Event::FinishRun { run_id: 1 }).unwrap();
+        assert_eq!(closed.state.runs[0].plan_phase, Some(PlanPhase::Executing));
+    }
+
+    #[test]
+    fn pstack_custom_carries_only_the_initial_prompt_and_launches() {
+        let prompt = compose_pstack_prompt(&state(), 1, ExecutionProfile::CustomPrompt, "/opt/pstack", GrillLanguage::default(), Some("Rename the module"))
+            .expect("pstack Custom composes");
+        assert!(prompt.contains("Initial Prompt:\nRename the module"));
+        assert!(prompt.contains("/opt/pstack/roles/context-1-"));
+        assert!(!prompt.contains("/skills/"));
+        assert!(matches!(
+            compose_pstack_prompt(&state(), 1, ExecutionProfile::CustomPrompt, "/opt/pstack", GrillLanguage::default(), None),
+            Err(DomainError::EmptyRunPrompt)
+        ));
+
+        let mut event = start_plan_event();
+        if let Event::StartDirectRun { execution_profile, .. } = &mut event {
+            *execution_profile = ExecutionProfile::CustomPrompt;
+        }
+        let started = decide(state(), event).expect("Custom is shared by both Workflows");
+        assert_eq!(started.state.runs[0].workflow, Workflow::Pstack);
+    }
+
+    #[test]
+    fn pstack_prompt_without_an_initial_prompt_does_not_repeat_the_notes() {
+        let mut state = state();
+        state.items[0].notes = "Only once.".into();
+        let prompt = compose_pstack_prompt(&state, 1, ExecutionProfile::Autonomous, "/opt/pstack", GrillLanguage::default(), None)
+            .expect("Autonomous composes without an Initial Prompt");
+        assert_eq!(prompt.matches("Only once.").count(), 1);
+        assert!(!prompt.contains("Initial Prompt:"));
+        assert!(!prompt.contains("{{"));
+    }
+
+    #[test]
+    fn go_is_rejected_for_non_plan_runs_and_when_the_pane_is_unavailable() {
+        let not_plan = decide(state(), start_event(GrillConfiguration::default())).expect("the Grill should start");
+        assert!(matches!(decide(not_plan.state, Event::GoPlan { run_id: 1 }), Err(DomainError::PlanGoNotAvailable { .. })));
+
+        let started = decide(state(), start_plan_event()).expect("the Plan should start");
+        let finished = decide(started.state, Event::UpdateRunState { run_id: 1, state: RunState::Finished }).unwrap();
+        let unavailable = decide(finished.state, Event::SetRunPaneStatus { run_id: 1, status: RunPaneStatus::Missing }).unwrap();
+        assert!(matches!(decide(unavailable.state, Event::GoPlan { run_id: 1 }), Err(DomainError::PlanGoNotAvailable { .. })));
+    }
+
+    #[test]
+    fn plan_prompt_forces_the_multi_phase_playbook_and_path_report() {
+        let prompt = compose_pstack_prompt(&state(), 1, ExecutionProfile::Plan, "/opt/pstack", GrillLanguage::default(), Some("Plan this"))
+            .expect("the plan prompt should compose");
+        assert!(prompt.contains("playbooks/multi-phase-plan.md"));
+        assert!(prompt.contains("stop without implementing"));
+        assert!(prompt.contains("repository-relative path"));
+        assert!(prompt.contains("plan.ready"));
+        assert!(prompt.contains("/opt/pstack/roles/context-1-"));
+    }
+
+    #[test]
+    fn grill_configuration_accepts_effort_levels_discovered_from_provider_cli() {
         let configuration = GrillConfiguration {
             agent: AgentKind::Codex,
             model: "gpt-6-luna".into(),
-            effort: "not-supported".into(),
+            effort: "future-cli-level".into(),
         };
 
-        assert!(validate_grill_configuration(&configuration).is_err());
+        assert!(validate_grill_configuration(&configuration).is_ok());
         assert!(grill_model_catalog()
             .iter()
             .any(|catalog| catalog.agent == AgentKind::Codex
@@ -2077,7 +2542,8 @@ mod grill_contract_tests {
             .prompt
             .contains("Stress-test this architecture decision."));
         assert!(run.prompt.contains("Decide the next architecture"));
-        assert!(run.prompt.contains("The decision must stay reversible."));
+        // Item notes reach the Grill through the prefilled initial prompt, not a separate section.
+        assert!(!run.prompt.contains("The decision must stay reversible."));
         assert!(run.prompt.contains(grill_skill_snapshot()));
         assert!(run
             .prompt
@@ -3505,6 +3971,7 @@ https://example.com/unrelated"#,
                 title: "Another Item".into(),
                 context_id: 1,
                 project_id: 1,
+                notes: String::new(),
             },
         )
         .expect("a second Item should be created");

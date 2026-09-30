@@ -2,12 +2,16 @@ import { type FormEvent, type ReactNode, useEffect, useState } from "react";
 import { createContext, useContext } from "react";
 import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 
-import { useHealthStatusQuery, useSetupStateQuery } from "../features/setup/setup-queries";
+import {
+  useHealthStatusQuery,
+  useSetupStateQuery,
+} from "../features/setup/setup-queries";
 import {
   useCompleteSetupMutation,
   useHealthCheckMutation,
 } from "../features/setup/setup-mutations";
 import { useStructureData } from "../features/structure/structure-queries";
+import { PlanUsageButton } from "../features/plan-usage/PlanUsageButton";
 import {
   applyTheme,
   loadThemePreference,
@@ -84,8 +88,10 @@ export function AppShell() {
   const [setupProvider, setSetupProvider] = useState<ProviderChoice>("github");
   const [error, setError] = useState<string>();
   const [showHealthDetails, setShowHealthDetails] = useState(false);
-  const [themePreference, setThemePreference] = useState<ThemePreference>(loadThemePreference);
-  const [currentSystemTheme, setCurrentSystemTheme] = useState<Theme>(systemTheme);
+  const [themePreference, setThemePreference] =
+    useState<ThemePreference>(loadThemePreference);
+  const [currentSystemTheme, setCurrentSystemTheme] =
+    useState<Theme>(systemTheme);
   const theme = resolveTheme(themePreference, currentSystemTheme);
   const [terminalRequest, setTerminalRequest] = useState<{
     runId: number;
@@ -106,10 +112,15 @@ export function AppShell() {
     select: (state) => state.location.pathname,
   });
   const activeTab = appTabForPath(pathname);
-  const activeTabDetails = appTabs.find((tab) => tab.id === activeTab) ?? appTabs[0];
+  const activeTabDetails =
+    appTabs.find((tab) => tab.id === activeTab) ?? appTabs[0];
   const runtimeState = healthStatus?.runtime.state ?? "unavailable";
-  const runtimeLabel = healthStatus ? dependencyStateLabel(healthStatus.runtime.state) : "Checking";
-  const providerLabel = healthStatus ? dependencyStateLabel(healthStatus.provider.state) : "Checking";
+  const runtimeLabel = healthStatus
+    ? dependencyStateLabel(healthStatus.runtime.state)
+    : "Checking";
+  const providerLabel = healthStatus
+    ? dependencyStateLabel(healthStatus.provider.state)
+    : "Checking";
   const isSaving = setupMutation.isPending;
   const isCheckingDependencies = healthMutation.isPending;
 
@@ -120,13 +131,17 @@ export function AppShell() {
   }, [theme]);
 
   useEffect(() => {
-    if (structure.contexts[0] && (!setupContextName.trim() || setupContextName === "Personal")) {
+    if (
+      structure.contexts[0] &&
+      (!setupContextName.trim() || setupContextName === "Personal")
+    ) {
       setSetupContextName(structure.contexts[0].name);
     }
   }, [setupContextName, structure.contexts]);
 
   useEffect(() => {
-    if (setupState) setSetupProvider(setupState.completed ? setupState.provider : "github");
+    if (setupState)
+      setSetupProvider(setupState.completed ? setupState.provider : "github");
   }, [setupState]);
 
   async function handleCompleteSetup(event: FormEvent<HTMLFormElement>) {
@@ -147,31 +162,34 @@ export function AppShell() {
       <h1 className="sr-only">{activeTabDetails.label}</h1>
 
       <TabNavigation activeTab={activeTab}>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          className="h-auto min-h-8 shrink-0 gap-2 px-2 text-xs text-muted-foreground hover:bg-secondary hover:text-primary"
-          aria-label={`Runtime and provider health. Runtime: ${runtimeLabel}, GitHub: ${providerLabel}`}
-          aria-expanded={showHealthDetails}
-          onClick={() => setShowHealthDetails((current) => !current)}
-        >
-          <span
-            aria-hidden="true"
-            className={`size-2 shrink-0 rounded-full ring-4 ${
-              runtimeState === "available"
-                ? "bg-emerald-500 ring-emerald-500/15"
-                : runtimeState === "unavailable"
-                  ? "bg-destructive ring-destructive/15"
-                  : "bg-amber-500 ring-amber-500/15"
-            }`}
-          />
-          <span aria-hidden="true" className="flex gap-2 max-[510px]:hidden">
-            <span>Runtime: {runtimeLabel}</span>
-            <span className="text-muted-foreground/60">·</span>
-            <span>GitHub: {providerLabel}</span>
-          </span>
-        </Button>
+        <div className="flex shrink-0 items-center gap-1">
+          <PlanUsageButton />
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-auto min-h-8 shrink-0 gap-2 px-2 text-xs text-muted-foreground hover:bg-secondary hover:text-primary"
+            aria-label={`Runtime and provider health. Runtime: ${runtimeLabel}, GitHub: ${providerLabel}`}
+            aria-expanded={showHealthDetails}
+            onClick={() => setShowHealthDetails((current) => !current)}
+          >
+            <span
+              aria-hidden="true"
+              className={`size-2 shrink-0 rounded-full ring-4 ${
+                runtimeState === "available"
+                  ? "bg-emerald-500 ring-emerald-500/15"
+                  : runtimeState === "unavailable"
+                    ? "bg-destructive ring-destructive/15"
+                    : "bg-amber-500 ring-amber-500/15"
+              }`}
+            />
+            <span aria-hidden="true" className="flex gap-2 max-[510px]:hidden">
+              <span>Runtime: {runtimeLabel}</span>
+              <span className="text-muted-foreground/60">·</span>
+              <span>GitHub: {providerLabel}</span>
+            </span>
+          </Button>
+        </div>
       </TabNavigation>
 
       {showHealthDetails && setupState?.completed && healthStatus && (
@@ -191,13 +209,29 @@ export function AppShell() {
           isCheckingDependencies={isCheckingDependencies}
           onContextNameChange={setSetupContextName}
           onProviderChange={setSetupProvider}
-          onCheckDependencies={() => void healthMutation.mutateAsync(setupProvider)}
+          onCheckDependencies={() =>
+            void healthMutation.mutateAsync(setupProvider)
+          }
           onSubmit={handleCompleteSetup}
         />
       )}
 
       {(error ?? (queryError ? errorMessage(queryError) : undefined)) && (
         <ErrorAlert message={error ?? errorMessage(queryError)} />
+      )}
+
+      {structure.grillModelCatalogError && (
+        <ErrorAlert
+          message={`${structure.grillModelCatalogError}. The saved catalog remains available when one exists.`}
+          onRetry={() => void structureQuery.retryGrillModelCatalog()}
+        />
+      )}
+      {structure.grillModelCatalogStatus === "refreshing" && (
+        <Alert className="mt-4">
+          <AlertDescription>
+            Refreshing the Codex model catalog in the background…
+          </AlertDescription>
+        </Alert>
       )}
 
       <Dialog
@@ -215,7 +249,8 @@ export function AppShell() {
               Embedded terminal · Run #{terminalRequest.runId}
             </DialogTitle>
             <DialogDescription className="sr-only">
-              Terminal session for this Run. Closing the view leaves the Run running.
+              Terminal session for this Run. Closing the view leaves the Run
+              running.
             </DialogDescription>
             <EmbeddedTerminal
               key={`${terminalRequest.runId}-${terminalRequest.pane.paneId}`}
@@ -241,15 +276,35 @@ export function AppShell() {
         <Outlet />
       </AppShellContext.Provider>
       {/* Modal dialogs disable pointer events outside them; toasts stay usable. */}
-      <Toaster theme={theme} position="bottom-right" className="pointer-events-auto" />
+      <Toaster
+        theme={theme}
+        position="bottom-right"
+        className="pointer-events-auto"
+      />
     </main>
   );
 }
 
-function ErrorAlert({ message }: { message: string }) {
+function ErrorAlert({
+  message,
+  onRetry,
+}: {
+  message: string;
+  onRetry?: () => void;
+}) {
   return (
-    <Alert className="mt-4 border-destructive/30 bg-destructive/5" variant="destructive">
-      <AlertDescription>{message}</AlertDescription>
+    <Alert
+      className="mt-4 border-destructive/30 bg-destructive/5"
+      variant="destructive"
+    >
+      <AlertDescription className="flex items-center justify-between gap-3">
+        <span>{message}</span>
+        {onRetry && (
+          <Button type="button" size="sm" variant="outline" onClick={onRetry}>
+            Retry
+          </Button>
+        )}
+      </AlertDescription>
     </Alert>
   );
 }
@@ -263,7 +318,10 @@ function TabNavigation({
 }) {
   return (
     <div className="flex items-center justify-between gap-4 border-b border-border">
-      <nav className="flex min-w-0 gap-6 overflow-x-auto" aria-label="Main sections">
+      <nav
+        className="flex min-w-0 gap-6 overflow-x-auto"
+        aria-label="Main sections"
+      >
         {appTabs.map((tab) => (
           <Button
             asChild
@@ -276,7 +334,10 @@ function TabNavigation({
                 : "border-transparent text-muted-foreground"
             }`}
           >
-            <Link to={tab.path} aria-current={activeTab === tab.id ? "page" : undefined}>
+            <Link
+              to={tab.path}
+              aria-current={activeTab === tab.id ? "page" : undefined}
+            >
               {tab.label}
             </Link>
           </Button>
@@ -316,23 +377,32 @@ function SetupWizard({
             <p className="mb-2.5 text-[0.72rem] font-bold uppercase tracking-[0.14em] text-primary">
               First run
             </p>
-            <h2 id="setup-heading" className="font-heading text-2xl font-medium tracking-tight">
+            <h2
+              id="setup-heading"
+              className="font-heading text-2xl font-medium tracking-tight"
+            >
               Make the app ready for your work
             </h2>
             <p className="mt-3 max-w-[720px] text-sm leading-relaxed text-muted-foreground">
-              Choose your first Context, decide whether to connect GitHub, and check the tools
-              already installed on this Machine. Mission Manager never installs or authenticates
-              anything on your behalf.
+              Choose your first Context, decide whether to connect GitHub, and
+              check the tools already installed on this Machine. Mission Manager
+              never installs or authenticates anything on your behalf.
             </p>
           </div>
-          <span className="shrink-0 text-sm font-semibold text-muted-foreground">Three quick checks</span>
+          <span className="shrink-0 text-sm font-semibold text-muted-foreground">
+            Three quick checks
+          </span>
         </div>
         <form className="mt-6 grid gap-4" onSubmit={onSubmit}>
           <div className="grid gap-3 rounded-xl border border-border bg-background/60 p-4 sm:grid-cols-[30px_minmax(0,1fr)]">
-            <span className="grid size-7 place-items-center rounded-full bg-primary text-xs font-bold text-primary-foreground">1</span>
+            <span className="grid size-7 place-items-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
+              1
+            </span>
             <div className="grid gap-3">
               <div>
-                <h3 className="font-heading text-base font-medium">Create a Context</h3>
+                <h3 className="font-heading text-base font-medium">
+                  Create a Context
+                </h3>
                 <p className="mt-1 text-sm text-muted-foreground">
                   A Context keeps its Items, providers, and Machines together.
                 </p>
@@ -350,10 +420,14 @@ function SetupWizard({
             </div>
           </div>
           <div className="grid gap-3 rounded-xl border border-border bg-background/60 p-4 sm:grid-cols-[30px_minmax(0,1fr)]">
-            <span className="grid size-7 place-items-center rounded-full bg-primary text-xs font-bold text-primary-foreground">2</span>
+            <span className="grid size-7 place-items-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
+              2
+            </span>
             <div className="grid gap-3">
               <div>
-                <h3 className="font-heading text-base font-medium">Choose a provider</h3>
+                <h3 className="font-heading text-base font-medium">
+                  Choose a provider
+                </h3>
                 <p className="mt-1 text-sm text-muted-foreground">
                   You can keep local work here and connect a provider later.
                 </p>
@@ -371,7 +445,9 @@ function SetupWizard({
                   />
                   <span className="grid gap-1">
                     <strong>GitHub</strong>
-                    <small className="text-muted-foreground">Use the installed `gh` CLI for Issues and pull requests.</small>
+                    <small className="text-muted-foreground">
+                      Use the installed `gh` CLI for Issues and pull requests.
+                    </small>
                   </span>
                 </label>
                 <label className="flex items-start gap-2 rounded-lg border border-border p-3 text-sm font-normal">
@@ -386,20 +462,27 @@ function SetupWizard({
                   />
                   <span className="grid gap-1">
                     <strong>No provider yet</strong>
-                    <small className="text-muted-foreground">Local Items and Runs remain available.</small>
+                    <small className="text-muted-foreground">
+                      Local Items and Runs remain available.
+                    </small>
                   </span>
                 </label>
               </div>
             </div>
           </div>
           <div className="grid gap-3 rounded-xl border border-border bg-background/60 p-4 sm:grid-cols-[30px_minmax(0,1fr)]">
-            <span className="grid size-7 place-items-center rounded-full bg-primary text-xs font-bold text-primary-foreground">3</span>
+            <span className="grid size-7 place-items-center rounded-full bg-primary text-xs font-bold text-primary-foreground">
+              3
+            </span>
             <div>
               <div className="flex items-start justify-between gap-4 max-[760px]:flex-col">
                 <div>
-                  <h3 className="font-heading text-base font-medium">Check dependencies</h3>
+                  <h3 className="font-heading text-base font-medium">
+                    Check dependencies
+                  </h3>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    Missing or unauthenticated tools do not stop the rest of the app.
+                    Missing or unauthenticated tools do not stop the rest of the
+                    app.
                   </p>
                 </div>
                 <Button
@@ -447,7 +530,9 @@ function HealthDetails({
             <p className="mb-2.5 text-[0.72rem] font-bold uppercase tracking-[0.14em] text-primary">
               Tool health
             </p>
-            <h2 className="font-heading text-xl font-medium">Runtime and provider status</h2>
+            <h2 className="font-heading text-xl font-medium">
+              Runtime and provider status
+            </h2>
           </div>
           <Button
             type="button"
@@ -467,7 +552,9 @@ function HealthDetails({
 }
 
 function DependencyList({ health }: { health: HealthStatus | undefined }) {
-  const dependencies = health ? [health.runtime, health.provider, ...health.agents] : [];
+  const dependencies = health
+    ? [health.runtime, health.provider, ...health.agents]
+    : [];
 
   return (
     <ul className="mt-3 grid gap-2">
@@ -482,15 +569,25 @@ function DependencyList({ health }: { health: HealthStatus | undefined }) {
             key={dependency.key}
           >
             <Badge
-              variant={dependency.state === "available" ? "secondary" : "outline"}
-              className={dependency.state === "available" ? "text-emerald-700 dark:text-emerald-300" : "text-amber-700 dark:text-amber-300"}
+              variant={
+                dependency.state === "available" ? "secondary" : "outline"
+              }
+              className={
+                dependency.state === "available"
+                  ? "text-emerald-700 dark:text-emerald-300"
+                  : "text-amber-700 dark:text-amber-300"
+              }
             >
               {dependencyStateLabel(dependency.state)}
             </Badge>
             <span className="grid min-w-0 gap-0.5 text-xs leading-relaxed text-muted-foreground">
               <strong className="text-foreground">{dependency.label}</strong>
               <span>{dependency.message}</span>
-              {dependency.executablePath && <code className="break-all text-[0.7rem]">{dependency.executablePath}</code>}
+              {dependency.executablePath && (
+                <code className="break-all text-[0.7rem]">
+                  {dependency.executablePath}
+                </code>
+              )}
               {dependency.action && <small>{dependency.action}</small>}
             </span>
           </li>

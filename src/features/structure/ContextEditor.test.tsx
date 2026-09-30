@@ -42,6 +42,18 @@ describe("ContextEditor", () => {
               model: "gpt-6-sol",
               effort: "high",
             },
+            default_workflow: "matt-pocock",
+            pstack_defaults: {
+              agent: "claude",
+              model: "claude-sonnet-5",
+              effort: "high",
+            },
+            pstack_roles: [
+              { role: "code-delegate", configuration: { agent: "claude", model: "claude-opus-5", effort: "high" } },
+              { role: "judge-and-prose", configuration: { agent: "codex", model: "gpt-6-sol", effort: "high" } },
+              { role: "review-panel", configuration: { agent: "codex", model: "gpt-6-sol", effort: "high" } },
+              { role: "explorers", configuration: { agent: "claude", model: "claude-sonnet-5", effort: "medium" } },
+            ],
             gh_executable_path: null,
             twg_executable_path: null,
             az_executable_path: null,
@@ -197,12 +209,12 @@ describe("ContextEditor", () => {
         checkDirtyCheckouts: true,
         grillDefaults: {
           agent: "claude",
-          model: "claude-sonnet-4-5",
+          model: "claude-sonnet-5",
           effort: "high",
         },
         implementDefaults: {
           agent: "claude",
-          model: "claude-sonnet-4-5",
+          model: "claude-sonnet-5",
           effort: "high",
         },
         attentionDefaults: expect.arrayContaining([
@@ -245,6 +257,18 @@ describe("ContextEditor", () => {
               model: "gpt-6-sol",
               effort: "high",
             },
+            default_workflow: "matt-pocock",
+            pstack_defaults: {
+              agent: "claude",
+              model: "claude-sonnet-5",
+              effort: "high",
+            },
+            pstack_roles: [
+              { role: "code-delegate", configuration: { agent: "claude", model: "claude-opus-5", effort: "high" } },
+              { role: "judge-and-prose", configuration: { agent: "codex", model: "gpt-6-sol", effort: "high" } },
+              { role: "review-panel", configuration: { agent: "codex", model: "gpt-6-sol", effort: "high" } },
+              { role: "explorers", configuration: { agent: "claude", model: "claude-sonnet-5", effort: "medium" } },
+            ],
             gh_executable_path: null,
             twg_executable_path: null,
             az_executable_path: null,

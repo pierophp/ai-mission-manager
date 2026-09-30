@@ -6,6 +6,49 @@ use super::projections::{
 };
 use super::*;
 
+/// A Run's model choice must be a valid catalog entry for the agent it launches.
+fn validate_run_configuration(
+    configuration: &GrillConfiguration,
+    agent: AgentKind,
+) -> Result<(), DomainError> {
+    validate_grill_configuration(configuration)?;
+    if configuration.agent != agent {
+        return Err(DomainError::InvalidGrillConfiguration {
+            agent: configuration.agent,
+            model: configuration.model.clone(),
+            effort: configuration.effort.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_workflow_profile(
+    workflow: Workflow,
+    execution_profile: ExecutionProfile,
+) -> Result<(), DomainError> {
+    if !workflow.offers(execution_profile) {
+        return Err(DomainError::ExecutionProfileNotInWorkflow {
+            workflow,
+            execution_profile,
+        });
+    }
+    Ok(())
+}
+
+fn validate_pstack_role_table(table: &PstackRoleTable) -> Result<(), DomainError> {
+    if table.0.len() != PstackRole::ALL.len()
+        || PstackRole::ALL
+            .iter()
+            .any(|role| table.0.iter().filter(|entry| entry.role == *role).count() != 1)
+    {
+        return Err(DomainError::InvalidPstackRoleTable);
+    }
+    for entry in &table.0 {
+        validate_grill_configuration(&entry.configuration)?;
+    }
+    Ok(())
+}
+
 fn selected_cli_configuration_profile(
     state: &DomainState,
     context_id: i64,
@@ -68,6 +111,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
                 implement_defaults: GrillConfiguration::default(),
+                default_workflow: Workflow::MattPocock,
+                pstack_defaults: GrillConfiguration::default(),
+                pstack_roles: PstackRoleTable::default(),
                 gh_executable_path: None,
                 twg_executable_path: None,
                 az_executable_path: None,
@@ -162,6 +208,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 check_dirty_checkouts,
                 grill_defaults,
                 implement_defaults,
+                default_workflow,
+                pstack_defaults,
+                pstack_roles,
                 gh_executable_path,
                 twg_executable_path,
                 az_executable_path,
@@ -227,6 +276,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             }
             validate_grill_configuration(&grill_defaults)?;
             validate_grill_configuration(&implement_defaults)?;
+            validate_grill_configuration(&pstack_defaults)?;
+            validate_pstack_role_table(&pstack_roles)?;
             if attention_defaults.len() != 3
                 || attention_defaults
                     .iter()
@@ -260,6 +311,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             context.check_dirty_checkouts = check_dirty_checkouts;
             context.grill_defaults = grill_defaults;
             context.implement_defaults = implement_defaults;
+            context.default_workflow = default_workflow;
+            context.pstack_defaults = pstack_defaults;
+            context.pstack_roles = pstack_roles;
             context.gh_executable_path = clean_optional_identifier(gh_executable_path);
             context.twg_executable_path = clean_optional_identifier(twg_executable_path);
             context.az_executable_path = clean_optional_identifier(az_executable_path);
@@ -902,6 +956,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 codex_profile_id: None,
                 check_dirty_checkouts: true,
                 grill_defaults: GrillConfiguration::default(),
+                default_workflow: Workflow::MattPocock,
+                pstack_defaults: GrillConfiguration::default(),
+                pstack_roles: PstackRoleTable::default(),
                 implement_defaults: GrillConfiguration::default(),
                 gh_executable_path: None,
                 twg_executable_path: None,
@@ -1402,6 +1459,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             title,
             context_id,
             project_id,
+            notes,
         } => {
             if title.trim().is_empty() {
                 return Err(DomainError::EmptyTitle);
@@ -1431,7 +1489,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 title: title.trim().to_owned(),
                 project_id,
                 status: project.defaults.item_status,
-                notes: String::new(),
+                notes,
                 reminders: Vec::new(),
             };
 
@@ -1889,6 +1947,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             allow_dirty,
             allow_shared_checkouts,
             implementation_queue,
+            workflow,
         } => {
             let context_id = item_context_id(&state, item_id)?;
             if implementation_queue.is_some()
@@ -2069,16 +2128,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 None
             };
             if let Some(configuration) = &configuration {
-                validate_grill_configuration(configuration)?;
-                if execution_profile != ExecutionProfile::Implement || configuration.agent != agent
-                {
-                    return Err(DomainError::InvalidGrillConfiguration {
-                        agent: configuration.agent,
-                        model: configuration.model.clone(),
-                        effort: configuration.effort.clone(),
-                    });
-                }
+                validate_run_configuration(configuration, agent)?;
             }
+            validate_workflow_profile(workflow, execution_profile)?;
             let run = Run {
                 id,
                 item_id,
@@ -2091,13 +2143,15 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     &state, context_id, agent,
                 ),
                 execution_profile,
+                workflow,
                 model: configuration
                     .as_ref()
                     .map(|configuration| configuration.model.clone()),
                 effort: configuration
                     .as_ref()
                     .map(|configuration| configuration.effort.clone()),
-                skill_snapshot: None,
+                skill_snapshot: (workflow == Workflow::Pstack)
+                    .then(crate::pstack::skill_snapshot),
                 prompt,
                 working_directory,
                 session_name,
@@ -2108,6 +2162,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: checkouts,
                 transcript: String::new(),
+                reported_pull_requests: Vec::new(),
+                attention_summary: None,
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_decisions: Vec::new(),
@@ -2115,6 +2171,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 grill_phase: None,
                 grill_action: None,
                 grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
             };
             state.next_run_id = next_run_id;
             let mut effects = vec![];
@@ -2136,6 +2194,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             worktree_id,
             machine_id,
             agent,
+            configuration,
             execution_profile,
             prompt,
             working_directory,
@@ -2143,6 +2202,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             pane_id,
             started_at,
             prompt_selection,
+            workflow,
         } => {
             let context_id = item_context_id(&state, item_id)?;
             let workspace = state
@@ -2230,6 +2290,10 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     pane_id,
                 });
             }
+            if let Some(configuration) = &configuration {
+                validate_run_configuration(configuration, agent)?;
+            }
+            validate_workflow_profile(workflow, execution_profile)?;
             let id = state.next_run_id;
             let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
             let run = Run {
@@ -2244,9 +2308,15 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     &state, context_id, agent,
                 ),
                 execution_profile,
-                model: None,
-                effort: None,
-                skill_snapshot: None,
+                workflow,
+                model: configuration
+                    .as_ref()
+                    .map(|configuration| configuration.model.clone()),
+                effort: configuration
+                    .as_ref()
+                    .map(|configuration| configuration.effort.clone()),
+                skill_snapshot: (workflow == Workflow::Pstack)
+                    .then(crate::pstack::skill_snapshot),
                 prompt,
                 working_directory,
                 session_name,
@@ -2257,6 +2327,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: Vec::new(),
                 transcript: String::new(),
+                reported_pull_requests: Vec::new(),
+                attention_summary: None,
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_decisions: Vec::new(),
@@ -2264,12 +2336,16 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 grill_phase: None,
                 grill_action: None,
                 grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
+            let mut effects = Vec::new();
+            effects.push(Effect::PersistRun { run, next_run_id });
             Ok(Decision {
                 state,
-                effects: vec![Effect::PersistRun { run, next_run_id }],
+                effects,
             })
         }
         Event::StartGrillRun {
@@ -2404,6 +2480,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                     configuration.agent,
                 ),
                 execution_profile: ExecutionProfile::Grill,
+                workflow: Workflow::MattPocock,
                 model: Some(configuration.model),
                 effort: Some(configuration.effort),
                 skill_snapshot: Some(skill_snapshot),
@@ -2417,6 +2494,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: checkouts,
                 transcript: String::new(),
+                reported_pull_requests: Vec::new(),
+                attention_summary: None,
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_decisions: Vec::new(),
@@ -2424,6 +2503,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 grill_phase: Some(GrillPhase::Starting),
                 grill_action: None,
                 grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -2538,6 +2619,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 agent,
                 cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::CustomPrompt,
+                workflow: Workflow::MattPocock,
                 model: None,
                 effort: None,
                 skill_snapshot: None,
@@ -2551,6 +2633,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 pane_status: RunPaneStatus::Available,
                 direct_checkouts: Vec::new(),
                 transcript: String::new(),
+                reported_pull_requests: Vec::new(),
+                attention_summary: None,
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_decisions: Vec::new(),
@@ -2558,6 +2642,8 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 grill_phase: None,
                 grill_action: None,
                 grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
             };
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
@@ -2576,6 +2662,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .find(|run| run.id == run_id)
                 .ok_or(DomainError::RunNotFound { run_id })?;
             run.state = run_state;
+            if run.execution_profile == ExecutionProfile::Plan {
+                run.plan_phase = PlanPhase::after_state(run.plan_phase, run_state);
+            }
             if run.execution_profile == ExecutionProfile::Grill {
                 run.grill_phase = match run_state {
                     RunState::Unknown => run.grill_phase.or(Some(GrillPhase::Starting)),
@@ -2629,6 +2718,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             }
             if state_changed {
                 run.state = run_state;
+                if run.execution_profile == ExecutionProfile::Plan {
+                    run.plan_phase = PlanPhase::after_state(run.plan_phase, run_state);
+                }
                 if run.execution_profile == ExecutionProfile::Grill {
                     run.grill_phase = match run_state {
                         RunState::Unknown => run.grill_phase.or(Some(GrillPhase::Starting)),
@@ -2664,6 +2756,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .find(|run| run.id == run_id)
                 .ok_or(DomainError::RunNotFound { run_id })?;
             run.state = RunState::Finished;
+            if run.execution_profile == ExecutionProfile::Plan {
+                run.plan_phase = PlanPhase::after_state(run.plan_phase, RunState::Finished);
+            }
             if run.execution_profile == ExecutionProfile::Grill {
                 run.grill_phase = Some(GrillPhase::Finished);
             }
@@ -2999,6 +3094,91 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             }
 
             Ok(Decision { state, effects })
+        }
+        Event::ReportRunPullRequest { run_id, object } => {
+            if object.kind != ExternalObjectKind::PullRequest {
+                return Err(DomainError::ReportedObjectNotPullRequest { run_id });
+            }
+            let run = state
+                .runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
+                .ok_or(DomainError::RunNotFound { run_id })?;
+            if run.workflow != Workflow::Pstack {
+                return Err(DomainError::NotPstackRun { run_id });
+            }
+            let item_id = run.item_id;
+            let canonical_url = object.canonical_url.trim().to_owned();
+            if canonical_url.is_empty() {
+                return Err(DomainError::EmptyExternalUrl);
+            }
+            if run.reported_pull_requests.iter().any(|url| url == &canonical_url) {
+                return Ok(Decision { state, effects: Vec::new() });
+            }
+            run.reported_pull_requests.push(canonical_url.clone());
+            let run = run.clone();
+            let already_linked = state.links.iter().any(|link| {
+                link.item_id == item_id
+                    && state.external_objects.iter().any(|candidate| {
+                        candidate.id == link.external_object_id
+                            && candidate.canonical_url == canonical_url
+                    })
+            });
+            let mut effects = vec![Effect::PersistRunReports { run }];
+            if !already_linked {
+                effects.extend(link_external_object(&mut state, item_id, object, None, None, false)?);
+            }
+            Ok(Decision { state, effects })
+        }
+        Event::RecordRunAttention { run_id, summary } => {
+            let run = state
+                .runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
+                .ok_or(DomainError::RunNotFound { run_id })?;
+            if run.workflow != Workflow::Pstack {
+                return Err(DomainError::NotPstackRun { run_id });
+            }
+            let summary = summary.trim().to_owned();
+            if summary.is_empty() || run.attention_summary.as_deref() == Some(&summary) {
+                return Ok(Decision { state, effects: Vec::new() });
+            }
+            run.attention_summary = Some(summary);
+            let run = run.clone();
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRunReports { run }],
+            })
+        }
+        Event::RecordRunPlan { run_id, path } => {
+            let run = state.runs.iter_mut().find(|run| run.id == run_id)
+                .ok_or(DomainError::RunNotFound { run_id })?;
+            if run.execution_profile != ExecutionProfile::Plan || run.workflow != Workflow::Pstack {
+                return Err(DomainError::PlanGoNotAvailable { run_id });
+            }
+            let path = path.trim();
+            if path.is_empty() || run.plan_path.as_deref() == Some(path) {
+                return Ok(Decision { state, effects: Vec::new() });
+            }
+            run.plan_path = Some(path.to_owned());
+            let run = run.clone();
+            Ok(Decision { state, effects: vec![Effect::PersistRunReports { run }] })
+        }
+        Event::GoPlan { run_id } => {
+            let run = state.runs.iter_mut().find(|run| run.id == run_id)
+                .ok_or(DomainError::RunNotFound { run_id })?;
+            if run.execution_profile != ExecutionProfile::Plan
+                || run.workflow != Workflow::Pstack
+                || run.state != RunState::Finished
+                || run.plan_phase != Some(PlanPhase::AwaitingGo)
+                || run.pane_status != RunPaneStatus::Available
+            {
+                return Err(DomainError::PlanGoNotAvailable { run_id });
+            }
+            run.state = RunState::Working;
+            run.plan_phase = Some(PlanPhase::Executing);
+            let run = run.clone();
+            Ok(Decision { state, effects: vec![Effect::PersistRunState { run }] })
         }
         Event::RecordRunTranscript {
             run_id,

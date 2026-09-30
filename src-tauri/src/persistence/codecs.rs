@@ -1,4 +1,5 @@
 use super::*;
+use crate::domain::{PlanPhase, Workflow};
 
 pub(super) fn bool_as_i64(value: bool) -> i64 {
     i64::from(value)
@@ -25,6 +26,9 @@ pub(super) fn execution_profile_as_str(profile: ExecutionProfile) -> &'static st
         ExecutionProfile::Implement => "implement",
         ExecutionProfile::Review => "review",
         ExecutionProfile::CustomPrompt => "custom",
+        ExecutionProfile::Autonomous => "autonomous",
+        ExecutionProfile::Plan => "plan",
+        ExecutionProfile::PstackReview => "pstack-review",
         ExecutionProfile::Grill => "grill",
     }
 }
@@ -35,8 +39,26 @@ pub(super) fn parse_execution_profile(profile: &str) -> Result<ExecutionProfile,
         "implement" => Ok(ExecutionProfile::Implement),
         "review" => Ok(ExecutionProfile::Review),
         "custom" => Ok(ExecutionProfile::CustomPrompt),
+        "autonomous" => Ok(ExecutionProfile::Autonomous),
+        "plan" => Ok(ExecutionProfile::Plan),
+        "pstack-review" => Ok(ExecutionProfile::PstackReview),
         "grill" => Ok(ExecutionProfile::Grill),
         other => Err(StoreError::InvalidExecutionProfile(other.into())),
+    }
+}
+
+pub(super) fn workflow_as_str(workflow: Workflow) -> &'static str {
+    match workflow {
+        Workflow::MattPocock => "matt-pocock",
+        Workflow::Pstack => "pstack",
+    }
+}
+
+pub(super) fn parse_workflow(workflow: &str) -> Result<Workflow, StoreError> {
+    match workflow {
+        "matt-pocock" => Ok(Workflow::MattPocock),
+        "pstack" => Ok(Workflow::Pstack),
+        other => Err(StoreError::InvalidWorkflow(other.into())),
     }
 }
 
@@ -130,6 +152,21 @@ pub(super) fn parse_grill_phase(phase: &str) -> Result<GrillPhase, StoreError> {
         "recoverable_pane_loss" => Ok(GrillPhase::RecoverablePaneLoss),
         "finished" => Ok(GrillPhase::Finished),
         other => Err(StoreError::InvalidGrillPhase(other.into())),
+    }
+}
+
+pub(super) fn plan_phase_as_str(phase: PlanPhase) -> &'static str {
+    match phase {
+        PlanPhase::AwaitingGo => "awaiting_go",
+        PlanPhase::Executing => "executing",
+    }
+}
+
+pub(super) fn parse_plan_phase(phase: &str) -> Result<PlanPhase, StoreError> {
+    match phase {
+        "awaiting_go" => Ok(PlanPhase::AwaitingGo),
+        "executing" => Ok(PlanPhase::Executing),
+        other => Err(StoreError::InvalidPlanPhase(other.into())),
     }
 }
 

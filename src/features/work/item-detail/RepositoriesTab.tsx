@@ -1,4 +1,4 @@
-import { type FormEvent, useState } from "react";
+import { useState } from "react";
 import {
   Alert,
   AlertDescription,
@@ -15,16 +15,9 @@ import {
 } from "../../../components/ui/card";
 import { Checkbox } from "../../../components/ui/checkbox";
 import { Input } from "../../../components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "../../../components/ui/native-select";
-import { Textarea } from "../../../components/ui/textarea";
-import { errorMessage } from "../../../runtime/errors";
 import type {
-  AgentKind,
   Context,
-  ExecutionProfile,
+  GrillAgentCatalog,
   ItemView,
   Machine,
   Repository,
@@ -34,6 +27,7 @@ import type {
 import type { ItemCommands } from "../use-item-commands";
 import { workActions } from "../work-mutations";
 import { repositoryName } from "../work-utils";
+import { RunLaunchForm } from "./RunLaunchForm";
 import { itemExecution } from "./shared";
 
 export function RepositoriesTab({
@@ -41,43 +35,32 @@ export function RepositoriesTab({
   repositories,
   machines,
   contexts,
+  grillModelCatalog,
   commands,
 }: {
   view: ItemView;
   repositories: Repository[];
   machines: Machine[];
   contexts: Context[];
+  grillModelCatalog: GrillAgentCatalog[];
   commands: ItemCommands;
 }) {
-  const { isSaving, saveItem, whileSaving, workCommand } = commands;
-  const { itemRepositories, executionMachineId, executionMachine } =
+  const { isSaving, saveItem } = commands;
+  const { itemRepositories, itemContext, executionMachineId, executionMachine } =
     itemExecution(view, repositories, contexts, machines);
   const [worktreePathDrafts, setWorktreePathDrafts] = useState<
     Record<string, string>
   >({});
-  const [worktreeRunWorkspaceId, setWorktreeRunWorkspaceId] = useState<number>();
-  const [worktreeRunWorktreeId, setWorktreeRunWorktreeId] = useState<number>();
-  const [worktreeRunPrompt, setWorktreeRunPrompt] = useState("");
-  const [worktreeRunPromptNeedsCompose, setWorktreeRunPromptNeedsCompose] =
-    useState(false);
-  const [runAgent, setRunAgent] = useState<AgentKind>("claude");
-  const [runProfile, setRunProfile] = useState<ExecutionProfile>("implement");
-  const [includeRunNotes, setIncludeRunNotes] = useState(false);
-  const [runCustomPrompt, setRunCustomPrompt] = useState("");
+  const [worktreeRun, setWorktreeRun] = useState<{
+    workspace: Workspace;
+    worktreeId: number;
+  }>();
   const [worktreeRemovalReport, setWorktreeRemovalReport] =
     useState<WorktreeRemovalReport>();
   const [
     worktreeRemovalDestructiveConfirmed,
     setWorktreeRemovalDestructiveConfirmed,
   ] = useState(false);
-
-  function runPromptSelection() {
-    return {
-      includeObjective: true,
-      includeNotes: includeRunNotes,
-      externalObjectIds: [],
-    };
-  }
 
   async function prepareWorkspaceWorktree(
     workspace: Workspace,
@@ -159,84 +142,6 @@ export function RepositoriesTab({
     setWorktreeRemovalDestructiveConfirmed(false);
   }
 
-  async function openWorktreeRun(workspace: Workspace, worktreeId: number) {
-    const includeNotes = Boolean(view.item.notes.trim());
-    setWorktreeRunWorkspaceId(workspace.id);
-    setWorktreeRunWorktreeId(worktreeId);
-    setRunAgent("claude");
-    setRunProfile("implement");
-    setIncludeRunNotes(includeNotes);
-    setRunCustomPrompt("");
-    setWorktreeRunPrompt("");
-    setWorktreeRunPromptNeedsCompose(true);
-    await whileSaving(async () => {
-      try {
-        const prompt = await workCommand.execute(
-          workActions.composeRunPrompt(
-            view.item.id,
-            "implement",
-            { includeObjective: true, includeNotes, externalObjectIds: [] },
-            null,
-          ),
-          false,
-        );
-        setWorktreeRunPrompt(prompt);
-        setWorktreeRunPromptNeedsCompose(false);
-      } catch (promptError) {
-        setWorktreeRunWorkspaceId(undefined);
-        setWorktreeRunWorktreeId(undefined);
-        window.alert(errorMessage(promptError));
-      }
-    });
-  }
-
-  async function composeWorktreeRunPrompt() {
-    if (!worktreeRunWorkspaceId) return;
-    await whileSaving(async () => {
-      try {
-        const composed = await workCommand.execute(
-          workActions.composeRunPrompt(
-            view.item.id,
-            runProfile,
-            runPromptSelection(),
-            runProfile === "custom" ? runCustomPrompt : null,
-          ),
-          false,
-        );
-        setWorktreeRunPrompt(composed);
-        setWorktreeRunPromptNeedsCompose(false);
-      } catch (composeError) {
-        window.alert(errorMessage(composeError));
-      }
-    });
-  }
-
-  async function handleStartWorktreeRun(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (
-      !worktreeRunWorkspaceId ||
-      !worktreeRunWorktreeId ||
-      !worktreeRunPrompt.trim() ||
-      worktreeRunPromptNeedsCompose
-    ) {
-      return;
-    }
-    await saveItem(
-      workActions.startWorktreeRun({
-        itemId: view.item.id,
-        workspaceId: worktreeRunWorkspaceId,
-        worktreeId: worktreeRunWorktreeId,
-        agent: runAgent,
-        executionProfile: runProfile,
-        prompt: worktreeRunPrompt,
-        promptSelection: runPromptSelection(),
-      }),
-    );
-    setWorktreeRunWorkspaceId(undefined);
-    setWorktreeRunWorktreeId(undefined);
-    setWorktreeRunPrompt("");
-  }
-
   const workspace = view.workspaces[0];
   if (itemRepositories.length === 0 || !workspace) {
     return (
@@ -250,6 +155,25 @@ export function RepositoriesTab({
   const workspaceWorktrees = view.worktrees.filter(
     (worktree) => worktree.workspace_id === workspace.id,
   );
+  const worktreeRunWorktree = view.worktrees.find(
+    (worktree) => worktree.id === worktreeRun?.worktreeId,
+  );
+  const worktreeRunTarget =
+    worktreeRun &&
+    worktreeRunWorktree &&
+    view.workspaces.some(
+      (candidate) => candidate.id === worktreeRun.workspace.id,
+    )
+      ? {
+          kind: "worktree" as const,
+          workspace: worktreeRun.workspace,
+          worktree: worktreeRunWorktree,
+          repositoryName: repositoryName(
+            repositories,
+            worktreeRunWorktree.repository_id,
+          ),
+        }
+      : undefined;
 
   return (
     <Card size="sm">
@@ -400,12 +324,13 @@ export function RepositoriesTab({
                   variant="outline"
                   disabled={isSaving || worktree.machine_id !== executionMachineId}
                   onClick={() =>
-                    void openWorktreeRun(
-                      view.workspaces.find(
-                        (candidate) => candidate.id === worktree.workspace_id,
-                      ) ?? workspace,
-                      worktree.id,
-                    )
+                    setWorktreeRun({
+                      workspace:
+                        view.workspaces.find(
+                          (candidate) => candidate.id === worktree.workspace_id,
+                        ) ?? workspace,
+                      worktreeId: worktree.id,
+                    })
                   }
                 >
                   {worktree.machine_id === executionMachineId
@@ -484,111 +409,17 @@ export function RepositoriesTab({
               </div>
             </div>
           )}
-        {worktreeRunWorkspaceId !== undefined &&
-          worktreeRunWorktreeId !== undefined &&
-          view.workspaces.some(
-            (candidate) => candidate.id === worktreeRunWorkspaceId,
-          ) && (
-            <form
-              className="grid gap-4 rounded-lg border border-primary/30 bg-primary/5 p-4"
-              onSubmit={(event) => void handleStartWorktreeRun(event)}
-            >
-              <div>
-                <h4 className="m-0 text-base font-medium">Start Worktree Run</h4>
-                <p className="mt-1 text-sm text-muted-foreground">
-                  The agent will start in the selected registered Worktree.
-                </p>
-              </div>
-              <div className="grid gap-3 md:grid-cols-2">
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Agent</span>
-                  <NativeSelect
-                    value={runAgent}
-                    onChange={(event) =>
-                      setRunAgent(event.target.value as AgentKind)
-                    }
-                    disabled={isSaving}
-                  >
-                    <NativeSelectOption value="claude">Claude Code</NativeSelectOption>
-                    <NativeSelectOption value="codex">Codex</NativeSelectOption>
-                  </NativeSelect>
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Execution Profile</span>
-                  <NativeSelect
-                    value={runProfile}
-                    onChange={(event) => {
-                      setRunProfile(event.target.value as ExecutionProfile);
-                      setWorktreeRunPromptNeedsCompose(true);
-                    }}
-                    disabled={isSaving}
-                  >
-                    <NativeSelectOption value="investigate">Investigate</NativeSelectOption>
-                    <NativeSelectOption value="implement">Implement</NativeSelectOption>
-                    <NativeSelectOption value="review">Review</NativeSelectOption>
-                    <NativeSelectOption value="custom">Custom prompt</NativeSelectOption>
-                  </NativeSelect>
-                </label>
-              </div>
-              {runProfile === "custom" && (
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Custom prompt source</span>
-                  <Textarea
-                    value={runCustomPrompt}
-                    onChange={(event) => {
-                      setRunCustomPrompt(event.target.value);
-                      setWorktreeRunPromptNeedsCompose(true);
-                    }}
-                    rows={3}
-                    placeholder="Tell the agent exactly what to do"
-                    disabled={isSaving}
-                  />
-                </label>
-              )}
-              <label className="grid gap-1.5 text-sm font-medium">
-                <span>Editable composed prompt</span>
-                <Textarea
-                  value={worktreeRunPrompt}
-                  onChange={(event) => setWorktreeRunPrompt(event.target.value)}
-                  rows={6}
-                  disabled={isSaving}
-                />
-              </label>
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="outline"
-                  disabled={isSaving}
-                  onClick={() => void composeWorktreeRunPrompt()}
-                >
-                  Compose from selection
-                </Button>
-                <Button
-                  type="submit"
-                  disabled={
-                    isSaving ||
-                    !worktreeRunPrompt.trim() ||
-                    worktreeRunPromptNeedsCompose
-                  }
-                >
-                  {isSaving ? "Starting…" : "Confirm and start Worktree Run"}
-                </Button>
-                <Button
-                  type="button"
-                  size="sm"
-                  variant="ghost"
-                  disabled={isSaving}
-                  onClick={() => {
-                    setWorktreeRunWorkspaceId(undefined);
-                    setWorktreeRunWorktreeId(undefined);
-                  }}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </form>
-          )}
+        {worktreeRunTarget && (
+          <RunLaunchForm
+            key={worktreeRunTarget.worktree.id}
+            view={view}
+            itemContext={itemContext}
+            modelCatalog={grillModelCatalog}
+            commands={commands}
+            target={worktreeRunTarget}
+            onClose={() => setWorktreeRun(undefined)}
+          />
+        )}
       </CardContent>
     </Card>
   );

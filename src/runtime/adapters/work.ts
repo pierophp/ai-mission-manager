@@ -28,7 +28,7 @@ import type {
   WorktreeRemovalReport,
   Worktree,
 } from "../types";
-import type { GrillContinuationAction } from "../execution-types";
+import type { GrillContinuationAction, Workflow } from "../execution-types";
 import { command } from "./tauri";
 
 export const workAdapter = {
@@ -147,6 +147,7 @@ export const workAdapter = {
     command<Run>("submit_grill_answers", { runId, answers }),
   continueGrill: (runId: number, action: GrillContinuationAction) =>
     command<Run>("continue_grill", { runId, action }),
+  goPlan: (runId: number) => command<Run>("go_plan", { runId }),
   deleteRun: (runId: number) =>
     command<{ runId: number }>("delete_run", { runId, confirmed: true }),
   prepareItemDeletion: (itemId: number) =>
@@ -171,13 +172,17 @@ export const workAdapter = {
     itemId: number,
     executionProfile: Run["execution_profile"],
     selection: RunPromptSelection,
-    customPrompt: string | null,
+    language: GrillLanguage | null,
+    initialPrompt: string | null,
+    workflow: Workflow,
   ) =>
     command<string>("compose_run_prompt", {
       itemId,
       executionProfile,
       promptSelection: selection,
-      customPrompt,
+      language,
+      initialPrompt,
+      workflow,
     }),
   composeGrillPrompt: (
     itemId: number,
@@ -200,6 +205,7 @@ export const workAdapter = {
     configuration,
     implementationQueue,
     executionProfile,
+    workflow,
     prompt,
     promptSelection,
     expectedCheckouts,
@@ -214,6 +220,7 @@ export const workAdapter = {
     configuration?: GrillConfiguration;
     implementationQueue?: ImplementationQueueStart;
     executionProfile: Run["execution_profile"];
+    workflow: Run["workflow"];
     prompt: string;
     promptSelection: RunPromptSelection;
     expectedCheckouts: RunCheckout[];
@@ -229,6 +236,7 @@ export const workAdapter = {
       configuration,
       implementationQueue,
       executionProfile,
+      workflow,
       prompt,
       promptSelection,
       expectedCheckouts,
@@ -281,7 +289,9 @@ export const workAdapter = {
     workspaceId,
     worktreeId,
     agent,
+    configuration,
     executionProfile,
+    workflow,
     prompt,
     promptSelection,
   }: {
@@ -289,7 +299,9 @@ export const workAdapter = {
     workspaceId: number;
     worktreeId: number;
     agent: Run["agent"];
+    configuration?: GrillConfiguration;
     executionProfile: Run["execution_profile"];
+    workflow: Run["workflow"];
     prompt: string;
     promptSelection: RunPromptSelection;
   }) =>
@@ -298,7 +310,9 @@ export const workAdapter = {
       workspaceId,
       worktreeId,
       agent,
+      configuration,
       executionProfile,
+      workflow,
       prompt,
       promptSelection,
     }),

@@ -274,6 +274,7 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
                     })
             }
             Effect::PersistRunTranscript { .. }
+            | Effect::PersistRunReports { .. }
             | Effect::PersistGrillAnswers { .. }
             | Effect::PersistGrillResponse { .. } => None,
             Effect::PersistRunPaneStatus { run } => {

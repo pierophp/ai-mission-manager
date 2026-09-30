@@ -58,6 +58,10 @@ _Avoid_: host, server, node
 A named configuration directory for Claude Code or Codex on one Machine. Contexts assigned to that Machine can reuse its profiles independently for each provider.
 _Avoid_: Execution Profile, account
 
+**Execution Mode**:
+The checkout strategy used by a Run: a direct checkout or a Worktree.
+_Avoid_: mode
+
 **Run**:
 One attempt at doing work on an Item by a single agent, using a Repository checkout configured for the Item's Project, either directly or through one physical Worktree. Runs are historical records while they are retained, but finished Runs may be explicitly deleted as part of local cleanup; an active Run blocks deletion of its Item, Machine, Project, or Context.
 _Avoid_: session, job, execution, attempt
@@ -70,9 +74,25 @@ _Avoid_: terminal, tab, window
 The kind of instruction prepared for an agent when a Run starts — investigate, implement, review, grill, or a custom prompt.
 _Avoid_: mode, template, preset
 
+**Workflow**:
+The development method a Run follows, either `matt-pocock` or `pstack`. A Context supplies its default, and a Run may override it at launch; the Workflow stays fixed for that Run and determines its available Execution Profiles. It is distinct from an Execution Profile and an Execution Mode.
+_Avoid_: mode
+
+**Initial Prompt**:
+The user's own words for one Run, sent alongside its Execution Profile's instruction. It starts as a copy of the Item's Notes and is edited for that Run only; the Notes are not added to the prompt separately. For a custom prompt it is the whole instruction, so it cannot be blank.
+_Avoid_: custom prompt source, notes
+
 **Implementation Queue**:
 An ordered selection of open Tickets linked to an Item's Spec, arranged by their captured order and blocking relationships. It records the launch configuration, checkout approvals, and the Run attached to its first entry; only one active queue may exist per Item.
 _Avoid_: batch, ticket batch
+
+**Plan Usage**:
+How much of a provider subscription one Agent CLI Configuration Profile has consumed, as that provider reports it: a set of Usage Windows plus the moment the reading was taken. It is read per profile, never per Context or per Run.
+_Avoid_: quota, credits, billing
+
+**Usage Window**:
+One limit a provider meters against — a rolling five-hour window, a weekly window, a per-model weekly window — carrying the percentage used and when it resets. Providers disagree on which windows exist, so the set is whatever the provider reported rather than a fixed list.
+_Avoid_: bucket, limit, period
 
 ### Attention
 

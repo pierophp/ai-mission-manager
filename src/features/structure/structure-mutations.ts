@@ -120,8 +120,12 @@ export const structureActions = {
     () => structureAdapter.setContextImplementDefaults(contextId, defaults),
   setContextDirtyCheckoutCheck: (contextId: number, enabled: boolean) =>
     () => structureAdapter.setContextDirtyCheckoutCheck(contextId, enabled),
-  createItem: (title: string, contextId: number, projectId: number) =>
-    () => structureAdapter.createItem(title, contextId, projectId),
+  createItem: (
+    title: string,
+    contextId: number,
+    projectId: number,
+    notes: string,
+  ) => () => structureAdapter.createItem(title, contextId, projectId, notes),
   prepareReset: () => () => structureAdapter.prepareReset(),
   reset: (confirmation: string) => () => structureAdapter.reset(confirmation),
 };

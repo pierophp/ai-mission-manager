@@ -22,6 +22,7 @@ impl Runtime {
         title: String,
         context_id: i64,
         project_id: i64,
+        notes: String,
     ) -> Result<Item, String> {
         let decision = decide(
             self.state.clone(),
@@ -29,6 +30,7 @@ impl Runtime {
                 title,
                 context_id,
                 project_id,
+                notes,
             },
         )
         .map_err(|error| error.to_string())?;

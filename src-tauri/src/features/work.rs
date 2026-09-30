@@ -36,7 +36,7 @@ use crate::{
         GrillContinuationAction, GrillLanguage, GrillPhase, HomeView, Item, ItemRelation,
         ItemRelationKind, ItemStatus, ItemView, LinkPurpose, Machine, MachineObservation,
         MachineTransport, Project, Repository, RepositoryLocation, Run, RunCheckout, RunPaneStatus,
-        RunPromptSelection, RunState, RunSuggestion, Workspace, WorkspaceRepository,
+        RunPromptSelection, RunState, RunSuggestion, Workflow, Workspace, WorkspaceRepository,
         WorkspaceRepositoryInput, Worktree,
     },
     git::GitCli,
@@ -78,7 +78,9 @@ pub(crate) fn worktree_run_event(
         worktree_id,
         machine_id,
         agent,
+        configuration: None,
         execution_profile,
+        workflow: Workflow::MattPocock,
         prompt,
         working_directory,
         session_name,
@@ -175,10 +177,11 @@ pub(crate) fn create_item(
     title: String,
     context_id: i64,
     project_id: i64,
+    notes: Option<String>,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Item, String> {
     locked(state, |runtime| {
-        runtime.create_item(title, context_id, project_id)
+        runtime.create_item(title, context_id, project_id, notes.unwrap_or_default())
     })
 }
 
@@ -500,15 +503,45 @@ mod workspace;
 #[cfg(test)]
 mod tests;
 
-pub(crate) fn compose_run_prompt(
+pub(crate) async fn compose_run_prompt(
     item_id: i64,
     execution_profile: ExecutionProfile,
     prompt_selection: RunPromptSelection,
-    custom_prompt: Option<String>,
+    language: Option<GrillLanguage>,
+    initial_prompt: Option<String>,
+    workflow: Workflow,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<String, String> {
+    if workflow == Workflow::Pstack {
+        let (domain_state, machine, terminal_runtime) = {
+            let runtime = state.lock().map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+            let item = runtime.state.items.iter().find(|item| item.id == item_id)
+                .ok_or_else(|| format!("Item {item_id} does not exist"))?;
+            let project = runtime.state.projects.iter().find(|project| project.id == item.project_id)
+                .ok_or_else(|| format!("Project {} does not exist", item.project_id))?;
+            let context = runtime.state.contexts.iter().find(|context| context.id == project.context_id)
+                .ok_or_else(|| format!("Context {} does not exist", project.context_id))?;
+            let machine_id = context.execution_machine_id
+                .ok_or_else(|| format!("Context {} has no execution Machine", context.name))?;
+            let machine = runtime.state.machines.iter().find(|machine| machine.id == machine_id)
+                .cloned().ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
+            (runtime.state.clone(), machine, Arc::clone(&runtime.terminal_runtime))
+        };
+        let home = tauri::async_runtime::spawn_blocking(move || terminal_runtime.machine_home(&machine))
+            .await.map_err(|error| format!("Machine home lookup worker failed: {error}"))??;
+        let root = crate::pstack::tree_directory(&home).to_string_lossy().into_owned();
+        return crate::domain::compose_pstack_prompt(
+            &domain_state, item_id, execution_profile, &root, language.unwrap_or_default(), initial_prompt.as_deref(),
+        ).map_err(|error| error.to_string());
+    }
     locked(state, |runtime| {
-        runtime.compose_run_prompt(item_id, execution_profile, prompt_selection, custom_prompt)
+        runtime.compose_run_prompt(
+            item_id,
+            execution_profile,
+            prompt_selection,
+            language,
+            initial_prompt,
+        )
     })
 }
 
@@ -552,6 +585,7 @@ pub(crate) async fn start_direct_run(
     configuration: Option<GrillConfiguration>,
     implementation_queue: Option<crate::domain::ImplementationQueueStart>,
     execution_profile: ExecutionProfile,
+    workflow: Workflow,
     prompt: String,
     prompt_selection: RunPromptSelection,
     expected_checkouts: Vec<RunCheckout>,
@@ -568,6 +602,7 @@ pub(crate) async fn start_direct_run(
         configuration,
         implementation_queue,
         execution_profile,
+        workflow,
         prompt,
         prompt_selection,
         expected_checkouts,
@@ -614,7 +649,9 @@ pub(crate) async fn start_worktree_run(
     workspace_id: i64,
     worktree_id: i64,
     agent: AgentKind,
+    configuration: Option<GrillConfiguration>,
     execution_profile: ExecutionProfile,
+    workflow: Workflow,
     prompt: String,
     prompt_selection: RunPromptSelection,
     state: State<'_, Mutex<Runtime>>,
@@ -624,7 +661,9 @@ pub(crate) async fn start_worktree_run(
         workspace_id,
         worktree_id,
         agent,
+        configuration,
         execution_profile,
+        workflow,
         prompt,
         prompt_selection,
         state.inner(),
@@ -713,6 +752,10 @@ pub(crate) async fn continue_grill(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
     runs::continue_grill_with_state(run_id, action, state.inner()).await
+}
+
+pub(crate) async fn go_plan(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
+    runs::go_plan_with_state(run_id, state.inner()).await
 }
 
 pub(crate) async fn terminal_resize(

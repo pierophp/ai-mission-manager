@@ -27,8 +27,8 @@ impl SqliteStore {
                 } => {
                     transaction.execute(
                         "INSERT INTO contexts
-                            (id, name, execution_machine_id, check_dirty_checkouts, grill_agent, grill_model, grill_effort, implement_agent, implement_model, implement_effort)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                            (id, name, execution_machine_id, check_dirty_checkouts, grill_agent, grill_model, grill_effort, implement_agent, implement_model, implement_effort, default_workflow, pstack_agent, pstack_model, pstack_effort)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
                         params![
                             context.id,
                             context.name,
@@ -40,6 +40,10 @@ impl SqliteStore {
                             agent_kind_as_str(context.implement_defaults.agent),
                             context.implement_defaults.model,
                             context.implement_defaults.effort,
+                            workflow_as_str(context.default_workflow),
+                            agent_kind_as_str(context.pstack_defaults.agent),
+                            context.pstack_defaults.model,
+                            context.pstack_defaults.effort,
                         ],
                     )?;
                     transaction.execute(
@@ -73,10 +77,12 @@ impl SqliteStore {
                              claude_profile_id = ?4, codex_profile_id = ?5,
                              grill_agent = ?6, grill_model = ?7, grill_effort = ?8,
                              implement_agent = ?9, implement_model = ?10, implement_effort = ?11,
-                             gh_executable_path = ?12, twg_executable_path = ?13,
-                             az_executable_path = ?14, atlassian_site = ?15,
-                             azure_devops_organization = ?16, bitbucket_workspace = ?17
-                         WHERE id = ?18",
+                             default_workflow = ?12, pstack_agent = ?13, pstack_model = ?14, pstack_effort = ?15,
+                             gh_executable_path = ?16, twg_executable_path = ?17,
+                             az_executable_path = ?18, atlassian_site = ?19,
+                             azure_devops_organization = ?20, bitbucket_workspace = ?21,
+                             pstack_roles_json = ?22
+                         WHERE id = ?23",
                         params![
                             context.name,
                             context.execution_machine_id,
@@ -89,12 +95,17 @@ impl SqliteStore {
                             agent_kind_as_str(context.implement_defaults.agent),
                             context.implement_defaults.model,
                             context.implement_defaults.effort,
+                            workflow_as_str(context.default_workflow),
+                            agent_kind_as_str(context.pstack_defaults.agent),
+                            context.pstack_defaults.model,
+                            context.pstack_defaults.effort,
                             context.gh_executable_path,
                             context.twg_executable_path,
                             context.az_executable_path,
                             context.atlassian_site,
                             context.azure_devops_organization,
                             context.bitbucket_workspace,
+                            serde_json::to_string(&context.pstack_roles).map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?,
                             context.id,
                         ],
                     )?;
@@ -528,8 +539,9 @@ impl SqliteStore {
                             transcript, grill_question_group_json, grill_answers_json,
                             grill_decisions_json, grill_response, grill_phase, grill_action,
                             last_applied_agent_state_sequence, grill_action_started_at,
-                            cli_configuration_profile_json)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)",
+                            cli_configuration_profile_json, workflow,
+                            reported_pull_requests_json, attention_summary, plan_phase, plan_path)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34)",
                         params![
                             run.id,
                             run.item_id,
@@ -578,6 +590,13 @@ impl SqliteStore {
                                 .map_err(|error| {
                                     rusqlite::Error::ToSqlConversionFailure(Box::new(error))
                                 })?,
+                            workflow_as_str(run.workflow),
+                            serde_json::to_string(&run.reported_pull_requests).map_err(|error| {
+                                rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                            })?,
+                            run.attention_summary,
+                            run.plan_phase.map(plan_phase_as_str),
+                            run.plan_path,
                         ],
                     )?;
                     transaction.execute(
@@ -588,15 +607,30 @@ impl SqliteStore {
                 Effect::PersistRunState { run } => {
                     transaction.execute(
                         "UPDATE runs SET state = ?1, grill_phase = ?2, grill_action = ?3,
-                         last_applied_agent_state_sequence = ?4, grill_action_started_at = ?5
-                         WHERE id = ?6",
+                         last_applied_agent_state_sequence = ?4, grill_action_started_at = ?5,
+                         plan_phase = ?6
+                         WHERE id = ?7",
                         params![
                             run_state_as_str(run.state),
                             run.grill_phase.map(grill_phase_as_str),
                             run.grill_action.map(grill_continuation_action_as_str),
                             run.last_applied_agent_state_sequence,
                             run.grill_action_started_at,
+                            run.plan_phase.map(plan_phase_as_str),
                             run.id
+                        ],
+                    )?;
+                }
+                Effect::PersistRunReports { run } => {
+                    transaction.execute(
+                        "UPDATE runs SET reported_pull_requests_json = ?1, attention_summary = ?2, plan_path = ?3 WHERE id = ?4",
+                        params![
+                            serde_json::to_string(&run.reported_pull_requests).map_err(|error| {
+                                rusqlite::Error::ToSqlConversionFailure(Box::new(error))
+                            })?,
+                            run.attention_summary,
+                            run.plan_path,
+                            run.id,
                         ],
                     )?;
                 }

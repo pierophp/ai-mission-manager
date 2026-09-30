@@ -4,6 +4,7 @@ pub mod domain;
 mod git;
 pub mod persistence;
 mod provider;
+mod pstack;
 mod terminal;
 
 mod app;
@@ -112,6 +113,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app::list_contexts,
             app::list_grill_model_catalog,
+            app::refresh_grill_model_catalog,
+            app::list_plan_usage,
+            app::refresh_plan_usage,
             app::set_context_grill_defaults,
             app::set_context_implement_defaults,
             app::set_context_dirty_checkout_check,
@@ -182,6 +186,7 @@ pub fn run() {
             app::terminal_input,
             app::submit_grill_answers,
             app::continue_grill,
+            app::go_plan,
             app::terminal_resize,
             app::close_terminal,
             app::open_external_terminal,

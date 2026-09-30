@@ -38,7 +38,7 @@ fn runtime_with_grill_run(
         )
         .expect("Repository should register");
     let item = runtime
-        .create_item("Exercise Grill command serialization".into(), 1, 1)
+        .create_item("Exercise Grill command serialization".into(), 1, 1, String::new())
         .expect("Item should be created");
     let workspace = runtime
         .create_workspace(
@@ -270,7 +270,7 @@ fn runtime_for_run_launch(
             .into_owned(),
     });
     let item = runtime
-        .create_item("Exercise gated Run launch".into(), 1, 1)
+        .create_item("Exercise gated Run launch".into(), 1, 1, String::new())
         .expect("Item should be created");
     let workspace = runtime
         .create_workspace(
@@ -321,10 +321,10 @@ fn item_interface_preserves_lifecycle_notes_reminders_relations_and_status() {
     let mut runtime = Runtime::open(&database).expect("runtime should open");
 
     runtime
-        .create_item("Plan the handoff".into(), 1, 1)
+        .create_item("Plan the handoff".into(), 1, 1, String::new())
         .expect("the first Item should be created");
     runtime
-        .create_item("Prepare the release".into(), 1, 1)
+        .create_item("Prepare the release".into(), 1, 1, String::new())
         .expect("the second Item should be created");
     runtime
         .update_item(
@@ -375,7 +375,7 @@ fn attention_interface_preserves_policy_watch_and_review_watermark() {
     let database = directory.path().join("mission-manager.sqlite");
     let mut runtime = Runtime::open(&database).expect("runtime should open");
     runtime
-        .create_item("Review provider change".into(), 1, 1)
+        .create_item("Review provider change".into(), 1, 1, String::new())
         .expect("the Item should be created");
 
     let link_decision = decide(
@@ -472,7 +472,7 @@ fn link_purpose_setting_persists_and_round_trips_through_runtime() {
     let database = directory.path().join("mission-manager.sqlite");
     let mut runtime = Runtime::open(&database).expect("runtime should open");
     runtime
-        .create_item("Capture a Spec link".into(), 1, 1)
+        .create_item("Capture a Spec link".into(), 1, 1, String::new())
         .expect("the Item should be created");
 
     let link = decide(
@@ -533,6 +533,7 @@ fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
         agent: crate::domain::AgentKind::Claude,
         cli_configuration_profile: None,
         execution_profile: crate::domain::ExecutionProfile::Implement,
+        workflow: crate::domain::Workflow::MattPocock,
         model: None,
         effort: None,
         skill_snapshot: None,
@@ -549,6 +550,8 @@ fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
         worktree_id: None,
         direct_checkouts: Vec::new(),
         transcript: String::new(),
+        reported_pull_requests: Vec::new(),
+        attention_summary: None,
         grill_question_group: None,
         grill_answers: Vec::new(),
         grill_decisions: Vec::new(),
@@ -556,6 +559,8 @@ fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
         grill_phase: None,
         grill_action: None,
         grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
     });
 
     let legacy_file = directory.path().join("agent-state/run-7.json");
@@ -684,7 +689,7 @@ fn workspace_interface_keeps_repository_selection_and_worktree_identity() {
         )
         .expect("Repository should be created");
     runtime
-        .create_item("Prepare reusable work".into(), 1, 1)
+        .create_item("Prepare reusable work".into(), 1, 1, String::new())
         .expect("Item should be created");
 
     let workspace = runtime
@@ -744,7 +749,7 @@ fn startup_preserves_workspace_branches_and_defaults_new_repositories() {
         )
         .expect("first Repository should register");
     runtime
-        .create_item("Preserve selected branches".into(), 1, 1)
+        .create_item("Preserve selected branches".into(), 1, 1, String::new())
         .expect("Item should be created");
     let workspace = runtime
         .create_workspace(
@@ -837,7 +842,7 @@ fn direct_run_preview_inspects_checkouts_before_returning_the_existing_contract(
         )
         .expect("Repository should be registered");
     runtime
-        .create_item("Inspect service".into(), 1, 1)
+        .create_item("Inspect service".into(), 1, 1, String::new())
         .expect("Item should be created");
     let workspace = runtime
         .create_workspace(
@@ -918,11 +923,12 @@ fn a_failed_run_preflight_never_calls_the_agent_launcher() {
             workspace.id,
             worktree.id,
             AgentKind::Claude,
+            None,
             ExecutionProfile::Implement,
+            crate::domain::Workflow::MattPocock,
             "Implement the change".into(),
             RunPromptSelection {
                 include_objective: true,
-                include_notes: false,
                 external_object_ids: Vec::new(),
             },
             &state,
@@ -947,6 +953,45 @@ fn a_failed_run_preflight_never_calls_the_agent_launcher() {
             .iter()
             .any(|command| matches!(command, FakeTerminalCommand::LaunchAgent { .. })));
     }
+}
+
+#[test]
+fn a_failed_pstack_tree_write_aborts_before_creating_or_releasing_a_pane() {
+    use crate::{
+        domain::{AgentKind, ExecutionProfile, RunPromptSelection, Workflow},
+        terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime},
+    };
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let checkout = directory.path().join("checkout");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+    fake.fail_pstack_provisioning(1, "fake pstack tree write failed");
+    let commands = fake.command_log();
+    let (runtime, item, workspace, _, worktree) = runtime_for_run_launch(
+        &directory.path().join("mission-manager.sqlite"),
+        &checkout,
+        fake,
+    );
+    let state = Mutex::new(runtime);
+
+    let error = tauri::async_runtime::block_on(runs::start_worktree_run_with_state(
+        item.id,
+        workspace.id,
+        worktree.id,
+        AgentKind::Claude,
+        None,
+        ExecutionProfile::Autonomous,
+        Workflow::Pstack,
+        "Fix the launch gate".into(),
+        RunPromptSelection { include_objective: true, external_object_ids: vec![] },
+        &state,
+    )).expect_err("failed tree write must reject launch");
+    assert!(error.contains("fake pstack tree write failed"));
+    let logged = commands.lock().expect("fake command log remains available").clone();
+    assert!(logged.iter().any(|command| matches!(command, FakeTerminalCommand::ProvisionPstackTree { machine_id: 1 })));
+    assert!(!logged.iter().any(|command| matches!(command, FakeTerminalCommand::LaunchAgent { .. })));
+    assert!(!logged.iter().any(|command| matches!(command, FakeTerminalCommand::ReleaseAgentLaunch { .. })));
+    assert!(state.lock().expect("runtime remains available").state.runs.is_empty());
 }
 
 #[test]
@@ -984,11 +1029,12 @@ fn selected_profile_for_the_wrong_provider_blocks_before_preflight() {
         workspace.id,
         worktree.id,
         AgentKind::Claude,
+        None,
         ExecutionProfile::Implement,
+        crate::domain::Workflow::MattPocock,
         "Implement the change".into(),
         RunPromptSelection {
             include_objective: true,
-            include_notes: false,
             external_object_ids: Vec::new(),
         },
         &state,
@@ -1036,11 +1082,12 @@ fn worktree_run_rejects_a_checkout_without_a_registered_remote() {
         workspace.id,
         worktree.id,
         AgentKind::Claude,
+        None,
         ExecutionProfile::Implement,
+        crate::domain::Workflow::MattPocock,
         "Implement the change".into(),
         RunPromptSelection {
             include_objective: true,
-            include_notes: false,
             external_object_ids: Vec::new(),
         },
         &state,
@@ -1124,7 +1171,6 @@ fn direct_grill_and_worktree_runs_are_persisted_before_their_gate_is_released() 
                 tauri::async_runtime::block_on(async move {
                     let selection = RunPromptSelection {
                         include_objective: true,
-                        include_notes: false,
                         external_object_ids: Vec::new(),
                     };
                     match flow {
@@ -1168,7 +1214,9 @@ fn direct_grill_and_worktree_runs_are_persisted_before_their_gate_is_released() 
                                 workspace.id,
                                 worktree.id,
                                 agent,
+                                None,
                                 ExecutionProfile::Implement,
+                                crate::domain::Workflow::MattPocock,
                                 "Implement the change".into(),
                                 selection,
                                 &worker_state,
@@ -1303,7 +1351,6 @@ fn first_and_advancing_queue_launches_deliver_the_local_implement_prompt() {
 
     let selection = RunPromptSelection {
         include_objective: true,
-        include_notes: false,
         external_object_ids: Vec::new(),
     };
     let checkouts = vec![RunCheckout {
@@ -1353,6 +1400,7 @@ fn first_and_advancing_queue_launches_deliver_the_local_implement_prompt() {
         Some(configuration),
         Some(queue),
         ExecutionProfile::Implement,
+        crate::domain::Workflow::MattPocock,
         "ignored queue seed prompt".into(),
         selection,
         checkouts,
@@ -1421,7 +1469,6 @@ fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
 
     let selection = RunPromptSelection {
         include_objective: true,
-        include_notes: false,
         external_object_ids: Vec::new(),
     };
     let edited_grill_prompt = "Edited composed Grill prompt\nUse the revised assumptions.";
@@ -1494,7 +1541,9 @@ fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
                         workspace.id,
                         worktree.id,
                         AgentKind::Claude,
+                        None,
                         ExecutionProfile::Implement,
+                        crate::domain::Workflow::MattPocock,
                         "Implement the change".into(),
                         selection.clone(),
                         &state,
@@ -1568,7 +1617,6 @@ fn failed_run_commit_kills_only_its_gated_session_without_release() {
         "Implement the change".into(),
         RunPromptSelection {
             include_objective: true,
-            include_notes: false,
             external_object_ids: Vec::new(),
         },
         vec![RunCheckout {
@@ -1626,7 +1674,6 @@ fn release_failure_keeps_recorded_run_unknown_and_reports_that_it_was_not_releas
         "Implement the change".into(),
         RunPromptSelection {
             include_objective: true,
-            include_notes: false,
             external_object_ids: Vec::new(),
         },
         vec![RunCheckout {
@@ -1775,7 +1822,7 @@ fn run_suggestion_tmux_inspection_does_not_hold_the_runtime_lock() {
     state
         .lock()
         .expect("Runtime should remain lockable while tmux is blocked")
-        .create_item("Local state change during tmux inspection".into(), 1, 1)
+        .create_item("Local state change during tmux inspection".into(), 1, 1, String::new())
         .expect("local state change should complete during tmux inspection");
     blocked_observation.release();
 

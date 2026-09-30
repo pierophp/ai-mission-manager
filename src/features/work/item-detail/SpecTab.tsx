@@ -107,7 +107,7 @@ function SpecDocument({
   const number = spec.snapshot?.metadata.find((entry) => entry.key === "number")?.value;
   const [selected, setSelected] = useState<string[]>([]);
   const [launchOpen, setLaunchOpen] = useState(false);
-  const [configuration, setConfiguration] = useState<GrillConfiguration>({ agent: "claude", model: "claude-sonnet-4-5", effort: "high" });
+  const [configuration, setConfiguration] = useState<GrillConfiguration>({ agent: "claude", model: "claude-sonnet-5", effort: "high" });
   const [preview, setPreview] = useState<DirectRunPreview>();
   const [workspaceId, setWorkspaceId] = useState(view.workspaces[0]?.id);
   const [repositoryId, setRepositoryId] = useState<number>();
@@ -212,8 +212,9 @@ function SpecDocument({
       configuration,
       implementationQueue: start,
       executionProfile: "implement",
+      workflow: "matt-pocock",
       prompt: "Implementation Queue",
-      promptSelection: { includeObjective: true, includeNotes: false, externalObjectIds: [] },
+      promptSelection: { includeObjective: true, externalObjectIds: [] },
       expectedCheckouts: preview.checkouts,
       allowDirty: preview.dirtyRepositoryIds.length > 0 && dirtyConsent,
       allowSharedCheckouts: preview.sharedPaths.length > 0 && sharedConsent,

@@ -1,44 +1,26 @@
 import {
   type Dispatch,
-  type FormEvent,
   type SetStateAction,
   useEffect,
   useRef,
   useState,
 } from "react";
 import { cn } from "cn";
-import {
-  Alert,
-  AlertDescription,
-  AlertTitle,
-} from "../../../components/ui/alert";
-import { Badge } from "../../../components/ui/badge";
 import { Button } from "../../../components/ui/button";
 import { Card, CardContent } from "../../../components/ui/card";
-import { Checkbox } from "../../../components/ui/checkbox";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "../../../components/ui/native-select";
 import { Spinner } from "../../../components/ui/spinner";
-import { Textarea } from "../../../components/ui/textarea";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
 import { errorMessage } from "../../../runtime/errors";
 import type { GrillContinuationAction } from "../../../runtime/execution-types";
 import type { PaneTab } from "../../../runtime/terminal-types";
 import type {
-  AgentKind,
   Context,
-  DirectRunPreview,
-  ExecutionProfile,
   GrillAgentCatalog,
   GrillAnswer,
-  GrillConfiguration,
-  GrillLanguage,
   ItemView,
   Machine,
   Repository,
   Run,
-  Workspace,
 } from "../../../runtime/types";
 import { GrillQuestionFlow } from "../grill-questions";
 import {
@@ -53,6 +35,7 @@ import {
 import type { ItemCommands } from "../use-item-commands";
 import { workActions } from "../work-mutations";
 import { grillPhaseLabel, paneTabForRun, repositoryName } from "../work-utils";
+import { RunLaunchForm } from "./RunLaunchForm";
 import { itemExecution, useFormIntent } from "./shared";
 
 /** Unsent Grill answers, keyed by question round, kept across Item switches. */
@@ -85,8 +68,8 @@ export function RunsTab({
   onOpenTerminal: (runId: number, pane: PaneTab) => void;
   focusedRunRequest?: { runId: number; request: number };
 }) {
-  const { isSaving, saveItem, whileSaving, confirm, workCommand } = commands;
-  const { itemRepositories, itemContext, executionMachine } = itemExecution(
+  const { isSaving, saveItem, confirm } = commands;
+  const { itemContext } = itemExecution(
     view,
     repositories,
     contexts,
@@ -104,58 +87,9 @@ export function RunsTab({
     runCard?.focus({ preventScroll: true });
   }, [focusedRunRequest]);
 
-  // Direct Run form
-  const [runAgent, setRunAgent] = useState<AgentKind>("claude");
-  const [runModel, setRunModel] = useState("claude-sonnet-4-5");
-  const [runEffort, setRunEffort] = useState("high");
-  const [runProfile, setRunProfile] = useState<ExecutionProfile>("grill");
-  const [includeRunNotes, setIncludeRunNotes] = useState(false);
-  const [runCustomPrompt, setRunCustomPrompt] = useState("");
-  const [runPrompt, setRunPrompt] = useState("");
-  const [runPromptNeedsCompose, setRunPromptNeedsCompose] = useState(false);
-  const runPromptDrafts = useRef<
-    Partial<
-      Record<
-        Exclude<ExecutionProfile, "grill">,
-        { prompt: string; needsCompose: boolean }
-      >
-    >
-  >({});
-  const [directRunWorkspaceId, setDirectRunWorkspaceId] = useState<number>();
-  const [directRunRepositoryId, setDirectRunRepositoryId] = useState<number>();
-  const [directRunPreview, setDirectRunPreview] = useState<DirectRunPreview>();
-  const [directRunDirtyConfirmed, setDirectRunDirtyConfirmed] = useState(false);
-  const [directRunSharedConfirmed, setDirectRunSharedConfirmed] =
-    useState(false);
-
-  // Grill Run form
-  const [grillRunWorkspaceId, setGrillRunWorkspaceId] = useState<number>();
-  const [grillRunRepositoryId, setGrillRunRepositoryId] = useState<number>();
-  const [grillRunPreview, setGrillRunPreview] = useState<DirectRunPreview>();
-  const [grillRunPreviewError, setGrillRunPreviewError] = useState<string>();
-  const [grillAgent, setGrillAgent] =
-    useState<GrillConfiguration["agent"]>("claude");
-  const [grillLanguage, setGrillLanguage] =
-    useState<GrillLanguage>("portuguese");
-  const [grillModel, setGrillModel] = useState("claude-sonnet-4-5");
-  const [grillEffort, setGrillEffort] = useState("high");
-  const [grillInitialPrompt, setGrillInitialPrompt] = useState("");
-  const [grillPromptPreview, setGrillPromptPreview] = useState("");
-  const [lastComposedGrillPrompt, setLastComposedGrillPrompt] = useState("");
-  const [grillPromptNeedsCompose, setGrillPromptNeedsCompose] = useState(true);
-  const [grillDirtyConfirmed, setGrillDirtyConfirmed] = useState(false);
-  const [grillSharedConfirmed, setGrillSharedConfirmed] = useState(false);
-
   const runsNewestFirst = [...view.runs].sort(
     (left, right) => right.started_at - left.started_at || right.id - left.id,
   );
-  const selectedGrillCatalog = grillModelCatalog.find(
-    (catalog) => catalog.agent === grillAgent,
-  );
-  const selectedGrillModel = selectedGrillCatalog?.models.find(
-    (model) => model.id === grillModel,
-  );
-
   function openRunForm(form: ItemForm) {
     if (form === "run") openRun();
   }
@@ -164,143 +98,10 @@ export function RunsTab({
 
   function closeRunForm() {
     setRunForm(undefined);
-    setDirectRunWorkspaceId(undefined);
-    setDirectRunPreview(undefined);
-    setRunPrompt("");
-    setRunPromptNeedsCompose(false);
-    runPromptDrafts.current = {};
-    setGrillRunWorkspaceId(undefined);
-    setGrillRunPreview(undefined);
-    setGrillRunPreviewError(undefined);
-    setGrillPromptPreview("");
-    setLastComposedGrillPrompt("");
-    setGrillPromptNeedsCompose(true);
   }
 
   function openRun() {
-    openGrillStart();
-  }
-
-  function openGrillStart() {
-    const defaults = itemContext?.grill_defaults;
-    const executionWorkspaceId = view.workspaces[0]?.id;
     setRunForm("run");
-    setRunProfile("grill");
-    setRunCustomPrompt("");
-    setGrillAgent(defaults?.agent ?? "claude");
-    setGrillLanguage("portuguese");
-    setGrillModel(defaults?.model ?? "claude-sonnet-4-5");
-    setGrillEffort(defaults?.effort ?? "high");
-    setGrillInitialPrompt("");
-    setGrillPromptPreview("");
-    setLastComposedGrillPrompt("");
-    setGrillPromptNeedsCompose(true);
-    void refreshGrillRunPreview(executionWorkspaceId);
-  }
-
-  async function refreshGrillRunPreview(workspaceId: number | undefined) {
-    setGrillRunWorkspaceId(workspaceId);
-    setGrillRunRepositoryId(undefined);
-    setGrillRunPreview(undefined);
-    setGrillRunPreviewError(undefined);
-    setGrillDirtyConfirmed(false);
-    setGrillSharedConfirmed(false);
-    if (!workspaceId) return;
-
-    await whileSaving(async () => {
-      try {
-        const preview = await workCommand.execute(
-          workActions.prepareGrillRun(view.item.id, workspaceId, null),
-          false,
-        );
-        setGrillRunPreview(preview);
-        setGrillRunRepositoryId(
-          preview.checkoutDetails.length === 1
-            ? preview.checkoutDetails[0].repositoryId
-            : undefined,
-        );
-      } catch (previewError) {
-        const message = errorMessage(previewError);
-        setGrillRunPreviewError(message);
-        window.alert(message);
-      }
-    });
-  }
-
-  async function composeGrillPromptPreview() {
-    if (!grillInitialPrompt.trim() || !selectedGrillModel) return;
-    await whileSaving(async () => {
-      try {
-        const prompt = await workCommand.execute(
-          workActions.composeGrillPrompt(
-            view.item.id,
-            { agent: grillAgent, model: grillModel, effort: grillEffort },
-            grillLanguage,
-            grillInitialPrompt,
-          ),
-          false,
-        );
-        setGrillPromptPreview(prompt);
-        setLastComposedGrillPrompt(prompt);
-        setGrillPromptNeedsCompose(false);
-      } catch (composeError) {
-        window.alert(errorMessage(composeError));
-      }
-    });
-  }
-
-  function handleComposeGrillPromptPreview() {
-    if (grillPromptPreview !== lastComposedGrillPrompt) {
-      confirm({
-        title: "Replace your edited Grill prompt?",
-        description: "Composing again will replace the full prompt you edited.",
-        confirmLabel: "Replace prompt",
-        onConfirm: () => void composeGrillPromptPreview(),
-      });
-      return;
-    }
-    void composeGrillPromptPreview();
-  }
-
-  async function handleStartGrillRun(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (
-      !grillRunWorkspaceId ||
-      !grillRunPreview ||
-      !grillRunRepositoryId ||
-      !selectedGrillModel ||
-      !grillInitialPrompt.trim() ||
-      !grillPromptPreview.trim() ||
-      grillPromptNeedsCompose
-    ) {
-      return;
-    }
-    const dirtyConfirmed =
-      grillRunPreview.dirtyRepositoryIds.length === 0 || grillDirtyConfirmed;
-    const sharedConfirmed =
-      grillRunPreview.sharedPaths.length === 0 || grillSharedConfirmed;
-    if (!dirtyConfirmed || !sharedConfirmed) return;
-
-    const started = await saveItem(
-      workActions.startGrillRun({
-        itemId: view.item.id,
-        workspaceId: grillRunWorkspaceId,
-        primaryRepositoryId: grillRunRepositoryId,
-        machineId: null,
-        language: grillLanguage,
-        configuration: {
-          agent: grillAgent,
-          model: grillModel,
-          effort: grillEffort,
-        },
-        prompt: grillPromptPreview,
-        expectedCheckouts: grillRunPreview.checkouts,
-        allowDirty: grillRunPreview.dirtyRepositoryIds.length > 0,
-        allowSharedCheckouts: grillRunPreview.sharedPaths.length > 0,
-      }),
-    );
-    // The new Run appears in the list below and shows its questions there.
-    if (started) closeRunForm();
   }
 
   async function handleSubmitGrillAnswers(
@@ -331,141 +132,8 @@ export function RunsTab({
     await saveItem(workActions.continueGrill(run.id, action));
   }
 
-  function runPromptSelection() {
-    return {
-      includeObjective: true,
-      includeNotes: includeRunNotes,
-      externalObjectIds: [],
-    };
-  }
-
-  function selectRunProfile(profile: ExecutionProfile) {
-    if (runProfile !== "grill") {
-      runPromptDrafts.current[runProfile] = {
-        prompt: runPrompt,
-        needsCompose: runPromptNeedsCompose,
-      };
-    }
-    setRunProfile(profile);
-    if (profile !== "grill") {
-      const draft = runPromptDrafts.current[profile];
-      setRunPrompt(draft?.prompt ?? "");
-      setRunPromptNeedsCompose(draft?.needsCompose ?? true);
-      const workspace = view.workspaces[0];
-      if (!directRunPreview && workspace) {
-        void openDirectRunPreview(workspace, profile);
-      }
-    }
-  }
-
-  async function composeRunPromptPreview(
-    profile: Exclude<ExecutionProfile, "grill"> = runProfile === "grill"
-      ? "implement"
-      : runProfile,
-  ) {
-    if (!directRunWorkspaceId) return;
-    await whileSaving(async () => {
-      try {
-        const prompt = await workCommand.execute(
-          workActions.composeRunPrompt(
-            view.item.id,
-            profile,
-            runPromptSelection(),
-            profile === "custom" ? runCustomPrompt : null,
-          ),
-          false,
-        );
-        setRunPrompt(prompt);
-        setRunPromptNeedsCompose(false);
-        runPromptDrafts.current[profile] = { prompt, needsCompose: false };
-      } catch (composeError) {
-        window.alert(errorMessage(composeError));
-      }
-    });
-  }
-
-  async function openDirectRunPreview(
-    workspace: Workspace,
-    profile: Exclude<ExecutionProfile, "grill"> = "implement",
-  ) {
-    const defaults = itemContext?.implement_defaults;
-    setRunAgent(defaults?.agent ?? "claude");
-    setRunModel(defaults?.model ?? "claude-sonnet-4-5");
-    setRunEffort(defaults?.effort ?? "high");
-    const includeNotes = Boolean(view.item.notes.trim());
-    setDirectRunWorkspaceId(workspace.id);
-    setDirectRunRepositoryId(undefined);
-    setDirectRunPreview(undefined);
-    setDirectRunDirtyConfirmed(false);
-    setDirectRunSharedConfirmed(false);
-    setIncludeRunNotes(includeNotes);
-    setRunCustomPrompt("");
-    await whileSaving(async () => {
-      try {
-        const [prompt, preview] = await Promise.all([
-          workCommand.execute(
-            workActions.composeRunPrompt(
-              view.item.id,
-              profile,
-              { includeObjective: true, includeNotes, externalObjectIds: [] },
-              profile === "custom" ? runCustomPrompt : null,
-            ),
-            false,
-          ),
-          workCommand.execute(
-            workActions.prepareDirectRun(view.item.id, workspace.id, null),
-            false,
-          ),
-        ]);
-        setRunPrompt(prompt);
-        setRunPromptNeedsCompose(false);
-        runPromptDrafts.current[profile] = { prompt, needsCompose: false };
-        setDirectRunPreview(preview);
-      } catch (previewError) {
-        closeRunForm();
-        window.alert(errorMessage(previewError));
-      }
-    });
-  }
-
-  async function handleStartDirectRun(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (
-      !directRunWorkspaceId ||
-      !directRunPreview ||
-      !directRunRepositoryId ||
-      !runPrompt.trim() ||
-      runPromptNeedsCompose
-    ) {
-      return;
-    }
-    const dirtyConfirmed =
-      directRunPreview.dirtyRepositoryIds.length === 0 ||
-      directRunDirtyConfirmed;
-    const sharedConfirmed =
-      directRunPreview.sharedPaths.length === 0 || directRunSharedConfirmed;
-    if (!dirtyConfirmed || !sharedConfirmed) return;
-
-    const started = await saveItem(
-      workActions.startDirectRun({
-        itemId: view.item.id,
-        workspaceId: directRunWorkspaceId,
-        primaryRepositoryId: directRunRepositoryId,
-        machineId: null,
-        agent: runAgent,
-        configuration:
-          runProfile === "implement"
-            ? { agent: runAgent, model: runModel, effort: runEffort }
-            : undefined,
-        executionProfile: runProfile,
-        prompt: runPrompt,
-        promptSelection: runPromptSelection(),
-        expectedCheckouts: directRunPreview.checkouts,
-        allowDirty: directRunPreview.dirtyRepositoryIds.length > 0,
-        allowSharedCheckouts: directRunPreview.sharedPaths.length > 0,
-      }),
-    );
-    if (started) closeRunForm();
+  async function handleGoPlan(run: Run) {
+    await saveItem(workActions.goPlan(run.id));
   }
 
   function handleStopRun(run: Run) {
@@ -498,592 +166,17 @@ export function RunsTab({
     });
   }
 
-  if (runForm === "run" && runProfile === "grill") {
+  const launchWorkspace = view.workspaces[0];
+  if (runForm === "run" && launchWorkspace) {
     return (
-      <form
-        className="grid gap-4 rounded-lg border border-primary/30 bg-primary/5 p-4"
-        onSubmit={(event) => void handleStartGrillRun(event)}
-      >
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h4 className="m-0 text-base font-medium">Start Run</h4>
-            <p className="mt-1 text-sm text-muted-foreground">
-              The Run uses this Item’s Context defaults unless you override them
-              here.
-            </p>
-          </div>
-          {grillRunPreview && (
-            <Badge variant="outline">
-              Machine: {grillRunPreview.machineName}
-            </Badge>
-          )}
-        </div>
-        <label className="grid gap-1.5 text-sm font-medium">
-          <span>Execution Profile</span>
-          <NativeSelect
-            value={runProfile}
-            onChange={(event) =>
-              selectRunProfile(event.target.value as ExecutionProfile)
-            }
-            disabled={isSaving}
-          >
-            <NativeSelectOption value="investigate">
-              Investigate
-            </NativeSelectOption>
-            <NativeSelectOption value="implement">Implement</NativeSelectOption>
-            <NativeSelectOption value="review">Review</NativeSelectOption>
-            <NativeSelectOption value="custom">
-              Custom prompt
-            </NativeSelectOption>
-            <NativeSelectOption value="grill">Grill</NativeSelectOption>
-          </NativeSelect>
-        </label>
-        {itemRepositories.length === 0 && (
-          <Alert variant="destructive">
-            <AlertTitle>Project Repository required</AlertTitle>
-            <AlertDescription>
-              Register a Repository in this Project&apos;s settings before
-              starting a Grill Run.
-            </AlertDescription>
-          </Alert>
-        )}
-        <div className="grid gap-3 md:grid-cols-2">
-          <div className="grid gap-1.5 text-sm">
-            <span className="font-medium">Project Repositories</span>
-            <span className="text-muted-foreground">
-              All configured Repositories are included.
-            </span>
-            <div className="flex flex-wrap gap-1.5">
-              {itemRepositories.map((repository) => (
-                <Badge variant="secondary" key={repository.id}>
-                  {repository.name}
-                </Badge>
-              ))}
-            </div>
-          </div>
-          <div className="grid gap-1.5 text-sm">
-            <span className="font-medium">Context execution Machine</span>
-            <span className="text-muted-foreground">
-              {executionMachine
-                ? `${executionMachine.name} · ${executionMachine.last_observed}`
-                : "Not configured"}
-            </span>
-          </div>
-        </div>
-        {grillRunPreviewError && (
-          <Alert variant="destructive">
-            <AlertTitle>Could not prepare the Grill checkout</AlertTitle>
-            <AlertDescription>
-              <p>{grillRunPreviewError}</p>
-              <p>
-                Register this Repository&apos;s checkout for the Context
-                execution Machine under Settings, then reopen the Grill Run.
-              </p>
-            </AlertDescription>
-          </Alert>
-        )}
-        {grillRunPreview && (
-          <>
-            <label className="grid gap-1.5 text-sm font-medium">
-              <span>Primary Repository / checkout root</span>
-              <NativeSelect
-                value={grillRunRepositoryId ?? ""}
-                onChange={(event) =>
-                  setGrillRunRepositoryId(
-                    Number(event.target.value) || undefined,
-                  )
-                }
-                disabled={isSaving}
-              >
-                <NativeSelectOption value="">
-                  Choose the primary checkout
-                </NativeSelectOption>
-                {grillRunPreview.checkoutDetails.map((checkout) => (
-                  <NativeSelectOption
-                    value={checkout.repositoryId}
-                    key={checkout.repositoryId}
-                  >
-                    {checkout.repositoryName} · {checkout.path}
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
-            </label>
-            <CheckoutList preview={grillRunPreview} />
-            {grillRunPreview.dirtyRepositoryIds.length > 0 && (
-              <Alert>
-                <AlertTitle>Checkout has local changes</AlertTitle>
-                <AlertDescription>
-                  Review the checkout before allowing the Grill to use it.
-                  <label className="mt-2 flex items-center gap-2 font-normal">
-                    <Checkbox
-                      checked={grillDirtyConfirmed}
-                      onCheckedChange={(checked) =>
-                        setGrillDirtyConfirmed(checked === true)
-                      }
-                      disabled={isSaving}
-                    />
-                    I understand and want to use the dirty checkout.
-                  </label>
-                </AlertDescription>
-              </Alert>
-            )}
-            {grillRunPreview.sharedPaths.length > 0 && (
-              <Alert variant="destructive">
-                <AlertTitle>Checkout is shared with an active Run</AlertTitle>
-                <AlertDescription>
-                  {grillRunPreview.sharedRuns.map((shared) => (
-                    <div key={`${shared.runId}-${shared.path}`}>
-                      Run #{shared.runId} · {shared.path}
-                    </div>
-                  ))}
-                  <label className="mt-2 flex items-center gap-2 font-normal">
-                    <Checkbox
-                      checked={grillSharedConfirmed}
-                      onCheckedChange={(checked) =>
-                        setGrillSharedConfirmed(checked === true)
-                      }
-                      disabled={isSaving}
-                    />
-                    I understand and want to share this checkout.
-                  </label>
-                </AlertDescription>
-              </Alert>
-            )}
-          </>
-        )}
-        <div className="grid gap-3 md:grid-cols-3">
-          <label className="grid gap-1.5 text-sm font-medium">
-            <span>Agent</span>
-            <NativeSelect
-              value={grillAgent}
-              onChange={(event) => {
-                const nextAgent = event.target
-                  .value as GrillConfiguration["agent"];
-                const nextCatalog = grillModelCatalog.find(
-                  (catalog) => catalog.agent === nextAgent,
-                );
-                const nextModel = nextCatalog?.models[0];
-                setGrillAgent(nextAgent);
-                setGrillModel(nextModel?.id ?? "");
-                setGrillEffort(nextModel?.efforts[0]?.id ?? "");
-                setGrillPromptNeedsCompose(true);
-              }}
-              disabled={isSaving || grillModelCatalog.length === 0}
-            >
-              {grillModelCatalog.map((catalog) => (
-                <NativeSelectOption value={catalog.agent} key={catalog.agent}>
-                  {catalog.agent === "claude" ? "Claude Code" : "Codex"}
-                </NativeSelectOption>
-              ))}
-            </NativeSelect>
-          </label>
-          <label className="grid gap-1.5 text-sm font-medium">
-            <span>Model</span>
-            <NativeSelect
-              value={grillModel}
-              onChange={(event) => {
-                const nextModel = selectedGrillCatalog?.models.find(
-                  (model) => model.id === event.target.value,
-                );
-                setGrillModel(event.target.value);
-                setGrillEffort(nextModel?.efforts[0]?.id ?? "");
-                setGrillPromptNeedsCompose(true);
-              }}
-              disabled={isSaving || !selectedGrillCatalog}
-            >
-              {selectedGrillCatalog?.models.map((model) => (
-                <NativeSelectOption value={model.id} key={model.id}>
-                  {model.label} ({model.id})
-                </NativeSelectOption>
-              ))}
-            </NativeSelect>
-          </label>
-          <label className="grid gap-1.5 text-sm font-medium">
-            <span>Effort</span>
-            <NativeSelect
-              value={grillEffort}
-              onChange={(event) => {
-                setGrillEffort(event.target.value);
-                setGrillPromptNeedsCompose(true);
-              }}
-              disabled={isSaving || !selectedGrillModel}
-            >
-              {selectedGrillModel?.efforts.map((effort) => (
-                <NativeSelectOption value={effort.id} key={effort.id}>
-                  {effort.label} ({effort.id})
-                </NativeSelectOption>
-              ))}
-            </NativeSelect>
-          </label>
-        </div>
-        <fieldset className="grid gap-2 text-sm font-medium" disabled={isSaving}>
-          <legend>Response language</legend>
-          <div className="inline-flex w-fit rounded-md border p-1">
-            {([
-              ["portuguese", "Português"],
-              ["english", "English"],
-            ] as const).map(([language, label]) => (
-              <label
-                className={cn(
-                  "cursor-pointer rounded px-3 py-1.5 text-sm transition-colors",
-                  grillLanguage === language
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:bg-muted hover:text-foreground",
-                )}
-                key={language}
-              >
-                <input
-                  checked={grillLanguage === language}
-                  className="peer sr-only"
-                  name="grill-response-language"
-                  onChange={() => {
-                    setGrillLanguage(language);
-                    setGrillPromptNeedsCompose(true);
-                  }}
-                  type="radio"
-                  value={language}
-                />
-                <span className="peer-focus-visible:outline peer-focus-visible:outline-2 peer-focus-visible:outline-ring">
-                  {label}
-                </span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
-        <label className="grid gap-1.5 text-sm font-medium">
-          <span>Initial prompt</span>
-          <Textarea
-            autoFocus
-            value={grillInitialPrompt}
-            onChange={(event) => {
-              setGrillInitialPrompt(event.target.value);
-              setGrillPromptNeedsCompose(true);
-            }}
-            rows={3}
-            placeholder="What decision, assumption, or plan should the Grill stress-test?"
-            disabled={isSaving}
-          />
-        </label>
-        {grillPromptPreview && (
-          <label className="grid gap-1.5 text-sm font-medium">
-            <span>Editable composed prompt</span>
-            <Textarea
-              value={grillPromptPreview}
-              onChange={(event) => setGrillPromptPreview(event.target.value)}
-              rows={8}
-              disabled={isSaving}
-            />
-          </label>
-        )}
-        <div className="flex flex-wrap gap-2">
-          <Button
-            type="button"
-            size="sm"
-            variant="outline"
-            disabled={
-              isSaving || !grillInitialPrompt.trim() || !selectedGrillModel
-            }
-            onClick={handleComposeGrillPromptPreview}
-          >
-            Preview composed prompt
-          </Button>
-          <Button
-            type="submit"
-            disabled={
-              isSaving ||
-              !grillRunPreview ||
-              !grillRunRepositoryId ||
-              !grillInitialPrompt.trim() ||
-              !grillPromptPreview.trim() ||
-              grillPromptNeedsCompose ||
-              !selectedGrillModel ||
-              ((grillRunPreview?.dirtyRepositoryIds.length ?? 0) > 0 &&
-                !grillDirtyConfirmed) ||
-              ((grillRunPreview?.sharedPaths.length ?? 0) > 0 &&
-                !grillSharedConfirmed)
-            }
-          >
-            {isSaving ? "Starting…" : "Start Run"}
-          </Button>
-          <Button
-            type="button"
-            size="sm"
-            variant="ghost"
-            disabled={isSaving}
-            onClick={closeRunForm}
-          >
-            Cancel
-          </Button>
-        </div>
-      </form>
-    );
-  }
-
-  if (runForm === "run" && runProfile !== "grill") {
-    return (
-      <div className="grid gap-4 rounded-lg border border-primary/30 bg-primary/5 p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h4 className="m-0 text-base font-medium">Start Run</h4>
-            <p className="mt-1 text-sm text-muted-foreground">
-              This Run will use{" "}
-              {executionMachine?.name ?? "the Context execution Machine"}{" "}
-              configured for {view.context_name}.
-            </p>
-          </div>
-          {directRunPreview && (
-            <Badge variant="outline">
-              Machine: {directRunPreview.machineName}
-            </Badge>
-          )}
-        </div>
-        {directRunPreview ? (
-          <form
-            className="grid gap-4"
-            onSubmit={(event) => void handleStartDirectRun(event)}
-          >
-            <CheckoutList preview={directRunPreview} />
-            <label className="grid gap-1.5 text-sm font-medium">
-              <span>Primary Repository / working directory</span>
-              <NativeSelect
-                autoFocus
-                value={directRunRepositoryId ?? ""}
-                onChange={(event) =>
-                  setDirectRunRepositoryId(
-                    Number(event.target.value) || undefined,
-                  )
-                }
-                disabled={isSaving}
-              >
-                <NativeSelectOption value="">
-                  Choose the checkout for this Run
-                </NativeSelectOption>
-                {directRunPreview.checkoutDetails.map((checkout) => (
-                  <NativeSelectOption
-                    value={checkout.repositoryId}
-                    key={checkout.repositoryId}
-                  >
-                    {checkout.repositoryName} · {checkout.path}
-                  </NativeSelectOption>
-                ))}
-              </NativeSelect>
-            </label>
-            {[...new Set(directRunPreview.currentBranches)].length > 1 && (
-              <Alert>
-                <AlertTitle>Repositories are on different branches</AlertTitle>
-                <AlertDescription>
-                  {directRunPreview.currentBranches.join(", ")}. The Run will
-                  use each checkout&apos;s current branch without switching it.
-                </AlertDescription>
-              </Alert>
-            )}
-            {directRunPreview.dirtyRepositoryIds.length > 0 && (
-              <Alert variant="destructive">
-                <AlertTitle>Dirty checkouts detected</AlertTitle>
-                <AlertDescription>
-                  Existing uncommitted changes will remain in the shared
-                  checkouts.
-                  <label className="mt-2 flex items-center gap-2 font-normal">
-                    <Checkbox
-                      checked={directRunDirtyConfirmed}
-                      onCheckedChange={(checked) =>
-                        setDirectRunDirtyConfirmed(checked === true)
-                      }
-                      disabled={isSaving}
-                    />
-                    I understand and want to use these dirty checkouts.
-                  </label>
-                </AlertDescription>
-              </Alert>
-            )}
-            {directRunPreview.sharedPaths.length > 0 && (
-              <Alert variant="destructive">
-                <AlertTitle>Checkouts are shared with active Runs</AlertTitle>
-                <AlertDescription>
-                  {directRunPreview.sharedRuns.map((shared) => (
-                    <div key={`${shared.runId}-${shared.path}`}>
-                      Run #{shared.runId} · {shared.path}
-                    </div>
-                  ))}
-                  <label className="mt-2 flex items-center gap-2 font-normal">
-                    <Checkbox
-                      checked={directRunSharedConfirmed}
-                      onCheckedChange={(checked) =>
-                        setDirectRunSharedConfirmed(checked === true)
-                      }
-                      disabled={isSaving}
-                    />
-                    I understand and want to share these checkouts.
-                  </label>
-                </AlertDescription>
-              </Alert>
-            )}
-            <div className="grid gap-3 md:grid-cols-2">
-              <label className="grid gap-1.5 text-sm font-medium">
-                <span>Agent</span>
-                <NativeSelect
-                  value={runAgent}
-                  onChange={(event) => {
-                    const agent = event.target.value as AgentKind;
-                    const model = grillModelCatalog.find(
-                      (catalog) => catalog.agent === agent,
-                    )?.models[0];
-                    setRunAgent(agent);
-                    setRunModel(model?.id ?? "");
-                    setRunEffort(model?.efforts[0]?.id ?? "");
-                  }}
-                  disabled={isSaving}
-                >
-                  <NativeSelectOption value="claude">
-                    Claude Code
-                  </NativeSelectOption>
-                  <NativeSelectOption value="codex">Codex</NativeSelectOption>
-                </NativeSelect>
-              </label>
-              <label className="grid gap-1.5 text-sm font-medium">
-                <span>Execution Profile</span>
-                <NativeSelect
-                  value={runProfile}
-                  onChange={(event) => {
-                    selectRunProfile(event.target.value as ExecutionProfile);
-                  }}
-                  disabled={isSaving}
-                >
-                  <NativeSelectOption value="investigate">
-                    Investigate
-                  </NativeSelectOption>
-                  <NativeSelectOption value="implement">
-                    Implement
-                  </NativeSelectOption>
-                  <NativeSelectOption value="review">Review</NativeSelectOption>
-                  <NativeSelectOption value="custom">
-                    Custom prompt
-                  </NativeSelectOption>
-                  <NativeSelectOption value="grill">Grill</NativeSelectOption>
-                </NativeSelect>
-              </label>
-            </div>
-            {runProfile === "implement" && (
-              <div className="grid gap-3 md:grid-cols-2">
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Model</span>
-                  <NativeSelect
-                    value={runModel}
-                    onChange={(event) => {
-                      const model = grillModelCatalog
-                        .find((catalog) => catalog.agent === runAgent)
-                        ?.models.find(
-                          (candidate) => candidate.id === event.target.value,
-                        );
-                      setRunModel(event.target.value);
-                      setRunEffort(model?.efforts[0]?.id ?? "");
-                    }}
-                    disabled={isSaving}
-                  >
-                    {grillModelCatalog
-                      .find((catalog) => catalog.agent === runAgent)
-                      ?.models.map((model) => (
-                        <NativeSelectOption value={model.id} key={model.id}>
-                          {model.label} ({model.id})
-                        </NativeSelectOption>
-                      ))}
-                  </NativeSelect>
-                </label>
-                <label className="grid gap-1.5 text-sm font-medium">
-                  <span>Effort</span>
-                  <NativeSelect
-                    value={runEffort}
-                    onChange={(event) => setRunEffort(event.target.value)}
-                    disabled={isSaving}
-                  >
-                    {grillModelCatalog
-                      .find((catalog) => catalog.agent === runAgent)
-                      ?.models.find((model) => model.id === runModel)
-                      ?.efforts.map((effort) => (
-                        <NativeSelectOption value={effort.id} key={effort.id}>
-                          {effort.label} ({effort.id})
-                        </NativeSelectOption>
-                      ))}
-                  </NativeSelect>
-                </label>
-              </div>
-            )}
-            {runProfile === "custom" && (
-              <label className="grid gap-1.5 text-sm font-medium">
-                <span>Custom prompt source</span>
-                <Textarea
-                  value={runCustomPrompt}
-                  onChange={(event) => {
-                    setRunCustomPrompt(event.target.value);
-                    setRunPromptNeedsCompose(true);
-                    runPromptDrafts.current.custom = {
-                      prompt: runPrompt,
-                      needsCompose: true,
-                    };
-                  }}
-                  rows={3}
-                  placeholder="Tell the agent exactly what to do"
-                  disabled={isSaving}
-                />
-              </label>
-            )}
-            <label className="grid gap-1.5 text-sm font-medium">
-              <span>Editable composed prompt</span>
-              <Textarea
-                value={runPrompt}
-                onChange={(event) => {
-                  setRunPrompt(event.target.value);
-                  runPromptDrafts.current[runProfile] = {
-                    prompt: event.target.value,
-                    needsCompose: runPromptNeedsCompose,
-                  };
-                }}
-                rows={6}
-                disabled={isSaving}
-              />
-            </label>
-            <div className="flex flex-wrap gap-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="outline"
-                disabled={isSaving}
-                onClick={() => void composeRunPromptPreview()}
-              >
-                Compose from selection
-              </Button>
-              <Button
-                type="submit"
-                disabled={
-                  isSaving ||
-                  !directRunRepositoryId ||
-                  !runPrompt.trim() ||
-                  runPromptNeedsCompose ||
-                  (directRunPreview.dirtyRepositoryIds.length > 0 &&
-                    !directRunDirtyConfirmed) ||
-                  (directRunPreview.sharedPaths.length > 0 &&
-                    !directRunSharedConfirmed)
-                }
-              >
-                {isSaving ? "Starting…" : "Start Run"}
-              </Button>
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                disabled={isSaving}
-                onClick={closeRunForm}
-              >
-                Cancel
-              </Button>
-            </div>
-          </form>
-        ) : (
-          <p className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Spinner /> Preparing checkout preview…
-          </p>
-        )}
-      </div>
+      <RunLaunchForm
+        view={view}
+        itemContext={itemContext}
+        modelCatalog={grillModelCatalog}
+        commands={commands}
+        target={{ kind: "checkout", workspace: launchWorkspace }}
+        onClose={closeRunForm}
+      />
     );
   }
 
@@ -1162,7 +255,15 @@ export function RunsTab({
                   {machines.find((machine) => machine.id === run.machine_id)
                     ?.name ?? "Machine #" + run.machine_id}{" "}
                   ·{" "}
-                  {runStateLabel(run.state, run.execution_profile === "grill")}
+                  {run.workflow === "pstack"
+                    ? run.plan_phase === "awaitingGo"
+                      ? "Awaiting Go"
+                      : run.state === "blocked"
+                      ? "Needs input"
+                      : run.state === "finished"
+                        ? "Finished"
+                        : "Working"
+                    : runStateLabel(run.state, run.execution_profile === "grill")}
                   {run.execution_profile === "grill" && run.grill_phase
                     ? ` · ${grillPhaseLabel(run.grill_phase)}`
                     : ""}
@@ -1185,6 +286,40 @@ export function RunsTab({
               <span className="text-xs text-muted-foreground">
                 Session {run.session_name} · Pane {run.pane_id}
               </span>
+              {run.reported_pull_requests.length > 0 && (
+                <div className="grid gap-1 text-xs">
+                  <strong>Pull Requests reported by this Run</strong>
+                  {run.reported_pull_requests.map((url) => (
+                    <a
+                      className="break-all text-primary underline"
+                      href={url}
+                      key={url}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {url}
+                    </a>
+                  ))}
+                </div>
+              )}
+              {run.attention_summary && (
+                <div className="grid gap-1 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-sm">
+                  <strong>Attention</strong>
+                  <p className="whitespace-pre-wrap">{run.attention_summary}</p>
+                </div>
+              )}
+              {run.execution_profile === "plan" && run.plan_phase === "awaitingGo" && (
+                <section className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/30 bg-primary/5 p-3" aria-label={`Plan ready for Run #${run.id}`}>
+                  <div className="grid gap-1 text-sm">
+                    <strong>Plan ready</strong>
+                    <PlanLink
+                      run={run}
+                      machine={machines.find((machine) => machine.id === run.machine_id)}
+                    />
+                  </div>
+                  <Button type="button" size="sm" disabled={isSaving || run.pane_status !== "available"} onClick={() => void handleGoPlan(run)}>Go</Button>
+                </section>
+              )}
               {run.execution_profile === "grill" &&
                 (run.grill_phase === "starting" ||
                   run.grill_phase === "working") && (
@@ -1377,23 +512,32 @@ export function RunsTab({
   );
 }
 
-function CheckoutList({ preview }: { preview: DirectRunPreview }) {
+/**
+ * The plan lives in the Run's working directory on its Machine. A local
+ * Machine reveals it in the file manager; a remote one can only show where it is.
+ */
+function PlanLink({ run, machine }: { run: Run; machine: Machine | undefined }) {
+  if (!run.plan_path) {
+    return <span className="text-muted-foreground">Plan path not reported</span>;
+  }
+  const path = run.plan_path.startsWith("/")
+    ? run.plan_path
+    : `${run.working_directory.replace(/\/+$/, "")}/${run.plan_path}`;
+  if (machine?.transport.kind !== "local") {
+    return <code className="break-all text-xs">{path}</code>;
+  }
   return (
-    <div className="grid gap-2 rounded-md border p-3 text-sm">
-      <p className="m-0 font-medium">Registered checkouts</p>
-      {preview.checkoutDetails.map((checkout) => (
-        <div
-          className="flex flex-wrap justify-between gap-2"
-          key={checkout.repositoryId}
-        >
-          <span>
-            {checkout.repositoryName} · {checkout.branch}
-          </span>
-          <code className="break-all text-xs text-muted-foreground">
-            {checkout.path}
-          </code>
-        </div>
-      ))}
-    </div>
+    <button
+      type="button"
+      className="break-all text-left text-primary underline"
+      title={path}
+      onClick={() =>
+        void revealItemInDir(path).catch((error: unknown) =>
+          window.alert(errorMessage(error)),
+        )
+      }
+    >
+      {run.plan_path}
+    </button>
   );
 }

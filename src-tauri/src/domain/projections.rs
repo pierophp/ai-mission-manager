@@ -539,8 +539,10 @@ pub fn compose_run_prompt(
     item_id: i64,
     profile: ExecutionProfile,
     selection: &RunPromptSelection,
-    custom_prompt: Option<&str>,
+    language: Option<GrillLanguage>,
+    initial_prompt: Option<&str>,
 ) -> Result<String, DomainError> {
+    let initial_prompt = initial_prompt.map(str::trim).filter(|prompt| !prompt.is_empty());
     let item = state
         .items
         .iter()
@@ -549,9 +551,6 @@ pub fn compose_run_prompt(
     let mut sections = Vec::new();
     if selection.include_objective {
         sections.push(format!("Item objective:\n{}", item.title));
-    }
-    if selection.include_notes && !item.notes.trim().is_empty() {
-        sections.push(format!("Item notes:\n{}", item.notes.trim()));
     }
     for external_object_id in &selection.external_object_ids {
         let link = state
@@ -593,18 +592,131 @@ pub fn compose_run_prompt(
             "Review the current changes for this Item for correctness, regressions, and missing test coverage."
                 .to_owned()
         }
-        ExecutionProfile::CustomPrompt => clean_name(
-            custom_prompt.unwrap_or_default().to_owned(),
-            DomainError::EmptyRunPrompt,
-        )?,
+        ExecutionProfile::CustomPrompt => initial_prompt
+            .ok_or(DomainError::EmptyRunPrompt)?
+            .to_owned(),
+        ExecutionProfile::Autonomous | ExecutionProfile::Plan | ExecutionProfile::PstackReview => {
+            return Err(DomainError::ExecutionProfileNotInWorkflow {
+                workflow: Workflow::MattPocock,
+                execution_profile: profile,
+            })
+        }
         ExecutionProfile::Grill => {
             "Use the selected grilling skill to ask a structured frontier of questions before recommending the next decision."
                 .to_owned()
         }
     };
     sections.insert(0, instruction);
+    if profile != ExecutionProfile::CustomPrompt {
+        if let Some(initial_prompt) = initial_prompt {
+            sections.push(format!("User's initial prompt:\n{initial_prompt}"));
+        }
+    }
+    if let Some(language) = language {
+        sections.insert(0, language.run_response_instruction().to_owned());
+    }
     let prompt = sections.join("\n\n");
     clean_name(prompt, DomainError::EmptyRunPrompt)
+}
+
+pub fn compose_pstack_prompt(
+    state: &DomainState,
+    item_id: i64,
+    profile: ExecutionProfile,
+    skill_root: &str,
+    language: GrillLanguage,
+    initial_prompt: Option<&str>,
+) -> Result<String, DomainError> {
+    let item = state.items.iter().find(|item| item.id == item_id)
+        .ok_or(DomainError::ItemNotFound { item_id })?;
+    let initial_prompt = initial_prompt.map(str::trim).filter(|value| !value.is_empty());
+    let spec = state.links.iter().find(|link| link.item_id == item_id && link.purpose == LinkPurpose::ToSpec)
+        .and_then(|link| state.external_objects.iter().find(|object| object.id == link.external_object_id))
+        .map(|object| object.canonical_url.as_str());
+    let context_id = item_context_id(state, item_id)?;
+    let context = state.contexts.iter().find(|context| context.id == context_id)
+        .ok_or(DomainError::ContextNotFound { context_id })?;
+    let roles_path = pstack_role_file_path(skill_root, context);
+    let roles_instruction = format!("Read the generated role instructions at `{roles_path}` and follow them when delegating.");
+    let profile_instruction = match profile {
+        ExecutionProfile::Autonomous => format!("You are starting an Autonomous pstack Run. Read `{skill_root}/skills/poteto-mode/SKILL.md` in full before acting. The Skill tool is unavailable because these skills disable model invocation; read any other needed skill by its absolute path under `{skill_root}/skills/` instead of relying on the Skill tool. {roles_instruction} Do not paste skill text into your response."),
+        ExecutionProfile::Plan => format!("You are starting a Plan pstack Run. Read `{skill_root}/skills/poteto-mode/SKILL.md` in full and follow `{skill_root}/skills/poteto-mode/playbooks/multi-phase-plan.md` in full. The Skill tool is unavailable because these skills disable model invocation; read both files by their absolute paths. {roles_instruction} Complete the required planning phases, write the plan in the repository, then stop without implementing it. Report the plan's repository-relative path in your final response. Do not delegate implementation."),
+        ExecutionProfile::PstackReview => format!("You are starting a pstack Review Run. Read `{skill_root}/skills/interrogate/SKILL.md` and follow it to review the Pull Request or branch named in the Initial Prompt. Read the generated role instructions at `{roles_path}` and use its `Review panel` entry to configure the read-only reviewers. Review only: do not edit files, commit, push, or apply suggested changes. Synthesize the reviewers' findings into a verdict, including actionable findings and disagreements. Do not use the matt-pocock `review` profile instructions."),
+        ExecutionProfile::CustomPrompt => {
+            initial_prompt.ok_or(DomainError::EmptyRunPrompt)?;
+            format!("You are starting a Custom pstack Run. No skill is selected: do what the Initial Prompt asks. {roles_instruction}")
+        }
+        _ => return Err(DomainError::ExecutionProfileNotInWorkflow { workflow: Workflow::Pstack, execution_profile: profile }),
+    };
+    let mut prompt = format!(
+        "{profile_instruction}\n\nItem: {}\nItem context: {}",
+        item.title,
+        if item.notes.trim().is_empty() { "(no additional notes)" } else { item.notes.trim() },
+    );
+    if let Some(initial_prompt) = initial_prompt {
+        prompt.push_str(&format!("\n\nInitial Prompt:\n{initial_prompt}"));
+    }
+    if let Some(spec) = spec {
+        prompt.push_str(&format!("\n\nSpec: {spec}"));
+    }
+    prompt.push_str(&format!("\n\n{}\nWrite commits and pull requests in English.\n\nMission Manager event contract:\nWhen a Pull Request is opened, immediately print `AI_MISSION_MANAGER_EVENT {{\"event\":\"pull_request.opened\",\"url\":\"<canonical Pull Request URL>\"}}` on a line by itself. Report every Pull Request opened by this Run. At the end of the final Attention section in your final response, print `AI_MISSION_MANAGER_EVENT {{\"event\":\"attention.final\",\"summary\":\"<concise Attention summary>\"}}`. For a Plan Run, also print `AI_MISSION_MANAGER_EVENT {{\"event\":\"plan.ready\",\"path\":\"<repository-relative plan path>\"}}` after writing the plan. Escape JSON strings correctly.", language.run_response_instruction()));
+    if profile == ExecutionProfile::PstackReview {
+        prompt.push_str("\n\nThis Run is read-only. Do not edit files, change branches, create commits, push, open or modify pull requests, or apply reviewer suggestions. Return the synthesized verdict in the final response.");
+    }
+    clean_name(prompt, DomainError::EmptyRunPrompt)
+}
+
+pub fn pstack_role_file_path(skill_root: &str, context: &Context) -> String {
+    let identity = format!(
+        "{}|{:?}|{:?}|{:?}",
+        serde_json::to_string(&context.pstack_roles).unwrap_or_default(),
+        context.claude_profile_id,
+        context.codex_profile_id,
+        context.id,
+    );
+    let hash = identity.bytes().fold(0xcbf29ce484222325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+    });
+    format!("{skill_root}/roles/context-{}-{hash:016x}.md", context.id)
+}
+
+pub fn compose_pstack_role_file(
+    parent_agent: AgentKind,
+    roles: &PstackRoleTable,
+    claude_profile: Option<&CliConfigurationProfile>,
+    codex_profile: Option<&CliConfigurationProfile>,
+) -> String {
+    let mut contents = String::from(
+        "# pstack role assignments\n\nDelegate each task according to its role row. Use the configured model and effort. When the role CLI matches the active parent CLI, spawn the role inside the current harness. When it differs, invoke that CLI as shown, preserving the selected Context profile.\n\n",
+    );
+    for entry in &roles.0 {
+        let config = &entry.configuration;
+        let profile = match config.agent {
+            AgentKind::Claude => claude_profile,
+            AgentKind::Codex => codex_profile,
+        };
+        let profile_line = profile
+            .map(|profile| format!("Context CLI profile #{} (`{}`) at `{}`", profile.id, profile.name, profile.directory))
+            .unwrap_or_else(|| "the standard CLI configuration (no Context profile selected)".to_owned());
+        let invocation = match config.agent {
+            AgentKind::Claude => format!("`{}claude -p --model {} --effort {}`", profile.map(|profile| format!("CLAUDE_CONFIG_DIR={} ", shell_single_quote(&profile.directory))).unwrap_or_default(), config.model, config.effort),
+            AgentKind::Codex => format!("`{}codex exec --model {} -c model_reasoning_effort={}`", profile.map(|profile| format!("CODEX_HOME={} ", shell_single_quote(&profile.directory))).unwrap_or_default(), config.model, config.effort),
+        };
+        let delegation = if config.agent == parent_agent {
+            format!("Spawn this role inside the active {} harness.", parent_agent.slug())
+        } else {
+            format!("This role uses the other CLI; invoke it using {invocation} with {profile_line}.")
+        };
+        contents.push_str(&format!(
+            "## {}\n- CLI: {}\n- Model: `{}`\n- Effort: `{}`\n- {}\n\n",
+            entry.role.label(), config.agent.slug(), config.model, config.effort, delegation
+        ));
+    }
+    contents
+}
+
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub fn compose_grill_prompt(
@@ -621,10 +733,8 @@ pub fn compose_grill_prompt(
         .find(|item| item.id == item_id)
         .ok_or(DomainError::ItemNotFound { item_id })?;
     let initial_prompt = clean_name(initial_prompt.to_owned(), DomainError::EmptyRunPrompt)?;
+    // Item notes are not added here: the launch form prefills the initial prompt with them.
     let mut context = vec![format!("Item objective:\n{}", item.title)];
-    if !item.notes.trim().is_empty() {
-        context.push(format!("Item notes:\n{}", item.notes.trim()));
-    }
     for link in state.links.iter().filter(|link| link.item_id == item_id) {
         if let Some(object) = state
             .external_objects
@@ -746,6 +856,20 @@ pub fn compose_grill_continuation_prompt(
     sections.push(GRILL_OUTPUT_CONTRACT.to_owned());
     sections.push(downstream_issue_event_instruction(run.id, action));
     Ok(sections.join("\n\n"))
+}
+
+pub fn compose_plan_go_prompt(run: &Run) -> Result<String, DomainError> {
+    if run.workflow != Workflow::Pstack
+        || run.execution_profile != ExecutionProfile::Plan
+        || run.plan_phase != Some(PlanPhase::AwaitingGo)
+    {
+        return Err(DomainError::PlanGoNotAvailable { run_id: run.id });
+    }
+    let plan_path = run.plan_path.as_deref().unwrap_or("the plan you just wrote");
+    Ok(format!(
+        "{}\n\nThe user approved continuing this Plan Run by selecting Go. Continue in this same Run, Pane, and working directory. Read and execute the plan at `{plan_path}`. Implement its phases, perform the required verification, and report the resulting changes and checks. Do not rewrite the plan unless implementation reveals a concrete blocker.",
+        GrillLanguage::from_run_prompt(&run.prompt).response_instruction(),
+    ))
 }
 
 fn downstream_issue_event_instruction(run_id: i64, action: GrillContinuationAction) -> String {
