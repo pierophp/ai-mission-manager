@@ -19,6 +19,7 @@ import type {
   Context,
   DirectRunPreview,
   ExecutionProfile,
+  Workflow,
   GrillAgentCatalog,
   GrillConfiguration,
   GrillLanguage,
@@ -45,6 +46,24 @@ const profiles: {
   hint: string;
   placeholder: string;
 }[] = [
+  {
+    value: "autonomous",
+    label: "Autonomous",
+    hint: "Route the Initial Prompt through poteto-mode and its playbooks.",
+    placeholder: "Anything the agent should focus on (optional)",
+  },
+  {
+    value: "plan",
+    label: "Plan",
+    hint: "Run the pstack multi-phase plan playbook, write the plan, and stop for Go.",
+    placeholder: "What should the plan cover? (optional)",
+  },
+  {
+    value: "pstack-review",
+    label: "Review",
+    hint: "Run interrogate with the configured reviewers and synthesize a read-only verdict.",
+    placeholder: "Name the pull request or branch to review.",
+  },
   {
     value: "grill",
     label: "Grill",
@@ -91,7 +110,7 @@ const objectiveOnly = {
 
 /** Grill and Custom have nothing to send without an initial prompt. */
 function requiresInitialPrompt(profile: ExecutionProfile) {
-  return profile === "grill" || profile === "custom";
+  return profile === "grill" || profile === "custom" || profile === "pstack-review";
 }
 
 /**
@@ -115,15 +134,17 @@ export function RunLaunchForm({
   onClose: () => void;
 }) {
   const { isSaving, whileSaving, confirm, workCommand, onChanged } = commands;
-  const availableProfiles =
-    target.kind === "worktree"
-      ? profiles.filter((profile) => profile.value !== "grill")
-      : profiles;
-  const initialProfile = availableProfiles[0].value;
+  const [workflow, setWorkflow] = useState<Workflow>(itemContext?.default_workflow ?? "matt-pocock");
+  const availableProfiles = workflow === "pstack"
+    ? profiles.filter((profile) => profile.value === "autonomous" || profile.value === "plan" || profile.value === "pstack-review")
+    : target.kind === "worktree"
+      ? profiles.filter((profile) => profile.value !== "grill" && profile.value !== "plan")
+      : profiles.filter((profile) => profile.value !== "plan");
+  const initialProfile = workflow === "pstack" ? "autonomous" : availableProfiles[0].value;
 
   const [profile, setProfile] = useState<ExecutionProfile>(initialProfile);
   const [configuration, setConfiguration] = useState(() =>
-    defaultConfiguration(initialProfile, itemContext, modelCatalog),
+    defaultConfiguration(initialProfile, workflow, itemContext, modelCatalog),
   );
   const [configurationTouched, setConfigurationTouched] = useState(false);
   const [language, setLanguage] = useState<GrillLanguage>("portuguese");
@@ -209,10 +230,17 @@ export function RunLaunchForm({
     setProfile(next);
     // Follow the Context defaults for the new profile until the user picks a model.
     if (!configurationTouched) {
-      setConfiguration(defaultConfiguration(next, itemContext, modelCatalog));
+      setConfiguration(defaultConfiguration(next, workflow, itemContext, modelCatalog));
     }
   }
 
+  function selectWorkflow(next: Workflow) {
+    setWorkflow(next);
+    const nextProfile = next === "pstack" ? "autonomous" : target.kind === "worktree" ? "implement" : "grill";
+    setProfile(nextProfile);
+    setConfiguration(defaultConfiguration(nextProfile, next, itemContext, modelCatalog));
+    setConfigurationTouched(false);
+  }
   function updateConfiguration(next: GrillConfiguration) {
     setConfiguration(next);
     setConfigurationTouched(true);
@@ -232,6 +260,7 @@ export function RunLaunchForm({
           objectiveOnly,
           language,
           initialPrompt.trim() ? initialPrompt : null,
+          workflow,
         );
   }
 
@@ -280,6 +309,7 @@ export function RunLaunchForm({
         agent,
         configuration,
         executionProfile: profile,
+        workflow,
         prompt,
         promptSelection: objectiveOnly,
       });
@@ -301,6 +331,7 @@ export function RunLaunchForm({
           agent,
           configuration,
           executionProfile: profile,
+          workflow,
           promptSelection: objectiveOnly,
         });
   }
@@ -347,6 +378,13 @@ export function RunLaunchForm({
         {machineName && <Badge variant="outline">Machine: {machineName}</Badge>}
       </div>
 
+      <label className="grid gap-1.5 text-sm font-medium">
+        <span>Workflow</span>
+        <NativeSelect value={workflow} onChange={(event) => selectWorkflow(event.target.value as Workflow)} disabled={isSaving}>
+          <NativeSelectOption value="matt-pocock">Matt Pocock</NativeSelectOption>
+          <NativeSelectOption value="pstack">pstack</NativeSelectOption>
+        </NativeSelect>
+      </label>
       <SegmentedChoice
         legend="Execution Profile"
         name="run-execution-profile"
@@ -478,7 +516,9 @@ export function RunLaunchForm({
           <span className="text-xs font-normal text-muted-foreground">
             {profile === "custom"
               ? "A Custom Run sends only this prompt, so write what the agent should do."
-              : "Tell the Grill what to stress-test."}
+              : profile === "pstack-review"
+                ? "Name the pull request or branch to review."
+                : "Tell the Grill what to stress-test."}
           </span>
         )}
       </label>
@@ -583,11 +623,13 @@ export function RunLaunchForm({
 
 function defaultConfiguration(
   profile: ExecutionProfile,
+  workflow: Workflow,
   itemContext: Context | undefined,
   modelCatalog: GrillAgentCatalog[],
 ): GrillConfiguration {
-  const defaults =
-    profile === "grill"
+  const defaults = workflow === "pstack"
+      ? itemContext?.pstack_defaults
+      : profile === "grill"
       ? itemContext?.grill_defaults
       : itemContext?.implement_defaults;
   if (defaults) return defaults;

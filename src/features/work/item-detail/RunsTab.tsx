@@ -130,6 +130,10 @@ export function RunsTab({
     await saveItem(workActions.continueGrill(run.id, action));
   }
 
+  async function handleGoPlan(run: Run) {
+    await saveItem(workActions.goPlan(run.id));
+  }
+
   function handleStopRun(run: Run) {
     confirm({
       title: `Stop Run #${run.id}?`,
@@ -249,7 +253,15 @@ export function RunsTab({
                   {machines.find((machine) => machine.id === run.machine_id)
                     ?.name ?? "Machine #" + run.machine_id}{" "}
                   ·{" "}
-                  {runStateLabel(run.state, run.execution_profile === "grill")}
+                  {run.workflow === "pstack"
+                    ? run.plan_phase === "awaitingGo"
+                      ? "Awaiting Go"
+                      : run.state === "blocked"
+                      ? "Needs input"
+                      : run.state === "finished"
+                        ? "Finished"
+                        : "Working"
+                    : runStateLabel(run.state, run.execution_profile === "grill")}
                   {run.execution_profile === "grill" && run.grill_phase
                     ? ` · ${grillPhaseLabel(run.grill_phase)}`
                     : ""}
@@ -272,6 +284,39 @@ export function RunsTab({
               <span className="text-xs text-muted-foreground">
                 Session {run.session_name} · Pane {run.pane_id}
               </span>
+              {run.reported_pull_requests.length > 0 && (
+                <div className="grid gap-1 text-xs">
+                  <strong>Pull Requests reported by this Run</strong>
+                  {run.reported_pull_requests.map((url) => (
+                    <a
+                      className="break-all text-primary underline"
+                      href={url}
+                      key={url}
+                      rel="noreferrer"
+                      target="_blank"
+                    >
+                      {url}
+                    </a>
+                  ))}
+                </div>
+              )}
+              {run.attention_summary && (
+                <div className="grid gap-1 rounded-md border border-amber-500/40 bg-amber-500/5 p-2 text-sm">
+                  <strong>Attention</strong>
+                  <p className="whitespace-pre-wrap">{run.attention_summary}</p>
+                </div>
+              )}
+              {run.execution_profile === "plan" && run.plan_phase === "awaitingGo" && (
+                <section className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/30 bg-primary/5 p-3" aria-label={`Plan ready for Run #${run.id}`}>
+                  <div className="grid gap-1 text-sm">
+                    <strong>Plan ready</strong>
+                    {run.plan_path ? (
+                      <a className="break-all text-primary underline" href={run.plan_path} target="_blank" rel="noreferrer">{run.plan_path}</a>
+                    ) : <span className="text-muted-foreground">Plan path not reported</span>}
+                  </div>
+                  <Button type="button" size="sm" disabled={isSaving || run.pane_status !== "available"} onClick={() => void handleGoPlan(run)}>Go</Button>
+                </section>
+              )}
               {run.execution_profile === "grill" &&
                 (run.grill_phase === "starting" ||
                   run.grill_phase === "working") && (

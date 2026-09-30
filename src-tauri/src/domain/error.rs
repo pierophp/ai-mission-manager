@@ -42,6 +42,11 @@ pub enum DomainError {
     ContextNameTaken { name: String },
     #[error("Context attention defaults must contain one policy for Issue, Pull Request, and generic External Objects")]
     InvalidContextAttentionDefaults,
+    #[error("Execution Profile {execution_profile:?} is not available in Workflow {workflow:?}")]
+    ExecutionProfileNotInWorkflow {
+        workflow: Workflow,
+        execution_profile: ExecutionProfile,
+    },
     #[error("Project name already exists in Context {context_id}: {name}")]
     ProjectNameTaken { context_id: i64, name: String },
     #[error("Context {context_id} does not exist")]
@@ -227,6 +232,8 @@ pub enum DomainError {
         model: String,
         effort: String,
     },
+    #[error("pstack role table must contain each supported role exactly once")]
+    InvalidPstackRoleTable,
     #[error("a Grill skill snapshot cannot be blank")]
     EmptyGrillSkillSnapshot,
     #[error("a Grill answer cannot be blank")]
@@ -241,6 +248,12 @@ pub enum DomainError {
     GrillResponseAlreadySubmitted { run_id: i64 },
     #[error("Run {run_id} is not a Grill Run")]
     NotGrillRun { run_id: i64 },
+    #[error("Run {run_id} is not a pstack Run")]
+    NotPstackRun { run_id: i64 },
+    #[error("Run {run_id} is not awaiting Go or its Pane is unavailable")]
+    PlanGoNotAvailable { run_id: i64 },
+    #[error("Reported object on Run {run_id} is not a Pull Request")]
+    ReportedObjectNotPullRequest { run_id: i64 },
     #[error("a Grill response cannot be blank")]
     EmptyGrillResponse,
     #[error("Run {run_id} does not exist")]

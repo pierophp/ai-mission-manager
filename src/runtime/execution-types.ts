@@ -4,7 +4,11 @@ export type ExecutionProfile =
   | "implement"
   | "review"
   | "custom"
+  | "autonomous"
+  | "plan"
+  | "pstack-review"
   | "grill";
+export type Workflow = "matt-pocock" | "pstack";
 export type RunState = "unknown" | "working" | "blocked" | "finished";
 export type RunPaneStatus = "unknown" | "available" | "missing";
 export type GrillPhase =
@@ -16,6 +20,7 @@ export type GrillPhase =
   | "finished";
 
 export type GrillContinuationAction = "to-spec" | "to-tickets" | "implement";
+export type PlanPhase = "awaitingGo";
 
 export type RunCheckout = {
   repositoryId: number;
@@ -61,6 +66,7 @@ export type Run = {
     name: string;
   } | null;
   execution_profile: ExecutionProfile;
+  workflow: Workflow;
   model: string | null;
   effort: string | null;
   skill_snapshot: string | null;
@@ -74,12 +80,16 @@ export type Run = {
   pane_status: RunPaneStatus;
   direct_checkouts: RunCheckout[];
   transcript: string;
+  reported_pull_requests: string[];
+  attention_summary: string | null;
   grill_question_group: GrillQuestionGroup | null;
   grill_answers: GrillAnswer[];
   grill_decisions: GrillAnswer[];
   grill_response: string | null;
   grill_phase: GrillPhase | null;
   grill_action: GrillContinuationAction | null;
+  plan_phase: PlanPhase | null;
+  plan_path: string | null;
 };
 
 export type RunSuggestion = {

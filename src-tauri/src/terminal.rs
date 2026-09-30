@@ -23,6 +23,7 @@ use crate::{
         AGENT_STATE_RUNS_RELATIVE_PATH,
     },
     domain::{AgentKind, CliConfigurationProfile, Machine, MachineTransport},
+    dependencies::resolve_executable,
 };
 
 pub trait TerminalRuntime: Send + Sync {
@@ -36,6 +37,17 @@ pub trait TerminalRuntime: Send + Sync {
     ) -> MachineRunPreflight;
 
     fn check_machine(&self, machine: &Machine) -> MachineReadiness;
+
+    fn machine_home(&self, machine: &Machine) -> Result<PathBuf, String>;
+
+    fn provision_pstack_tree(&self, machine: &Machine) -> Result<String, String>;
+
+    fn write_pstack_role_file(
+        &self,
+        machine: &Machine,
+        path: &Path,
+        contents: &str,
+    ) -> Result<(), String>;
 
     fn observe_machine(&self, machine: &Machine, state_run_ids: &[i64]) -> ObservedMachine;
 
@@ -174,6 +186,8 @@ pub struct AgentHookReadiness {
 pub struct MachineReadiness {
     pub reachable: Option<bool>,
     pub tmux_available: Option<bool>,
+    pub bun_available: Option<bool>,
+    pub bun_error: Option<String>,
     pub claude_executable_resolved: Option<bool>,
     pub codex_executable_resolved: Option<bool>,
     pub state_directory_writable: Option<bool>,
@@ -800,6 +814,18 @@ impl TerminalRuntime for TmuxRuntime {
         prepare_machine_for_run(machine, None, None, None).readiness
     }
 
+    fn machine_home(&self, machine: &Machine) -> Result<PathBuf, String> {
+        machine_home(machine)
+    }
+
+    fn provision_pstack_tree(&self, machine: &Machine) -> Result<String, String> {
+        provision_pstack_tree(machine)
+    }
+
+    fn write_pstack_role_file(&self, machine: &Machine, path: &Path, contents: &str) -> Result<(), String> {
+        write_machine_file(machine, path, contents.as_bytes())
+    }
+
     fn observe_machine(&self, machine: &Machine, state_run_ids: &[i64]) -> ObservedMachine {
         crate::terminal::observe_machine(machine, state_run_ids)
     }
@@ -893,6 +919,8 @@ pub(crate) enum FakeTerminalCommand {
     CheckMachine {
         machine_id: i64,
     },
+    ProvisionPstackTree { machine_id: i64 },
+    WritePstackRoleFile { machine_id: i64, path: PathBuf },
     ObserveMachine {
         machine_id: i64,
     },
@@ -957,6 +985,7 @@ pub(crate) struct FakeTerminalRuntime {
     state_file_records: Arc<Mutex<std::collections::HashMap<i64, Vec<AgentStateRecord>>>>,
     transcript_captures: FakeTranscriptCaptures,
     release_failures: Arc<Mutex<std::collections::HashMap<i64, String>>>,
+    pstack_provisioning_failures: Arc<Mutex<std::collections::HashMap<i64, String>>>,
     dirty_checkout_on_launch: Arc<Mutex<bool>>,
     checkout_remote_on_launch: Arc<Mutex<Option<String>>>,
     observation_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
@@ -1023,6 +1052,7 @@ impl FakeTerminalRuntime {
             state_file_records: Arc::new(Mutex::new(std::collections::HashMap::new())),
             transcript_captures: Arc::new(Mutex::new(std::collections::HashMap::new())),
             release_failures: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            pstack_provisioning_failures: Arc::new(Mutex::new(std::collections::HashMap::new())),
             dirty_checkout_on_launch: Arc::new(Mutex::new(false)),
             checkout_remote_on_launch: Arc::new(Mutex::new(None)),
             observation_gate: Arc::new((
@@ -1124,6 +1154,13 @@ impl FakeTerminalRuntime {
         self.release_failures
             .lock()
             .expect("fake release failures should remain available")
+            .insert(machine_id, error.into());
+    }
+
+    pub(crate) fn fail_pstack_provisioning(&self, machine_id: i64, error: impl Into<String>) {
+        self.pstack_provisioning_failures
+            .lock()
+            .expect("fake pstack provisioning failures should remain available")
             .insert(machine_id, error.into());
     }
 
@@ -1276,6 +1313,25 @@ impl TerminalRuntime for FakeTerminalRuntime {
         let mut preflight = fake_machine_preflight(machine, self.outcome(machine), None);
         self.simulate_hook_provisioning(machine, &mut preflight.readiness, None);
         preflight.readiness
+    }
+
+    fn machine_home(&self, _machine: &Machine) -> Result<PathBuf, String> {
+        Ok(PathBuf::from("/fake/home"))
+    }
+
+    fn provision_pstack_tree(&self, machine: &Machine) -> Result<String, String> {
+        self.record(FakeTerminalCommand::ProvisionPstackTree { machine_id: machine.id });
+        if let Some(error) = self.pstack_provisioning_failures
+            .lock()
+            .expect("fake pstack provisioning failures should remain available")
+            .get(&machine.id).cloned() { return Err(error); }
+        Ok(crate::pstack::tree_directory(Path::new("/fake/home"))
+            .to_string_lossy().into_owned())
+    }
+
+    fn write_pstack_role_file(&self, machine: &Machine, path: &Path, _contents: &str) -> Result<(), String> {
+        self.record(FakeTerminalCommand::WritePstackRoleFile { machine_id: machine.id, path: path.to_path_buf() });
+        Ok(())
     }
 
     fn observe_machine(&self, machine: &Machine, state_run_ids: &[i64]) -> ObservedMachine {
@@ -1877,7 +1933,7 @@ pub fn find_agent_executable(machine: &Machine, name: &str) -> Result<PathBuf, S
     {
         return Err(format!("unsupported agent executable name: {name}"));
     }
-    match machine.transport {
+    match &machine.transport {
         MachineTransport::Local => env::var_os("PATH")
             .into_iter()
             .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
@@ -2098,6 +2154,124 @@ fn install_remote_hook_script(machine: &Machine) -> Result<(), String> {
     .map(|_| ())
 }
 
+fn machine_home(machine: &Machine) -> Result<PathBuf, String> {
+    match &machine.transport {
+        MachineTransport::Local => env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or_else(|| "HOME is not set on the local Machine".to_owned()),
+        MachineTransport::Ssh { .. } => run_machine_shell(machine, "printf '%s' \"$HOME\"")
+            .and_then(|home| {
+                let home = PathBuf::from(home.trim());
+                if home.is_absolute() {
+                    Ok(home)
+                } else {
+                    Err(format!("Machine {} did not report an absolute home directory", machine.name))
+                }
+            }),
+    }
+}
+
+fn write_machine_file(machine: &Machine, path: &Path, contents: &[u8]) -> Result<(), String> {
+    match machine.transport {
+        MachineTransport::Local => {
+            let parent = path.parent().ok_or_else(|| "Generated role file has no parent directory".to_owned())?;
+            std::fs::create_dir_all(parent).map_err(|error| format!("Could not create pstack role directory: {error}"))?;
+            let temporary = path.with_extension(format!("md.tmp.{}", std::process::id()));
+            std::fs::write(&temporary, contents).map_err(|error| format!("Could not write pstack role file: {error}"))?;
+            #[cfg(unix)]
+            std::fs::set_permissions(&temporary, std::os::unix::fs::PermissionsExt::from_mode(0o600))
+                .map_err(|error| format!("Could not secure pstack role file: {error}"))?;
+            std::fs::rename(&temporary, path).map_err(|error| format!("Could not install pstack role file: {error}"))
+        }
+        MachineTransport::Ssh { .. } => {
+            let target = shell_quote(&path.to_string_lossy());
+            let command = format!("set -eu; umask 077; target={target}; parent=${{target%/*}}; mkdir -p \"$parent\"; temporary=\"$target.tmp.$$\"; trap 'rm -f \"$temporary\"' EXIT HUP INT TERM; cat > \"$temporary\"; chmod 600 \"$temporary\"; mv -f \"$temporary\" \"$target\"; trap - EXIT HUP INT TERM");
+            run_machine_shell_with_input(machine, &command, contents).map(|_| ())
+        }
+    }
+}
+
+fn provision_pstack_tree(machine: &Machine) -> Result<String, String> {
+    let home = machine_home(machine)?;
+    let target = crate::pstack::tree_directory(&home);
+    match machine.transport {
+        MachineTransport::Local => {
+            write_local_pstack_tree(&target, crate::pstack::PSTACK_TREE_HASH, crate::pstack::PSTACK_TREE)?;
+        }
+        MachineTransport::Ssh { .. } => {
+            let target_text = target.to_string_lossy();
+            let command = build_remote_pstack_tree_command(&target_text);
+            let input = encode_pstack_tree();
+            run_machine_shell_with_input(machine, &command, &input).map_err(|error| format!("Could not provision pstack on Machine {}: {error}", machine.name))?;
+        }
+    }
+    Ok(target.to_string_lossy().into_owned())
+}
+
+fn write_local_pstack_tree(
+    target: &Path,
+    tree_hash: &str,
+    files: &[(&str, &[u8], bool)],
+) -> Result<(), String> {
+    if target.is_dir() { return Ok(()); }
+    if target.exists() { return Err(format!("pstack target exists but is not a directory: {}", target.display())); }
+    let parent = target.parent().ok_or_else(|| "pstack tree path has no parent".to_owned())?;
+    std::fs::create_dir_all(parent).map_err(|error| format!("Could not create pstack directory: {error}"))?;
+    let temporary = parent.join(format!(".pstack-{tree_hash}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&temporary);
+    for (relative, contents, executable) in files {
+        if Path::new(relative).is_absolute() || Path::new(relative).components().any(|component| matches!(component, std::path::Component::ParentDir)) {
+            return Err(format!("Invalid embedded pstack path: {relative}"));
+        }
+        let file = temporary.join(relative);
+        if let Some(parent) = file.parent() {
+            std::fs::create_dir_all(parent).map_err(|error| format!("Could not create pstack subdirectory: {error}"))?;
+        }
+        std::fs::write(&file, contents).map_err(|error| format!("Could not write pstack file {}: {error}", file.display()))?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(if *executable { 0o755 } else { 0o644 }))
+            .map_err(|error| format!("Could not set pstack file permissions {}: {error}", file.display()))?;
+    }
+    match std::fs::rename(&temporary, target) {
+        Ok(()) => Ok(()),
+        Err(_error) if target.is_dir() => { let _ = std::fs::remove_dir_all(temporary); Ok(()) },
+        Err(error) => { let _ = std::fs::remove_dir_all(temporary); Err(format!("Could not install pstack tree: {error}")) },
+    }
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let a = chunk[0];
+        let b = *chunk.get(1).unwrap_or(&0);
+        let c = *chunk.get(2).unwrap_or(&0);
+        output.push(TABLE[(a >> 2) as usize] as char);
+        output.push(TABLE[(((a & 3) << 4) | (b >> 4)) as usize] as char);
+        output.push(if chunk.len() > 1 { TABLE[(((b & 15) << 2) | (c >> 6)) as usize] as char } else { '=' });
+        output.push(if chunk.len() > 2 { TABLE[(c & 63) as usize] as char } else { '=' });
+    }
+    output
+}
+
+fn encode_pstack_tree() -> Vec<u8> {
+    let mut encoded = Vec::new();
+    for (path, contents, executable) in crate::pstack::PSTACK_TREE {
+        encoded.extend_from_slice(path.as_bytes());
+        encoded.push(b'\n');
+        encoded.extend_from_slice(if *executable { b"1\n" } else { b"0\n" });
+        encoded.extend_from_slice(encode_base64(contents).as_bytes());
+        encoded.push(b'\n');
+    }
+    encoded.push(b'\n');
+    encoded
+}
+
+fn build_remote_pstack_tree_command(target: &str) -> String {
+    let target = shell_quote(target);
+    format!("set -eu; target={target}; if [ -d \"$target\" ]; then exit 0; fi; parent=${{target%/*}}; mkdir -p \"$parent\"; temporary=\"$target.tmp.$$\"; trap 'rm -rf \"$temporary\"' EXIT HUP INT TERM; mkdir -p \"$temporary\"; while IFS= read -r relative && [ -n \"$relative\" ]; do IFS= read -r executable || exit 1; IFS= read -r contents || exit 1; case \"$relative\" in /*|*..*) exit 1;; esac; file=\"$temporary/$relative\"; mkdir -p \"${{file%/*}}\"; printf '%s' \"$contents\" | base64 -d > \"$file\"; if [ \"$executable\" = 1 ]; then chmod 755 \"$file\"; fi; done; if [ -d \"$target\" ]; then exit 0; fi; mv \"$temporary\" \"$target\"; trap - EXIT HUP INT TERM")
+}
+
 fn prepare_machine_for_run(
     machine: &Machine,
     run: Option<(AgentKind, i64)>,
@@ -2142,6 +2316,19 @@ fn prepare_machine_for_run(
         },
     };
     readiness.reachable = Some(true);
+    match &machine.transport {
+        MachineTransport::Local => {
+            readiness.bun_available = Some(resolve_executable("bun", None).is_some());
+        }
+        MachineTransport::Ssh { .. } => match run_machine_shell(machine, "command -v bun") {
+            Ok(path) if !path.trim().is_empty() => readiness.bun_available = Some(true),
+            Ok(_) => readiness.bun_available = Some(false),
+            Err(error) => {
+                readiness.bun_available = Some(false);
+                readiness.bun_error = Some(format!("Could not check Bun on Machine {}: {error}", machine.name));
+            }
+        },
+    }
 
     if let Err(error) = probe_machine(machine) {
         readiness.tmux_available = Some(false);
@@ -3425,6 +3612,36 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+
+    #[test]
+    fn local_pstack_provisioning_is_hash_addressed_and_idempotent() {
+        let home = tempdir().expect("home exists");
+        let root = home.path().join(".local/share/ai-mission-manager/pstack");
+        let first = root.join("hash-a");
+        write_local_pstack_tree(&first, "hash-a", &[("skills/poteto-mode/SKILL.md", b"first", false)])
+            .expect("first hash is written");
+        std::fs::write(first.join("skills/poteto-mode/SKILL.md"), b"user copy")
+            .expect("simulate an existing tree");
+        write_local_pstack_tree(&first, "hash-a", &[("skills/poteto-mode/SKILL.md", b"replacement", false)])
+            .expect("same hash leaves existing tree untouched");
+        let second = root.join("hash-b");
+        write_local_pstack_tree(&second, "hash-b", &[("skills/poteto-mode/SKILL.md", b"second", false)])
+            .expect("new hash gets its own directory");
+        assert_eq!(std::fs::read(first.join("skills/poteto-mode/SKILL.md")).unwrap(), b"user copy");
+        assert_eq!(std::fs::read(second.join("skills/poteto-mode/SKILL.md")).unwrap(), b"second");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+    }
+
+    #[test]
+    fn remote_pstack_writer_is_idempotent_and_streams_tree_files() {
+        let command = build_remote_pstack_tree_command("/home/runner/.local/share/ai-mission-manager/pstack/hash");
+        assert!(command.contains("if [ -d \"$target\" ]; then exit 0; fi"));
+        assert!(command.contains("base64 -d"));
+        assert!(command.contains("chmod 755"));
+        assert!(command.contains("mv \"$temporary\" \"$target\""));
+        let payload = encode_pstack_tree();
+        assert!(payload.windows(b"skills/poteto-mode/SKILL.md\n".len()).any(|window| window == b"skills/poteto-mode/SKILL.md\n"));
+    }
 
     #[test]
     fn grill_launch_uses_provider_identifiers_for_model_and_effort() {

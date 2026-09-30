@@ -1,6 +1,6 @@
 use super::codecs::*;
 use super::*;
-use crate::domain::CliConfigurationProfile;
+use crate::domain::{CliConfigurationProfile, PstackRoleTable};
 
 impl SqliteStore {
     pub fn load_state(&self) -> Result<DomainState, StoreError> {
@@ -23,9 +23,11 @@ impl SqliteStore {
                 "SELECT id, name, execution_machine_id, check_dirty_checkouts,
                         grill_agent, grill_model, grill_effort,
                         implement_agent, implement_model, implement_effort,
+                        default_workflow, pstack_agent, pstack_model, pstack_effort,
                         claude_profile_id, codex_profile_id,
                         gh_executable_path, twg_executable_path, az_executable_path,
                         atlassian_site, azure_devops_organization, bitbucket_workspace
+                        , pstack_roles_json
                      FROM contexts ORDER BY id",
             )?;
             let rows = statement.query_map([], |row| {
@@ -35,13 +37,18 @@ impl SqliteStore {
                 let implement_agent: String = row.get(7)?;
                 let implement_model: String = row.get(8)?;
                 let implement_effort: String = row.get(9)?;
+                let default_workflow: String = row.get(10)?;
+                let pstack_agent: String = row.get(11)?;
+                let pstack_model: String = row.get(12)?;
+                let pstack_effort: String = row.get(13)?;
+                let pstack_roles_json: String = row.get(22)?;
                 Ok(Context {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     execution_machine_id: row.get(2)?,
                     check_dirty_checkouts: row.get::<_, i64>(3)? != 0,
-                    claude_profile_id: row.get(10)?,
-                    codex_profile_id: row.get(11)?,
+                    claude_profile_id: row.get(14)?,
+                    codex_profile_id: row.get(15)?,
                     grill_defaults: GrillConfiguration {
                         agent: parse_agent_kind(&agent).map_err(|error| {
                             rusqlite::Error::FromSqlConversionFailure(
@@ -64,12 +71,41 @@ impl SqliteStore {
                         model: implement_model,
                         effort: implement_effort,
                     },
-                    gh_executable_path: row.get(12)?,
-                    twg_executable_path: row.get(13)?,
-                    az_executable_path: row.get(14)?,
-                    atlassian_site: row.get(15)?,
-                    azure_devops_organization: row.get(16)?,
-                    bitbucket_workspace: row.get(17)?,
+                    default_workflow: parse_workflow(&default_workflow).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            10,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    pstack_defaults: GrillConfiguration {
+                        agent: parse_agent_kind(&pstack_agent).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                11,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
+                        model: pstack_model,
+                        effort: pstack_effort,
+                    },
+                    pstack_roles: if pstack_roles_json.trim().is_empty() {
+                        PstackRoleTable::default()
+                    } else {
+                        serde_json::from_str(&pstack_roles_json).map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                22,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?
+                    },
+                    gh_executable_path: row.get(16)?,
+                    twg_executable_path: row.get(17)?,
+                    az_executable_path: row.get(18)?,
+                    atlassian_site: row.get(19)?,
+                    azure_devops_organization: row.get(20)?,
+                    bitbucket_workspace: row.get(21)?,
                 })
             })?;
             rows.collect::<Result<Vec<_>, _>>()?
@@ -326,7 +362,8 @@ impl SqliteStore {
                         direct_checkouts_json, transcript,
                         grill_question_group_json, grill_answers_json, grill_decisions_json,
                         grill_response, grill_phase, grill_action, grill_action_started_at,
-                        cli_configuration_profile_json
+                        cli_configuration_profile_json, workflow,
+                        reported_pull_requests_json, attention_summary, plan_phase, plan_path
                  FROM runs
                  ORDER BY id",
             )?;
@@ -340,6 +377,9 @@ impl SqliteStore {
                 let grill_phase: Option<String> = row.get(25)?;
                 let grill_action: Option<String> = row.get(26)?;
                 let cli_configuration_profile_json: Option<String> = row.get(28)?;
+                let workflow: String = row.get(29)?;
+                let reported_pull_requests_json: String = row.get(30)?;
+                let plan_phase: Option<String> = row.get(32)?;
                 let grill_question_group = grill_question_group_json
                     .map(|json| {
                         serde_json::from_str::<GrillQuestionGroup>(&json).map_err(|error| {
@@ -422,6 +462,13 @@ impl SqliteStore {
                             )
                         },
                     )?,
+                    workflow: parse_workflow(&workflow).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            29,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
                     model: row.get(8)?,
                     effort: row.get(9)?,
                     skill_snapshot: row.get(10)?,
@@ -457,6 +504,21 @@ impl SqliteStore {
                         },
                     )?,
                     transcript: row.get(20)?,
+                    reported_pull_requests: serde_json::from_str(
+                        &reported_pull_requests_json,
+                    )
+                    .map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            30,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?,
+                    attention_summary: row.get(31)?,
+                    plan_phase: plan_phase.map(|phase| parse_plan_phase(&phase)).transpose().map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(32, rusqlite::types::Type::Text, Box::new(error))
+                    })?,
+                    plan_path: row.get(33)?,
                     grill_question_group,
                     grill_answers,
                     grill_decisions,

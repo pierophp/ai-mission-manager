@@ -20,6 +20,12 @@ pub struct Context {
     #[serde(default)]
     pub implement_defaults: GrillConfiguration,
     #[serde(default)]
+    pub default_workflow: Workflow,
+    #[serde(default)]
+    pub pstack_defaults: GrillConfiguration,
+    #[serde(default)]
+    pub pstack_roles: PstackRoleTable,
+    #[serde(default)]
     pub gh_executable_path: Option<String>,
     #[serde(default)]
     pub twg_executable_path: Option<String>,
@@ -31,6 +37,65 @@ pub struct Context {
     pub azure_devops_organization: Option<String>,
     #[serde(default)]
     pub bitbucket_workspace: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PstackRole {
+    CodeDelegate,
+    JudgeAndProse,
+    ReviewPanel,
+    Explorers,
+}
+
+impl PstackRole {
+    pub const ALL: [Self; 4] = [
+        Self::CodeDelegate,
+        Self::JudgeAndProse,
+        Self::ReviewPanel,
+        Self::Explorers,
+    ];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::CodeDelegate => "Code delegate",
+            Self::JudgeAndProse => "Judge and prose",
+            Self::ReviewPanel => "Review panel",
+            Self::Explorers => "Explorers",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PstackRoleConfiguration {
+    pub role: PstackRole,
+    pub configuration: GrillConfiguration,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct PstackRoleTable(pub Vec<PstackRoleConfiguration>);
+
+impl Default for PstackRoleTable {
+    fn default() -> Self {
+        use AgentKind::{Claude, Codex};
+        use PstackRole::*;
+        Self(vec![
+            PstackRoleConfiguration { role: CodeDelegate, configuration: GrillConfiguration { agent: Claude, model: "claude-opus-5".into(), effort: "high".into() } },
+            PstackRoleConfiguration { role: JudgeAndProse, configuration: GrillConfiguration { agent: Codex, model: "gpt-6-sol".into(), effort: "high".into() } },
+            PstackRoleConfiguration { role: ReviewPanel, configuration: GrillConfiguration { agent: Codex, model: "gpt-6-sol".into(), effort: "high".into() } },
+            PstackRoleConfiguration { role: Explorers, configuration: GrillConfiguration { agent: Claude, model: "claude-sonnet-5".into(), effort: "medium".into() } },
+        ])
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Workflow {
+    #[default]
+    MattPocock,
+    Pstack,
 }
 
 impl Context {
@@ -306,6 +371,12 @@ pub enum ExecutionProfile {
     Review,
     #[serde(rename = "custom")]
     CustomPrompt,
+    #[serde(rename = "autonomous")]
+    Autonomous,
+    #[serde(rename = "plan")]
+    Plan,
+    #[serde(rename = "pstack-review")]
+    PstackReview,
     #[serde(rename = "grill")]
     Grill,
 }
@@ -331,6 +402,12 @@ pub enum GrillPhase {
     AwaitingNextAction,
     RecoverablePaneLoss,
     Finished,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PlanPhase {
+    AwaitingGo,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,6 +440,8 @@ pub struct Run {
     pub cli_configuration_profile: Option<CliConfigurationProfileIdentity>,
     pub execution_profile: ExecutionProfile,
     #[serde(default)]
+    pub workflow: Workflow,
+    #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
     pub effort: Option<String>,
@@ -380,6 +459,10 @@ pub struct Run {
     #[serde(default)]
     pub transcript: String,
     #[serde(default)]
+    pub reported_pull_requests: Vec<String>,
+    #[serde(default)]
+    pub attention_summary: Option<String>,
+    #[serde(default)]
     pub grill_question_group: Option<GrillQuestionGroup>,
     #[serde(default)]
     pub grill_answers: Vec<GrillAnswer>,
@@ -395,12 +478,18 @@ pub struct Run {
     /// after it can be captured as that action's output.
     #[serde(default)]
     pub grill_action_started_at: Option<i64>,
+    #[serde(default)]
+    pub plan_phase: Option<PlanPhase>,
+    #[serde(default)]
+    pub plan_path: Option<String>,
 }
 
 pub fn run_is_active(run: &Run) -> bool {
     run.state != RunState::Finished
         || (run.execution_profile == ExecutionProfile::Grill
             && run.grill_phase != Some(GrillPhase::Finished))
+        || (run.execution_profile == ExecutionProfile::Plan
+            && run.plan_phase == Some(PlanPhase::AwaitingGo))
 }
 
 pub fn run_is_finished(run: &Run) -> bool {
@@ -613,6 +702,12 @@ pub struct ContextConfiguration {
     pub check_dirty_checkouts: bool,
     pub grill_defaults: GrillConfiguration,
     pub implement_defaults: GrillConfiguration,
+    #[serde(default)]
+    pub default_workflow: Workflow,
+    #[serde(default)]
+    pub pstack_defaults: GrillConfiguration,
+    #[serde(default)]
+    pub pstack_roles: PstackRoleTable,
     pub gh_executable_path: Option<String>,
     pub twg_executable_path: Option<String>,
     pub az_executable_path: Option<String>,

@@ -179,6 +179,7 @@ pub enum Event {
         agent: AgentKind,
         configuration: Option<GrillConfiguration>,
         execution_profile: ExecutionProfile,
+        workflow: Workflow,
         prompt: String,
         working_directory: String,
         session_name: String,
@@ -199,6 +200,7 @@ pub enum Event {
         agent: AgentKind,
         configuration: Option<GrillConfiguration>,
         execution_profile: ExecutionProfile,
+        workflow: Workflow,
         prompt: String,
         working_directory: String,
         session_name: String,
@@ -281,6 +283,21 @@ pub enum Event {
         run_id: i64,
         transcript: String,
         question_group: Option<GrillQuestionGroup>,
+    },
+    ReportRunPullRequest {
+        run_id: i64,
+        object: ExternalObjectInput,
+    },
+    RecordRunAttention {
+        run_id: i64,
+        summary: String,
+    },
+    RecordRunPlan {
+        run_id: i64,
+        path: String,
+    },
+    GoPlan {
+        run_id: i64,
     },
     RecordGrillAnswers {
         run_id: i64,
@@ -368,6 +385,18 @@ pub struct ImplementationQueueStart {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
+    EnsurePstackTree {
+        machine_id: i64,
+        tree_hash: String,
+    },
+    EnsurePstackRoleFile {
+        machine_id: i64,
+        context_id: i64,
+        parent_agent: AgentKind,
+        roles: PstackRoleTable,
+        claude_profile: Option<CliConfigurationProfile>,
+        codex_profile: Option<CliConfigurationProfile>,
+    },
     PersistContext {
         context: Context,
         next_context_id: i64,
@@ -485,6 +514,9 @@ pub enum Effect {
         run: Run,
     },
     PersistRunTranscript {
+        run: Run,
+    },
+    PersistRunReports {
         run: Run,
     },
     PersistGrillAnswers {

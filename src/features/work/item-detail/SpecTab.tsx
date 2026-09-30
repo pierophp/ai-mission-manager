@@ -212,6 +212,7 @@ function SpecDocument({
       configuration,
       implementationQueue: start,
       executionProfile: "implement",
+      workflow: "matt-pocock",
       prompt: "Implementation Queue",
       promptSelection: { includeObjective: true, externalObjectIds: [] },
       expectedCheckouts: preview.checkouts,

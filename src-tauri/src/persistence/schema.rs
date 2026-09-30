@@ -23,6 +23,11 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              implement_agent TEXT NOT NULL DEFAULT 'claude',
              implement_model TEXT NOT NULL DEFAULT 'claude-sonnet-5',
              implement_effort TEXT NOT NULL DEFAULT 'high',
+             default_workflow TEXT NOT NULL DEFAULT 'matt-pocock',
+             pstack_agent TEXT NOT NULL DEFAULT 'claude',
+             pstack_model TEXT NOT NULL DEFAULT 'claude-sonnet-5',
+             pstack_effort TEXT NOT NULL DEFAULT 'high',
+             pstack_roles_json TEXT NOT NULL DEFAULT '',
              claude_profile_id INTEGER,
              codex_profile_id INTEGER,
              gh_executable_path TEXT,
@@ -97,6 +102,11 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
         ("implement_agent", "TEXT NOT NULL DEFAULT 'claude'"),
         ("implement_model", "TEXT NOT NULL DEFAULT 'claude-sonnet-5'"),
         ("implement_effort", "TEXT NOT NULL DEFAULT 'high'"),
+        ("default_workflow", "TEXT NOT NULL DEFAULT 'matt-pocock'"),
+        ("pstack_agent", "TEXT NOT NULL DEFAULT 'claude'"),
+        ("pstack_model", "TEXT NOT NULL DEFAULT 'claude-sonnet-5'"),
+        ("pstack_effort", "TEXT NOT NULL DEFAULT 'high'"),
+        ("pstack_roles_json", "TEXT NOT NULL DEFAULT ''"),
         ("claude_profile_id", "INTEGER"),
         ("codex_profile_id", "INTEGER"),
         ("gh_executable_path", "TEXT"),
@@ -255,7 +265,8 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
              cli_configuration_profile_json TEXT,
              execution_profile TEXT NOT NULL
-                 CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom', 'grill')),
+                 CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom', 'grill', 'autonomous', 'plan', 'pstack-review')),
+             workflow TEXT NOT NULL DEFAULT 'matt-pocock',
              model TEXT,
              effort TEXT,
              skill_snapshot TEXT,
@@ -269,6 +280,8 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              pane_status TEXT NOT NULL DEFAULT 'unknown',
              direct_checkouts_json TEXT NOT NULL DEFAULT '[]',
              transcript TEXT NOT NULL DEFAULT '',
+             reported_pull_requests_json TEXT NOT NULL DEFAULT '[]',
+             attention_summary TEXT,
              grill_question_group_json TEXT,
              grill_answers_json TEXT NOT NULL DEFAULT '[]',
              grill_decisions_json TEXT NOT NULL DEFAULT '[]',
@@ -278,6 +291,8 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              grill_action_started_at INTEGER
              ,implementation_queue_id INTEGER
              ,implementation_queue_position INTEGER
+             ,plan_phase TEXT
+             ,plan_path TEXT
          );
          CREATE TABLE IF NOT EXISTS implementation_queues (
              id INTEGER PRIMARY KEY NOT NULL,
@@ -460,6 +475,12 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
         )?;
     }
     let run_columns = table_columns(connection, "runs")?;
+    if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "workflow") {
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN workflow TEXT NOT NULL DEFAULT 'matt-pocock'",
+            [],
+        )?;
+    }
     if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "state") {
         connection.execute(
             "ALTER TABLE runs ADD COLUMN state TEXT NOT NULL DEFAULT 'unknown'",
@@ -507,6 +528,21 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
             "ALTER TABLE runs ADD COLUMN transcript TEXT NOT NULL DEFAULT ''",
             [],
         )?;
+    }
+    if !run_columns.is_empty()
+        && !run_columns
+            .iter()
+            .any(|column| column == "reported_pull_requests_json")
+    {
+        connection.execute(
+            "ALTER TABLE runs ADD COLUMN reported_pull_requests_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+    if !run_columns.is_empty()
+        && !run_columns.iter().any(|column| column == "attention_summary")
+    {
+        connection.execute("ALTER TABLE runs ADD COLUMN attention_summary TEXT", [])?;
     }
     if !run_columns.is_empty()
         && !run_columns
@@ -563,6 +599,13 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
     if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "worktree_id") {
         connection.execute("ALTER TABLE runs ADD COLUMN worktree_id INTEGER", [])?;
     }
+    if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "plan_phase") {
+        connection.execute("ALTER TABLE runs ADD COLUMN plan_phase TEXT", [])?;
+    }
+    if !run_columns.is_empty() && !run_columns.iter().any(|column| column == "plan_path") {
+        connection.execute("ALTER TABLE runs ADD COLUMN plan_path TEXT", [])?;
+    }
+    migrate_runs_execution_profiles(connection)?;
     ensure_sequence_at_least(connection, "next_context_id", "contexts", "id")?;
     ensure_sequence_at_least(connection, "next_project_id", "projects", "id")?;
     ensure_sequence_at_least(connection, "next_item_id", "items", "id")?;
@@ -730,7 +773,7 @@ pub(super) fn migrate_legacy_workset_data(connection: &mut Connection) -> Result
                  machine_id INTEGER NOT NULL REFERENCES machines(id),
                  agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
                  execution_profile TEXT NOT NULL
-                     CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom')),
+                     CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom', 'grill', 'autonomous', 'plan', 'pstack-review')),
                  prompt TEXT NOT NULL,
                  working_directory TEXT NOT NULL,
                  session_name TEXT NOT NULL,
@@ -786,7 +829,7 @@ pub(super) fn migrate_runs_for_grill(connection: &mut Connection) -> Result<(), 
              machine_id INTEGER NOT NULL REFERENCES machines(id),
              agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
              execution_profile TEXT NOT NULL
-                 CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom', 'grill')),
+                     CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom', 'grill', 'autonomous', 'plan', 'pstack-review')),
              model TEXT,
              effort TEXT,
              skill_snapshot TEXT,
@@ -813,6 +856,64 @@ pub(super) fn migrate_runs_for_grill(connection: &mut Connection) -> Result<(), 
          CREATE INDEX runs_by_workspace ON runs (workspace_id, id);",
     )?;
     Ok(())
+}
+
+/// Widen the Run profile CHECK while preserving every persisted Run and report.
+fn migrate_runs_execution_profiles(connection: &mut Connection) -> Result<(), StoreError> {
+    let sql = connection.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs'",
+        [],
+        |row| row.get::<_, String>(0),
+    ).optional()?;
+    let Some(sql) = sql else { return Ok(()); };
+    if sql.contains("'autonomous'") && sql.contains("'plan'") && sql.contains("'pstack-review'") { return Ok(()); }
+    let existing = table_columns(connection, "runs")?;
+    let known = [
+        "id", "item_id", "workspace_id", "repository_id", "worktree_id", "machine_id", "agent",
+        "cli_configuration_profile_json", "execution_profile", "workflow", "model", "effort",
+        "skill_snapshot", "prompt", "working_directory", "session_name", "pane_id", "started_at",
+        "state", "last_applied_agent_state_sequence", "pane_status", "direct_checkouts_json", "transcript",
+        "reported_pull_requests_json", "attention_summary", "grill_question_group_json", "grill_answers_json",
+        "grill_decisions_json", "grill_response", "grill_phase", "grill_action", "grill_action_started_at",
+        "implementation_queue_id", "implementation_queue_position", "plan_phase", "plan_path",
+    ];
+    let columns = known.iter().filter(|column| existing.iter().any(|candidate| candidate == **column))
+        .copied().collect::<Vec<_>>().join(", ");
+    connection.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
+    let result = (|| -> Result<(), StoreError> {
+        connection.execute_batch(
+            "DROP INDEX IF EXISTS runs_by_item;
+             DROP INDEX IF EXISTS runs_by_workspace;
+             ALTER TABLE runs RENAME TO runs_legacy;
+             CREATE TABLE runs_expanded (
+                 id INTEGER PRIMARY KEY NOT NULL,
+                 item_id INTEGER NOT NULL REFERENCES items(id),
+                 workspace_id INTEGER REFERENCES workspaces(id),
+                 repository_id INTEGER REFERENCES repositories(id),
+                 worktree_id INTEGER REFERENCES worktrees(id),
+                 machine_id INTEGER NOT NULL REFERENCES machines(id),
+                 agent TEXT NOT NULL CHECK (agent IN ('claude', 'codex')),
+                 cli_configuration_profile_json TEXT,
+                 execution_profile TEXT NOT NULL CHECK (execution_profile IN ('investigate', 'implement', 'review', 'custom', 'grill', 'autonomous', 'plan', 'pstack-review')),
+                 workflow TEXT NOT NULL DEFAULT 'matt-pocock', model TEXT, effort TEXT, skill_snapshot TEXT,
+                 prompt TEXT NOT NULL, working_directory TEXT NOT NULL, session_name TEXT NOT NULL,
+                 pane_id TEXT NOT NULL, started_at INTEGER NOT NULL, state TEXT NOT NULL DEFAULT 'unknown',
+                 last_applied_agent_state_sequence INTEGER, pane_status TEXT NOT NULL DEFAULT 'unknown',
+                 direct_checkouts_json TEXT NOT NULL DEFAULT '[]', transcript TEXT NOT NULL DEFAULT '',
+                 reported_pull_requests_json TEXT NOT NULL DEFAULT '[]', attention_summary TEXT,
+                 grill_question_group_json TEXT, grill_answers_json TEXT NOT NULL DEFAULT '[]',
+                 grill_decisions_json TEXT NOT NULL DEFAULT '[]', grill_response TEXT, grill_phase TEXT,
+                 grill_action TEXT, grill_action_started_at INTEGER, implementation_queue_id INTEGER,
+                 implementation_queue_position INTEGER, plan_phase TEXT, plan_path TEXT
+             );"
+        )?;
+        connection.execute_batch(&format!("INSERT INTO runs_expanded ({columns}) SELECT {columns} FROM runs_legacy; DROP TABLE runs_legacy; ALTER TABLE runs_expanded RENAME TO runs; CREATE INDEX runs_by_item ON runs (item_id, id); CREATE INDEX runs_by_workspace ON runs (workspace_id, id);"))?;
+        connection.execute_batch("COMMIT;")?;
+        Ok(())
+    })();
+    if result.is_err() { let _ = connection.execute_batch("ROLLBACK;"); }
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    result
 }
 
 fn ensure_default_projects(connection: &mut Connection) -> Result<(), StoreError> {

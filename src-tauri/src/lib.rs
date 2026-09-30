@@ -4,6 +4,7 @@ pub mod domain;
 mod git;
 pub mod persistence;
 mod provider;
+mod pstack;
 mod terminal;
 
 mod app;
@@ -185,6 +186,7 @@ pub fn run() {
             app::terminal_input,
             app::submit_grill_answers,
             app::continue_grill,
+            app::go_plan,
             app::terminal_resize,
             app::close_terminal,
             app::open_external_terminal,

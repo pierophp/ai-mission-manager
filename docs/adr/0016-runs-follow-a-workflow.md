@@ -1,0 +1,3 @@
+# Each Run follows a Workflow
+
+Each Run follows one Workflow (`matt-pocock` or `pstack`): its Context provides the default, it may be overridden when launching the Run, and it cannot change afterward. Execution Profiles belong to a Workflow, so a Run's profile is chosen from the set offered by its Workflow. Keep `matt-pocock` skills pasted into the prompt because each is a self-contained `SKILL.md`, preserving the current prompt snapshot without requiring files on a Machine. The pstack skill tree contains cross-referenced files and scripts, so the app writes that tree to the Execution Machine and the prompt references it by path. This extends ADR-0009's precedent: the app provisions its own tooling on a Machine.
