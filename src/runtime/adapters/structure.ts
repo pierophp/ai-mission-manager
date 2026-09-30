@@ -21,8 +21,8 @@ import type {
   Item,
   ItemStatus,
   ExecutionMode,
-  GrillAgentCatalog,
   GrillConfiguration,
+  GrillModelCatalogSnapshot,
 } from "../types";
 import type { AgentKind } from "../execution-types";
 import { command } from "./tauri";
@@ -37,7 +37,8 @@ export const structureAdapter = {
   listAttentionDefaults: () =>
     command<ContextAttentionDefault[]>("list_context_attention_defaults"),
   listGrillModelCatalog: () =>
-    command<GrillAgentCatalog[]>("list_grill_model_catalog"),
+    command<GrillModelCatalogSnapshot>("list_grill_model_catalog"),
+  refreshGrillModelCatalog: () => command<void>("refresh_grill_model_catalog"),
   createContext: (name: string) => command<Context>("create_context", { name }),
   createContextConfiguration: (configuration: ContextConfiguration) =>
     command<Context>("create_context_configuration", { configuration }),

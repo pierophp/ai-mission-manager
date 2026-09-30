@@ -197,12 +197,12 @@ describe("ContextEditor", () => {
         checkDirtyCheckouts: true,
         grillDefaults: {
           agent: "claude",
-          model: "claude-sonnet-4-5",
+          model: "claude-sonnet-5",
           effort: "high",
         },
         implementDefaults: {
           agent: "claude",
-          model: "claude-sonnet-4-5",
+          model: "claude-sonnet-5",
           effort: "high",
         },
         attentionDefaults: expect.arrayContaining([

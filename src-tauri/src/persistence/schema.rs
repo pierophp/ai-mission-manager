@@ -18,10 +18,10 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
              execution_machine_id INTEGER,
              check_dirty_checkouts INTEGER NOT NULL DEFAULT 1,
              grill_agent TEXT NOT NULL DEFAULT 'claude',
-             grill_model TEXT NOT NULL DEFAULT 'claude-sonnet-4-5',
+             grill_model TEXT NOT NULL DEFAULT 'claude-sonnet-5',
              grill_effort TEXT NOT NULL DEFAULT 'high',
              implement_agent TEXT NOT NULL DEFAULT 'claude',
-             implement_model TEXT NOT NULL DEFAULT 'claude-sonnet-4-5',
+             implement_model TEXT NOT NULL DEFAULT 'claude-sonnet-5',
              implement_effort TEXT NOT NULL DEFAULT 'high',
              claude_profile_id INTEGER,
              codex_profile_id INTEGER,
@@ -78,7 +78,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
     if !context_columns.is_empty() && !context_columns.iter().any(|column| column == "grill_model")
     {
         connection.execute(
-            "ALTER TABLE contexts ADD COLUMN grill_model TEXT NOT NULL DEFAULT 'claude-sonnet-4-5'",
+            "ALTER TABLE contexts ADD COLUMN grill_model TEXT NOT NULL DEFAULT 'claude-sonnet-5'",
             [],
         )?;
     }
@@ -95,10 +95,7 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
     for (column, definition) in [
         ("check_dirty_checkouts", "INTEGER NOT NULL DEFAULT 1"),
         ("implement_agent", "TEXT NOT NULL DEFAULT 'claude'"),
-        (
-            "implement_model",
-            "TEXT NOT NULL DEFAULT 'claude-sonnet-4-5'",
-        ),
+        ("implement_model", "TEXT NOT NULL DEFAULT 'claude-sonnet-5'"),
         ("implement_effort", "TEXT NOT NULL DEFAULT 'high'"),
         ("claude_profile_id", "INTEGER"),
         ("codex_profile_id", "INTEGER"),

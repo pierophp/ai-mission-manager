@@ -78,6 +78,14 @@ _Avoid_: custom prompt source, notes
 An ordered selection of open Tickets linked to an Item's Spec, arranged by their captured order and blocking relationships. It records the launch configuration, checkout approvals, and the Run attached to its first entry; only one active queue may exist per Item.
 _Avoid_: batch, ticket batch
 
+**Plan Usage**:
+How much of a provider subscription one Agent CLI Configuration Profile has consumed, as that provider reports it: a set of Usage Windows plus the moment the reading was taken. It is read per profile, never per Context or per Run.
+_Avoid_: quota, credits, billing
+
+**Usage Window**:
+One limit a provider meters against — a rolling five-hour window, a weekly window, a per-model weekly window — carrying the percentage used and when it resets. Providers disagree on which windows exist, so the set is whatever the provider reported rather than a fixed list.
+_Avoid_: bucket, limit, period
+
 ### Attention
 
 **Needs Attention**:

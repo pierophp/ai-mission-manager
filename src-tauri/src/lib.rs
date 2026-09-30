@@ -112,6 +112,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app::list_contexts,
             app::list_grill_model_catalog,
+            app::refresh_grill_model_catalog,
+            app::list_plan_usage,
+            app::refresh_plan_usage,
             app::set_context_grill_defaults,
             app::set_context_implement_defaults,
             app::set_context_dirty_checkout_check,

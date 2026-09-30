@@ -44,7 +44,7 @@ const defaultPolicy: ExternalChangePolicy = {
 };
 const defaultGrillConfiguration = (): GrillConfiguration => ({
   agent: "claude",
-  model: "claude-sonnet-4-5",
+  model: "claude-sonnet-5",
   effort: "high",
 });
 

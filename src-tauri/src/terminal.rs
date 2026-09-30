@@ -3374,17 +3374,6 @@ pub fn agent_cli_arguments(
         if model.trim().is_empty() {
             return Err("agent model identifier cannot be blank".into());
         }
-        let model = match agent {
-            AgentKind::Claude => match model {
-                "claude-opus-4-1" => "claude-opus-5",
-                provider_model => provider_model,
-            },
-            AgentKind::Codex => match model {
-                "codex-sol" | "codex-terra" => "gpt-6-sol",
-                "codex-luna" => "gpt-6-luna",
-                provider_model => provider_model,
-            },
-        };
         arguments.extend(["--model".into(), model.into()]);
     }
     if let Some(effort) = effort {
@@ -3445,7 +3434,7 @@ mod tests {
             vec!["--model", "claude-sonnet-4-5", "--effort", "high"]
         );
         assert_eq!(
-            agent_cli_arguments(AgentKind::Codex, Some("codex-luna"), Some("xhigh"))
+            agent_cli_arguments(AgentKind::Codex, Some("gpt-6-luna"), Some("xhigh"))
                 .expect("Codex arguments should be valid"),
             vec![
                 "--model",

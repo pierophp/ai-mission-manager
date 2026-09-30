@@ -626,7 +626,7 @@ mod implementation_queue_tests {
         );
         assert_eq!(
             decision.state.runs[0].model.as_deref(),
-            Some("claude-sonnet-4-5")
+            Some(GrillConfiguration::default().model.as_str())
         );
         assert_eq!(decision.state.runs[0].effort.as_deref(), Some("high"));
         assert_eq!(
@@ -2154,14 +2154,14 @@ mod grill_contract_tests {
     }
 
     #[test]
-    fn grill_catalog_rejects_an_effort_not_supported_by_the_selected_model() {
+    fn grill_configuration_accepts_effort_levels_discovered_from_provider_cli() {
         let configuration = GrillConfiguration {
             agent: AgentKind::Codex,
             model: "gpt-6-luna".into(),
-            effort: "not-supported".into(),
+            effort: "future-cli-level".into(),
         };
 
-        assert!(validate_grill_configuration(&configuration).is_err());
+        assert!(validate_grill_configuration(&configuration).is_ok());
         assert!(grill_model_catalog()
             .iter()
             .any(|catalog| catalog.agent == AgentKind::Codex

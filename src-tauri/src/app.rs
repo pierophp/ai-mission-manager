@@ -389,8 +389,30 @@ pub fn list_contexts(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Context>, S
 }
 
 #[tauri::command]
-pub fn list_grill_model_catalog() -> Vec<crate::domain::GrillAgentCatalog> {
-    crate::features::setup::list_grill_model_catalog()
+pub fn list_grill_model_catalog(
+    app: AppHandle,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<crate::features::model_catalog::GrillModelCatalogSnapshot, String> {
+    crate::features::setup::list_grill_model_catalog(app, state)
+}
+
+#[tauri::command]
+pub fn refresh_grill_model_catalog(app: AppHandle) {
+    crate::features::setup::refresh_grill_model_catalog(app)
+}
+
+#[tauri::command]
+pub fn list_plan_usage(
+    app: AppHandle,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<crate::features::plan_usage::PlanUsageSnapshot, String> {
+    let runtime = state.lock().map_err(|error| error.to_string())?;
+    crate::features::plan_usage::list(app, &runtime)
+}
+
+#[tauri::command]
+pub fn refresh_plan_usage(app: AppHandle) {
+    crate::features::plan_usage::refresh(app)
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1790,7 +1812,12 @@ mod tests {
             )
             .expect("second Repository should register");
         runtime
-            .create_item("Keep two lines of work reusable".into(), 1, 1, String::new())
+            .create_item(
+                "Keep two lines of work reusable".into(),
+                1,
+                1,
+                String::new(),
+            )
             .expect("Item should be created");
 
         assert_eq!(runtime.state.workspaces.len(), 1);

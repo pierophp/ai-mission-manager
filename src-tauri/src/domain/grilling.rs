@@ -826,7 +826,7 @@ impl Default for GrillConfiguration {
     fn default() -> Self {
         Self {
             agent: AgentKind::Claude,
-            model: "claude-sonnet-4-5".into(),
+            model: "claude-sonnet-5".into(),
             effort: "high".into(),
         }
     }
@@ -854,6 +854,20 @@ pub struct GrillAgentCatalog {
     pub models: Vec<GrillModel>,
 }
 
+const CLAUDE_EFFORTS: &[(&str, &str)] = &[
+    ("low", "Low"),
+    ("medium", "Medium"),
+    ("high", "High"),
+    ("xhigh", "Extra high"),
+    ("max", "Max"),
+];
+const CODEX_EFFORTS: &[(&str, &str)] = &[
+    ("low", "Low"),
+    ("medium", "Medium"),
+    ("high", "High"),
+    ("xhigh", "Extra high"),
+];
+
 pub fn grill_model_catalog() -> Vec<GrillAgentCatalog> {
     let efforts = |ids: &[(&str, &str)]| {
         ids.iter()
@@ -869,18 +883,54 @@ pub fn grill_model_catalog() -> Vec<GrillAgentCatalog> {
             models: vec![
                 GrillModel {
                     id: "claude-opus-5".into(),
-                    label: "Opus 5".into(),
-                    efforts: efforts(&[("low", "Low"), ("medium", "Medium"), ("high", "High")]),
+                    label: "Claude Opus 5".into(),
+                    efforts: efforts(CLAUDE_EFFORTS),
+                },
+                GrillModel {
+                    id: "claude-sonnet-5".into(),
+                    label: "Claude Sonnet 5".into(),
+                    efforts: efforts(CLAUDE_EFFORTS),
+                },
+                GrillModel {
+                    id: "claude-opus-4-8".into(),
+                    label: "Claude Opus 4.8".into(),
+                    efforts: efforts(CLAUDE_EFFORTS),
+                },
+                GrillModel {
+                    id: "claude-sonnet-4-6".into(),
+                    label: "Claude Sonnet 4.6".into(),
+                    efforts: efforts(CLAUDE_EFFORTS),
+                },
+                GrillModel {
+                    id: "claude-opus-4-5-20251101".into(),
+                    label: "Claude Opus 4.5".into(),
+                    efforts: efforts(CLAUDE_EFFORTS),
+                },
+                GrillModel {
+                    id: "claude-sonnet-4-5-20250929".into(),
+                    label: "Claude Sonnet 4.5".into(),
+                    efforts: efforts(CLAUDE_EFFORTS),
+                },
+                GrillModel {
+                    id: "claude-haiku-4-5-20251001".into(),
+                    label: "Claude Haiku 4.5".into(),
+                    efforts: efforts(CLAUDE_EFFORTS),
                 },
                 GrillModel {
                     id: "claude-sonnet-4-5".into(),
-                    label: "Sonnet".into(),
-                    efforts: efforts(&[("low", "Low"), ("medium", "Medium"), ("high", "High")]),
+                    label: "Claude Sonnet 4.5 (legacy ID)".into(),
+                    efforts: efforts(CLAUDE_EFFORTS),
                 },
                 GrillModel {
                     id: "claude-haiku-4-5".into(),
-                    label: "Haiku".into(),
-                    efforts: efforts(&[("low", "Low"), ("medium", "Medium"), ("high", "High")]),
+                    label: "Claude Haiku 4.5 (legacy ID)".into(),
+                    efforts: efforts(&[
+                        ("low", "Low"),
+                        ("medium", "Medium"),
+                        ("high", "High"),
+                        ("xhigh", "Extra high"),
+                        ("max", "Max"),
+                    ]),
                 },
             ],
         },
@@ -890,22 +940,12 @@ pub fn grill_model_catalog() -> Vec<GrillAgentCatalog> {
                 GrillModel {
                     id: "gpt-6-sol".into(),
                     label: "GPT-6 Sol".into(),
-                    efforts: efforts(&[
-                        ("low", "Low"),
-                        ("medium", "Medium"),
-                        ("high", "High"),
-                        ("xhigh", "Extra high"),
-                    ]),
+                    efforts: efforts(CODEX_EFFORTS),
                 },
                 GrillModel {
                     id: "gpt-6-luna".into(),
                     label: "GPT-6 Luna".into(),
-                    efforts: efforts(&[
-                        ("low", "Low"),
-                        ("medium", "Medium"),
-                        ("high", "High"),
-                        ("xhigh", "Extra high"),
-                    ]),
+                    efforts: efforts(CODEX_EFFORTS),
                 },
             ],
         },
@@ -913,21 +953,18 @@ pub fn grill_model_catalog() -> Vec<GrillAgentCatalog> {
 }
 
 pub fn validate_grill_configuration(configuration: &GrillConfiguration) -> Result<(), DomainError> {
-    let valid = grill_model_catalog()
-        .into_iter()
-        .find(|catalog| catalog.agent == configuration.agent)
-        .and_then(|catalog| {
-            catalog
-                .models
+    let valid = !configuration.model.trim().is_empty()
+        && !configuration.effort.trim().is_empty()
+        && (configuration.agent == AgentKind::Codex
+            || grill_model_catalog()
                 .into_iter()
-                .find(|model| model.id == configuration.model)
-        })
-        .is_some_and(|model| {
-            model
-                .efforts
-                .into_iter()
-                .any(|effort| effort.id == configuration.effort)
-        });
+                .find(|catalog| catalog.agent == AgentKind::Claude)
+                .is_some_and(|catalog| {
+                    catalog
+                        .models
+                        .iter()
+                        .any(|model| model.id == configuration.model)
+                }));
     if valid {
         Ok(())
     } else {

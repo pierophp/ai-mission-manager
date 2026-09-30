@@ -65,6 +65,13 @@ export type GrillAgentCatalog = {
   models: GrillModel[];
 };
 
+export type GrillModelCatalogSnapshot = {
+  catalogs: GrillAgentCatalog[];
+  codexStatus: "ready" | "refreshing" | "error";
+  codexError: string | null;
+  codexFetchedAt: number | null;
+};
+
 export type ProviderChoice = "github" | "none";
 export type DependencyState =
   | "available"
@@ -750,3 +757,37 @@ export type ContextAttentionDefault = {
 
 export type * from "./execution-types";
 export type * from "./terminal-types";
+
+export type PlanUsageRefreshStatus = "ready" | "refreshing" | "never";
+
+export type ProfileUsageState =
+  | "ready"
+  | "signedOut"
+  | "machineUnreachable"
+  | "notReported";
+
+export type UsageWindow = {
+  id: string;
+  label: string;
+  usedPercent: number;
+  resetsAt: number | null;
+};
+
+export type ProfilePlanUsage = {
+  profileId: number;
+  profileName: string;
+  provider: AgentKind;
+  machineId: number;
+  machineName: string;
+  state: ProfileUsageState;
+  detail: string | null;
+  plan: string | null;
+  observedAt: number | null;
+  windows: UsageWindow[];
+};
+
+export type PlanUsageSnapshot = {
+  profiles: ProfilePlanUsage[];
+  fetchedAt: number | null;
+  status: PlanUsageRefreshStatus;
+};
