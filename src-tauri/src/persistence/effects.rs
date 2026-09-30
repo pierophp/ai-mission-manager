@@ -15,6 +15,8 @@ impl SqliteStore {
         let transaction = self.connection.transaction()?;
         for effect in effects {
             match effect {
+                // The launch coordinator executes this Machine effect while the Pane is gated.
+                Effect::EnsurePstackTree { .. } | Effect::EnsurePstackRoleFile { .. } => {}
                 Effect::PersistImplementationQueue { queue } => {
                     transaction.execute(
                         "INSERT INTO implementation_queues (id, item_id, queue_json) VALUES (?1, ?2, ?3) ON CONFLICT(id) DO UPDATE SET queue_json = excluded.queue_json",

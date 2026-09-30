@@ -109,6 +109,8 @@ fn audit_actions(before: &DomainState, effects: &[Effect]) -> Vec<AuditAction> {
                 context_id: context.id,
             }),
             Effect::PersistContextGrillDefaults { .. }
+            | Effect::EnsurePstackTree { .. }
+            | Effect::EnsurePstackRoleFile { .. }
             | Effect::PersistContextImplementDefaults { .. }
             | Effect::PersistContextConfiguration { .. }
             | Effect::UpdateContext { .. }
