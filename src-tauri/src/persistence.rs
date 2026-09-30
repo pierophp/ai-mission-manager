@@ -47,6 +47,8 @@ pub enum StoreError {
     InvalidGrillConfiguration(String),
     #[error("invalid Execution Profile in database: {0}")]
     InvalidExecutionProfile(String),
+    #[error("invalid Workflow in database: {0}")]
+    InvalidWorkflow(String),
     #[error("invalid Execution Mode in database: {0}")]
     InvalidExecutionMode(String),
     #[error("invalid Run state in database: {0}")]
@@ -55,6 +57,8 @@ pub enum StoreError {
     InvalidRunPaneStatus(String),
     #[error("invalid Grill phase in database: {0}")]
     InvalidGrillPhase(String),
+    #[error("invalid Plan phase in database: {0}")]
+    InvalidPlanPhase(String),
     #[error("invalid downstream action in database: {0}")]
     InvalidDownstreamAction(String),
     #[error("invalid Workspace preparation state in database: {0}")]

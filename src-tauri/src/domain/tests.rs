@@ -94,7 +94,7 @@ mod implementation_queue_tests {
         assert!(prompt.contains("Item: Work"));
         assert!(prompt.contains("Initial Prompt:\nFix the SSH launch gate."));
         assert!(prompt.contains("Respond to the user in English"));
-        assert!(prompt.contains("write commits and PRs in English"));
+        assert!(prompt.contains("Write commits and pull requests in English."));
         assert!(prompt.contains("AI_MISSION_MANAGER_EVENT"));
         assert!(prompt.contains("pull_request.opened"));
         assert!(prompt.contains("attention.final"));
@@ -717,9 +717,10 @@ mod implementation_queue_tests {
     #[test]
     fn pstack_review_profile_is_distinct_and_only_valid_in_pstack() {
         let mut pstack_event = event("open");
-        if let Event::StartDirectRun { workflow, execution_profile, .. } = &mut pstack_event {
+        if let Event::StartDirectRun { workflow, execution_profile, implementation_queue, .. } = &mut pstack_event {
             *workflow = Workflow::Pstack;
             *execution_profile = ExecutionProfile::PstackReview;
+            *implementation_queue = None;
         }
         let started = decide(state(), pstack_event).expect("pstack Review is valid");
         let run = started.state.runs.last().expect("Run is recorded");
@@ -727,8 +728,9 @@ mod implementation_queue_tests {
         assert_ne!(run.execution_profile, ExecutionProfile::Review);
 
         let mut matt_event = event("open");
-        if let Event::StartDirectRun { execution_profile, .. } = &mut matt_event {
+        if let Event::StartDirectRun { execution_profile, implementation_queue, .. } = &mut matt_event {
             *execution_profile = ExecutionProfile::PstackReview;
+            *implementation_queue = None;
         }
         assert!(matches!(
             decide(state(), matt_event),
@@ -740,11 +742,12 @@ mod implementation_queue_tests {
     }
 
     #[test]
-    fn autonomous_pstack_run_records_the_vendor_snapshot_and_tree_effect() {
+    fn autonomous_pstack_run_records_the_vendor_snapshot() {
         let mut event = event("open");
-        if let Event::StartDirectRun { workflow, execution_profile, .. } = &mut event {
+        if let Event::StartDirectRun { workflow, execution_profile, implementation_queue, .. } = &mut event {
             *workflow = Workflow::Pstack;
             *execution_profile = ExecutionProfile::Autonomous;
+            *implementation_queue = None;
         }
         let decision = decide(state(), event).expect("Autonomous pstack launch is valid");
         let run = decision.state.runs.last().expect("Run is recorded");
@@ -752,21 +755,15 @@ mod implementation_queue_tests {
         assert!(snapshot.contains(crate::pstack::PSTACK_VERSION));
         assert!(snapshot.contains(crate::pstack::PSTACK_UPSTREAM_COMMIT));
         assert!(snapshot.contains(crate::pstack::PSTACK_TREE_HASH));
-        assert!(decision.effects.iter().any(|effect| matches!(effect,
-            Effect::EnsurePstackTree { machine_id: 1, tree_hash } if tree_hash == crate::pstack::PSTACK_TREE_HASH
-        )));
-        assert!(decision.effects.iter().any(|effect| matches!(effect,
-            Effect::EnsurePstackRoleFile { machine_id: 1, context_id: 1, parent_agent: AgentKind::Claude, roles, .. }
-                if roles == &PstackRoleTable::default()
-        )));
     }
 
     #[test]
     fn pstack_reports_link_pull_requests_and_store_attention_without_changing_item_state() {
         let mut start = event("open");
-        if let Event::StartDirectRun { workflow, execution_profile, .. } = &mut start {
+        if let Event::StartDirectRun { workflow, execution_profile, implementation_queue, .. } = &mut start {
             *workflow = Workflow::Pstack;
             *execution_profile = ExecutionProfile::Autonomous;
+            *implementation_queue = None;
         }
         let started = decide(state(), start).expect("pstack Run should start");
         let item_status = started.state.items[0].status;
@@ -2430,7 +2427,57 @@ mod grill_contract_tests {
         assert_eq!(recorded.state.runs[0].plan_path.as_deref(), Some("docs/plan.md"));
         let continued = decide(recorded.state, Event::GoPlan { run_id: 1 }).expect("Go should resume the Run");
         assert_eq!(continued.state.runs[0].state, RunState::Working);
-        assert_eq!(continued.state.runs[0].plan_phase, None);
+        assert_eq!(continued.state.runs[0].plan_phase, Some(PlanPhase::Executing));
+    }
+
+    #[test]
+    fn a_plan_run_offers_go_once_and_finishes_after_executing_the_plan() {
+        let started = decide(state(), start_plan_event()).unwrap();
+        let finished = decide(started.state, Event::UpdateRunState { run_id: 1, state: RunState::Finished }).unwrap();
+        assert!(run_is_active(&finished.state.runs[0]), "Awaiting Go keeps the Run active");
+        let continued = decide(finished.state, Event::GoPlan { run_id: 1 }).unwrap();
+
+        let executed = decide(continued.state, Event::UpdateRunState { run_id: 1, state: RunState::Finished }).unwrap();
+        let run = &executed.state.runs[0];
+        assert_eq!(run.plan_phase, Some(PlanPhase::Executing));
+        assert!(run_is_finished(run), "the executed plan ends the Run");
+        assert!(matches!(
+            decide(executed.state.clone(), Event::GoPlan { run_id: 1 }),
+            Err(DomainError::PlanGoNotAvailable { .. })
+        ));
+        let closed = decide(executed.state, Event::FinishRun { run_id: 1 }).unwrap();
+        assert_eq!(closed.state.runs[0].plan_phase, Some(PlanPhase::Executing));
+    }
+
+    #[test]
+    fn pstack_custom_carries_only_the_initial_prompt_and_launches() {
+        let prompt = compose_pstack_prompt(&state(), 1, ExecutionProfile::CustomPrompt, "/opt/pstack", GrillLanguage::default(), Some("Rename the module"))
+            .expect("pstack Custom composes");
+        assert!(prompt.contains("Initial Prompt:\nRename the module"));
+        assert!(prompt.contains("/opt/pstack/roles/context-1-"));
+        assert!(!prompt.contains("/skills/"));
+        assert!(matches!(
+            compose_pstack_prompt(&state(), 1, ExecutionProfile::CustomPrompt, "/opt/pstack", GrillLanguage::default(), None),
+            Err(DomainError::EmptyRunPrompt)
+        ));
+
+        let mut event = start_plan_event();
+        if let Event::StartDirectRun { execution_profile, .. } = &mut event {
+            *execution_profile = ExecutionProfile::CustomPrompt;
+        }
+        let started = decide(state(), event).expect("Custom is shared by both Workflows");
+        assert_eq!(started.state.runs[0].workflow, Workflow::Pstack);
+    }
+
+    #[test]
+    fn pstack_prompt_without_an_initial_prompt_does_not_repeat_the_notes() {
+        let mut state = state();
+        state.items[0].notes = "Only once.".into();
+        let prompt = compose_pstack_prompt(&state, 1, ExecutionProfile::Autonomous, "/opt/pstack", GrillLanguage::default(), None)
+            .expect("Autonomous composes without an Initial Prompt");
+        assert_eq!(prompt.matches("Only once.").count(), 1);
+        assert!(!prompt.contains("Initial Prompt:"));
+        assert!(!prompt.contains("{{"));
     }
 
     #[test]
@@ -2452,6 +2499,7 @@ mod grill_contract_tests {
         assert!(prompt.contains("stop without implementing"));
         assert!(prompt.contains("repository-relative path"));
         assert!(prompt.contains("plan.ready"));
+        assert!(prompt.contains("/opt/pstack/roles/context-1-"));
     }
 
     #[test]

@@ -4394,6 +4394,8 @@ mod tests {
             shell.arg("-c").arg(command);
             shell.env("EXPECTED_PROFILE", &directory);
             shell.env_remove("AUTH_EXIT_CODE");
+            shell.env_remove("CLAUDE_CONFIG_DIR");
+            shell.env_remove("CODEX_HOME");
             shell.env_remove("ANTHROPIC_API_KEY");
             shell.env_remove("OPENAI_API_KEY");
             if let Some(exit) = auth_exit {

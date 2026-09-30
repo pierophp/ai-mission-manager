@@ -26,11 +26,7 @@ fn validate_workflow_profile(
     workflow: Workflow,
     execution_profile: ExecutionProfile,
 ) -> Result<(), DomainError> {
-    if (workflow == Workflow::Pstack
-        && !matches!(execution_profile, ExecutionProfile::Autonomous | ExecutionProfile::Plan | ExecutionProfile::PstackReview))
-        || (workflow == Workflow::MattPocock
-            && matches!(execution_profile, ExecutionProfile::Autonomous | ExecutionProfile::Plan | ExecutionProfile::PstackReview))
-    {
+    if !workflow.offers(execution_profile) {
         return Err(DomainError::ExecutionProfileNotInWorkflow {
             workflow,
             execution_profile,
@@ -72,18 +68,6 @@ fn selected_cli_configuration_profile(
         provider: profile.provider,
         name: profile.name.clone(),
     })
-}
-
-fn configured_cli_profile(
-    state: &DomainState,
-    profile_id: Option<i64>,
-) -> Option<CliConfigurationProfile> {
-    let profile_id = profile_id?;
-    state
-        .cli_configuration_profiles
-        .iter()
-        .find(|profile| profile.id == profile_id)
-        .cloned()
 }
 
 fn detach_ticket_links_from_spec(
@@ -2192,22 +2176,6 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             };
             state.next_run_id = next_run_id;
             let mut effects = vec![];
-            if workflow == Workflow::Pstack {
-                effects.push(Effect::EnsurePstackTree {
-                    machine_id,
-                    tree_hash: crate::pstack::PSTACK_TREE_HASH.into(),
-                });
-                let context = state.contexts.iter().find(|context| context.id == context_id)
-                    .expect("the Context was resolved during launch validation");
-                effects.push(Effect::EnsurePstackRoleFile {
-                    machine_id,
-                    context_id,
-                    parent_agent: agent,
-                    roles: context.pstack_roles.clone(),
-                    claude_profile: configured_cli_profile(&state, context.claude_profile_id),
-                    codex_profile: configured_cli_profile(&state, context.codex_profile_id),
-                });
-            }
             if let Some(mut queue) = implementation_queue {
                 queue.entries[0].run_id = Some(run.id);
                 state.implementation_queues.push(queue.clone());
@@ -2374,22 +2342,6 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             state.next_run_id = next_run_id;
             state.runs.push(run.clone());
             let mut effects = Vec::new();
-            if workflow == Workflow::Pstack {
-                effects.push(Effect::EnsurePstackTree {
-                    machine_id,
-                    tree_hash: crate::pstack::PSTACK_TREE_HASH.into(),
-                });
-                let context = state.contexts.iter().find(|context| context.id == context_id)
-                    .expect("the Context was resolved during launch validation");
-                effects.push(Effect::EnsurePstackRoleFile {
-                    machine_id,
-                    context_id,
-                    parent_agent: agent,
-                    roles: context.pstack_roles.clone(),
-                    claude_profile: configured_cli_profile(&state, context.claude_profile_id),
-                    codex_profile: configured_cli_profile(&state, context.codex_profile_id),
-                });
-            }
             effects.push(Effect::PersistRun { run, next_run_id });
             Ok(Decision {
                 state,
@@ -2711,8 +2663,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .ok_or(DomainError::RunNotFound { run_id })?;
             run.state = run_state;
             if run.execution_profile == ExecutionProfile::Plan {
-                run.plan_phase = (run_state == RunState::Finished)
-                    .then_some(PlanPhase::AwaitingGo);
+                run.plan_phase = PlanPhase::after_state(run.plan_phase, run_state);
             }
             if run.execution_profile == ExecutionProfile::Grill {
                 run.grill_phase = match run_state {
@@ -2768,8 +2719,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             if state_changed {
                 run.state = run_state;
                 if run.execution_profile == ExecutionProfile::Plan {
-                    run.plan_phase = (run_state == RunState::Finished)
-                        .then_some(PlanPhase::AwaitingGo);
+                    run.plan_phase = PlanPhase::after_state(run.plan_phase, run_state);
                 }
                 if run.execution_profile == ExecutionProfile::Grill {
                     run.grill_phase = match run_state {
@@ -2807,7 +2757,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 .ok_or(DomainError::RunNotFound { run_id })?;
             run.state = RunState::Finished;
             if run.execution_profile == ExecutionProfile::Plan {
-                run.plan_phase = Some(PlanPhase::AwaitingGo);
+                run.plan_phase = PlanPhase::after_state(run.plan_phase, RunState::Finished);
             }
             if run.execution_profile == ExecutionProfile::Grill {
                 run.grill_phase = Some(GrillPhase::Finished);
@@ -3226,7 +3176,7 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 return Err(DomainError::PlanGoNotAvailable { run_id });
             }
             run.state = RunState::Working;
-            run.plan_phase = None;
+            run.plan_phase = Some(PlanPhase::Executing);
             let run = run.clone();
             Ok(Decision { state, effects: vec![Effect::PersistRunState { run }] })
         }

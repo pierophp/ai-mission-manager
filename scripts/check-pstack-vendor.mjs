@@ -10,7 +10,8 @@ const FORBIDDEN = [
   ["removed Cursor home path", /~\/.cursor\//i],
 ];
 const MARKDOWN_LINK = /\]\(([^)]+)\)/g;
-const CODE_PATH = /`([^`<>\n]+\.(?:md|mjs|ts|tsx|js|sh|json|ya?ml))`/g;
+const CODE_SPAN = /`([^`\n]+)`/g;
+const PATH_TOKEN = /^[^<>\s]+\/[^<>\s]+\.(?:md|mjs|ts|tsx|js|sh|json|ya?ml)$/;
 const SOURCE_EXTENSIONS = new Set([
   ".md",
   ".mjs",
@@ -57,10 +58,14 @@ function referencedPaths(sourcePath, content, treeRoot) {
     const target = linkPath(match[1]);
     if (target) references.push({ target, relativeToSource: true });
   }
-  for (const match of content.matchAll(CODE_PATH)) {
-    const target = match[1].trim();
-    if (target.includes("<") || target.includes(">")) continue;
-    references.push({ target, relativeToSource: !target.startsWith("skills/") });
+  // A code span names a tree path only when it holds a directory. A bare file
+  // name (`status.md`, `main.js`) is an example or a file created at runtime,
+  // and a command (`bun scripts/orch/orch.ts`) is checked by its path argument.
+  for (const match of content.matchAll(CODE_SPAN)) {
+    for (const target of match[1].trim().split(/\s+/)) {
+      if (!PATH_TOKEN.test(target)) continue;
+      references.push({ target, relativeToSource: !target.startsWith("skills/") });
+    }
   }
   return references.map(({ target, relativeToSource }) => {
     const sourceCandidate = path.resolve(path.dirname(sourcePath), target);

@@ -595,11 +595,12 @@ pub fn compose_run_prompt(
         ExecutionProfile::CustomPrompt => initial_prompt
             .ok_or(DomainError::EmptyRunPrompt)?
             .to_owned(),
-        ExecutionProfile::Autonomous => initial_prompt
-            .unwrap_or("Read the pstack Autonomous prompt for the full task.")
-            .to_owned(),
-        ExecutionProfile::Plan => "Follow the pstack multi-phase plan playbook, write the plan, report its path, and stop for Go.".to_owned(),
-        ExecutionProfile::PstackReview => return Err(DomainError::ExecutionProfileNotInWorkflow { workflow: Workflow::Pstack, execution_profile: profile }),
+        ExecutionProfile::Autonomous | ExecutionProfile::Plan | ExecutionProfile::PstackReview => {
+            return Err(DomainError::ExecutionProfileNotInWorkflow {
+                workflow: Workflow::MattPocock,
+                execution_profile: profile,
+            })
+        }
         ExecutionProfile::Grill => {
             "Use the selected grilling skill to ask a structured frontier of questions before recommending the next decision."
                 .to_owned()
@@ -636,22 +637,29 @@ pub fn compose_pstack_prompt(
     let context = state.contexts.iter().find(|context| context.id == context_id)
         .ok_or(DomainError::ContextNotFound { context_id })?;
     let roles_path = pstack_role_file_path(skill_root, context);
+    let roles_instruction = format!("Read the generated role instructions at `{roles_path}` and follow them when delegating.");
     let profile_instruction = match profile {
-        ExecutionProfile::Autonomous => format!("You are starting an Autonomous pstack Run. Read `{skill_root}/skills/poteto-mode/SKILL.md` in full before acting. The Skill tool is unavailable because these skills disable model invocation; read any other needed skill by its absolute path under `{skill_root}/skills/` instead of relying on the Skill tool. Read the generated role instructions at `{roles_path}` and follow them when delegating. Do not paste skill text into your response."),
-        ExecutionProfile::Plan => format!("You are starting a Plan pstack Run. Read `{skill_root}/skills/poteto-mode/SKILL.md` in full and follow `{skill_root}/skills/poteto-mode/playbooks/multi-phase-plan.md` in full. The Skill tool is unavailable because these skills disable model invocation; read both files by their absolute paths. Complete the required planning phases, write the plan in the repository, then stop without implementing it. Report the plan's repository-relative path in your final response. Do not delegate implementation."),
-        ExecutionProfile::PstackReview => format!("You are starting a pstack Review Run. Read `{skill_root}/skills/interrogate/SKILL.md` and follow it to review the Pull Request or branch named in the Initial Prompt. Read the generated role instructions at `{roles_path}` and use its `Review panel` entry to configure Reviewer A. Review only: do not edit files, commit, push, or apply suggested changes. Synthesize the reviewers' findings into a verdict, including actionable findings and disagreements. Do not use the matt-pocock `review` profile instructions."),
+        ExecutionProfile::Autonomous => format!("You are starting an Autonomous pstack Run. Read `{skill_root}/skills/poteto-mode/SKILL.md` in full before acting. The Skill tool is unavailable because these skills disable model invocation; read any other needed skill by its absolute path under `{skill_root}/skills/` instead of relying on the Skill tool. {roles_instruction} Do not paste skill text into your response."),
+        ExecutionProfile::Plan => format!("You are starting a Plan pstack Run. Read `{skill_root}/skills/poteto-mode/SKILL.md` in full and follow `{skill_root}/skills/poteto-mode/playbooks/multi-phase-plan.md` in full. The Skill tool is unavailable because these skills disable model invocation; read both files by their absolute paths. {roles_instruction} Complete the required planning phases, write the plan in the repository, then stop without implementing it. Report the plan's repository-relative path in your final response. Do not delegate implementation."),
+        ExecutionProfile::PstackReview => format!("You are starting a pstack Review Run. Read `{skill_root}/skills/interrogate/SKILL.md` and follow it to review the Pull Request or branch named in the Initial Prompt. Read the generated role instructions at `{roles_path}` and use its `Review panel` entry to configure the read-only reviewers. Review only: do not edit files, commit, push, or apply suggested changes. Synthesize the reviewers' findings into a verdict, including actionable findings and disagreements. Do not use the matt-pocock `review` profile instructions."),
+        ExecutionProfile::CustomPrompt => {
+            initial_prompt.ok_or(DomainError::EmptyRunPrompt)?;
+            format!("You are starting a Custom pstack Run. No skill is selected: do what the Initial Prompt asks. {roles_instruction}")
+        }
         _ => return Err(DomainError::ExecutionProfileNotInWorkflow { workflow: Workflow::Pstack, execution_profile: profile }),
     };
     let mut prompt = format!(
-        "{profile_instruction}\n\nItem: {}\nItem context: {}\n\nInitial Prompt:\n{}",
+        "{profile_instruction}\n\nItem: {}\nItem context: {}",
         item.title,
         if item.notes.trim().is_empty() { "(no additional notes)" } else { item.notes.trim() },
-        initial_prompt.unwrap_or(item.notes.trim()),
     );
+    if let Some(initial_prompt) = initial_prompt {
+        prompt.push_str(&format!("\n\nInitial Prompt:\n{initial_prompt}"));
+    }
     if let Some(spec) = spec {
         prompt.push_str(&format!("\n\nSpec: {spec}"));
     }
-    prompt.push_str(&format!("\n\n{}\nWrite commits and pull requests in English.\n\nMission Manager event contract:\nImmediately after creating each external work object, print one JSON object on a line by itself using this form: `AI_MISSION_MANAGER_EVENT {{\"event\":\"external.object.created\",\"url\":\"<canonical URL or local Markdown path>\",\"ordinal\":1,\"blocked_by\":[],\"run_id\":{},\"action\":\"implement\"}}`. Use the canonical URL, or a local Markdown path under a registered checkout. For multiple objects, use publication order and 1-based ordinals; include blocker URLs or paths in `blocked_by`.\nWhen a Pull Request is opened, immediately print `AI_MISSION_MANAGER_EVENT {{\"event\":\"pull_request.opened\",\"run_id\":{},\"url\":\"<canonical Pull Request URL>\"}}`. Report every Pull Request opened by this Run. At the end of the final Attention section in your final response, print `AI_MISSION_MANAGER_EVENT {{\"event\":\"attention.final\",\"run_id\":{},\"summary\":\"<concise Attention summary>\"}}`. For a Plan Run, also print `AI_MISSION_MANAGER_EVENT {{\"event\":\"plan.ready\",\"run_id\":{},\"path\":\"<repository-relative plan path>\"}}` after writing the plan. Escape JSON strings correctly, and do not emit reports for another Run.", language.run_response_instruction(), state.next_run_id, state.next_run_id, state.next_run_id, state.next_run_id));
+    prompt.push_str(&format!("\n\n{}\nWrite commits and pull requests in English.\n\nMission Manager event contract:\nWhen a Pull Request is opened, immediately print `AI_MISSION_MANAGER_EVENT {{\"event\":\"pull_request.opened\",\"url\":\"<canonical Pull Request URL>\"}}` on a line by itself. Report every Pull Request opened by this Run. At the end of the final Attention section in your final response, print `AI_MISSION_MANAGER_EVENT {{\"event\":\"attention.final\",\"summary\":\"<concise Attention summary>\"}}`. For a Plan Run, also print `AI_MISSION_MANAGER_EVENT {{\"event\":\"plan.ready\",\"path\":\"<repository-relative plan path>\"}}` after writing the plan. Escape JSON strings correctly.", language.run_response_instruction()));
     if profile == ExecutionProfile::PstackReview {
         prompt.push_str("\n\nThis Run is read-only. Do not edit files, change branches, create commits, push, open or modify pull requests, or apply reviewer suggestions. Return the synthesized verdict in the final response.");
     }

@@ -659,7 +659,7 @@ pub(crate) async fn advance_finished_implementation_queue(
         Some(queue.configuration.clone()),
         None,
         ExecutionProfile::Implement,
-        run.workflow,
+        crate::domain::Workflow::MattPocock,
         implementation_queue_entry_prompt(&next, &queue.spec_url),
         RunPromptSelection {
             include_objective: true,
@@ -798,7 +798,7 @@ pub(super) async fn launch_implementation_queue_entry_with_state(
         Some(queue.configuration.clone()),
         None,
         ExecutionProfile::Implement,
-        source_run.workflow,
+        crate::domain::Workflow::MattPocock,
         implementation_queue_entry_prompt(&entry, &queue.spec_url),
         RunPromptSelection {
             include_objective: true,
@@ -1531,30 +1531,33 @@ enum PstackReport {
 #[derive(serde::Deserialize)]
 struct PstackReportLine {
     event: String,
-    run_id: i64,
     url: Option<String>,
     summary: Option<String>,
     path: Option<String>,
 }
 
-fn parse_pstack_reports(transcript: &str, run_id: i64) -> Vec<PstackReport> {
+/// Each pstack Run owns its Pane, so every report captured from it belongs to
+/// that Run. Values still holding the prompt's `<placeholder>` are the echoed
+/// contract, not a report.
+fn parse_pstack_reports(transcript: &str) -> Vec<PstackReport> {
+    fn reported(value: Option<String>) -> Option<String> {
+        let value = value?.trim().to_owned();
+        (!value.is_empty() && !value.starts_with('<')).then_some(value)
+    }
     transcript
         .lines()
         .filter_map(|line| {
             let payload = line.trim().strip_prefix("AI_MISSION_MANAGER_EVENT ")?;
             let report = serde_json::from_str::<PstackReportLine>(payload).ok()?;
-            if report.run_id != run_id {
-                return None;
-            }
             match report.event.as_str() {
                 "pull_request.opened" => Some(PstackReport::PullRequestOpened {
-                    url: report.url?.trim().to_owned(),
+                    url: reported(report.url)?,
                 }),
                 "attention.final" => Some(PstackReport::FinalAttention {
-                    summary: report.summary?.trim().to_owned(),
+                    summary: reported(report.summary)?,
                 }),
                 "plan.ready" => Some(PstackReport::PlanReady {
-                    path: report.path?.trim().to_owned(),
+                    path: reported(report.path)?,
                 }),
                 _ => None,
             }
@@ -1619,7 +1622,7 @@ impl ReconciliationSnapshot {
                     captured_pane
                         .as_ref()
                         .and_then(|capture| capture.as_ref().ok())
-                        .map(|transcript| parse_pstack_reports(transcript, run.id))
+                        .map(|transcript| parse_pstack_reports(transcript))
                         .unwrap_or_default()
                 } else {
                     Vec::new()
@@ -3627,7 +3630,7 @@ async fn start_run_with_state(
     let session_name = observation.snapshot.session_name.clone();
     let gate_channel = observation.snapshot.gate_channel.clone();
     let working_directory = observation.working_directory.clone();
-    let mut prompt = observation.snapshot.prompt.clone();
+    let prompt = observation.snapshot.prompt.clone();
     if observation.snapshot.input.workflow() == crate::domain::Workflow::Pstack {
         let provision_runtime = Arc::clone(&observation.snapshot.terminal_runtime);
         let provision_machine = observation.snapshot.machine.clone();
@@ -3636,7 +3639,6 @@ async fn start_run_with_state(
         })
         .await
         .map_err(|error| format!("pstack provisioning worker failed: {error}"))??;
-        prompt = prompt.replace("{{PSTACK_ROOT}}", &root);
         let context = &observation.snapshot.context;
         let claude_profile = context.claude_profile_id.and_then(|profile_id| {
             observation.snapshot.state.cli_configuration_profiles.iter().find(|profile| profile.id == profile_id)
@@ -4213,18 +4215,7 @@ impl Runtime {
         selection: RunPromptSelection,
         language: Option<GrillLanguage>,
         initial_prompt: Option<String>,
-        workflow: crate::domain::Workflow,
     ) -> Result<String, String> {
-        if workflow == crate::domain::Workflow::Pstack {
-            return crate::domain::compose_pstack_prompt(
-                &self.state,
-                item_id,
-                execution_profile,
-                "{{PSTACK_ROOT}}",
-                language.unwrap_or_default(),
-                initial_prompt.as_deref(),
-            ).map_err(|error| error.to_string());
-        }
         build_run_prompt(
             &self.state,
             item_id,
@@ -4709,16 +4700,17 @@ mod identity_tests {
     };
 
     #[test]
-    fn pstack_report_parser_accepts_only_well_formed_reports_for_this_run() {
+    fn pstack_report_parser_accepts_only_well_formed_reports() {
         let transcript = concat!(
-            "AI_MISSION_MANAGER_EVENT {\"event\":\"pull_request.opened\",\"run_id\":7,\"url\":\"https://github.com/acme/service/pull/7\"}\n",
-            "AI_MISSION_MANAGER_EVENT {\"event\":\"attention.final\",\"run_id\":7,\"summary\":\"Review rollback\"}\n",
-            "AI_MISSION_MANAGER_EVENT {\"event\":\"attention.final\",\"run_id\":8,\"summary\":\"Other Run\"}\n",
+            "AI_MISSION_MANAGER_EVENT {\"event\":\"pull_request.opened\",\"url\":\"<canonical Pull Request URL>\"}\n",
+            "AI_MISSION_MANAGER_EVENT {\"event\":\"pull_request.opened\",\"url\":\"https://github.com/acme/service/pull/7\"}\n",
+            "AI_MISSION_MANAGER_EVENT {\"event\":\"attention.final\",\"summary\":\"Review rollback\"}\n",
+            "AI_MISSION_MANAGER_EVENT {\"event\":\"plan.ready\",\"path\":\" \"}\n",
             "AI_MISSION_MANAGER_EVENT {not json}\n",
         );
 
         assert_eq!(
-            parse_pstack_reports(transcript, 7),
+            parse_pstack_reports(transcript),
             [
                 PstackReport::PullRequestOpened {
                     url: "https://github.com/acme/service/pull/7".into(),
