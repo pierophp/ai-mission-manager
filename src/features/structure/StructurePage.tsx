@@ -53,7 +53,7 @@ import {
 import {
   structureActions,
   useStructureCommand,
-} from "./structure-mutations";
+} from "./structure-commands";
 import type {
   Context,
   AgentHookReadiness,

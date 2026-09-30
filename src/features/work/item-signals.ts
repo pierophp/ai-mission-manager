@@ -1,6 +1,5 @@
 import { currentMinute } from "../../runtime/time";
-import type { GrillContinuationAction } from "../../runtime/execution-types";
-import type { ExternalLinkView, ItemView, Run } from "../../runtime/types";
+import type { ItemView, RunDisplayPhase } from "../../runtime/types";
 
 export const itemDetailTabs = [
   "overview",
@@ -32,50 +31,9 @@ export function displayItemIdentifier(identifier: string): string {
   return match ? `#${match[1]}` : identifier;
 }
 
-export function isRunFinished(run: Run): boolean {
-  return (
-    run.state === "finished" &&
-    (run.execution_profile !== "grill" || run.grill_phase === "finished")
-  );
-}
-
-export function isGrillWaitingForAnswers(run: Run): boolean {
-  return (
-    run.execution_profile === "grill" &&
-    run.grill_phase === "waitingForAnswers" &&
-    !run.grill_response
-  );
-}
-
 /** Identifies one round of questions, so a new round counts as new. */
-export function grillQuestionKey(run: Run): string {
+export function grillQuestionKey(run: ItemView["runs"][number]): string {
   return `${run.id}:${run.grill_question_group?.round ?? 0}:${JSON.stringify(run.grill_question_group)}`;
-}
-
-export function activeRuns(view: ItemView): Run[] {
-  return view.runs.filter(
-    (run) => !isRunFinished(run) && run.pane_status !== "missing",
-  );
-}
-
-/** External Objects whose Link can serve as an Implementation Queue Spec. */
-export function supportsImplementationSpec(link: ExternalLinkView): boolean {
-  const { object } = link;
-  return (
-    (object.provider === "github" && object.kind === "issue") ||
-    (object.provider === "atlassian" && ["document", "issue"].includes(object.kind)) ||
-    (object.provider === "generic" && object.external_key.startsWith("local:"))
-  );
-}
-
-/** External Objects whose Link can serve as a queued ticket. */
-export function supportsImplementationTicket(link: ExternalLinkView): boolean {
-  const { object } = link;
-  return (
-    (object.provider === "github" && object.kind === "issue") ||
-    (object.provider === "atlassian" && object.kind === "issue") ||
-    (object.provider === "generic" && object.external_key.startsWith("local:"))
-  );
 }
 
 /**
@@ -83,51 +41,52 @@ export function supportsImplementationTicket(link: ExternalLinkView): boolean {
  * tab. A Grill waiting for answers is not also counted as an active Run.
  */
 export function itemSignals(view: ItemView) {
-  const grillWaiting = view.runs.some(isGrillWaitingForAnswers);
-  const runActive = activeRuns(view).some(
-    (run) => !isGrillWaitingForAnswers(run),
-  );
   const now = currentMinute();
   const reminderDue = view.item.reminders.some(
     (reminder) => reminder.remind_at <= now,
   );
-  return { grillWaiting, runActive, reminderDue };
+  return { ...view.run_signals, reminderDue };
 }
 
 export function defaultItemTab(view: ItemView): ItemDetailTab {
-  return view.runs.some(isGrillWaitingForAnswers) ? "runs" : "overview";
+  return view.run_signals.grillWaiting ? "runs" : "overview";
 }
 
-export function runStateLabel(state: Run["state"], isGrill = false): string {
-  if (state === "working") return "Working";
-  if (state === "blocked") return isGrill ? "Waiting for answers" : "Blocked";
-  if (state === "finished") return "Finished";
-  return "Unknown";
-}
-
-/**
- * The step that follows `previous` in a Grill Run, mirroring the backend:
- * the Grill itself, then to-spec, to-tickets, and implement.
- */
-export function nextGrillAction(
-  previous: GrillContinuationAction | null | undefined,
-): GrillContinuationAction | undefined {
-  if (!previous) return "to-spec";
-  if (previous === "to-spec") return "to-tickets";
-  if (previous === "to-tickets") return "implement";
-  return undefined;
+export function runPhaseLabel(phase: RunDisplayPhase): string {
+  switch (phase) {
+    case "awaitingGo":
+      return "Awaiting Go";
+    case "blocked":
+      return "Needs input";
+    case "grillStarting":
+      return "Starting Grill";
+    case "grillWorking":
+      return "Grill working";
+    case "working":
+      return "Working";
+    case "grillWaitingForAnswers":
+      return "Waiting for answers";
+    case "grillAwaitingNextAction":
+      return "Awaiting next action";
+    case "grillRecoverablePaneLoss":
+      return "Pane unavailable · recoverable";
+    case "finished":
+      return "Finished";
+    case "unknown":
+      return "Unknown";
+  }
 }
 
 /**
  * The Item's Specs: supported Spec Objects explicitly marked on their Link,
  * newest first.
  */
-export function itemSpecs(view: ItemView): ExternalLinkView[] {
+export function itemSpecs(view: ItemView): ItemView["links"] {
   return view.links
     .filter(
       (link) =>
         link.link.purpose === "to-spec" &&
-        supportsImplementationSpec(link),
+        link.supports_implementation_spec,
     )
     .sort((left, right) => right.link.id - left.link.id);
 }

@@ -10,6 +10,7 @@ struct WorktreeSetupSnapshot {
     selected: WorkspaceRepository,
     repository: Repository,
     machine: Machine,
+    machine_access: Arc<dyn crate::machine_access::MachineAccess>,
     location: RepositoryLocation,
 }
 
@@ -21,7 +22,7 @@ struct WorktreeSetupObservation {
 
 impl WorktreeSetupSnapshot {
     fn destination_path(&self) -> PathBuf {
-        let machine_home = machine_home_directory(&self.machine);
+        let machine_home = machine_home_directory(&self.machine, self.machine_access.as_ref());
         let worktree_root = resolve_machine_path(&self.location.worktree_root, &machine_home);
         worktree_path(
             &worktree_root,
@@ -34,7 +35,7 @@ impl WorktreeSetupSnapshot {
     fn normalized_destination_path(&self) -> Result<String, String> {
         normalize_machine_path(
             &self.destination_path().to_string_lossy(),
-            &machine_home_directory(&self.machine),
+            &machine_home_directory(&self.machine, self.machine_access.as_ref()),
         )
         .map_err(|error| error.to_string())
     }
@@ -44,7 +45,7 @@ impl WorktreeSetupSnapshot {
         reuse_existing_branch: bool,
         confirm_dirty_attachment: bool,
     ) -> Result<WorktreeSetupObservation, String> {
-        let machine_home = machine_home_directory(&self.machine);
+        let machine_home = machine_home_directory(&self.machine, self.machine_access.as_ref());
         let canonical_checkout = resolve_machine_path(&self.location.checkout_path, &machine_home);
         let destination = self.destination_path();
         let path = self.normalized_destination_path()?;
@@ -76,7 +77,7 @@ impl WorktreeSetupSnapshot {
         path: String,
         confirm_dirty_attachment: bool,
     ) -> Result<WorktreeSetupObservation, String> {
-        let machine_home = machine_home_directory(&self.machine);
+        let machine_home = machine_home_directory(&self.machine, self.machine_access.as_ref());
         let canonical_checkout = resolve_machine_path(&self.location.checkout_path, &machine_home);
         let path =
             normalize_machine_path(&path, &machine_home).map_err(|error| error.to_string())?;
@@ -99,7 +100,7 @@ impl WorktreeSetupSnapshot {
     }
 
     fn cleanup_prepared_worktree(&self, path: &str) -> Result<(), String> {
-        let machine_home = machine_home_directory(&self.machine);
+        let machine_home = machine_home_directory(&self.machine, self.machine_access.as_ref());
         let canonical_checkout = resolve_machine_path(&self.location.checkout_path, &machine_home);
         let worktree_path = resolve_machine_path(path, &machine_home);
         GitCli::system()
@@ -461,6 +462,7 @@ impl Runtime {
             selected,
             repository,
             machine,
+            machine_access: Arc::clone(&self.machine_access),
             location,
         })
     }

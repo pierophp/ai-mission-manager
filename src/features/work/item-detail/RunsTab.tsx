@@ -14,7 +14,6 @@ import { errorMessage } from "../../../runtime/errors";
 import type { GrillContinuationAction } from "../../../runtime/execution-types";
 import type { PaneTab } from "../../../runtime/terminal-types";
 import type {
-  Context,
   GrillAgentCatalog,
   GrillAnswer,
   ItemView,
@@ -27,16 +26,13 @@ import {
   type ItemForm,
   type ItemIntent,
   grillQuestionKey,
-  isGrillWaitingForAnswers,
-  isRunFinished,
-  nextGrillAction,
-  runStateLabel,
+  runPhaseLabel,
 } from "../item-signals";
 import type { ItemCommands } from "../use-item-commands";
-import { workActions } from "../work-mutations";
-import { grillPhaseLabel, paneTabForRun, repositoryName } from "../work-utils";
+import { workActions } from "../work-commands";
+import { paneTabForRun, repositoryName } from "../work-utils";
 import { RunLaunchForm } from "./RunLaunchForm";
-import { itemExecution, useFormIntent } from "./shared";
+import { useFormIntent } from "./shared";
 
 /** Unsent Grill answers, keyed by question round, kept across Item switches. */
 export type GrillAnswerDrafts = Record<string, Record<number, string>>;
@@ -47,7 +43,6 @@ export function RunsTab({
   view,
   repositories,
   machines,
-  contexts,
   grillModelCatalog,
   commands,
   intent,
@@ -59,7 +54,6 @@ export function RunsTab({
   view: ItemView;
   repositories: Repository[];
   machines: Machine[];
-  contexts: Context[];
   grillModelCatalog: GrillAgentCatalog[];
   commands: ItemCommands;
   intent: ItemIntent | undefined;
@@ -69,12 +63,6 @@ export function RunsTab({
   focusedRunRequest?: { runId: number; request: number };
 }) {
   const { isSaving, saveItem, confirm } = commands;
-  const { itemContext } = itemExecution(
-    view,
-    repositories,
-    contexts,
-    machines,
-  );
   const [runForm, setRunForm] = useState<"run">();
   const grillSubmissionLocks = useRef(new Set<string>());
 
@@ -157,7 +145,10 @@ export function RunsTab({
   }
 
   function handleDeleteRun(run: Run) {
-    if (!isRunFinished(run)) return;
+    const projection = view.run_projections.find(
+      (candidate) => candidate.runId === run.id,
+    );
+    if (!projection?.continuations.delete) return;
     confirm({
       title: `Delete finished Run #${run.id}?`,
       description: "This removes the Run from history and cannot be undone.",
@@ -171,7 +162,6 @@ export function RunsTab({
     return (
       <RunLaunchForm
         view={view}
-        itemContext={itemContext}
         modelCatalog={grillModelCatalog}
         commands={commands}
         target={{ kind: "checkout", workspace: launchWorkspace }}
@@ -199,6 +189,9 @@ export function RunsTab({
         <span className="text-sm text-muted-foreground">No Runs yet.</span>
       )}
       {runsNewestFirst.map((run) => {
+        const projection = view.run_projections.find(
+          (candidate) => candidate.runId === run.id,
+        )!;
         const runRepository =
           run.repository_id === null
             ? run.direct_checkouts.find(
@@ -221,13 +214,7 @@ export function RunsTab({
           ]),
         );
         const answers = grillDrafts[questionKey] ?? persistedAnswers;
-        const skipAction = nextGrillAction(run.grill_action);
-        // A step that already ran is not offered again as the next action.
-        const nextActions = (
-          ["to-spec", "to-tickets", "implement"] as const
-        ).filter(
-          (action) => !(action === "to-spec" && run.grill_action === "to-spec"),
-        );
+        const nextActions = projection.continuations.grillActions;
         return (
           <Card
             size="sm"
@@ -255,18 +242,7 @@ export function RunsTab({
                   {machines.find((machine) => machine.id === run.machine_id)
                     ?.name ?? "Machine #" + run.machine_id}{" "}
                   ·{" "}
-                  {run.workflow === "pstack"
-                    ? run.plan_phase === "awaitingGo"
-                      ? "Awaiting Go"
-                      : run.state === "blocked"
-                      ? "Needs input"
-                      : run.state === "finished"
-                        ? "Finished"
-                        : "Working"
-                    : runStateLabel(run.state, run.execution_profile === "grill")}
-                  {run.execution_profile === "grill" && run.grill_phase
-                    ? ` · ${grillPhaseLabel(run.grill_phase)}`
-                    : ""}
+                  {runPhaseLabel(projection.phase)}
                   {run.pane_status === "available" && " · Pane available"}
                 </span>
               </div>
@@ -308,7 +284,7 @@ export function RunsTab({
                   <p className="whitespace-pre-wrap">{run.attention_summary}</p>
                 </div>
               )}
-              {run.execution_profile === "plan" && run.plan_phase === "awaitingGo" && (
+              {projection.continuations.goPlan && (
                 <section className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/30 bg-primary/5 p-3" aria-label={`Plan ready for Run #${run.id}`}>
                   <div className="grid gap-1 text-sm">
                     <strong>Plan ready</strong>
@@ -320,20 +296,19 @@ export function RunsTab({
                   <Button type="button" size="sm" disabled={isSaving || run.pane_status !== "available"} onClick={() => void handleGoPlan(run)}>Go</Button>
                 </section>
               )}
-              {run.execution_profile === "grill" &&
-                (run.grill_phase === "starting" ||
-                  run.grill_phase === "working") && (
+              {(projection.phase === "grillStarting" ||
+                projection.phase === "grillWorking") && (
                   <div
                     className="flex items-center gap-2 text-sm text-muted-foreground"
                     aria-live="polite"
                   >
                     <Spinner />
-                    {run.grill_phase === "starting"
+                    {projection.phase === "grillStarting"
                       ? "Waiting for the Grill’s first questions…"
                       : "The Grill is working…"}
                   </div>
                 )}
-              {isGrillWaitingForAnswers(run) && (
+              {projection.phase === "grillWaitingForAnswers" && (
                 <section
                   className="grid gap-3 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3"
                   aria-label={`Grill questions for Run #${run.id}`}
@@ -346,24 +321,23 @@ export function RunsTab({
                         send one numbered response to the same Pane.
                       </span>
                     </div>
-                    {skipAction && (
+                    {nextActions.map((action) => (
                       <Button
+                        key={action}
                         type="button"
                         variant="ghost"
                         size="sm"
                         title={
-                          skipAction === "to-spec"
+                          action === "to-spec"
                             ? "Stop grilling and write the spec now; the open questions go into the spec."
-                            : `Leave these questions to their recommendations and continue with ${skipAction}.`
+                            : `Leave these questions to their recommendations and continue with ${action}.`
                         }
                         disabled={isSaving || run.pane_status !== "available"}
-                        onClick={() =>
-                          void handleContinueGrill(run, skipAction)
-                        }
+                        onClick={() => void handleContinueGrill(run, action)}
                       >
-                        Skip to {skipAction}
+                        Skip to {action}
                       </Button>
-                    )}
+                    ))}
                   </div>
                   <GrillQuestionFlow
                     key={questionKey}
@@ -396,7 +370,7 @@ export function RunsTab({
                 </details>
               )}
               {(run.pane_status === "missing" ||
-                run.grill_phase === "recoverablePaneLoss") && (
+                projection.phase === "grillRecoverablePaneLoss") && (
                 <span className="text-xs text-destructive">
                   Pane unavailable. This Run is preserved and recoverable;
                   reconnect the exact Pane or use the terminal escape hatch when
@@ -408,8 +382,7 @@ export function RunsTab({
                   Pane status not confirmed.
                 </span>
               )}
-              {run.execution_profile === "grill" &&
-                run.grill_phase === "awaitingNextAction" && (
+              {projection.phase === "grillAwaitingNextAction" && (
                   <div className="grid gap-2 rounded-md border border-primary/30 bg-primary/5 p-3">
                     <div>
                       <strong className="block text-sm">
@@ -469,7 +442,7 @@ export function RunsTab({
                   >
                     Open in Terminal
                   </Button>
-                  {!isRunFinished(run) && run.pane_status !== "missing" && (
+                  {projection.continuations.stop && (
                     <Button
                       type="button"
                       size="sm"
@@ -480,7 +453,7 @@ export function RunsTab({
                       Stop Run
                     </Button>
                   )}
-                  {!isRunFinished(run) && (
+                  {projection.continuations.finish && (
                     <Button
                       type="button"
                       size="sm"
@@ -491,7 +464,7 @@ export function RunsTab({
                       Finish Run
                     </Button>
                   )}
-                  {isRunFinished(run) && (
+                  {projection.continuations.delete && (
                     <Button
                       type="button"
                       size="sm"

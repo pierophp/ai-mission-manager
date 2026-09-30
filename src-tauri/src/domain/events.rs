@@ -172,6 +172,11 @@ pub enum Event {
     DeleteRun {
         run_id: i64,
     },
+    StartRun(RunStart),
+    // Test fixture adapters keep unrelated transition tests concise. They are
+    // normalized to `StartRun` before the reducer sees them and never exist in
+    // production builds.
+    #[cfg(test)]
     StartDirectRun {
         item_id: i64,
         workspace_id: i64,
@@ -192,6 +197,7 @@ pub enum Event {
         allow_shared_checkouts: bool,
         implementation_queue: Option<ImplementationQueueStart>,
     },
+    #[cfg(test)]
     StartWorktreeRun {
         item_id: i64,
         workspace_id: i64,
@@ -208,6 +214,7 @@ pub enum Event {
         started_at: i64,
         prompt_selection: RunPromptSelection,
     },
+    #[cfg(test)]
     StartGrillRun {
         item_id: i64,
         workspace_id: i64,
@@ -375,7 +382,48 @@ pub enum Event {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// The strategy is the only part of admitting a Run that varies by checkout
+/// type. Shared identity, prompt, and terminal data live on `RunStart`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunStart {
+    pub item_id: i64,
+    pub workspace_id: i64,
+    pub machine_id: i64,
+    pub agent: AgentKind,
+    pub configuration: Option<GrillConfiguration>,
+    pub execution_profile: ExecutionProfile,
+    pub workflow: Option<Workflow>,
+    pub prompt: String,
+    pub working_directory: String,
+    pub session_name: String,
+    pub pane_id: String,
+    pub started_at: i64,
+    pub prompt_selection: Option<RunPromptSelection>,
+    pub strategy: RunStartStrategy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunStartStrategy {
+    Direct {
+        repository_id: i64,
+        checkouts: Vec<RunCheckout>,
+        allow_dirty: bool,
+        allow_shared_checkouts: bool,
+        implementation_queue: Option<ImplementationQueueStart>,
+    },
+    Worktree {
+        worktree_id: i64,
+    },
+    Grill {
+        repository_id: i64,
+        checkouts: Vec<RunCheckout>,
+        skill_snapshot: String,
+        allow_dirty: bool,
+        allow_shared_checkouts: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ImplementationQueueStart {
     pub spec_external_object_id: i64,

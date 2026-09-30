@@ -2,7 +2,47 @@
 import { act, createElement } from "react";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ContextConfiguration } from "../../runtime/types";
 import { ContextEditor } from "./ContextEditor";
+
+const mocks = vi.hoisted(() => ({ command: vi.fn() }));
+
+vi.mock("../../runtime/command", () => ({ command: mocks.command }));
+
+const attentionKinds: ContextConfiguration["attentionDefaults"][number]["object_kind"][] = [
+  "issue",
+  "pull_request",
+  "generic",
+];
+
+const rustDefaults: ContextConfiguration = {
+  name: "",
+  executionMachineId: null,
+  claudeProfileId: null,
+  codexProfileId: null,
+  checkDirtyCheckouts: true,
+  grillDefaults: { agent: "claude", model: "claude-sonnet-5", effort: "high" },
+  implementDefaults: { agent: "claude", model: "claude-sonnet-5", effort: "high" },
+  defaultWorkflow: "matt-pocock",
+  pstackDefaults: { agent: "claude", model: "claude-sonnet-5", effort: "high" },
+  pstackRoles: [
+    { role: "code-delegate", configuration: { agent: "claude", model: "claude-opus-5", effort: "high" } },
+    { role: "judge-and-prose", configuration: { agent: "codex", model: "gpt-6-sol", effort: "high" } },
+    { role: "review-panel", configuration: { agent: "codex", model: "gpt-6-sol", effort: "high" } },
+    { role: "explorers", configuration: { agent: "claude", model: "claude-sonnet-5", effort: "medium" } },
+  ],
+  ghExecutablePath: null,
+  twgExecutablePath: null,
+  azExecutablePath: null,
+  atlassianSite: null,
+  azureDevopsOrganization: null,
+  bitbucketWorkspace: null,
+  attentionDefaults: attentionKinds.map((object_kind) => ({
+    context_id: 0,
+    object_kind,
+    policy: { title: true, state: true, metadata: true },
+  })),
+};
 
 describe("ContextEditor", () => {
   let container: HTMLDivElement;
@@ -10,6 +50,7 @@ describe("ContextEditor", () => {
 
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    mocks.command.mockReset().mockResolvedValue(rustDefaults);
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -19,6 +60,7 @@ describe("ContextEditor", () => {
     act(() => root.unmount());
     container.remove();
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   it("preloads settings, shows Attention policies, and keeps the draft after a failed save", async () => {
@@ -123,6 +165,9 @@ describe("ContextEditor", () => {
         }),
       ),
     );
+    await act(async () => {});
+
+    expect(mocks.command).toHaveBeenCalledWith("newContextConfiguration");
 
     expect(container.textContent).toContain("Research");
     expect(container.textContent).toContain("Build Mac");
@@ -183,6 +228,7 @@ describe("ContextEditor", () => {
         }),
       ),
     );
+    await act(async () => {});
 
     expect(container.textContent).toContain("Create Context");
     expect(container.textContent).toContain(
@@ -358,6 +404,7 @@ describe("ContextEditor", () => {
         }),
       ),
     );
+    await act(async () => {});
 
     const profileSelect = (provider: string) =>
       Array.from(container.querySelectorAll("label"))

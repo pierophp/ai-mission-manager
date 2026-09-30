@@ -80,7 +80,7 @@ fi
 exit 0
 "#;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct AgentStateRecord {
     pub agent: AgentKind,
     #[serde(rename = "runId")]

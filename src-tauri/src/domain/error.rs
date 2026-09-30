@@ -209,16 +209,16 @@ pub enum DomainError {
     EmptyRunPrompt,
     #[error("a Run working directory cannot be blank")]
     EmptyRunWorkingDirectory,
-    #[error("Direct Run must include at least one Repository")]
-    EmptyDirectRunCheckouts,
-    #[error("Direct Run checkout for Repository {repository_id} is invalid")]
-    InvalidDirectRunCheckout { repository_id: i64 },
+    #[error("Run must include at least one Repository checkout")]
+    EmptyRunCheckouts,
+    #[error("Run checkout for Repository {repository_id} is invalid")]
+    InvalidRunCheckout { repository_id: i64 },
     #[error("Direct Run must choose a primary Repository")]
     MissingDirectRunRepository,
-    #[error("Direct Run has dirty checkouts for Repositories {repository_ids:?}; confirm the warning before starting")]
-    DirectRunDirtyCheckouts { repository_ids: Vec<i64> },
-    #[error("Direct Run shares checkout paths with active Runs {run_ids:?}: {paths:?}; confirm the shared checkout warning before starting")]
-    DirectRunSharedCheckouts {
+    #[error("Run has dirty checkouts for Repositories {repository_ids:?}; confirm the warning before starting")]
+    RunDirtyCheckouts { repository_ids: Vec<i64> },
+    #[error("Run shares checkout paths with active Runs {run_ids:?}: {paths:?}; confirm the shared checkout warning before starting")]
+    RunSharedCheckouts {
         run_ids: Vec<i64>,
         paths: Vec<String>,
     },

@@ -6,7 +6,6 @@
 //! `domain`; SQLite, Git, filesystem, and Tauri state access stay here.
 
 use std::{
-    env,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -22,7 +21,8 @@ use crate::{
         ProjectDefaults, Repository, RepositoryLocation,
     },
     git::GitCli,
-    terminal::{run_machine_shell, shell_quote, MachineReadiness, TerminalRuntime},
+    machine_access::{quote_shell_argument, MachineAccess},
+    terminal::{MachineReadiness, TerminalRuntime},
 };
 
 use crate::features::deletion::{
@@ -31,11 +31,8 @@ use crate::features::deletion::{
     ResetLocalDataResult,
 };
 
-pub(crate) fn machine_home_directory(machine: &Machine) -> String {
-    match &machine.transport {
-        MachineTransport::Local => env::var("HOME").unwrap_or_else(|_| "/".into()),
-        MachineTransport::Ssh { .. } => "~".into(),
-    }
+pub(crate) fn machine_home_directory(machine: &Machine, access: &dyn MachineAccess) -> String {
+    access.home_path(machine)
 }
 
 pub(crate) fn resolve_machine_path(path: &str, machine_home: &str) -> PathBuf {
@@ -98,7 +95,7 @@ pub(crate) fn list_machines(
     })
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CliProfileSettingsView {
     pub profile: CliConfigurationProfile,
@@ -162,7 +159,10 @@ fn cli_sign_in_command(provider: AgentKind, directory: &str) -> String {
     if let Some(relative_path) = directory.strip_prefix("~/") {
         format!("{variable}=\"$HOME/{relative_path}\" {cli_invocation}")
     } else {
-        format!("{variable}={} {cli_invocation}", shell_quote(directory))
+        format!(
+            "{variable}={} {cli_invocation}",
+            quote_shell_argument(directory)
+        )
     }
 }
 
@@ -195,6 +195,24 @@ pub(crate) fn list_context_attention_defaults(
     locked(state, |runtime| {
         Ok(runtime.state.attention_defaults.clone())
     })
+}
+
+pub(crate) fn new_context_configuration() -> ContextConfiguration {
+    let mut configuration = ContextConfiguration::default();
+    configuration.attention_defaults = [
+        ExternalObjectKind::Issue,
+        ExternalObjectKind::PullRequest,
+        ExternalObjectKind::Document,
+        ExternalObjectKind::Generic,
+    ]
+    .into_iter()
+    .map(|object_kind| ContextAttentionDefault {
+        context_id: 0,
+        object_kind,
+        policy: ExternalChangePolicy::all(),
+    })
+    .collect();
+    configuration
 }
 
 pub(crate) fn create_context(
@@ -989,7 +1007,8 @@ impl Runtime {
                 .directory
                 .strip_prefix("~/")
                 .expect("app-managed directories are home-relative");
-            run_machine_shell(&machine, &format!("mkdir -p -- \"$HOME/{relative_path}\""))?;
+            self.machine_access
+                .run_shell(&machine, &format!("mkdir -p -- \"$HOME/{relative_path}\""))?;
         }
         self.commit(decision)?;
         Ok(CliProfileSettingsView {
@@ -1253,7 +1272,7 @@ impl Runtime {
         {
             return Err("A remote URL is required when cloning a Repository".to_owned());
         }
-        let machine_home = machine_home_directory(&machine);
+        let machine_home = machine_home_directory(&machine, self.machine_access.as_ref());
         let normalized_checkout_path = normalize_machine_path(&checkout_path, &machine_home)
             .map_err(|error| error.to_string())?;
         let resolved_checkout_path = resolve_machine_path(&normalized_checkout_path, &machine_home);
@@ -1364,7 +1383,7 @@ impl Runtime {
             ));
         }
 
-        let machine_home = machine_home_directory(&machine);
+        let machine_home = machine_home_directory(&machine, self.machine_access.as_ref());
         let normalized_checkout_path = normalize_machine_path(&checkout_path, &machine_home)
             .map_err(|error| error.to_string())?;
         let resolved_checkout_path = resolve_machine_path(&normalized_checkout_path, &machine_home);

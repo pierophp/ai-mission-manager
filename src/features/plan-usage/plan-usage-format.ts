@@ -13,7 +13,9 @@ export function usageTone(usedPercent: number): UsageTone {
 // decision: the closest any profile is to a wall.
 export function worstUsedPercent(snapshot: PlanUsageSnapshot | undefined) {
   const percentages = (snapshot?.profiles ?? []).flatMap((profile) =>
-    profile.windows.map((window) => window.usedPercent),
+    profile.windows.flatMap((window) =>
+      window.usedPercent === null ? [] : [window.usedPercent],
+    ),
   );
   return percentages.length === 0 ? null : Math.max(...percentages);
 }

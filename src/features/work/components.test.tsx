@@ -31,6 +31,15 @@ function renderLinkCard(object: ExternalObject) {
           snapshot: null,
           attention_policy: { title: false, state: false, metadata: false },
           attention_entry: null,
+          supports_implementation_spec:
+            (object.provider === "github" && object.kind === "issue") ||
+            (object.provider === "atlassian" &&
+              (object.kind === "document" || object.kind === "issue")) ||
+            (object.provider === "generic" && object.external_key.startsWith("local:")),
+          supports_implementation_ticket:
+            (object.provider === "github" && object.kind === "issue") ||
+            (object.provider === "atlassian" && object.kind === "issue") ||
+            (object.provider === "generic" && object.external_key.startsWith("local:")),
         },
         isSaving: false,
         onRefresh: async () => {},

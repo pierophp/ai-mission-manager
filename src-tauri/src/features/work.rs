@@ -34,10 +34,10 @@ use crate::{
         ExternalChangePolicy, ExternalLinkView, ExternalObjectInput, ExternalObjectKind,
         ExternalProvider, ExternalSnapshot, GrillAnswer, GrillConfiguration,
         GrillContinuationAction, GrillLanguage, GrillPhase, HomeView, Item, ItemRelation,
-        ItemRelationKind, ItemStatus, ItemView, LinkPurpose, Machine, MachineObservation,
-        MachineTransport, Project, Repository, RepositoryLocation, Run, RunCheckout, RunPaneStatus,
-        RunPromptSelection, RunState, RunSuggestion, Workflow, Workspace, WorkspaceRepository,
-        WorkspaceRepositoryInput, Worktree,
+        ItemRelationKind, ItemStatus, ItemView, LinkPurpose, Machine, MachineObservation, Project,
+        Repository, RepositoryLocation, Run, RunCheckout, RunPaneStatus, RunPromptSelection,
+        RunStart, RunStartStrategy, RunState, RunSuggestion, Workflow, Workspace,
+        WorkspaceRepository, WorkspaceRepositoryInput, Worktree,
     },
     git::GitCli,
     provider::{
@@ -46,7 +46,7 @@ use crate::{
     },
     terminal::{
         open_pane_in_terminal, terminal_transport, AgentLaunchContext, ExternalPaneIdentity,
-        MachineObservationFailure, RunReconciliationResult, TerminalRuntime, TmuxControlPane,
+        MachineObservationFailure, RunReconciliationResult, TerminalConnection, TerminalRuntime,
     },
 };
 
@@ -97,19 +97,19 @@ fn format_commit_error(error: String, cleanup_error: Option<String>) -> String {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 pub struct ExternalLinkAction {
     pub link: ExternalLinkView,
     pub warning: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 pub struct PollFailure {
     pub external_object_id: i64,
     pub error: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 pub struct PollResult {
     pub refreshed: usize,
     pub failures: Vec<PollFailure>,
@@ -513,26 +513,60 @@ pub(crate) async fn compose_run_prompt(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<String, String> {
     if workflow == Workflow::Pstack {
-        let (domain_state, machine, terminal_runtime) = {
-            let runtime = state.lock().map_err(|_| "Mission Manager state is unavailable".to_owned())?;
-            let item = runtime.state.items.iter().find(|item| item.id == item_id)
+        let (domain_state, machine, machine_access) = {
+            let runtime = state
+                .lock()
+                .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+            let item = runtime
+                .state
+                .items
+                .iter()
+                .find(|item| item.id == item_id)
                 .ok_or_else(|| format!("Item {item_id} does not exist"))?;
-            let project = runtime.state.projects.iter().find(|project| project.id == item.project_id)
+            let project = runtime
+                .state
+                .projects
+                .iter()
+                .find(|project| project.id == item.project_id)
                 .ok_or_else(|| format!("Project {} does not exist", item.project_id))?;
-            let context = runtime.state.contexts.iter().find(|context| context.id == project.context_id)
+            let context = runtime
+                .state
+                .contexts
+                .iter()
+                .find(|context| context.id == project.context_id)
                 .ok_or_else(|| format!("Context {} does not exist", project.context_id))?;
-            let machine_id = context.execution_machine_id
+            let machine_id = context
+                .execution_machine_id
                 .ok_or_else(|| format!("Context {} has no execution Machine", context.name))?;
-            let machine = runtime.state.machines.iter().find(|machine| machine.id == machine_id)
-                .cloned().ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
-            (runtime.state.clone(), machine, Arc::clone(&runtime.terminal_runtime))
+            let machine = runtime
+                .state
+                .machines
+                .iter()
+                .find(|machine| machine.id == machine_id)
+                .cloned()
+                .ok_or_else(|| format!("Machine {machine_id} does not exist"))?;
+            (
+                runtime.state.clone(),
+                machine,
+                Arc::clone(&runtime.machine_access),
+            )
         };
-        let home = tauri::async_runtime::spawn_blocking(move || terminal_runtime.machine_home(&machine))
-            .await.map_err(|error| format!("Machine home lookup worker failed: {error}"))??;
-        let root = crate::pstack::tree_directory(&home).to_string_lossy().into_owned();
+        let home =
+            tauri::async_runtime::spawn_blocking(move || machine_access.home_directory(&machine))
+                .await
+                .map_err(|error| format!("Machine home lookup worker failed: {error}"))??;
+        let root = crate::pstack::tree_directory(&home)
+            .to_string_lossy()
+            .into_owned();
         return crate::domain::compose_pstack_prompt(
-            &domain_state, item_id, execution_profile, &root, language.unwrap_or_default(), initial_prompt.as_deref(),
-        ).map_err(|error| error.to_string());
+            &domain_state,
+            item_id,
+            execution_profile,
+            &root,
+            language.unwrap_or_default(),
+            initial_prompt.as_deref(),
+        )
+        .map_err(|error| error.to_string());
     }
     locked(state, |runtime| {
         runtime.compose_run_prompt(
@@ -541,9 +575,20 @@ pub(crate) async fn compose_run_prompt(
             prompt_selection,
             language,
             initial_prompt,
-            workflow,
         )
     })
+}
+
+pub(crate) fn get_run_launch_options(
+    item_id: i64,
+    target: crate::domain::RunLaunchTargetKind,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<crate::domain::RunLaunchOptions, String> {
+    let runtime = state
+        .lock()
+        .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+    crate::domain::run_launch_options(&runtime.state, item_id, target)
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn compose_grill_prompt(
@@ -576,100 +621,11 @@ pub(crate) async fn prepare_grill_run(
     prepare_direct_run(item_id, workspace_id, machine_id, state).await
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn start_direct_run(
-    item_id: i64,
-    workspace_id: i64,
-    machine_id: Option<i64>,
-    primary_repository_id: i64,
-    agent: AgentKind,
-    configuration: Option<GrillConfiguration>,
-    implementation_queue: Option<crate::domain::ImplementationQueueStart>,
-    execution_profile: ExecutionProfile,
-    workflow: Workflow,
-    prompt: String,
-    prompt_selection: RunPromptSelection,
-    expected_checkouts: Vec<RunCheckout>,
-    allow_dirty: bool,
-    allow_shared_checkouts: bool,
+pub(crate) async fn start_run(
+    request: runs::run_launcher::RunLaunchRequest,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    runs::start_direct_run_with_queue_state(
-        item_id,
-        workspace_id,
-        machine_id,
-        primary_repository_id,
-        agent,
-        configuration,
-        implementation_queue,
-        execution_profile,
-        workflow,
-        prompt,
-        prompt_selection,
-        expected_checkouts,
-        allow_dirty,
-        allow_shared_checkouts,
-        state.inner(),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn start_grill_run(
-    item_id: i64,
-    workspace_id: i64,
-    machine_id: Option<i64>,
-    primary_repository_id: i64,
-    configuration: GrillConfiguration,
-    language: GrillLanguage,
-    prompt: String,
-    expected_checkouts: Vec<RunCheckout>,
-    allow_dirty: bool,
-    allow_shared_checkouts: bool,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<Run, String> {
-    runs::start_grill_run_with_state(
-        item_id,
-        workspace_id,
-        machine_id,
-        primary_repository_id,
-        configuration,
-        language,
-        prompt,
-        expected_checkouts,
-        allow_dirty,
-        allow_shared_checkouts,
-        state.inner(),
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn start_worktree_run(
-    item_id: i64,
-    workspace_id: i64,
-    worktree_id: i64,
-    agent: AgentKind,
-    configuration: Option<GrillConfiguration>,
-    execution_profile: ExecutionProfile,
-    workflow: Workflow,
-    prompt: String,
-    prompt_selection: RunPromptSelection,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<Run, String> {
-    runs::start_worktree_run_with_state(
-        item_id,
-        workspace_id,
-        worktree_id,
-        agent,
-        configuration,
-        execution_profile,
-        workflow,
-        prompt,
-        prompt_selection,
-        state.inner(),
-    )
-    .await
+    runs::run_launcher::launch(request, state.inner()).await
 }
 
 pub(crate) async fn list_run_suggestions(

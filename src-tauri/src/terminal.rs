@@ -12,21 +12,51 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[cfg(test)]
-use std::sync::Condvar;
-
 use serde::Serialize;
+
+#[cfg(test)]
+use crate::machine_access::{
+    build_machine_shell_command, build_remote_pstack_tree_command, encode_pstack_tree,
+    write_local_pstack_tree, SshTransport,
+};
+pub(crate) use crate::machine_access::{
+    probe_local_runtime, terminal_transport, TerminalTransport,
+};
 
 use crate::{
     agent_state::{
         self, AgentStateRecord, AGENT_STATE_HOOK_RELATIVE_PATH, AGENT_STATE_OPTION,
         AGENT_STATE_RUNS_RELATIVE_PATH,
     },
-    domain::{AgentKind, CliConfigurationProfile, Machine, MachineTransport},
     dependencies::resolve_executable,
+    domain::{AgentKind, CliConfigurationProfile, Machine, MachineTransport},
+    machine_access::{
+        build_tmux_process_command, find_agent_executable, is_executable, probe_machine,
+        run_machine_shell, run_machine_shell_with_input, shell_quote, validate_ssh_transport,
+    },
 };
 
 pub trait TerminalRuntime: Send + Sync {
+    fn attach_connection(
+        &self,
+        machine: &Machine,
+        session_name: &str,
+        pane_id: &str,
+        on_output: Box<dyn Fn(Vec<u8>) + Send>,
+        on_agent_state: Box<dyn Fn(AgentStateRecord) + Send>,
+        on_exit: Box<dyn Fn(Option<i32>) + Send>,
+    ) -> Result<Box<dyn TerminalConnection>, String> {
+        let _ = (
+            machine,
+            session_name,
+            pane_id,
+            on_output,
+            on_agent_state,
+            on_exit,
+        );
+        Err("This Terminal Runtime does not support embedded terminal connections".into())
+    }
+
     fn preflight_agent_run(
         &self,
         machine: &Machine,
@@ -38,17 +68,6 @@ pub trait TerminalRuntime: Send + Sync {
 
     fn check_machine(&self, machine: &Machine) -> MachineReadiness;
 
-    fn machine_home(&self, machine: &Machine) -> Result<PathBuf, String>;
-
-    fn provision_pstack_tree(&self, machine: &Machine) -> Result<String, String>;
-
-    fn write_pstack_role_file(
-        &self,
-        machine: &Machine,
-        path: &Path,
-        contents: &str,
-    ) -> Result<(), String>;
-
     fn observe_machine(&self, machine: &Machine, state_run_ids: &[i64]) -> ObservedMachine;
 
     fn capture_pane_transcript(&self, machine: &Machine, pane_id: &str) -> Result<Vec<u8>, String>;
@@ -58,14 +77,8 @@ pub trait TerminalRuntime: Send + Sync {
 
     fn list_agent_panes(&self, machine: &Machine) -> Result<Vec<AgentPaneSummary>, String>;
 
-    fn send_pane_input(
-        &self,
-        machine: &Machine,
-        pane_id: &str,
-        input: &[u8],
-    ) -> Result<(), String> {
-        send_input_to_pane(machine, pane_id, input)
-    }
+    fn send_pane_input(&self, machine: &Machine, pane_id: &str, input: &[u8])
+        -> Result<(), String>;
 
     #[allow(clippy::too_many_arguments)]
     fn launch_agent(
@@ -86,12 +99,32 @@ pub trait TerminalRuntime: Send + Sync {
     fn kill_pane(&self, machine: &Machine, session_name: &str, pane_id: &str)
         -> Result<(), String>;
 
+    fn kill_pane_with_timeout(
+        &self,
+        machine: &Machine,
+        pane_id: &str,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        let _ = (machine, pane_id, timeout);
+        Err("This Terminal Runtime does not support timed Pane shutdown".into())
+    }
+
     fn interrupt_pane(
         &self,
         machine: &Machine,
         session_name: &str,
         pane_id: &str,
     ) -> Result<(), String>;
+}
+
+pub(crate) trait TerminalConnection: Send + Sync {
+    fn send_input(&self, input: &[u8]) -> Result<(), String>;
+    fn resize(&self, columns: u16, rows: u16) -> Result<(), String>;
+    fn capture_pane_snapshot(
+        &self,
+        after_capture: Box<dyn FnOnce() + Send>,
+    ) -> Result<Vec<u8>, String>;
+    fn close(&self) -> Result<(), String>;
 }
 
 pub struct AgentLaunchContext<'a> {
@@ -103,7 +136,7 @@ pub struct AgentLaunchContext<'a> {
     pub profile_directory: Option<&'a Path>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PaneSummary {
     pub pane_id: String,
@@ -144,7 +177,7 @@ pub struct ObservedPaneAgentState {
     pub record: AgentStateRecord,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum MachineObservationFailureKind {
     Unreachable,
@@ -157,7 +190,7 @@ pub struct MachineObservationError {
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineObservationFailure {
     pub machine_id: i64,
@@ -166,14 +199,14 @@ pub struct MachineObservationFailure {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RunReconciliationResult {
     pub failures: Vec<MachineObservationFailure>,
     pub changed: bool,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentHookReadiness {
     pub provisioned: Option<bool>,
@@ -181,7 +214,7 @@ pub struct AgentHookReadiness {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineReadiness {
     pub reachable: Option<bool>,
@@ -203,23 +236,6 @@ pub struct MachineRunPreflight {
     pub executable: Option<PathBuf>,
     pub state_file: Option<PathBuf>,
     pub profile_directory: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SshTransport {
-    pub host: String,
-    pub user: Option<String>,
-    pub port: Option<u16>,
-    pub identity_file: Option<String>,
-    pub known_hosts_file: Option<String>,
-    pub strict_host_key_checking: Option<String>,
-    pub ssh_path: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TerminalTransport {
-    Local,
-    Ssh(SshTransport),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -341,45 +357,6 @@ fn tmux_command(identity: &ExternalPaneIdentity, args: &[&str]) -> String {
         .map(|argument| shell_quote(argument))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-fn validate_ssh_transport(transport: &SshTransport) -> Result<(), String> {
-    if transport.host.is_empty()
-        || !transport
-            .host
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b".@:_-".contains(&byte))
-    {
-        return Err(format!(
-            "SSH host contains unsupported characters: {}",
-            transport.host
-        ));
-    }
-    if let Some(user) = &transport.user {
-        if user.is_empty()
-            || !user
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-        {
-            return Err(format!("SSH user contains unsupported characters: {user}"));
-        }
-    }
-    if let Some(port) = transport.port {
-        if port == 0 {
-            return Err("SSH port must be positive".to_owned());
-        }
-    }
-    if let Some(strict_host_key_checking) = &transport.strict_host_key_checking {
-        if !matches!(
-            strict_host_key_checking.as_str(),
-            "yes" | "accept-new" | "no"
-        ) {
-            return Err(format!(
-                "unsupported SSH StrictHostKeyChecking value: {strict_host_key_checking}"
-            ));
-        }
-    }
-    Ok(())
 }
 
 fn build_terminal_apple_script(command: &str, terminal_app: &str) -> String {
@@ -790,10 +767,51 @@ impl Drop for TmuxControlPane {
     }
 }
 
+impl TerminalConnection for TmuxControlPane {
+    fn send_input(&self, input: &[u8]) -> Result<(), String> {
+        TmuxControlPane::send_input(self, input)
+    }
+
+    fn resize(&self, columns: u16, rows: u16) -> Result<(), String> {
+        TmuxControlPane::resize(self, columns, rows)
+    }
+
+    fn capture_pane_snapshot(
+        &self,
+        after_capture: Box<dyn FnOnce() + Send>,
+    ) -> Result<Vec<u8>, String> {
+        TmuxControlPane::capture_pane_snapshot(self, after_capture)
+    }
+
+    fn close(&self) -> Result<(), String> {
+        TmuxControlPane::close(self)
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy)]
 pub struct TmuxRuntime;
 
 impl TerminalRuntime for TmuxRuntime {
+    fn attach_connection(
+        &self,
+        machine: &Machine,
+        session_name: &str,
+        pane_id: &str,
+        on_output: Box<dyn Fn(Vec<u8>) + Send>,
+        on_agent_state: Box<dyn Fn(AgentStateRecord) + Send>,
+        on_exit: Box<dyn Fn(Option<i32>) + Send>,
+    ) -> Result<Box<dyn TerminalConnection>, String> {
+        let connection = TmuxControlPane::attach(
+            machine,
+            session_name,
+            pane_id,
+            on_output,
+            on_agent_state,
+            on_exit,
+        )?;
+        Ok(Box::new(connection))
+    }
+
     fn preflight_agent_run(
         &self,
         machine: &Machine,
@@ -814,18 +832,6 @@ impl TerminalRuntime for TmuxRuntime {
         prepare_machine_for_run(machine, None, None, None).readiness
     }
 
-    fn machine_home(&self, machine: &Machine) -> Result<PathBuf, String> {
-        machine_home(machine)
-    }
-
-    fn provision_pstack_tree(&self, machine: &Machine) -> Result<String, String> {
-        provision_pstack_tree(machine)
-    }
-
-    fn write_pstack_role_file(&self, machine: &Machine, path: &Path, contents: &str) -> Result<(), String> {
-        write_machine_file(machine, path, contents.as_bytes())
-    }
-
     fn observe_machine(&self, machine: &Machine, state_run_ids: &[i64]) -> ObservedMachine {
         crate::terminal::observe_machine(machine, state_run_ids)
     }
@@ -844,6 +850,15 @@ impl TerminalRuntime for TmuxRuntime {
 
     fn list_agent_panes(&self, machine: &Machine) -> Result<Vec<AgentPaneSummary>, String> {
         crate::terminal::list_agent_panes(machine)
+    }
+
+    fn send_pane_input(
+        &self,
+        machine: &Machine,
+        pane_id: &str,
+        input: &[u8],
+    ) -> Result<(), String> {
+        send_input_to_pane(machine, pane_id, input)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -885,6 +900,15 @@ impl TerminalRuntime for TmuxRuntime {
         kill_tmux_pane(machine, pane_id)
     }
 
+    fn kill_pane_with_timeout(
+        &self,
+        machine: &Machine,
+        pane_id: &str,
+        timeout: Duration,
+    ) -> Result<(), String> {
+        kill_pane_with_timeout(machine, pane_id, timeout)
+    }
+
     fn interrupt_pane(
         &self,
         machine: &Machine,
@@ -896,825 +920,10 @@ impl TerminalRuntime for TmuxRuntime {
 }
 
 #[cfg(test)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum FakeMachineOutcome {
-    Available,
-    Unreachable,
-    TmuxQueryFailed,
-    TmuxUnavailable,
-    AgentUnavailable,
-    StateDirectoryUnwritable,
-    HookProvisioningFailed,
-}
-
+#[path = "terminal/fake.rs"]
+mod fake;
 #[cfg(test)]
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FakeTerminalCommand {
-    PreflightAgentRun {
-        machine_id: i64,
-        agent: AgentKind,
-        run_id: i64,
-        profile: Option<CliConfigurationProfile>,
-    },
-    CheckMachine {
-        machine_id: i64,
-    },
-    ProvisionPstackTree { machine_id: i64 },
-    WritePstackRoleFile { machine_id: i64, path: PathBuf },
-    ObserveMachine {
-        machine_id: i64,
-    },
-    ReadAgentStateFiles {
-        machine_id: i64,
-        run_ids: Vec<i64>,
-    },
-    CapturePaneTranscript {
-        machine_id: i64,
-        pane_id: String,
-    },
-    ListPanes {
-        machine_id: i64,
-        session_name: String,
-    },
-    ListAgentPanes {
-        machine_id: i64,
-    },
-    LaunchAgent {
-        machine_id: i64,
-        session_name: String,
-        gate_channel: String,
-        run_id: i64,
-        profile_directory: Option<PathBuf>,
-    },
-    ReleaseAgentLaunch {
-        machine_id: i64,
-        gate_channel: String,
-    },
-    KillSession {
-        machine_id: i64,
-        session_name: String,
-    },
-    KillPane {
-        machine_id: i64,
-        session_name: String,
-        pane_id: String,
-    },
-    SendPaneInput {
-        machine_id: i64,
-        pane_id: String,
-        input: Vec<u8>,
-    },
-    InterruptPane {
-        machine_id: i64,
-        session_name: String,
-        pane_id: String,
-    },
-}
-
-#[cfg(test)]
-type FakeTranscriptCaptures =
-    Arc<Mutex<std::collections::HashMap<(i64, String), Result<Vec<u8>, String>>>>;
-
-#[cfg(test)]
-pub(crate) struct FakeTerminalRuntime {
-    outcomes: std::collections::HashMap<i64, FakeMachineOutcome>,
-    commands: Arc<Mutex<Vec<FakeTerminalCommand>>>,
-    hook_configs: Arc<Mutex<std::collections::HashMap<(i64, String), String>>>,
-    observed_panes: Arc<Mutex<std::collections::HashMap<i64, Vec<ObservedPane>>>>,
-    pane_state_records: Arc<Mutex<std::collections::HashMap<i64, Vec<ObservedPaneAgentState>>>>,
-    state_file_records: Arc<Mutex<std::collections::HashMap<i64, Vec<AgentStateRecord>>>>,
-    transcript_captures: FakeTranscriptCaptures,
-    release_failures: Arc<Mutex<std::collections::HashMap<i64, String>>>,
-    pstack_provisioning_failures: Arc<Mutex<std::collections::HashMap<i64, String>>>,
-    dirty_checkout_on_launch: Arc<Mutex<bool>>,
-    checkout_remote_on_launch: Arc<Mutex<Option<String>>>,
-    observation_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
-    send_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
-    release_gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
-}
-
-#[cfg(test)]
-#[derive(Default)]
-struct FakeObservationGateState {
-    enabled: bool,
-    started: bool,
-    released: bool,
-}
-
-#[cfg(test)]
-pub(crate) struct FakeObservationBlock {
-    gate: Arc<(Mutex<FakeObservationGateState>, Condvar)>,
-}
-
-#[cfg(test)]
-impl FakeObservationBlock {
-    pub(crate) fn wait_until_started(&self, timeout: Duration) -> bool {
-        let (state, changed) = &*self.gate;
-        let state = state
-            .lock()
-            .expect("fake observation gate should remain available");
-        if state.started {
-            return true;
-        }
-        let (state, _) = changed
-            .wait_timeout_while(state, timeout, |state| !state.started)
-            .expect("fake observation gate should remain available");
-        state.started
-    }
-
-    pub(crate) fn release(&self) {
-        let (state, changed) = &*self.gate;
-        let mut state = state
-            .lock()
-            .expect("fake observation gate should remain available");
-        state.enabled = false;
-        state.released = true;
-        changed.notify_all();
-    }
-}
-
-#[cfg(test)]
-impl Drop for FakeObservationBlock {
-    fn drop(&mut self) {
-        self.release();
-    }
-}
-
-#[cfg(test)]
-impl FakeTerminalRuntime {
-    pub(crate) fn new(outcomes: impl IntoIterator<Item = (i64, FakeMachineOutcome)>) -> Self {
-        Self {
-            outcomes: outcomes.into_iter().collect(),
-            commands: Arc::new(Mutex::new(Vec::new())),
-            hook_configs: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            observed_panes: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            pane_state_records: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            state_file_records: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            transcript_captures: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            release_failures: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            pstack_provisioning_failures: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            dirty_checkout_on_launch: Arc::new(Mutex::new(false)),
-            checkout_remote_on_launch: Arc::new(Mutex::new(None)),
-            observation_gate: Arc::new((
-                Mutex::new(FakeObservationGateState::default()),
-                Condvar::new(),
-            )),
-            send_gate: Arc::new((
-                Mutex::new(FakeObservationGateState::default()),
-                Condvar::new(),
-            )),
-            release_gate: Arc::new((
-                Mutex::new(FakeObservationGateState::default()),
-                Condvar::new(),
-            )),
-        }
-    }
-
-    pub(crate) fn block_observations(&self) -> FakeObservationBlock {
-        Self::block_gate(&self.observation_gate)
-    }
-
-    pub(crate) fn block_sends(&self) -> FakeObservationBlock {
-        Self::block_gate(&self.send_gate)
-    }
-
-    pub(crate) fn block_launch_release(&self) -> FakeObservationBlock {
-        Self::block_gate(&self.release_gate)
-    }
-
-    fn block_gate(gate: &Arc<(Mutex<FakeObservationGateState>, Condvar)>) -> FakeObservationBlock {
-        let gate = Arc::clone(gate);
-        let (state, _) = &*gate;
-        let mut state = state
-            .lock()
-            .expect("fake observation gate should remain available");
-        state.enabled = true;
-        state.started = false;
-        state.released = false;
-        drop(state);
-        FakeObservationBlock { gate }
-    }
-
-    fn wait_for_gate(gate: &Arc<(Mutex<FakeObservationGateState>, Condvar)>) {
-        let (state, changed) = &**gate;
-        let mut state = state
-            .lock()
-            .expect("fake operation gate should remain available");
-        if state.enabled {
-            state.started = true;
-            changed.notify_all();
-            let _state = changed
-                .wait_while(state, |state| !state.released)
-                .expect("fake operation gate should remain available");
-        }
-    }
-
-    pub(crate) fn set_observed_panes(&self, machine_id: i64, panes: Vec<ObservedPane>) {
-        self.observed_panes
-            .lock()
-            .expect("fake observed pane list should remain available")
-            .insert(machine_id, panes);
-    }
-
-    pub(crate) fn set_agent_state_records(&self, machine_id: i64, records: Vec<AgentStateRecord>) {
-        self.state_file_records
-            .lock()
-            .expect("fake agent state records should remain available")
-            .insert(machine_id, records);
-    }
-
-    pub(crate) fn set_pane_agent_state_records(
-        &self,
-        machine_id: i64,
-        records: Vec<ObservedPaneAgentState>,
-    ) {
-        self.pane_state_records
-            .lock()
-            .expect("fake Pane agent state records should remain available")
-            .insert(machine_id, records);
-    }
-
-    pub(crate) fn set_transcript_capture_failure(
-        &self,
-        machine_id: i64,
-        pane_id: impl Into<String>,
-        error: impl Into<String>,
-    ) {
-        self.transcript_captures
-            .lock()
-            .expect("fake transcript capture map should remain available")
-            .insert((machine_id, pane_id.into()), Err(error.into()));
-    }
-
-    pub(crate) fn command_log(&self) -> Arc<Mutex<Vec<FakeTerminalCommand>>> {
-        Arc::clone(&self.commands)
-    }
-
-    pub(crate) fn fail_launch_release(&self, machine_id: i64, error: impl Into<String>) {
-        self.release_failures
-            .lock()
-            .expect("fake release failures should remain available")
-            .insert(machine_id, error.into());
-    }
-
-    pub(crate) fn fail_pstack_provisioning(&self, machine_id: i64, error: impl Into<String>) {
-        self.pstack_provisioning_failures
-            .lock()
-            .expect("fake pstack provisioning failures should remain available")
-            .insert(machine_id, error.into());
-    }
-
-    pub(crate) fn dirty_checkout_after_launch(&self) {
-        *self
-            .dirty_checkout_on_launch
-            .lock()
-            .expect("fake launch mutation should remain available") = true;
-    }
-
-    pub(crate) fn change_checkout_remote_after_launch(&self, remote_url: impl Into<String>) {
-        *self
-            .checkout_remote_on_launch
-            .lock()
-            .expect("fake launch mutation should remain available") = Some(remote_url.into());
-    }
-
-    pub(crate) fn set_agent_hook_config(
-        &self,
-        machine_id: i64,
-        agent: AgentKind,
-        contents: impl Into<String>,
-    ) {
-        self.hook_configs
-            .lock()
-            .expect("fake hook config should remain available")
-            .insert((machine_id, agent.slug().into()), contents.into());
-    }
-
-    pub(crate) fn agent_hook_config(&self, machine_id: i64, agent: AgentKind) -> Option<String> {
-        self.hook_configs
-            .lock()
-            .expect("fake hook config should remain available")
-            .get(&(machine_id, agent.slug().into()))
-            .cloned()
-    }
-
-    fn outcome(&self, machine: &Machine) -> FakeMachineOutcome {
-        self.outcomes
-            .get(&machine.id)
-            .copied()
-            .unwrap_or(FakeMachineOutcome::Unreachable)
-    }
-
-    fn record(&self, command: FakeTerminalCommand) {
-        self.commands
-            .lock()
-            .expect("fake terminal command log should remain available")
-            .push(command);
-    }
-
-    fn available_pane() -> PaneSummary {
-        PaneSummary {
-            pane_id: "%1".into(),
-            pane_index: 0,
-            pid: 1,
-            columns: 80,
-            rows: 24,
-            title: "fake pane".into(),
-            current_command: "fake-agent".into(),
-            current_path: "/fake/worktree".into(),
-        }
-    }
-
-    fn simulate_hook_provisioning(
-        &self,
-        machine: &Machine,
-        readiness: &mut MachineReadiness,
-        run: Option<(AgentKind, i64)>,
-    ) {
-        if readiness.reachable != Some(true)
-            || (run.is_some() && readiness.state_directory_writable != Some(true))
-            || self.outcome(machine) == FakeMachineOutcome::HookProvisioningFailed
-        {
-            return;
-        }
-        let script = Path::new("/fake/home").join(AGENT_STATE_HOOK_RELATIVE_PATH);
-        for agent in [AgentKind::Claude, AgentKind::Codex] {
-            let key = (machine.id, agent.slug().to_owned());
-            let existing = self
-                .hook_configs
-                .lock()
-                .expect("fake hook config should remain available")
-                .get(&key)
-                .cloned();
-            let result = agent_state::merge_provider_hooks(
-                existing.as_deref(),
-                &script,
-                agent,
-                agent_state::agent_hook_events(agent),
-            )
-            .and_then(|merged| {
-                let contents = String::from_utf8(merged).map_err(|error| error.to_string())?;
-                self.hook_configs
-                    .lock()
-                    .expect("fake hook config should remain available")
-                    .insert(key, contents);
-                Ok(())
-            });
-            let status = match result {
-                Ok(()) => hook_provisioning_success(),
-                Err(error) => hook_provisioning_failure(error),
-            };
-            match agent {
-                AgentKind::Claude => readiness.claude_hooks = status,
-                AgentKind::Codex => readiness.codex_hooks = status,
-            }
-        }
-        readiness.last_provisioning_error = [
-            readiness.claude_hooks.error.as_deref(),
-            readiness.codex_hooks.error.as_deref(),
-        ]
-        .into_iter()
-        .flatten()
-        .next()
-        .map(str::to_owned);
-        if readiness.error.is_none() {
-            readiness.error = readiness.last_provisioning_error.clone();
-        }
-    }
-}
-
-#[cfg(test)]
-impl TerminalRuntime for FakeTerminalRuntime {
-    fn preflight_agent_run(
-        &self,
-        machine: &Machine,
-        agent: AgentKind,
-        run_id: i64,
-        _preferred_executable: Option<&Path>,
-        profile: Option<&CliConfigurationProfile>,
-    ) -> MachineRunPreflight {
-        self.record(FakeTerminalCommand::PreflightAgentRun {
-            machine_id: machine.id,
-            agent,
-            run_id,
-            profile: profile.cloned(),
-        });
-        let mut preflight =
-            fake_machine_preflight(machine, self.outcome(machine), Some((agent, run_id)));
-        preflight.profile_directory = profile.map(|profile| PathBuf::from(&profile.directory));
-        self.simulate_hook_provisioning(machine, &mut preflight.readiness, Some((agent, run_id)));
-        preflight
-    }
-
-    fn check_machine(&self, machine: &Machine) -> MachineReadiness {
-        self.record(FakeTerminalCommand::CheckMachine {
-            machine_id: machine.id,
-        });
-        let mut preflight = fake_machine_preflight(machine, self.outcome(machine), None);
-        self.simulate_hook_provisioning(machine, &mut preflight.readiness, None);
-        preflight.readiness
-    }
-
-    fn machine_home(&self, _machine: &Machine) -> Result<PathBuf, String> {
-        Ok(PathBuf::from("/fake/home"))
-    }
-
-    fn provision_pstack_tree(&self, machine: &Machine) -> Result<String, String> {
-        self.record(FakeTerminalCommand::ProvisionPstackTree { machine_id: machine.id });
-        if let Some(error) = self.pstack_provisioning_failures
-            .lock()
-            .expect("fake pstack provisioning failures should remain available")
-            .get(&machine.id).cloned() { return Err(error); }
-        Ok(crate::pstack::tree_directory(Path::new("/fake/home"))
-            .to_string_lossy().into_owned())
-    }
-
-    fn write_pstack_role_file(&self, machine: &Machine, path: &Path, _contents: &str) -> Result<(), String> {
-        self.record(FakeTerminalCommand::WritePstackRoleFile { machine_id: machine.id, path: path.to_path_buf() });
-        Ok(())
-    }
-
-    fn observe_machine(&self, machine: &Machine, state_run_ids: &[i64]) -> ObservedMachine {
-        self.record(FakeTerminalCommand::ObserveMachine {
-            machine_id: machine.id,
-        });
-        let (state, changed) = &*self.observation_gate;
-        let mut state = state
-            .lock()
-            .expect("fake observation gate should remain available");
-        if state.enabled {
-            state.started = true;
-            changed.notify_all();
-            state = changed
-                .wait_while(state, |state| !state.released)
-                .expect("fake observation gate should remain available");
-        }
-        drop(state);
-        let panes = match self.outcome(machine) {
-            FakeMachineOutcome::Available
-            | FakeMachineOutcome::AgentUnavailable
-            | FakeMachineOutcome::StateDirectoryUnwritable
-            | FakeMachineOutcome::HookProvisioningFailed => Ok(self
-                .observed_panes
-                .lock()
-                .expect("fake observed pane list should remain available")
-                .get(&machine.id)
-                .cloned()
-                .unwrap_or_else(|| {
-                    vec![ObservedPane {
-                        session_name: format!("session-{}", machine.id),
-                        pane_id: "%1".into(),
-                    }]
-                })),
-            FakeMachineOutcome::Unreachable | FakeMachineOutcome::TmuxUnavailable => {
-                Err(MachineObservationError {
-                    kind: MachineObservationFailureKind::Unreachable,
-                    message: format!("fake Machine {} is unreachable", machine.name),
-                })
-            }
-            FakeMachineOutcome::TmuxQueryFailed => Err(MachineObservationError {
-                kind: MachineObservationFailureKind::TmuxQueryFailed,
-                message: format!("fake tmux query failed on Machine {}", machine.name),
-            }),
-        };
-        let requested = state_run_ids
-            .iter()
-            .copied()
-            .collect::<std::collections::HashSet<_>>();
-        self.record(FakeTerminalCommand::ReadAgentStateFiles {
-            machine_id: machine.id,
-            run_ids: state_run_ids.to_vec(),
-        });
-        let state_records = if matches!(
-            &panes,
-            Err(MachineObservationError {
-                kind: MachineObservationFailureKind::Unreachable,
-                ..
-            })
-        ) {
-            Vec::new()
-        } else {
-            self.state_file_records
-                .lock()
-                .expect("fake agent state records should remain available")
-                .get(&machine.id)
-                .into_iter()
-                .flatten()
-                .filter(|record| {
-                    record
-                        .run_id
-                        .parse::<i64>()
-                        .is_ok_and(|run_id| requested.contains(&run_id))
-                })
-                .cloned()
-                .collect()
-        };
-        let pane_state_records = self
-            .pane_state_records
-            .lock()
-            .expect("fake Pane agent state records should remain available")
-            .get(&machine.id)
-            .into_iter()
-            .flatten()
-            .filter(|pane_state| {
-                pane_state
-                    .record
-                    .run_id
-                    .parse::<i64>()
-                    .is_ok_and(|run_id| requested.contains(&run_id))
-            })
-            .cloned()
-            .collect();
-        ObservedMachine {
-            panes,
-            pane_state_records,
-            state_file_records: state_records,
-        }
-    }
-
-    fn capture_pane_transcript(&self, machine: &Machine, pane_id: &str) -> Result<Vec<u8>, String> {
-        self.record(FakeTerminalCommand::CapturePaneTranscript {
-            machine_id: machine.id,
-            pane_id: pane_id.into(),
-        });
-        self.transcript_captures
-            .lock()
-            .expect("fake transcript capture map should remain available")
-            .get(&(machine.id, pane_id.into()))
-            .cloned()
-            .unwrap_or_else(|| Ok(Vec::new()))
-    }
-
-    fn list_panes(
-        &self,
-        machine: &Machine,
-        session_name: &str,
-    ) -> Result<Vec<PaneSummary>, String> {
-        self.record(FakeTerminalCommand::ListPanes {
-            machine_id: machine.id,
-            session_name: session_name.into(),
-        });
-        match self.outcome(machine) {
-            FakeMachineOutcome::Available
-            | FakeMachineOutcome::AgentUnavailable
-            | FakeMachineOutcome::StateDirectoryUnwritable
-            | FakeMachineOutcome::HookProvisioningFailed => Ok(vec![Self::available_pane()]),
-            FakeMachineOutcome::Unreachable | FakeMachineOutcome::TmuxUnavailable => {
-                Err(format!("fake Machine {} is unreachable", machine.name))
-            }
-            FakeMachineOutcome::TmuxQueryFailed => Err(format!(
-                "fake tmux query failed on Machine {}",
-                machine.name
-            )),
-        }
-    }
-
-    fn list_agent_panes(&self, machine: &Machine) -> Result<Vec<AgentPaneSummary>, String> {
-        self.record(FakeTerminalCommand::ListAgentPanes {
-            machine_id: machine.id,
-        });
-        let (state, changed) = &*self.observation_gate;
-        let mut state = state
-            .lock()
-            .expect("fake observation gate should remain available");
-        if state.enabled {
-            state.started = true;
-            changed.notify_all();
-            state = changed
-                .wait_while(state, |state| !state.released)
-                .expect("fake observation gate should remain available");
-        }
-        drop(state);
-        match self.outcome(machine) {
-            FakeMachineOutcome::Available
-            | FakeMachineOutcome::AgentUnavailable
-            | FakeMachineOutcome::StateDirectoryUnwritable
-            | FakeMachineOutcome::HookProvisioningFailed => Ok(Vec::new()),
-            FakeMachineOutcome::Unreachable | FakeMachineOutcome::TmuxUnavailable => {
-                Err(format!("fake Machine {} is unreachable", machine.name))
-            }
-            FakeMachineOutcome::TmuxQueryFailed => Err(format!(
-                "fake tmux query failed on Machine {}",
-                machine.name
-            )),
-        }
-    }
-
-    fn send_pane_input(
-        &self,
-        machine: &Machine,
-        pane_id: &str,
-        input: &[u8],
-    ) -> Result<(), String> {
-        self.record(FakeTerminalCommand::SendPaneInput {
-            machine_id: machine.id,
-            pane_id: pane_id.into(),
-            input: input.into(),
-        });
-        Self::wait_for_gate(&self.send_gate);
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn launch_agent(
-        &self,
-        machine: &Machine,
-        session_name: &str,
-        gate_channel: &str,
-        root: &Path,
-        _executable: &Path,
-        _prompt: &str,
-        launch: AgentLaunchContext<'_>,
-    ) -> Result<String, String> {
-        self.record(FakeTerminalCommand::LaunchAgent {
-            machine_id: machine.id,
-            session_name: session_name.into(),
-            gate_channel: gate_channel.into(),
-            run_id: launch.run_id,
-            profile_directory: launch.profile_directory.map(Path::to_path_buf),
-        });
-        let dirty_after_launch = *self
-            .dirty_checkout_on_launch
-            .lock()
-            .expect("fake launch mutation should remain available");
-        if dirty_after_launch {
-            std::fs::write(
-                root.join(".fake-terminal-launch-dirt"),
-                b"dirty after launch",
-            )
-            .map_err(|error| format!("Could not simulate post-launch checkout dirt: {error}"))?;
-        }
-        let remote_after_launch = self
-            .checkout_remote_on_launch
-            .lock()
-            .expect("fake launch mutation should remain available")
-            .clone();
-        if let Some(remote_url) = remote_after_launch {
-            let output = Command::new("git")
-                .args(["-C", &root.to_string_lossy(), "remote", "set-url", "origin"])
-                .arg(remote_url)
-                .output()
-                .map_err(|error| {
-                    format!("Could not simulate post-launch remote change: {error}")
-                })?;
-            if !output.status.success() {
-                return Err(format!(
-                    "Could not simulate post-launch remote change: {}",
-                    String::from_utf8_lossy(&output.stderr).trim()
-                ));
-            }
-        }
-        Ok(format!("%fake-{}", launch.run_id))
-    }
-
-    fn release_agent_launch(&self, machine: &Machine, gate_channel: &str) -> Result<(), String> {
-        self.record(FakeTerminalCommand::ReleaseAgentLaunch {
-            machine_id: machine.id,
-            gate_channel: gate_channel.into(),
-        });
-        self.release_failures
-            .lock()
-            .expect("fake release failures should remain available")
-            .get(&machine.id)
-            .cloned()
-            .map_or(Ok(()), Err)?;
-        Self::wait_for_gate(&self.release_gate);
-        Ok(())
-    }
-
-    fn kill_session(&self, machine: &Machine, session_name: &str) -> Result<(), String> {
-        self.record(FakeTerminalCommand::KillSession {
-            machine_id: machine.id,
-            session_name: session_name.into(),
-        });
-        Ok(())
-    }
-
-    fn kill_pane(
-        &self,
-        machine: &Machine,
-        session_name: &str,
-        pane_id: &str,
-    ) -> Result<(), String> {
-        self.record(FakeTerminalCommand::KillPane {
-            machine_id: machine.id,
-            session_name: session_name.into(),
-            pane_id: pane_id.into(),
-        });
-        Ok(())
-    }
-
-    fn interrupt_pane(
-        &self,
-        machine: &Machine,
-        session_name: &str,
-        pane_id: &str,
-    ) -> Result<(), String> {
-        self.record(FakeTerminalCommand::InterruptPane {
-            machine_id: machine.id,
-            session_name: session_name.into(),
-            pane_id: pane_id.into(),
-        });
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-fn fake_machine_preflight(
-    machine: &Machine,
-    outcome: FakeMachineOutcome,
-    run: Option<(AgentKind, i64)>,
-) -> MachineRunPreflight {
-    let mut readiness = MachineReadiness {
-        reachable: Some(true),
-        ..MachineReadiness::default()
-    };
-    if outcome == FakeMachineOutcome::Unreachable {
-        readiness.reachable = Some(false);
-        readiness.error = Some(format!("Could not reach Machine {}", machine.name));
-        return MachineRunPreflight {
-            readiness,
-            ..MachineRunPreflight::default()
-        };
-    }
-    if outcome == FakeMachineOutcome::TmuxUnavailable {
-        readiness.tmux_available = Some(false);
-        readiness.error = Some(format!(
-            "Machine {} does not have tmux available",
-            machine.name
-        ));
-        if run.is_some() {
-            return MachineRunPreflight {
-                readiness,
-                ..MachineRunPreflight::default()
-            };
-        }
-    } else {
-        readiness.tmux_available = Some(true);
-    }
-
-    if let Some((agent, _)) = run {
-        set_executable_readiness(
-            &mut readiness,
-            agent,
-            Some(outcome != FakeMachineOutcome::AgentUnavailable),
-        );
-    }
-    if let (FakeMachineOutcome::AgentUnavailable, Some((agent, _))) = (outcome, run) {
-        readiness.error = Some(format!(
-            "{} executable is unavailable on Machine {}",
-            agent_display_name(agent),
-            machine.name
-        ));
-        return MachineRunPreflight {
-            readiness,
-            ..MachineRunPreflight::default()
-        };
-    }
-
-    if outcome == FakeMachineOutcome::StateDirectoryUnwritable {
-        readiness.state_directory_writable = Some(false);
-        readiness.error = Some(format!(
-            "Agent state directory is not writable on Machine {}",
-            machine.name
-        ));
-        if run.is_some() {
-            return MachineRunPreflight {
-                readiness,
-                ..MachineRunPreflight::default()
-            };
-        }
-    } else {
-        readiness.state_directory_writable = Some(true);
-    }
-
-    if outcome == FakeMachineOutcome::HookProvisioningFailed {
-        let error = "fake hook provisioning failed".to_owned();
-        readiness.claude_hooks = hook_provisioning_failure(error.clone());
-        readiness.codex_hooks = hook_provisioning_failure(error.clone());
-        readiness.last_provisioning_error = Some(error.clone());
-        readiness.error = Some(error);
-        return MachineRunPreflight {
-            readiness,
-            ..MachineRunPreflight::default()
-        };
-    }
-    readiness.claude_hooks = hook_provisioning_success();
-    readiness.codex_hooks = hook_provisioning_success();
-    let state_file =
-        run.map(|(_, run_id)| state_file_for_machine_run(Path::new("/fake/home"), run_id));
-    let executable = run.map(|(agent, _)| PathBuf::from(format!("/fake/bin/{}", agent.slug())));
-    MachineRunPreflight {
-        readiness,
-        executable,
-        state_file,
-        profile_directory: None,
-    }
-}
-
-pub(crate) fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
+pub(crate) use fake::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime};
 
 fn run_tmux(machine: &Machine, args: &[String]) -> Result<String, String> {
     let output = run_tmux_output(machine, args)?;
@@ -1805,259 +1014,6 @@ pub(crate) fn kill_pane_with_timeout(
             format!("Machine {}: {detail}", machine.name)
         })
     }
-}
-
-pub fn terminal_transport(machine: &Machine) -> TerminalTransport {
-    match &machine.transport {
-        MachineTransport::Local => TerminalTransport::Local,
-        MachineTransport::Ssh {
-            host,
-            user,
-            port,
-            identity_file,
-            known_hosts_file,
-            strict_host_key_checking,
-        } => TerminalTransport::Ssh(SshTransport {
-            host: host.clone(),
-            user: user.clone(),
-            port: *port,
-            identity_file: identity_file.clone(),
-            known_hosts_file: known_hosts_file.clone(),
-            strict_host_key_checking: strict_host_key_checking.clone(),
-            ssh_path: None,
-        }),
-    }
-}
-
-fn build_tmux_process_command(
-    transport: &TerminalTransport,
-    allocate_tty: bool,
-    tmux_args: &[&str],
-    tmux_path: &str,
-) -> Result<(String, Vec<String>), String> {
-    if tmux_path.trim().is_empty() {
-        return Err("tmux executable path cannot be blank".to_owned());
-    }
-    if matches!(transport, TerminalTransport::Local) {
-        return Ok((
-            tmux_path.to_owned(),
-            tmux_args
-                .iter()
-                .map(|argument| (*argument).to_owned())
-                .collect(),
-        ));
-    }
-
-    let TerminalTransport::Ssh(transport) = transport else {
-        unreachable!("local transport returned above");
-    };
-    validate_ssh_transport(transport)?;
-    let target = match &transport.user {
-        Some(user) => format!("{user}@{}", transport.host),
-        None => transport.host.clone(),
-    };
-    let remote_command = std::iter::once(tmux_path)
-        .chain(tmux_args.iter().copied())
-        .map(shell_quote)
-        .collect::<Vec<_>>()
-        .join(" ");
-    let mut arguments = vec![
-        if allocate_tty { "-tt" } else { "-T" }.to_owned(),
-        "-o".to_owned(),
-        "BatchMode=yes".to_owned(),
-    ];
-    if let Some(port) = transport.port {
-        arguments.extend(["-p".to_owned(), port.to_string()]);
-    }
-    if let Some(identity_file) = &transport.identity_file {
-        arguments.extend(["-i".to_owned(), identity_file.clone()]);
-    }
-    if let Some(known_hosts_file) = &transport.known_hosts_file {
-        arguments.extend([
-            "-o".to_owned(),
-            format!("UserKnownHostsFile={known_hosts_file}"),
-        ]);
-    }
-    if let Some(strict_host_key_checking) = &transport.strict_host_key_checking {
-        arguments.extend([
-            "-o".to_owned(),
-            format!("StrictHostKeyChecking={strict_host_key_checking}"),
-        ]);
-    }
-    arguments.extend([target, remote_command]);
-    Ok((
-        transport.ssh_path.as_deref().unwrap_or("ssh").to_owned(),
-        arguments,
-    ))
-}
-
-pub fn probe_machine(machine: &Machine) -> Result<(), String> {
-    match &machine.transport {
-        MachineTransport::Local => Command::new("tmux")
-            .arg("-V")
-            .output()
-            .map_err(|error| format!("Could not inspect Machine {}: {error}", machine.name))
-            .and_then(|output| {
-                if output.status.success() {
-                    Ok(())
-                } else {
-                    Err(format!("Machine {} could not run tmux", machine.name))
-                }
-            }),
-        MachineTransport::Ssh { .. } => run_machine_shell(machine, "tmux -V").map(|_| ()),
-    }
-}
-
-pub fn probe_local_runtime(executable: &Path) -> Result<(), String> {
-    let output = Command::new(executable)
-        .arg("-V")
-        .output()
-        .map_err(|error| format!("could not run tmux: {error}"))?;
-    if output.status.success() {
-        Ok(())
-    } else {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(if detail.is_empty() {
-            format!("tmux exited with {}", output.status)
-        } else {
-            detail
-        })
-    }
-}
-
-pub fn find_agent_executable(machine: &Machine, name: &str) -> Result<PathBuf, String> {
-    if name.is_empty()
-        || !name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
-    {
-        return Err(format!("unsupported agent executable name: {name}"));
-    }
-    match &machine.transport {
-        MachineTransport::Local => env::var_os("PATH")
-            .into_iter()
-            .flat_map(|path| env::split_paths(&path).collect::<Vec<_>>())
-            .map(|directory| directory.join(name))
-            .find(|candidate| is_executable(candidate))
-            .and_then(|candidate| candidate.canonicalize().ok().or(Some(candidate)))
-            .ok_or_else(|| format!("{name} is not installed on Machine {}", machine.name)),
-        MachineTransport::Ssh { .. } => {
-            let output = run_machine_shell(
-                machine,
-                &format!("command -v {} || true", shell_quote(name)),
-            )?;
-            let path = output.trim();
-            if path.is_empty() {
-                Err(format!(
-                    "{name} is not installed on Machine {}",
-                    machine.name
-                ))
-            } else if !Path::new(path).is_absolute() {
-                Err(format!(
-                    "Machine {} returned a non-absolute {name} executable path",
-                    machine.name
-                ))
-            } else {
-                Ok(PathBuf::from(path))
-            }
-        }
-    }
-}
-
-pub(crate) fn run_machine_shell(machine: &Machine, command: &str) -> Result<String, String> {
-    run_machine_shell_with_input(machine, command, &[])
-}
-
-fn run_machine_shell_with_input(
-    machine: &Machine,
-    command: &str,
-    input: &[u8],
-) -> Result<String, String> {
-    let (program, arguments) = build_machine_shell_command(machine, command)?;
-    let output = run_shell_with_input(&program, &arguments, input).map_err(|error| {
-        let kind = if matches!(machine.transport, MachineTransport::Ssh { .. }) {
-            "connect to"
-        } else {
-            "inspect"
-        };
-        format!("Could not {kind} Machine {}: {error}", machine.name)
-    })?;
-    if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-    } else {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        Err(if detail.is_empty() {
-            format!("command exited with {}", output.status)
-        } else {
-            detail
-        })
-    }
-}
-
-fn build_machine_shell_command(
-    machine: &Machine,
-    command: &str,
-) -> Result<(String, Vec<String>), String> {
-    match &machine.transport {
-        MachineTransport::Local => Ok(("sh".into(), vec!["-lc".into(), command.into()])),
-        MachineTransport::Ssh { .. } => {
-            let transport = terminal_transport(machine);
-            let TerminalTransport::Ssh(transport) = transport else {
-                unreachable!("SSH transport should remain SSH");
-            };
-            validate_ssh_transport(&transport)?;
-            let target = match &transport.user {
-                Some(user) => format!("{user}@{}", transport.host),
-                None => transport.host.clone(),
-            };
-            let mut arguments = vec!["-T".to_owned(), "-o".to_owned(), "BatchMode=yes".to_owned()];
-            if let Some(port) = transport.port {
-                arguments.extend(["-p".to_owned(), port.to_string()]);
-            }
-            if let Some(identity_file) = &transport.identity_file {
-                arguments.extend(["-i".to_owned(), identity_file.clone()]);
-            }
-            if let Some(known_hosts_file) = &transport.known_hosts_file {
-                arguments.extend([
-                    "-o".to_owned(),
-                    format!("UserKnownHostsFile={known_hosts_file}"),
-                ]);
-            }
-            if let Some(strict_host_key_checking) = &transport.strict_host_key_checking {
-                arguments.extend([
-                    "-o".to_owned(),
-                    format!("StrictHostKeyChecking={strict_host_key_checking}"),
-                ]);
-            }
-            arguments.extend([target, command.to_owned()]);
-            Ok((
-                transport.ssh_path.as_deref().unwrap_or("ssh").to_owned(),
-                arguments,
-            ))
-        }
-    }
-}
-
-fn run_shell_with_input(
-    program: &str,
-    arguments: &[impl AsRef<std::ffi::OsStr>],
-    input: &[u8],
-) -> std::io::Result<std::process::Output> {
-    if input.is_empty() {
-        return Command::new(program).args(arguments).output();
-    }
-    let mut child = Command::new(program)
-        .args(arguments)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .expect("piped shell stdin should be available")
-        .write_all(input)?;
-    child.wait_with_output()
 }
 
 fn remote_provider_hook_path(agent: AgentKind, directory: &Path) -> PathBuf {
@@ -2154,124 +1110,6 @@ fn install_remote_hook_script(machine: &Machine) -> Result<(), String> {
     .map(|_| ())
 }
 
-fn machine_home(machine: &Machine) -> Result<PathBuf, String> {
-    match &machine.transport {
-        MachineTransport::Local => env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| "HOME is not set on the local Machine".to_owned()),
-        MachineTransport::Ssh { .. } => run_machine_shell(machine, "printf '%s' \"$HOME\"")
-            .and_then(|home| {
-                let home = PathBuf::from(home.trim());
-                if home.is_absolute() {
-                    Ok(home)
-                } else {
-                    Err(format!("Machine {} did not report an absolute home directory", machine.name))
-                }
-            }),
-    }
-}
-
-fn write_machine_file(machine: &Machine, path: &Path, contents: &[u8]) -> Result<(), String> {
-    match machine.transport {
-        MachineTransport::Local => {
-            let parent = path.parent().ok_or_else(|| "Generated role file has no parent directory".to_owned())?;
-            std::fs::create_dir_all(parent).map_err(|error| format!("Could not create pstack role directory: {error}"))?;
-            let temporary = path.with_extension(format!("md.tmp.{}", std::process::id()));
-            std::fs::write(&temporary, contents).map_err(|error| format!("Could not write pstack role file: {error}"))?;
-            #[cfg(unix)]
-            std::fs::set_permissions(&temporary, std::os::unix::fs::PermissionsExt::from_mode(0o600))
-                .map_err(|error| format!("Could not secure pstack role file: {error}"))?;
-            std::fs::rename(&temporary, path).map_err(|error| format!("Could not install pstack role file: {error}"))
-        }
-        MachineTransport::Ssh { .. } => {
-            let target = shell_quote(&path.to_string_lossy());
-            let command = format!("set -eu; umask 077; target={target}; parent=${{target%/*}}; mkdir -p \"$parent\"; temporary=\"$target.tmp.$$\"; trap 'rm -f \"$temporary\"' EXIT HUP INT TERM; cat > \"$temporary\"; chmod 600 \"$temporary\"; mv -f \"$temporary\" \"$target\"; trap - EXIT HUP INT TERM");
-            run_machine_shell_with_input(machine, &command, contents).map(|_| ())
-        }
-    }
-}
-
-fn provision_pstack_tree(machine: &Machine) -> Result<String, String> {
-    let home = machine_home(machine)?;
-    let target = crate::pstack::tree_directory(&home);
-    match machine.transport {
-        MachineTransport::Local => {
-            write_local_pstack_tree(&target, crate::pstack::PSTACK_TREE_HASH, crate::pstack::PSTACK_TREE)?;
-        }
-        MachineTransport::Ssh { .. } => {
-            let target_text = target.to_string_lossy();
-            let command = build_remote_pstack_tree_command(&target_text);
-            let input = encode_pstack_tree();
-            run_machine_shell_with_input(machine, &command, &input).map_err(|error| format!("Could not provision pstack on Machine {}: {error}", machine.name))?;
-        }
-    }
-    Ok(target.to_string_lossy().into_owned())
-}
-
-fn write_local_pstack_tree(
-    target: &Path,
-    tree_hash: &str,
-    files: &[(&str, &[u8], bool)],
-) -> Result<(), String> {
-    if target.is_dir() { return Ok(()); }
-    if target.exists() { return Err(format!("pstack target exists but is not a directory: {}", target.display())); }
-    let parent = target.parent().ok_or_else(|| "pstack tree path has no parent".to_owned())?;
-    std::fs::create_dir_all(parent).map_err(|error| format!("Could not create pstack directory: {error}"))?;
-    let temporary = parent.join(format!(".pstack-{tree_hash}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&temporary);
-    for (relative, contents, executable) in files {
-        if Path::new(relative).is_absolute() || Path::new(relative).components().any(|component| matches!(component, std::path::Component::ParentDir)) {
-            return Err(format!("Invalid embedded pstack path: {relative}"));
-        }
-        let file = temporary.join(relative);
-        if let Some(parent) = file.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| format!("Could not create pstack subdirectory: {error}"))?;
-        }
-        std::fs::write(&file, contents).map_err(|error| format!("Could not write pstack file {}: {error}", file.display()))?;
-        #[cfg(unix)]
-        std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(if *executable { 0o755 } else { 0o644 }))
-            .map_err(|error| format!("Could not set pstack file permissions {}: {error}", file.display()))?;
-    }
-    match std::fs::rename(&temporary, target) {
-        Ok(()) => Ok(()),
-        Err(_error) if target.is_dir() => { let _ = std::fs::remove_dir_all(temporary); Ok(()) },
-        Err(error) => { let _ = std::fs::remove_dir_all(temporary); Err(format!("Could not install pstack tree: {error}")) },
-    }
-}
-
-fn encode_base64(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let a = chunk[0];
-        let b = *chunk.get(1).unwrap_or(&0);
-        let c = *chunk.get(2).unwrap_or(&0);
-        output.push(TABLE[(a >> 2) as usize] as char);
-        output.push(TABLE[(((a & 3) << 4) | (b >> 4)) as usize] as char);
-        output.push(if chunk.len() > 1 { TABLE[(((b & 15) << 2) | (c >> 6)) as usize] as char } else { '=' });
-        output.push(if chunk.len() > 2 { TABLE[(c & 63) as usize] as char } else { '=' });
-    }
-    output
-}
-
-fn encode_pstack_tree() -> Vec<u8> {
-    let mut encoded = Vec::new();
-    for (path, contents, executable) in crate::pstack::PSTACK_TREE {
-        encoded.extend_from_slice(path.as_bytes());
-        encoded.push(b'\n');
-        encoded.extend_from_slice(if *executable { b"1\n" } else { b"0\n" });
-        encoded.extend_from_slice(encode_base64(contents).as_bytes());
-        encoded.push(b'\n');
-    }
-    encoded.push(b'\n');
-    encoded
-}
-
-fn build_remote_pstack_tree_command(target: &str) -> String {
-    let target = shell_quote(target);
-    format!("set -eu; target={target}; if [ -d \"$target\" ]; then exit 0; fi; parent=${{target%/*}}; mkdir -p \"$parent\"; temporary=\"$target.tmp.$$\"; trap 'rm -rf \"$temporary\"' EXIT HUP INT TERM; mkdir -p \"$temporary\"; while IFS= read -r relative && [ -n \"$relative\" ]; do IFS= read -r executable || exit 1; IFS= read -r contents || exit 1; case \"$relative\" in /*|*..*) exit 1;; esac; file=\"$temporary/$relative\"; mkdir -p \"${{file%/*}}\"; printf '%s' \"$contents\" | base64 -d > \"$file\"; if [ \"$executable\" = 1 ]; then chmod 755 \"$file\"; fi; done; if [ -d \"$target\" ]; then exit 0; fi; mv \"$temporary\" \"$target\"; trap - EXIT HUP INT TERM")
-}
-
 fn prepare_machine_for_run(
     machine: &Machine,
     run: Option<(AgentKind, i64)>,
@@ -2325,7 +1163,10 @@ fn prepare_machine_for_run(
             Ok(_) => readiness.bun_available = Some(false),
             Err(error) => {
                 readiness.bun_available = Some(false);
-                readiness.bun_error = Some(format!("Could not check Bun on Machine {}: {error}", machine.name));
+                readiness.bun_error = Some(format!(
+                    "Could not check Bun on Machine {}: {error}",
+                    machine.name
+                ));
             }
         },
     }
@@ -2835,24 +1676,6 @@ fn agent_display_name(agent: AgentKind) -> &'static str {
 
 fn state_file_for_machine_run(home: &Path, run_id: i64) -> PathBuf {
     agent_state::state_file_path(&home.join(AGENT_STATE_RUNS_RELATIVE_PATH), run_id)
-}
-
-fn is_executable(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        path.metadata()
-            .map(|metadata| metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        true
-    }
 }
 
 pub fn list_panes(machine: &Machine, session_name: &str) -> Result<Vec<PaneSummary>, String> {
@@ -3618,29 +2441,51 @@ mod tests {
         let home = tempdir().expect("home exists");
         let root = home.path().join(".local/share/ai-mission-manager/pstack");
         let first = root.join("hash-a");
-        write_local_pstack_tree(&first, "hash-a", &[("skills/poteto-mode/SKILL.md", b"first", false)])
-            .expect("first hash is written");
+        write_local_pstack_tree(
+            &first,
+            "hash-a",
+            &[("skills/poteto-mode/SKILL.md", b"first", false)],
+        )
+        .expect("first hash is written");
         std::fs::write(first.join("skills/poteto-mode/SKILL.md"), b"user copy")
             .expect("simulate an existing tree");
-        write_local_pstack_tree(&first, "hash-a", &[("skills/poteto-mode/SKILL.md", b"replacement", false)])
-            .expect("same hash leaves existing tree untouched");
+        write_local_pstack_tree(
+            &first,
+            "hash-a",
+            &[("skills/poteto-mode/SKILL.md", b"replacement", false)],
+        )
+        .expect("same hash leaves existing tree untouched");
         let second = root.join("hash-b");
-        write_local_pstack_tree(&second, "hash-b", &[("skills/poteto-mode/SKILL.md", b"second", false)])
-            .expect("new hash gets its own directory");
-        assert_eq!(std::fs::read(first.join("skills/poteto-mode/SKILL.md")).unwrap(), b"user copy");
-        assert_eq!(std::fs::read(second.join("skills/poteto-mode/SKILL.md")).unwrap(), b"second");
+        write_local_pstack_tree(
+            &second,
+            "hash-b",
+            &[("skills/poteto-mode/SKILL.md", b"second", false)],
+        )
+        .expect("new hash gets its own directory");
+        assert_eq!(
+            std::fs::read(first.join("skills/poteto-mode/SKILL.md")).unwrap(),
+            b"user copy"
+        );
+        assert_eq!(
+            std::fs::read(second.join("skills/poteto-mode/SKILL.md")).unwrap(),
+            b"second"
+        );
         assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
     }
 
     #[test]
     fn remote_pstack_writer_is_idempotent_and_streams_tree_files() {
-        let command = build_remote_pstack_tree_command("/home/runner/.local/share/ai-mission-manager/pstack/hash");
+        let command = build_remote_pstack_tree_command(
+            "/home/runner/.local/share/ai-mission-manager/pstack/hash",
+        );
         assert!(command.contains("if [ -d \"$target\" ]; then exit 0; fi"));
         assert!(command.contains("base64 -d"));
         assert!(command.contains("chmod 755"));
         assert!(command.contains("mv \"$temporary\" \"$target\""));
         let payload = encode_pstack_tree();
-        assert!(payload.windows(b"skills/poteto-mode/SKILL.md\n".len()).any(|window| window == b"skills/poteto-mode/SKILL.md\n"));
+        assert!(payload
+            .windows(b"skills/poteto-mode/SKILL.md\n".len())
+            .any(|window| window == b"skills/poteto-mode/SKILL.md\n"));
     }
 
     #[test]

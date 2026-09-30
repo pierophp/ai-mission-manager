@@ -40,8 +40,6 @@ import { ItemCard } from "./item-card";
 import type { ItemForm } from "./item-signals";
 import {
   displayItemIdentifier,
-  supportsImplementationSpec,
-  supportsImplementationTicket,
 } from "./item-signals";
 import {
   externalObjectKindLabel,
@@ -50,7 +48,7 @@ import {
   orderHomeColumnItems,
   parseHomeColumnOrder,
 } from "./work-utils";
-import { useWorkCommand, workActions } from "./work-mutations";
+import { useWorkCommand, workActions } from "./work-commands";
 import {
   useExternalCommentsQuery,
   useExternalDocumentQuery,
@@ -321,13 +319,13 @@ export function ExternalLinkCard({
           >
             <NativeSelectOption
               value="to-spec"
-              disabled={!supportsImplementationSpec(externalLink)}
+              disabled={!externalLink.supports_implementation_spec}
             >
               Spec
             </NativeSelectOption>
             <NativeSelectOption
               value="to-tickets"
-              disabled={!supportsImplementationTicket(externalLink)}
+              disabled={!externalLink.supports_implementation_ticket}
             >
               Tickets
             </NativeSelectOption>

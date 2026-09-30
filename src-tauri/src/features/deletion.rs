@@ -20,27 +20,43 @@ use crate::{
         ResetLocalDataPlan, ResetLocalDataSummary, RunPaneStatus, Worktree,
     },
     git::GitCli,
-    terminal::kill_pane_with_timeout,
+    terminal::TerminalRuntime,
 };
 
 use crate::features::structure::{machine_home_directory, resolve_machine_path};
 
 pub const RESET_CONFIRMATION_PHRASE: &str = "RESET ALL LOCAL DATA";
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+fn stop_machine_run_panes(
+    terminal_runtime: &dyn TerminalRuntime,
+    machine: &Machine,
+    pane_ids: &[String],
+) -> (usize, usize) {
+    let failures = pane_ids
+        .iter()
+        .filter(|pane_id| {
+            terminal_runtime
+                .kill_pane_with_timeout(machine, pane_id, Duration::from_secs(5))
+                .is_err()
+        })
+        .count();
+    (pane_ids.len(), failures)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemDeletionPreview {
     pub plan: ItemDeletionPlan,
     pub blockers: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemDeletionResult {
     pub summary: ItemDeletionSummary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorktreeRemovalReport {
     pub worktree_id: i64,
@@ -211,7 +227,7 @@ pub(crate) async fn delete_machine_with_state(
                 .into(),
         );
     }
-    let (pending, machine, all_runs, runs_to_stop) = {
+    let (pending, machine, all_runs, runs_to_stop, terminal_runtime) = {
         let runtime = state
             .lock()
             .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
@@ -268,20 +284,22 @@ pub(crate) async fn delete_machine_with_state(
             .filter(|run| run.pane_status != RunPaneStatus::Missing)
             .cloned()
             .collect::<Vec<_>>();
-        (pending, machine, all_runs, runs_to_stop)
+        (
+            pending,
+            machine,
+            all_runs,
+            runs_to_stop,
+            std::sync::Arc::clone(&runtime.terminal_runtime),
+        )
     };
     let worker_machine = machine.clone();
     let (stop_attempt_count, stop_failure_count) =
         tauri::async_runtime::spawn_blocking(move || {
-            let attempts = runs_to_stop.len();
-            let failures = runs_to_stop
+            let pane_ids = runs_to_stop
                 .iter()
-                .filter(|run| {
-                    kill_pane_with_timeout(&worker_machine, &run.pane_id, Duration::from_secs(5))
-                        .is_err()
-                })
-                .count();
-            (attempts, failures)
+                .map(|run| run.pane_id.clone())
+                .collect::<Vec<_>>();
+            stop_machine_run_panes(terminal_runtime.as_ref(), &worker_machine, &pane_ids)
         })
         .await
         .map_err(|error| format!("Machine Run shutdown worker failed: {error}"))?;
@@ -346,14 +364,14 @@ pub(crate) async fn delete_machine_with_state(
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WorktreeRemovalResult {
     pub worktree_id: i64,
     pub branch_preserved: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalObjectLinkDeletionPreview {
     pub link_id: i64,
@@ -362,7 +380,7 @@ pub struct ExternalObjectLinkDeletionPreview {
     pub item_title: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalObjectDeletionPreview {
     pub plan: ExternalObjectDeletionPlan,
@@ -370,13 +388,13 @@ pub struct ExternalObjectDeletionPreview {
     pub provider_warning: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalObjectDeletionResult {
     pub summary: ExternalObjectDeletionSummary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalLinkDeletionResult {
     pub link_id: i64,
@@ -384,28 +402,28 @@ pub struct ExternalLinkDeletionResult {
     pub external_object_deleted: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryDeletionPreview {
     pub plan: RepositoryDeletionPlan,
     pub blockers: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineDeletionPreview {
     pub plan: MachineDeletionPlan,
     pub blockers: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ParentDeletionPreview {
     pub plan: ParentDeletionPlan,
     pub blockers: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ResetLocalDataPreview {
     pub plan: ResetLocalDataPlan,
@@ -414,20 +432,20 @@ pub struct ResetLocalDataPreview {
     pub confirmation_phrase: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ResetLocalDataResult {
     pub summary: ResetLocalDataSummary,
     pub audit_entry_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ParentDeletionResult {
     pub summary: ParentDeletionSummary,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineDeletionResult {
     pub machine_id: i64,
@@ -438,7 +456,7 @@ pub struct MachineDeletionResult {
     pub stop_failure_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryDeletionResult {
     pub repository_id: i64,
@@ -626,7 +644,7 @@ impl Runtime {
                     repository.name, machine.name
                 )
             })?;
-        let machine_home = machine_home_directory(&machine);
+        let machine_home = machine_home_directory(&machine, self.machine_access.as_ref());
         let checkout_path = resolve_machine_path(&location.checkout_path, &machine_home);
         let worktree_path = resolve_machine_path(&worktree.path, &machine_home);
         Ok(WorktreeRemovalSnapshot {
@@ -1046,5 +1064,47 @@ impl Runtime {
             .map_err(|error| error.to_string())?;
         self.commit(decision)?;
         Ok(RunDeletionResult { run_id })
+    }
+}
+
+#[cfg(test)]
+mod machine_run_stop_tests {
+    use super::*;
+    use crate::{
+        domain::{MachineObservation, MachineTransport},
+        terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime},
+    };
+
+    #[test]
+    fn deletion_stops_run_panes_through_the_terminal_runtime_fake() {
+        let terminal = FakeTerminalRuntime::new([(9, FakeMachineOutcome::Available)]);
+        let machine = Machine {
+            id: 9,
+            context_id: 2,
+            name: "test Machine".into(),
+            socket_name: "test".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        };
+        let panes = vec!["%12".to_owned(), "%13".to_owned()];
+
+        let result = stop_machine_run_panes(&terminal, &machine, &panes);
+
+        assert_eq!(result, (2, 0));
+        assert!(terminal
+            .commands()
+            .contains(&FakeTerminalCommand::KillPaneWithTimeout {
+                machine_id: 9,
+                pane_id: "%12".into(),
+                timeout: Duration::from_secs(5),
+            }));
+        assert!(terminal
+            .commands()
+            .contains(&FakeTerminalCommand::KillPaneWithTimeout {
+                machine_id: 9,
+                pane_id: "%13".into(),
+                timeout: Duration::from_secs(5),
+            }));
     }
 }

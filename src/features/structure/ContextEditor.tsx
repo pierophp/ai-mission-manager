@@ -26,35 +26,12 @@ import type {
   GrillConfiguration,
   Machine,
   PstackRole,
-  PstackRoleTable,
 } from "../../runtime/types";
-
-const objectKinds: ExternalObjectKind[] = [
-  "issue",
-  "pull_request",
-  "document",
-  "generic",
-];
+import { structureCommands } from "./structure-commands";
 const agentLabels: Record<GrillConfiguration["agent"], string> = {
   claude: "Claude Code",
   codex: "Codex",
 };
-const defaultPolicy: ExternalChangePolicy = {
-  title: true,
-  state: true,
-  metadata: true,
-};
-const defaultGrillConfiguration = (): GrillConfiguration => ({
-  agent: "claude",
-  model: "claude-sonnet-5",
-  effort: "high",
-});
-const defaultPstackRoleTable = (): PstackRoleTable => [
-  { role: "code-delegate", configuration: { agent: "claude", model: "claude-opus-5", effort: "high" } },
-  { role: "judge-and-prose", configuration: { agent: "codex", model: "gpt-6-sol", effort: "high" } },
-  { role: "review-panel", configuration: { agent: "codex", model: "gpt-6-sol", effort: "high" } },
-  { role: "explorers", configuration: { agent: "claude", model: "claude-sonnet-5", effort: "medium" } },
-];
 const pstackRoleLabels: Record<PstackRole, string> = {
   "code-delegate": "Code delegate",
   "judge-and-prose": "Judge and prose",
@@ -65,6 +42,7 @@ const pstackRoleLabels: Record<PstackRole, string> = {
 function initialConfiguration(
   context: Context | undefined,
   attentionDefaults: ContextAttentionDefault[],
+  defaults: ContextConfiguration,
 ): ContextConfiguration {
   return {
     name: context?.name ?? "",
@@ -72,27 +50,23 @@ function initialConfiguration(
     claudeProfileId: context?.claude_profile_id ?? null,
     codexProfileId: context?.codex_profile_id ?? null,
     checkDirtyCheckouts: context?.check_dirty_checkouts ?? true,
-    grillDefaults: context?.grill_defaults ?? defaultGrillConfiguration(),
+    grillDefaults: context?.grill_defaults ?? defaults.grillDefaults,
     implementDefaults:
-      context?.implement_defaults ?? defaultGrillConfiguration(),
-    defaultWorkflow: context?.default_workflow ?? "matt-pocock",
-    pstackDefaults: context?.pstack_defaults ?? defaultGrillConfiguration(),
-    pstackRoles: context?.pstack_roles ?? defaultPstackRoleTable(),
+      context?.implement_defaults ?? defaults.implementDefaults,
+    defaultWorkflow: context?.default_workflow ?? defaults.defaultWorkflow,
+    pstackDefaults: context?.pstack_defaults ?? defaults.pstackDefaults,
+    pstackRoles: context?.pstack_roles ?? defaults.pstackRoles,
     ghExecutablePath: context?.gh_executable_path ?? null,
     twgExecutablePath: context?.twg_executable_path ?? null,
     azExecutablePath: context?.az_executable_path ?? null,
     atlassianSite: context?.atlassian_site ?? null,
     azureDevopsOrganization: context?.azure_devops_organization ?? null,
     bitbucketWorkspace: context?.bitbucket_workspace ?? null,
-    attentionDefaults: objectKinds.map(
-      (object_kind) =>
+    attentionDefaults: defaults.attentionDefaults.map(
+      (entry) =>
         attentionDefaults.find(
-          (entry) => entry.object_kind === object_kind,
-        ) ?? {
-          context_id: context?.id ?? 0,
-          object_kind,
-          policy: defaultPolicy,
-        },
+          (saved) => saved.object_kind === entry.object_kind,
+        ) ?? { ...entry, context_id: context?.id ?? 0 },
     ),
   };
 }
@@ -218,16 +192,59 @@ export function ContextEditor({
   onCancel: () => void;
   onDirtyChange: (dirty: boolean) => void;
 }) {
+  const [defaults, setDefaults] = useState<ContextConfiguration>();
+  const [configuration, setConfiguration] =
+    useState<ContextConfiguration | null>(null);
+  const [error, setError] = useState<string>();
+  useEffect(() => {
+    let cancelled = false;
+    structureCommands
+      .newContextConfiguration()
+      .then((value) => {
+        if (!cancelled) setDefaults(value);
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) setError(errorMessage(reason));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
   const savedConfiguration = useMemo(
-    () =>
+    () => defaults &&
       initialConfiguration(
         context,
         attentionDefaults.filter((entry) => entry.context_id === context?.id),
+        defaults,
       ),
-    [attentionDefaults, context],
+    [attentionDefaults, context, defaults],
   );
-  const [configuration, setConfiguration] = useState(savedConfiguration);
-  const [error, setError] = useState<string>();
+
+  useEffect(() => {
+    if (savedConfiguration) setConfiguration(savedConfiguration);
+    setError(undefined);
+  }, [savedConfiguration]);
+
+  useEffect(() => {
+    onDirtyChange(
+      savedConfiguration !== undefined &&
+        configuration !== null &&
+        JSON.stringify(configuration) !== JSON.stringify(savedConfiguration),
+    );
+  }, [configuration, onDirtyChange, savedConfiguration]);
+
+  if (!configuration || !savedConfiguration) {
+    return error ? (
+      <Alert variant="destructive">
+        <AlertDescription>{error}</AlertDescription>
+      </Alert>
+    ) : (
+      <div role="status" className="p-4 text-sm text-muted-foreground">
+        Loading Context defaults…
+      </div>
+    );
+  }
+
   const executionMachine = machines.find(
     (machine) => machine.id === configuration.executionMachineId,
   );
@@ -235,23 +252,18 @@ export function ContextEditor({
     ({ profile }) => profile.machineId === executionMachine?.id,
   );
 
-  useEffect(() => {
-    setConfiguration(savedConfiguration);
-    setError(undefined);
-  }, [savedConfiguration]);
-
-  useEffect(() => {
-    onDirtyChange(
-      JSON.stringify(configuration) !== JSON.stringify(savedConfiguration),
-    );
-  }, [configuration, onDirtyChange, savedConfiguration]);
+  function updateConfiguration(
+    update: (current: ContextConfiguration) => ContextConfiguration,
+  ) {
+    setConfiguration((current) => current && update(current));
+  }
 
   function setAttentionPolicy(
     kind: ExternalObjectKind,
     key: keyof ExternalChangePolicy,
     checked: boolean,
   ) {
-    setConfiguration((current) => ({
+    updateConfiguration((current) => ({
       ...current,
       attentionDefaults: current.attentionDefaults.map((entry) =>
         entry.object_kind === kind
@@ -263,10 +275,12 @@ export function ContextEditor({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!configuration) return;
+    const submittedConfiguration = configuration;
     try {
       await onSave({
-        ...configuration,
-        name: configuration.name.trim(),
+        ...submittedConfiguration,
+        name: submittedConfiguration.name.trim(),
       });
       setError(undefined);
     } catch (saveError) {
@@ -306,7 +320,7 @@ export function ContextEditor({
             <Input
               value={configuration.name}
               onChange={(event) =>
-                setConfiguration((current) => ({
+                updateConfiguration((current) => ({
                   ...current,
                   name: event.target.value,
                 }))
@@ -319,7 +333,7 @@ export function ContextEditor({
               value={configuration.executionMachineId ?? ""}
               disabled={isSaving}
               onChange={(event) =>
-                setConfiguration((current) => ({
+                updateConfiguration((current) => ({
                   ...current,
                   executionMachineId: Number(event.target.value) || null,
                 }))
@@ -353,7 +367,7 @@ export function ContextEditor({
                   value={selected ?? ""}
                   disabled={isSaving}
                   onChange={(event) =>
-                    setConfiguration((current) => ({
+                    updateConfiguration((current) => ({
                       ...current,
                       [field]: Number(event.target.value) || null,
                     }))
@@ -386,7 +400,7 @@ export function ContextEditor({
             <Checkbox
               checked={configuration.checkDirtyCheckouts}
               onCheckedChange={(checked) =>
-                setConfiguration((current) => ({
+                updateConfiguration((current) => ({
                   ...current,
                   checkDirtyCheckouts: checked === true,
                 }))
@@ -404,7 +418,7 @@ export function ContextEditor({
             catalog={catalog}
             disabled={isSaving}
             onChange={(grillDefaults) =>
-              setConfiguration((current) => ({ ...current, grillDefaults }))
+              updateConfiguration((current) => ({ ...current, grillDefaults }))
             }
           />
           <ConfigurationFields
@@ -413,13 +427,13 @@ export function ContextEditor({
             catalog={catalog}
             disabled={isSaving}
             onChange={(implementDefaults) =>
-              setConfiguration((current) => ({ ...current, implementDefaults }))
+              updateConfiguration((current) => ({ ...current, implementDefaults }))
             }
           />
           <SettingField label="Default Workflow">
             <NativeSelect
               value={configuration.defaultWorkflow}
-              onChange={(event) => setConfiguration((current) => ({
+              onChange={(event) => updateConfiguration((current) => ({
                 ...current,
                 defaultWorkflow: event.target.value as ContextConfiguration["defaultWorkflow"],
               }))}
@@ -435,7 +449,7 @@ export function ContextEditor({
             catalog={catalog}
             disabled={isSaving}
             onChange={(pstackDefaults) =>
-              setConfiguration((current) => ({ ...current, pstackDefaults }))
+              updateConfiguration((current) => ({ ...current, pstackDefaults }))
             }
           />
         </TabsContent>
@@ -451,7 +465,7 @@ export function ContextEditor({
               catalog={catalog}
               disabled={isSaving}
               onChange={(nextConfiguration) =>
-                setConfiguration((current) => ({
+                updateConfiguration((current) => ({
                   ...current,
                   pstackRoles: current.pstackRoles.map((entry) =>
                     entry.role === role
@@ -481,7 +495,7 @@ export function ContextEditor({
                 placeholder={placeholder}
                 autoComplete="off"
                 onChange={(event) =>
-                  setConfiguration((current) => ({
+                  updateConfiguration((current) => ({
                     ...current,
                     [field]: event.target.value.trim() || null,
                   }))

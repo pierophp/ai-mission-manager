@@ -1,6 +1,6 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 
-import { setupAdapter } from "../../runtime/adapters";
+import { command } from "../../runtime/command";
 import type { ProviderChoice } from "../../runtime/types";
 
 export const setupKeys = {
@@ -13,14 +13,14 @@ export const setupKeys = {
 export const setupStateQueryOptions = () =>
   queryOptions({
     queryKey: setupKeys.state(),
-    queryFn: setupAdapter.getState,
+    queryFn: () => command("getSetupState"),
     staleTime: 5 * 60 * 1000,
   });
 
 export const healthStatusQueryOptions = (provider: ProviderChoice | null) =>
   queryOptions({
     queryKey: setupKeys.health(provider),
-    queryFn: () => setupAdapter.getHealth(provider),
+    queryFn: () => command("getHealthStatus", provider),
     staleTime: 60 * 1000,
   });
 

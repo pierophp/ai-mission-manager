@@ -58,6 +58,21 @@ function itemViewWithRun(state: "working" | "finished"): ItemView {
         plan_path: null,
       },
     ],
+    run_projections: [
+      {
+        runId: 1,
+        status: state === "finished" ? "finished" : "active",
+        phase: state === "finished" ? "finished" : "working",
+        continuations: {
+          goPlan: false,
+          grillActions: [],
+          stop: state !== "finished",
+          finish: state !== "finished",
+          delete: state === "finished",
+        },
+      },
+    ],
+    run_signals: { grillWaiting: false, runActive: state !== "finished" },
     implementation_queues: [],
     links: [],
   };
@@ -94,5 +109,37 @@ describe("ItemCard", () => {
 
     expect(html).not.toContain("bg-primary/5");
     expect(html).not.toContain("Run active");
+  });
+
+  it("shows a Plan awaiting Go as active", () => {
+    const view = itemViewWithRun("finished");
+    view.runs[0].execution_profile = "plan";
+    view.runs[0].workflow = "pstack";
+    view.runs[0].plan_phase = "awaitingGo";
+    view.run_projections[0] = {
+      ...view.run_projections[0],
+      status: "active",
+      phase: "awaitingGo",
+      continuations: {
+        ...view.run_projections[0].continuations,
+        goPlan: true,
+        finish: true,
+        delete: false,
+      },
+    };
+    view.run_signals.runActive = true;
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+    });
+    const html = renderToStaticMarkup(
+      createElement(
+        QueryClientProvider,
+        { client },
+        createElement(ItemCard, { view, onOpen: () => {}, onChanged: async () => {} }),
+      ),
+    );
+
+    expect(html).toContain("Run active");
+    expect(html).toContain("bg-primary/5");
   });
 });

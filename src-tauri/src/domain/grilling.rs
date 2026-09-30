@@ -40,7 +40,7 @@ pub const GRILL_OUTPUT_CONTRACT: &str = "Mission Manager output contract (it rea
 - Keep status notes (what you are checking, what you found) before the first `❓`, never between or after the questions.
 - The user answers every question of the round at once, with one numbered reply (`1. …`, `2. …`). An answer of `ok` accepts your recommendation.";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "kebab-case")]
 pub enum GrillContinuationAction {
     ToSpec,
@@ -95,14 +95,14 @@ pub fn grill_continuation_available(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "kebab-case")]
 pub enum DownstreamIssueDiscovery {
     StructuredEvent,
     OutputUrl,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DownstreamIssueCandidate {
     pub url: String,
@@ -117,7 +117,7 @@ pub struct DownstreamIssueCandidate {
     pub action: Option<GrillContinuationAction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ExternalObjectCreatedEvent {
     #[serde(alias = "type", alias = "kind")]
     pub event: String,
@@ -132,7 +132,7 @@ pub struct ExternalObjectCreatedEvent {
     pub action: Option<GrillContinuationAction>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ConfirmedDownstreamIssue {
     pub object: ExternalObjectInput,
     pub snapshot: ExternalSnapshotData,
@@ -143,7 +143,7 @@ pub struct ConfirmedDownstreamIssue {
     pub blocked_by: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct LinkProvenance {
     pub run_id: i64,
     pub action: GrillContinuationAction,
@@ -333,7 +333,7 @@ fn unique_issue_candidates(
         })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct GrillConfiguration {
     pub agent: AgentKind,
@@ -341,7 +341,7 @@ pub struct GrillConfiguration {
     pub effort: String,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "snake_case")]
 pub enum GrillLanguage {
     #[default]
@@ -392,7 +392,7 @@ impl GrillLanguage {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct GrillQuestionGroup {
     #[serde(default)]
@@ -400,7 +400,7 @@ pub struct GrillQuestionGroup {
     pub questions: Vec<GrillQuestion>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct GrillQuestion {
     pub number: u32,
@@ -410,14 +410,14 @@ pub struct GrillQuestion {
     pub options: Vec<GrillOption>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct GrillOption {
     pub key: String,
     pub label: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct GrillAnswer {
     pub question_number: u32,
@@ -832,14 +832,14 @@ impl Default for GrillConfiguration {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct GrillEffort {
     pub id: String,
     pub label: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct GrillModel {
     pub id: String,
@@ -847,7 +847,7 @@ pub struct GrillModel {
     pub efforts: Vec<GrillEffort>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct GrillAgentCatalog {
     pub agent: AgentKind,

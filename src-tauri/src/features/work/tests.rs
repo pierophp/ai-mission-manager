@@ -38,7 +38,12 @@ fn runtime_with_grill_run(
         )
         .expect("Repository should register");
     let item = runtime
-        .create_item("Exercise Grill command serialization".into(), 1, 1, String::new())
+        .create_item(
+            "Exercise Grill command serialization".into(),
+            1,
+            1,
+            String::new(),
+        )
         .expect("Item should be created");
     let workspace = runtime
         .create_workspace(
@@ -238,12 +243,26 @@ fn runtime_for_run_launch(
     checkout_path: &Path,
     terminal: crate::terminal::FakeTerminalRuntime,
 ) -> (Runtime, Item, Workspace, Repository, Worktree) {
+    runtime_for_run_launch_with_access(
+        database,
+        checkout_path,
+        terminal,
+        crate::machine_access::LocalSshMachineAccess,
+    )
+}
+
+fn runtime_for_run_launch_with_access(
+    database: &Path,
+    checkout_path: &Path,
+    terminal: crate::terminal::FakeTerminalRuntime,
+    machine_access: impl crate::machine_access::MachineAccess + 'static,
+) -> (Runtime, Item, Workspace, Repository, Worktree) {
     use crate::domain::MachineTransport;
 
     let remote_url = "https://example.com/service.git";
     let branch = "feature/run-gate";
     init_test_repository(checkout_path, remote_url, branch);
-    let mut runtime = Runtime::open_with_terminal_runtime(database, terminal)
+    let mut runtime = Runtime::open_with_adapters(database, terminal, machine_access)
         .expect("runtime should open with the fake Terminal Runtime");
     let machine = runtime
         .register_machine(
@@ -559,8 +578,8 @@ fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
         grill_phase: None,
         grill_action: None,
         grill_action_started_at: None,
-                plan_phase: None,
-                plan_path: None,
+        plan_phase: None,
+        plan_path: None,
     });
 
     let legacy_file = directory.path().join("agent-state/run-7.json");
@@ -959,18 +978,22 @@ fn a_failed_run_preflight_never_calls_the_agent_launcher() {
 fn a_failed_pstack_tree_write_aborts_before_creating_or_releasing_a_pane() {
     use crate::{
         domain::{AgentKind, ExecutionProfile, RunPromptSelection, Workflow},
+        machine_access::{FakeMachineAccess, FakeMachineAccessCall},
         terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime},
     };
 
     let directory = tempdir().expect("temporary app directory should exist");
     let checkout = directory.path().join("checkout");
     let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
-    fake.fail_pstack_provisioning(1, "fake pstack tree write failed");
+    let machine_access = FakeMachineAccess::default();
+    machine_access.fail_pstack_provisioning("fake pstack tree write failed");
+    let machine_access_calls = machine_access.clone();
     let commands = fake.command_log();
-    let (runtime, item, workspace, _, worktree) = runtime_for_run_launch(
+    let (runtime, item, workspace, _, worktree) = runtime_for_run_launch_with_access(
         &directory.path().join("mission-manager.sqlite"),
         &checkout,
         fake,
+        machine_access,
     );
     let state = Mutex::new(runtime);
 
@@ -983,15 +1006,34 @@ fn a_failed_pstack_tree_write_aborts_before_creating_or_releasing_a_pane() {
         ExecutionProfile::Autonomous,
         Workflow::Pstack,
         "Fix the launch gate".into(),
-        RunPromptSelection { include_objective: true, external_object_ids: vec![] },
+        RunPromptSelection {
+            include_objective: true,
+            external_object_ids: vec![],
+        },
         &state,
-    )).expect_err("failed tree write must reject launch");
+    ))
+    .expect_err("failed tree write must reject launch");
     assert!(error.contains("fake pstack tree write failed"));
-    let logged = commands.lock().expect("fake command log remains available").clone();
-    assert!(logged.iter().any(|command| matches!(command, FakeTerminalCommand::ProvisionPstackTree { machine_id: 1 })));
-    assert!(!logged.iter().any(|command| matches!(command, FakeTerminalCommand::LaunchAgent { .. })));
-    assert!(!logged.iter().any(|command| matches!(command, FakeTerminalCommand::ReleaseAgentLaunch { .. })));
-    assert!(state.lock().expect("runtime remains available").state.runs.is_empty());
+    let logged = commands
+        .lock()
+        .expect("fake command log remains available")
+        .clone();
+    assert!(machine_access_calls.calls().iter().any(|command| matches!(
+        command,
+        FakeMachineAccessCall::ProvisionPstackTree { machine_id: 1 }
+    )));
+    assert!(!logged
+        .iter()
+        .any(|command| matches!(command, FakeTerminalCommand::LaunchAgent { .. })));
+    assert!(!logged
+        .iter()
+        .any(|command| matches!(command, FakeTerminalCommand::ReleaseAgentLaunch { .. })));
+    assert!(state
+        .lock()
+        .expect("runtime remains available")
+        .state
+        .runs
+        .is_empty());
 }
 
 #[test]
@@ -1175,50 +1217,67 @@ fn direct_grill_and_worktree_runs_are_persisted_before_their_gate_is_released() 
                     };
                     match flow {
                         Flow::Direct => {
-                            runs::start_direct_run_with_state(
-                                item.id,
-                                workspace.id,
-                                None,
-                                repository.id,
-                                agent,
-                                Some(grill_configuration.clone()),
-                                ExecutionProfile::Implement,
-                                "Implement the change".into(),
-                                selection,
-                                vec![expected_checkout],
-                                false,
-                                false,
+                            runs::run_launcher::launch(
+                                runs::run_launcher::RunLaunchRequest {
+                                    item_id: item.id,
+                                    workspace_id: workspace.id,
+                                    queue_attachment: None,
+                                    strategy: runs::run_launcher::RunLaunchStrategy::Direct {
+                                        machine_id: None,
+                                        primary_repository_id: repository.id,
+                                        agent,
+                                        configuration: Some(grill_configuration.clone()),
+                                        implementation_queue: None,
+                                        execution_profile: ExecutionProfile::Implement,
+                                        workflow: crate::domain::Workflow::MattPocock,
+                                        prompt: "Implement the change".into(),
+                                        prompt_selection: selection,
+                                        expected_checkouts: vec![expected_checkout],
+                                        allow_dirty: false,
+                                        allow_shared_checkouts: false,
+                                    },
+                                },
                                 &worker_state,
                             )
                             .await
                         }
                         Flow::Grill => {
-                            runs::start_grill_run_with_state(
-                                item.id,
-                                workspace.id,
-                                None,
-                                repository.id,
-                                grill_configuration,
-                                crate::domain::GrillLanguage::default(),
-                                "Check the launch flow".into(),
-                                vec![expected_checkout],
-                                false,
-                                false,
+                            runs::run_launcher::launch(
+                                runs::run_launcher::RunLaunchRequest {
+                                    item_id: item.id,
+                                    workspace_id: workspace.id,
+                                    queue_attachment: None,
+                                    strategy: runs::run_launcher::RunLaunchStrategy::Grill {
+                                        machine_id: None,
+                                        primary_repository_id: repository.id,
+                                        configuration: grill_configuration,
+                                        language: crate::domain::GrillLanguage::default(),
+                                        prompt: "Check the launch flow".into(),
+                                        expected_checkouts: vec![expected_checkout],
+                                        allow_dirty: false,
+                                        allow_shared_checkouts: false,
+                                    },
+                                },
                                 &worker_state,
                             )
                             .await
                         }
                         Flow::Worktree => {
-                            runs::start_worktree_run_with_state(
-                                item.id,
-                                workspace.id,
-                                worktree.id,
-                                agent,
-                                None,
-                                ExecutionProfile::Implement,
-                                crate::domain::Workflow::MattPocock,
-                                "Implement the change".into(),
-                                selection,
+                            runs::run_launcher::launch(
+                                runs::run_launcher::RunLaunchRequest {
+                                    item_id: item.id,
+                                    workspace_id: workspace.id,
+                                    queue_attachment: None,
+                                    strategy: runs::run_launcher::RunLaunchStrategy::Worktree {
+                                        worktree_id: worktree.id,
+                                        agent,
+                                        configuration: None,
+                                        execution_profile: ExecutionProfile::Implement,
+                                        workflow: crate::domain::Workflow::MattPocock,
+                                        prompt: "Implement the change".into(),
+                                        prompt_selection: selection,
+                                    },
+                                },
                                 &worker_state,
                             )
                             .await
@@ -1822,7 +1881,12 @@ fn run_suggestion_tmux_inspection_does_not_hold_the_runtime_lock() {
     state
         .lock()
         .expect("Runtime should remain lockable while tmux is blocked")
-        .create_item("Local state change during tmux inspection".into(), 1, 1, String::new())
+        .create_item(
+            "Local state change during tmux inspection".into(),
+            1,
+            1,
+            String::new(),
+        )
         .expect("local state change should complete during tmux inspection");
     blocked_observation.release();
 

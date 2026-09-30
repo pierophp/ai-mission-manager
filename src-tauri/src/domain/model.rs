@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Context {
     pub id: i64,
     pub name: String,
@@ -39,7 +39,7 @@ pub struct Context {
     pub bitbucket_workspace: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "kebab-case")]
 pub enum PstackRole {
     CodeDelegate,
@@ -66,14 +66,14 @@ impl PstackRole {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PstackRoleConfiguration {
     pub role: PstackRole,
     pub configuration: GrillConfiguration,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(transparent)]
 pub struct PstackRoleTable(pub Vec<PstackRoleConfiguration>);
 
@@ -82,15 +82,43 @@ impl Default for PstackRoleTable {
         use AgentKind::{Claude, Codex};
         use PstackRole::*;
         Self(vec![
-            PstackRoleConfiguration { role: CodeDelegate, configuration: GrillConfiguration { agent: Claude, model: "claude-opus-5".into(), effort: "high".into() } },
-            PstackRoleConfiguration { role: JudgeAndProse, configuration: GrillConfiguration { agent: Codex, model: "gpt-6-sol".into(), effort: "high".into() } },
-            PstackRoleConfiguration { role: ReviewPanel, configuration: GrillConfiguration { agent: Codex, model: "gpt-6-sol".into(), effort: "high".into() } },
-            PstackRoleConfiguration { role: Explorers, configuration: GrillConfiguration { agent: Claude, model: "claude-sonnet-5".into(), effort: "medium".into() } },
+            PstackRoleConfiguration {
+                role: CodeDelegate,
+                configuration: GrillConfiguration {
+                    agent: Claude,
+                    model: "claude-opus-5".into(),
+                    effort: "high".into(),
+                },
+            },
+            PstackRoleConfiguration {
+                role: JudgeAndProse,
+                configuration: GrillConfiguration {
+                    agent: Codex,
+                    model: "gpt-6-sol".into(),
+                    effort: "high".into(),
+                },
+            },
+            PstackRoleConfiguration {
+                role: ReviewPanel,
+                configuration: GrillConfiguration {
+                    agent: Codex,
+                    model: "gpt-6-sol".into(),
+                    effort: "high".into(),
+                },
+            },
+            PstackRoleConfiguration {
+                role: Explorers,
+                configuration: GrillConfiguration {
+                    agent: Claude,
+                    model: "claude-sonnet-5".into(),
+                    effort: "medium".into(),
+                },
+            },
         ])
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "kebab-case")]
 pub enum Workflow {
     #[default]
@@ -99,12 +127,31 @@ pub enum Workflow {
 }
 
 impl Workflow {
+    /// Grill uses the self-contained Matt Pocock prompt workflow regardless
+    /// of the Context default selected for other Runs.
+    pub const fn for_execution_profile(
+        profile: ExecutionProfile,
+        requested: Option<Workflow>,
+    ) -> Workflow {
+        if matches!(profile, ExecutionProfile::Grill) {
+            Workflow::MattPocock
+        } else {
+            match requested {
+                Some(workflow) => workflow,
+                None => Workflow::MattPocock,
+            }
+        }
+    }
+
     /// The Execution Profiles this Workflow offers. Custom is shared by both.
     pub fn offers(self, profile: ExecutionProfile) -> bool {
         use ExecutionProfile::*;
         match self {
             Workflow::MattPocock => {
-                matches!(profile, Investigate | Implement | Review | Grill | CustomPrompt)
+                matches!(
+                    profile,
+                    Investigate | Implement | Review | Grill | CustomPrompt
+                )
             }
             Workflow::Pstack => matches!(profile, Autonomous | Plan | PstackReview | CustomPrompt),
         }
@@ -124,7 +171,7 @@ fn dirty_checkout_check_default() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ProjectDefaults {
     pub item_status: ItemStatus,
     pub execution_mode: ExecutionMode,
@@ -139,14 +186,14 @@ impl Default for ProjectDefaults {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum ExecutionMode {
     Direct,
     Worktree,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Project {
     pub id: i64,
     pub context_id: i64,
@@ -154,7 +201,7 @@ pub struct Project {
     pub defaults: ProjectDefaults,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Repository {
     pub id: i64,
     pub project_id: i64,
@@ -163,7 +210,7 @@ pub struct Repository {
     pub base_branch: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct RepositoryLocation {
     pub repository_id: i64,
     pub machine_id: i64,
@@ -171,7 +218,7 @@ pub struct RepositoryLocation {
     pub worktree_root: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceRepositoryInput {
     pub repository_id: i64,
@@ -179,7 +226,7 @@ pub struct WorkspaceRepositoryInput {
     pub base_branch: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceRepository {
     pub repository_id: i64,
@@ -187,7 +234,7 @@ pub struct WorkspaceRepository {
     pub base_branch: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum WorkspacePreparationState {
     Pending,
@@ -195,7 +242,7 @@ pub enum WorkspacePreparationState {
     Ready,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Workspace {
     pub id: i64,
     pub item_id: i64,
@@ -203,7 +250,7 @@ pub struct Workspace {
     pub preparation_state: WorkspacePreparationState,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ImplementationQueueEntry {
     pub position: i64,
@@ -218,7 +265,7 @@ pub struct ImplementationQueueEntry {
     pub skipped: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind", content = "message", rename_all = "snake_case")]
 pub enum ImplementationQueuePauseReason {
     TicketStillOpen,
@@ -228,7 +275,7 @@ pub enum ImplementationQueuePauseReason {
     LaunchFailed(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ImplementationQueue {
     pub id: i64,
@@ -246,7 +293,7 @@ pub struct ImplementationQueue {
     pub paused_reason: Option<ImplementationQueuePauseReason>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct Worktree {
     pub id: i64,
@@ -292,7 +339,7 @@ pub fn worktree_path(
         .join(repository_name)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RunCheckout {
     pub repository_id: i64,
@@ -301,7 +348,7 @@ pub struct RunCheckout {
     pub is_dirty: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 pub enum MachineTransport {
     #[serde(rename = "local")]
@@ -317,7 +364,7 @@ pub enum MachineTransport {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub enum MachineObservation {
     #[serde(rename = "unknown")]
     Unknown,
@@ -327,7 +374,7 @@ pub enum MachineObservation {
     Offline,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Machine {
     pub id: i64,
     pub context_id: i64,
@@ -338,7 +385,7 @@ pub struct Machine {
     pub last_observed_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CliConfigurationProfile {
     pub id: i64,
@@ -349,7 +396,7 @@ pub struct CliConfigurationProfile {
     pub app_managed: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct CliConfigurationProfileIdentity {
     pub profile_id: i64,
@@ -357,7 +404,7 @@ pub struct CliConfigurationProfileIdentity {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub enum AgentKind {
     #[serde(rename = "claude")]
     Claude,
@@ -374,7 +421,7 @@ impl AgentKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub enum ExecutionProfile {
     #[serde(rename = "investigate")]
     Investigate,
@@ -394,7 +441,7 @@ pub enum ExecutionProfile {
     Grill,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub enum RunState {
     #[serde(rename = "unknown")]
     Unknown,
@@ -406,7 +453,7 @@ pub enum RunState {
     Finished,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum GrillPhase {
     Starting,
@@ -417,7 +464,7 @@ pub enum GrillPhase {
     Finished,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub enum PlanPhase {
     AwaitingGo,
@@ -436,7 +483,7 @@ impl PlanPhase {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub enum RunPaneStatus {
     #[serde(rename = "unknown")]
     Unknown,
@@ -446,14 +493,14 @@ pub enum RunPaneStatus {
     Missing,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RunPromptSelection {
     pub include_objective: bool,
     pub external_object_ids: Vec<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Run {
     pub id: i64,
     pub item_id: i64,
@@ -536,7 +583,7 @@ pub struct AgentPaneObservation {
     pub machine_home: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RunSuggestion {
     pub machine_id: i64,
@@ -560,13 +607,13 @@ pub struct RunSuggestion {
     pub location_path: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Reminder {
     pub id: i64,
     pub remind_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Item {
     pub id: i64,
     pub human_identifier: String,
@@ -577,7 +624,7 @@ pub struct Item {
     pub reminders: Vec<Reminder>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub enum ExternalProvider {
     #[serde(rename = "github")]
     GitHub,
@@ -589,7 +636,7 @@ pub enum ExternalProvider {
     Generic,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub enum ExternalObjectKind {
     #[serde(rename = "issue")]
     Issue,
@@ -601,7 +648,7 @@ pub enum ExternalObjectKind {
     Generic,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "kebab-case")]
 pub enum LinkPurpose {
     ToSpec,
@@ -620,7 +667,7 @@ impl From<GrillContinuationAction> for LinkPurpose {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ExternalObjectInput {
     pub provider: ExternalProvider,
     pub kind: ExternalObjectKind,
@@ -628,7 +675,7 @@ pub struct ExternalObjectInput {
     pub canonical_url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ExternalObject {
     pub id: i64,
     pub provider: ExternalProvider,
@@ -637,13 +684,13 @@ pub struct ExternalObject {
     pub canonical_url: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ExternalMetadata {
     pub key: String,
     pub value: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ExternalSnapshotData {
     pub title: String,
     pub state: String,
@@ -651,7 +698,7 @@ pub struct ExternalSnapshotData {
     pub fetched_at: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ExternalSnapshot {
     pub external_object_id: i64,
     pub title: String,
@@ -660,7 +707,7 @@ pub struct ExternalSnapshot {
     pub fetched_at: i64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub enum ExternalChangeKind {
     #[serde(rename = "title")]
     Title,
@@ -670,7 +717,7 @@ pub enum ExternalChangeKind {
     Metadata,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ExternalChange {
     pub kind: ExternalChangeKind,
     pub key: Option<String>,
@@ -678,7 +725,7 @@ pub struct ExternalChange {
     pub current: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Activity {
     pub id: i64,
     pub external_object_id: i64,
@@ -686,7 +733,7 @@ pub struct Activity {
     pub changes: Vec<ExternalChange>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ExternalChangePolicy {
     pub title: bool,
     pub state: bool,
@@ -711,14 +758,14 @@ impl ExternalChangePolicy {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ContextAttentionDefault {
     pub context_id: i64,
     pub object_kind: ExternalObjectKind,
     pub policy: ExternalChangePolicy,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextConfiguration {
     pub name: String,
@@ -743,7 +790,7 @@ pub struct ContextConfiguration {
     pub attention_defaults: Vec<ContextAttentionDefault>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct Link {
     pub id: i64,
     pub item_id: i64,
@@ -760,7 +807,7 @@ pub struct Link {
     pub provenance: Option<LinkProvenance>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub enum AttentionEntryKind {
     #[serde(rename = "external_change")]
     ExternalChange,
@@ -773,7 +820,7 @@ pub enum AttentionEntryKind {
     ImplementationQueue,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct AttentionEntry {
     pub kind: AttentionEntryKind,
     pub link_id: i64,
@@ -789,16 +836,18 @@ pub struct AttentionEntry {
     pub summary: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ExternalLinkView {
     pub link: Link,
     pub object: ExternalObject,
     pub snapshot: Option<ExternalSnapshot>,
     pub attention_policy: ExternalChangePolicy,
     pub attention_entry: Option<AttentionEntry>,
+    pub supports_implementation_spec: bool,
+    pub supports_implementation_ticket: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub enum ItemStatus {
     Inbox,
     Active,
@@ -806,21 +855,21 @@ pub enum ItemStatus {
     Done,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub enum ItemRelationKind {
     Blocks,
     BlockedBy,
     RelatedTo,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ItemRelation {
     pub from_item_id: i64,
     pub to_item_id: i64,
     pub kind: ItemRelationKind,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ItemView {
     pub item: Item,
     pub context_id: i64,
@@ -830,19 +879,21 @@ pub struct ItemView {
     pub workspaces: Vec<Workspace>,
     pub worktrees: Vec<Worktree>,
     pub runs: Vec<Run>,
+    pub run_projections: Vec<RunProjection>,
+    pub run_signals: ItemRunSignals,
     #[serde(default)]
     pub implementation_queues: Vec<ImplementationQueue>,
     pub links: Vec<ExternalLinkView>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemDeletionWorkspace {
     pub id: i64,
     pub item_id: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemDeletionPlan {
     pub item_id: i64,
@@ -877,7 +928,7 @@ impl ItemDeletionPlan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ItemDeletionSummary {
     pub item_id: i64,
@@ -891,7 +942,7 @@ pub struct ItemDeletionSummary {
     pub activity_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalObjectDeletionPlan {
     pub external_object_id: i64,
@@ -917,7 +968,7 @@ impl ExternalObjectDeletionPlan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalObjectDeletionSummary {
     pub external_object_id: i64,
@@ -926,14 +977,14 @@ pub struct ExternalObjectDeletionSummary {
     pub activity_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryDeletionWorkspace {
     pub id: i64,
     pub item_id: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RepositoryDeletionPlan {
     pub repository_id: i64,
@@ -944,7 +995,7 @@ pub struct RepositoryDeletionPlan {
     pub state_fingerprint: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineDeletionRun {
     pub id: i64,
@@ -957,7 +1008,7 @@ pub struct MachineDeletionRun {
     pub pane_status: RunPaneStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct MachineDeletionPlan {
     pub machine_id: i64,
@@ -970,14 +1021,14 @@ pub struct MachineDeletionPlan {
     pub state_fingerprint: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ParentDeletionProject {
     pub id: i64,
     pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ParentDeletionItem {
     pub id: i64,
@@ -986,7 +1037,7 @@ pub struct ParentDeletionItem {
     pub project_id: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ParentDeletionRepository {
     pub id: i64,
@@ -995,14 +1046,14 @@ pub struct ParentDeletionRepository {
     pub project_id: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ParentDeletionMachine {
     pub id: i64,
     pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ParentDeletionRun {
     pub id: i64,
@@ -1016,7 +1067,7 @@ pub struct ParentDeletionRun {
     pub pane_status: RunPaneStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ParentDeletionSummary {
     pub context_id: Option<i64>,
@@ -1036,7 +1087,7 @@ pub struct ParentDeletionSummary {
     pub activity_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ResetLocalDataSummary {
     pub context_count: usize,
@@ -1055,7 +1106,7 @@ pub struct ResetLocalDataSummary {
     pub attention_default_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ResetLocalDataRecord {
     pub kind: String,
@@ -1063,7 +1114,7 @@ pub struct ResetLocalDataRecord {
     pub label: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ResetLocalDataPlan {
     pub summary: ResetLocalDataSummary,
@@ -1073,7 +1124,7 @@ pub struct ResetLocalDataPlan {
     pub state_fingerprint: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ParentDeletionPlan {
     pub context_id: Option<i64>,
@@ -1119,7 +1170,7 @@ impl ParentDeletionPlan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct HomeView {
     pub needs_attention: Vec<ItemView>,
     pub attention_entries: Vec<AttentionEntry>,
@@ -1129,7 +1180,7 @@ pub struct HomeView {
     pub completed: Vec<ItemView>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(tag = "action", rename_all = "camelCase")]
 pub enum AuditAction {
     ContextCreated {
@@ -1262,26 +1313,26 @@ pub enum AuditAction {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct AuditEntry {
     pub id: i64,
     pub recorded_at: i64,
     pub action: AuditAction,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ObservedActivity {
     pub activity: Activity,
     pub object: ExternalObject,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct ActivityTabView {
     pub audit_entries: Vec<AuditEntry>,
     pub activities: Vec<ObservedActivity>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 pub struct DomainState {
     pub next_context_id: i64,
     pub next_project_id: i64,

@@ -7,61 +7,51 @@ import { WorkPage } from "./WorkPage";
 const mocks = vi.hoisted(() => ({
   search: {} as Record<string, unknown>,
   navigate: vi.fn(),
-  createItem: vi.fn(),
+  command: vi.fn(),
 }));
 
 vi.mock("@tanstack/react-router", () => ({
   useSearch: () => mocks.search,
   useNavigate: () => mocks.navigate,
 }));
-vi.mock("@tanstack/react-query", () => ({
-  useQueryClient: () => ({ invalidateQueries: vi.fn(async () => {}) }),
-}));
+vi.mock("@tanstack/react-query", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-query")>();
+  const React = await import("react");
+  return {
+    ...actual,
+    useQueryClient: () => ({ invalidateQueries: vi.fn(async () => {}) }),
+    useMutation: (options: { mutationFn: (value: unknown) => Promise<unknown>; onSuccess?: (data: unknown, value: unknown) => Promise<void> }) => ({
+      isPending: false,
+      mutateAsync: async (value: unknown) => {
+        const data = await options.mutationFn(value);
+        await options.onSuccess?.(data, value);
+        return data;
+      },
+    }),
+    useQuery: (options: { queryKey: readonly unknown[]; queryFn: () => unknown }) => {
+      const [data, setData] = React.useState<unknown>();
+      const key = JSON.stringify(options.queryKey);
+      React.useEffect(() => {
+        let active = true;
+        Promise.resolve(options.queryFn()).then((value) => {
+          if (active) setData(value);
+        });
+        return () => { active = false; };
+      }, [key]);
+      return { data, isPending: data === undefined, isFetching: false, error: null };
+    },
+  };
+});
 vi.mock("../../components/app-shell", () => ({
   useAppShell: () => ({ openTerminal: vi.fn() }),
 }));
 vi.mock("../../runtime/RuntimeEventsBridge", () => ({
   usePollExternalObjects: () => ({ mutateAsync: vi.fn(), isPending: false }),
 }));
-vi.mock("../structure/structure-queries", () => ({
-  useStructureData: () => ({
-    data: {
-      contexts: [{ id: 1, name: "Product" }],
-      projects: [{ id: 2, context_id: 1, name: "App" }],
-      repositories: [],
-      machines: [],
-      grillModelCatalog: [],
-    },
-  }),
-}));
-vi.mock("./work-queries", () => ({
-  useHomeQuery: () => ({ data: emptyHome, isPending: false, isFetching: false }),
-  useRunSuggestionsQuery: () => ({ data: [] }),
-  useSearchQuery: () => ({ data: [], isFetching: false }),
-}));
-vi.mock("../structure/structure-mutations", () => ({
-  structureActions: {
-    createItem: (...args: unknown[]) => {
-      mocks.createItem(...args);
-      return async () => ({
-        id: 42,
-        human_identifier: "APP-42",
-        title: "Investigate invoice import",
-        project_id: 2,
-        status: "Active",
-        notes: "",
-        reminders: [],
-      });
-    },
-  },
-  useStructureCommand: () => ({
-    isPending: false,
-    execute: (action: () => Promise<unknown>) => action(),
-  }),
-}));
-vi.mock("./work-mutations", () => ({
-  useWorkCommand: () => ({ isPending: false, execute: vi.fn() }),
-  workActions: {},
+vi.mock("../../runtime/command", () => ({ command: mocks.command }));
+vi.mock("../../runtime/query-invalidation", () => ({
+  invalidateStructureQueries: vi.fn(async () => {}),
+  invalidateWorkQueries: vi.fn(async () => {}),
 }));
 
 const emptyHome = {
@@ -81,7 +71,27 @@ describe("WorkPage item creation", () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     mocks.search = {};
     mocks.navigate.mockReset();
-    mocks.createItem.mockReset();
+    mocks.command.mockReset().mockImplementation(async (name: string) => {
+      if (name === "getHome") return emptyHome;
+      if (name === "searchItemsCommand") return [];
+      if (name === "listRunSuggestions") return [];
+      if (name === "listContexts") return [{ id: 1, name: "Product" }];
+      if (name === "listProjects") return [{ id: 2, context_id: 1, name: "App" }];
+      if (name === "listRepositories" || name === "listRepositoryLocations" || name === "listMachines" || name === "listCliConfigurationProfiles" || name === "listContextAttentionDefaults") return [];
+      if (name === "listGrillModelCatalog") return { catalogs: [], codexStatus: "available", codexError: null };
+      if (name === "createItem") {
+        return {
+          id: 42,
+          human_identifier: "APP-42",
+          title: "Investigate invoice import",
+          project_id: 2,
+          status: "Active",
+          notes: "",
+          reminders: [],
+        };
+      }
+      return undefined;
+    });
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -115,7 +125,8 @@ describe("WorkPage item creation", () => {
         ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
-    expect(mocks.createItem).toHaveBeenCalledWith(
+    expect(mocks.command).toHaveBeenCalledWith(
+      "createItem",
       "Investigate invoice import",
       1,
       2,

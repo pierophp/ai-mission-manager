@@ -16,19 +16,29 @@ import { Spinner } from "../../../components/ui/spinner";
 import { Textarea } from "../../../components/ui/textarea";
 import { errorMessage } from "../../../runtime/errors";
 import type {
-  Context,
   DirectRunPreview,
-  ExecutionProfile,
-  Workflow,
   GrillAgentCatalog,
   GrillConfiguration,
-  GrillLanguage,
   ItemView,
+  RunLaunchOptions,
   Workspace,
   Worktree,
 } from "../../../runtime/types";
+import type { ExecutionProfile, Workflow } from "../../../runtime/execution-types";
 import type { ItemCommands } from "../use-item-commands";
-import { workActions } from "../work-mutations";
+import { workActions } from "../work-commands";
+import {
+  changeDraftProfile,
+  changeDraftWorkflow,
+  checkoutApprovalsReady,
+  initialLaunchDraft,
+  launchDraftSignature,
+  previewIsCurrent as isLaunchPreviewCurrent,
+  profileOptionForDraft,
+  updateDraftConfiguration,
+  workflowOptions,
+  type RunLaunchDraft,
+} from "./run-launch-draft";
 
 /** Where a Run starts: the Project checkouts, or one registered Worktree. */
 export type RunLaunchTarget =
@@ -60,7 +70,7 @@ const profiles: {
   },
   {
     value: "pstack-review",
-    label: "Review",
+    label: "pstack Review",
     hint: "Run interrogate with the configured reviewers and synthesize a read-only verdict.",
     placeholder: "Name the pull request or branch to review.",
   },
@@ -97,26 +107,6 @@ const profiles: {
   },
 ];
 
-/** The Execution Profiles each Workflow offers, as `Workflow::offers` in the domain. */
-const workflowProfiles: Record<Workflow, ExecutionProfile[]> = {
-  "matt-pocock": ["grill", "investigate", "implement", "review", "custom"],
-  pstack: ["autonomous", "plan", "pstack-review", "custom"],
-};
-
-function availableProfilesFor(workflow: Workflow, target: RunLaunchTarget) {
-  return profiles.filter(
-    (profile) =>
-      workflowProfiles[workflow].includes(profile.value) &&
-      // A Grill needs the Project checkouts.
-      !(target.kind === "worktree" && profile.value === "grill"),
-  );
-}
-
-function defaultProfile(workflow: Workflow, target: RunLaunchTarget): ExecutionProfile {
-  if (workflow === "pstack") return "autonomous";
-  return target.kind === "worktree" ? "investigate" : "grill";
-}
-
 const languages = [
   { value: "portuguese", label: "Português" },
   { value: "english", label: "English" },
@@ -128,11 +118,6 @@ const objectiveOnly = {
   externalObjectIds: [],
 };
 
-/** Grill and Custom have nothing to send without an initial prompt. */
-function requiresInitialPrompt(profile: ExecutionProfile) {
-  return profile === "grill" || profile === "custom" || profile === "pstack-review";
-}
-
 /**
  * The one inline form that starts a Run, whatever its Execution Profile. The
  * initial prompt starts from the Item's Notes; the composed prompt (with any
@@ -140,31 +125,20 @@ function requiresInitialPrompt(profile: ExecutionProfile) {
  */
 export function RunLaunchForm({
   view,
-  itemContext,
   modelCatalog,
   commands,
   target,
   onClose,
 }: {
   view: ItemView;
-  itemContext: Context | undefined;
   modelCatalog: GrillAgentCatalog[];
   commands: ItemCommands;
   target: RunLaunchTarget;
   onClose: () => void;
 }) {
   const { isSaving, whileSaving, confirm, workCommand, onChanged } = commands;
-  const [workflow, setWorkflow] = useState<Workflow>(itemContext?.default_workflow ?? "matt-pocock");
-  const availableProfiles = availableProfilesFor(workflow, target);
-  const initialProfile = defaultProfile(workflow, target);
-
-  const [profile, setProfile] = useState<ExecutionProfile>(initialProfile);
-  const [configuration, setConfiguration] = useState(() =>
-    defaultConfiguration(initialProfile, workflow, itemContext, modelCatalog),
-  );
-  const [configurationTouched, setConfigurationTouched] = useState(false);
-  const [language, setLanguage] = useState<GrillLanguage>("portuguese");
-  const [initialPrompt, setInitialPrompt] = useState(view.item.notes);
+  const [launchOptions, setLaunchOptions] = useState<RunLaunchOptions>();
+  const [draft, setDraft] = useState<RunLaunchDraft>();
 
   const [checkoutPreview, setCheckoutPreview] = useState<DirectRunPreview>();
   const [checkoutError, setCheckoutError] = useState<string>();
@@ -184,6 +158,22 @@ export function RunLaunchForm({
   }>();
 
   const workspaceId = target.workspace.id;
+  useEffect(() => {
+    let cancelled = false;
+    void whileSaving(async () => {
+      try {
+        const options = await workCommand.execute(
+          workActions.getRunLaunchOptions(view.item.id, target.kind), false,
+        );
+        if (cancelled) return;
+        setLaunchOptions(options);
+        setDraft(initialLaunchDraft(options, target.kind, view.item.notes));
+      } catch (optionsError) {
+        if (!cancelled) setLaunchError({ title: "Could not load Run options", message: errorMessage(optionsError) });
+      }
+    });
+    return () => { cancelled = true; };
+  }, [target.kind, view.item.id]);
   useEffect(() => {
     if (target.kind !== "checkout") return;
     let cancelled = false;
@@ -210,6 +200,21 @@ export function RunLaunchForm({
     // The checkout is prepared once, when the form opens for this target.
   }, [target.kind, workspaceId, view.item.id]);
 
+  if (!launchOptions || !draft) {
+    return launchError ? (
+      <div className="grid gap-3"><Alert variant="destructive"><AlertTitle>{launchError.title}</AlertTitle><AlertDescription>{launchError.message}</AlertDescription></Alert><Button type="button" variant="outline" onClick={onClose}>Cancel</Button></div>
+    ) : <p className="flex items-center gap-2 text-sm text-muted-foreground"><Spinner /> Loading Run options…</p>;
+  }
+  const projectedOptions = launchOptions;
+  const currentDraft = draft;
+  const workflow = currentDraft.workflow;
+  const profile = currentDraft.profile;
+  const configuration = currentDraft.configuration;
+  const language = currentDraft.language;
+  const initialPrompt = currentDraft.initialPrompt;
+  const availableProfiles = workflowOptions(projectedOptions, workflow).profiles
+    .map((option) => ({ ...profiles.find((entry) => entry.value === option.executionProfile)!, ...option }));
+
   const selectedProfile =
     availableProfiles.find((candidate) => candidate.value === profile) ??
     availableProfiles[0];
@@ -220,21 +225,20 @@ export function RunLaunchForm({
     (model) => model.id === configuration.model,
   );
   const promptMissing =
-    requiresInitialPrompt(profile) && !initialPrompt.trim();
-  const signature = JSON.stringify([
-    profile,
-    configuration,
-    language,
-    initialPrompt,
-  ]);
-  const previewIsCurrent = composed?.signature === signature;
+    Boolean(profileOptionForDraft(projectedOptions, currentDraft)?.requiresInitialPrompt) && !initialPrompt.trim();
+  const signature = launchDraftSignature(currentDraft);
+  const previewIsCurrent = isLaunchPreviewCurrent(composed?.signature, currentDraft);
   const previewEdited = Boolean(composed && composed.prompt !== composed.original);
   const checkoutReady =
     target.kind === "worktree" ||
     (checkoutPreview !== undefined &&
       primaryRepositoryId !== undefined &&
-      (checkoutPreview.dirtyRepositoryIds.length === 0 || dirtyConfirmed) &&
-      (checkoutPreview.sharedPaths.length === 0 || sharedConfirmed));
+      checkoutApprovalsReady({
+        dirtyRepositoryCount: checkoutPreview.dirtyRepositoryIds.length,
+        sharedPathCount: checkoutPreview.sharedPaths.length,
+        dirtyConfirmed,
+        sharedConfirmed,
+      }));
   const canStart =
     !isSaving &&
     checkoutReady &&
@@ -243,23 +247,14 @@ export function RunLaunchForm({
     !(previewIsCurrent && !composed?.prompt.trim());
 
   function selectProfile(next: ExecutionProfile) {
-    setProfile(next);
-    // Follow the Context defaults for the new profile until the user picks a model.
-    if (!configurationTouched) {
-      setConfiguration(defaultConfiguration(next, workflow, itemContext, modelCatalog));
-    }
+    setDraft(changeDraftProfile(projectedOptions, currentDraft, next));
   }
 
   function selectWorkflow(next: Workflow) {
-    setWorkflow(next);
-    const nextProfile = defaultProfile(next, target);
-    setProfile(nextProfile);
-    setConfiguration(defaultConfiguration(nextProfile, next, itemContext, modelCatalog));
-    setConfigurationTouched(false);
+    setDraft(changeDraftWorkflow(projectedOptions, currentDraft, next));
   }
   function updateConfiguration(next: GrillConfiguration) {
-    setConfiguration(next);
-    setConfigurationTouched(true);
+    setDraft(updateDraftConfiguration(currentDraft, next));
   }
 
   function composeAction() {
@@ -318,37 +313,54 @@ export function RunLaunchForm({
   function startAction(prompt: string) {
     const agent = configuration.agent;
     if (target.kind === "worktree") {
-      return workActions.startWorktreeRun({
+      return workActions.startRun({
         itemId: view.item.id,
         workspaceId,
-        worktreeId: target.worktree.id,
-        agent,
-        configuration,
-        executionProfile: profile,
-        workflow,
-        prompt,
-        promptSelection: objectiveOnly,
-      });
-    }
-    const checkout = {
-      itemId: view.item.id,
-      workspaceId,
-      primaryRepositoryId: primaryRepositoryId!,
-      machineId: null,
-      prompt,
-      expectedCheckouts: checkoutPreview!.checkouts,
-      allowDirty: checkoutPreview!.dirtyRepositoryIds.length > 0,
-      allowSharedCheckouts: checkoutPreview!.sharedPaths.length > 0,
-    };
-    return profile === "grill"
-      ? workActions.startGrillRun({ ...checkout, language, configuration })
-      : workActions.startDirectRun({
-          ...checkout,
+        strategy: {
+          kind: "worktree",
+          worktreeId: target.worktree.id,
           agent,
           configuration,
           executionProfile: profile,
           workflow,
+          prompt,
           promptSelection: objectiveOnly,
+        },
+      });
+    }
+    return profile === "grill"
+      ? workActions.startRun({
+          itemId: view.item.id,
+          workspaceId,
+          strategy: {
+            kind: "grill",
+            machineId: null,
+            primaryRepositoryId: primaryRepositoryId!,
+            language,
+            configuration,
+            prompt,
+            expectedCheckouts: checkoutPreview!.checkouts,
+            allowDirty: checkoutPreview!.dirtyRepositoryIds.length > 0,
+            allowSharedCheckouts: checkoutPreview!.sharedPaths.length > 0,
+          },
+        })
+      : workActions.startRun({
+          itemId: view.item.id,
+          workspaceId,
+          strategy: {
+            kind: "direct",
+            machineId: null,
+            primaryRepositoryId: primaryRepositoryId!,
+            agent,
+            configuration,
+            executionProfile: profile,
+            workflow,
+            prompt,
+            promptSelection: objectiveOnly,
+            expectedCheckouts: checkoutPreview!.checkouts,
+            allowDirty: checkoutPreview!.dirtyRepositoryIds.length > 0,
+            allowSharedCheckouts: checkoutPreview!.sharedPaths.length > 0,
+          },
         });
   }
 
@@ -397,8 +409,7 @@ export function RunLaunchForm({
       <label className="grid gap-1.5 text-sm font-medium">
         <span>Workflow</span>
         <NativeSelect value={workflow} onChange={(event) => selectWorkflow(event.target.value as Workflow)} disabled={isSaving}>
-          <NativeSelectOption value="matt-pocock">Matt Pocock</NativeSelectOption>
-          <NativeSelectOption value="pstack">pstack</NativeSelectOption>
+          {launchOptions.workflows.map((option) => <NativeSelectOption key={option.workflow} value={option.workflow}>{option.workflow === "pstack" ? "pstack" : "Matt Pocock"}</NativeSelectOption>)}
         </NativeSelect>
       </label>
       <SegmentedChoice
@@ -508,7 +519,7 @@ export function RunLaunchForm({
         name="run-response-language"
         options={languages}
         value={language}
-        onChange={setLanguage}
+        onChange={(next) => setDraft({ ...currentDraft, language: next })}
         disabled={isSaving}
       />
 
@@ -522,7 +533,7 @@ export function RunLaunchForm({
         <Textarea
           autoFocus
           value={initialPrompt}
-          onChange={(event) => setInitialPrompt(event.target.value)}
+          onChange={(event) => setDraft({ ...currentDraft, initialPrompt: event.target.value })}
           rows={5}
           placeholder={selectedProfile.placeholder}
           disabled={isSaving}
@@ -635,26 +646,6 @@ export function RunLaunchForm({
       </div>
     </form>
   );
-}
-
-function defaultConfiguration(
-  profile: ExecutionProfile,
-  workflow: Workflow,
-  itemContext: Context | undefined,
-  modelCatalog: GrillAgentCatalog[],
-): GrillConfiguration {
-  const defaults = workflow === "pstack"
-      ? itemContext?.pstack_defaults
-      : profile === "grill"
-      ? itemContext?.grill_defaults
-      : itemContext?.implement_defaults;
-  if (defaults) return defaults;
-  const model = modelCatalog[0]?.models[0];
-  return {
-    agent: modelCatalog[0]?.agent ?? "claude",
-    model: model?.id ?? "claude-sonnet-5",
-    effort: model?.efforts[0]?.id ?? "high",
-  };
 }
 
 function SegmentedChoice<T extends string>({

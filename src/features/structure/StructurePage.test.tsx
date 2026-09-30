@@ -26,19 +26,43 @@ const mocks = vi.hoisted(() => ({
       },
     ],
   },
-  createAction: vi.fn(),
-  execute: vi.fn(),
+  command: vi.fn(),
   shouldBlock: undefined as (() => boolean) | undefined,
   confirm: vi.fn(),
 }));
 
-vi.mock("@tanstack/react-query", () => ({
-  useQueryClient: () => ({
-    refetchQueries: vi.fn(async () => {}),
-    invalidateQueries: vi.fn(async () => {}),
-    fetchQuery: vi.fn(async () => undefined),
-  }),
-}));
+vi.mock("@tanstack/react-query", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@tanstack/react-query")>();
+  const React = await import("react");
+  return {
+    ...actual,
+    useQueryClient: () => ({
+      refetchQueries: vi.fn(async () => {}),
+      invalidateQueries: vi.fn(async () => {}),
+      fetchQuery: vi.fn(async (options: { queryFn: () => unknown }) => options.queryFn()),
+    }),
+    useMutation: (options: { mutationFn: (value: unknown) => Promise<unknown>; onSuccess?: (data: unknown, value: unknown) => Promise<void> }) => ({
+      isPending: false,
+      mutateAsync: async (value: unknown) => {
+        const data = await options.mutationFn(value);
+        await options.onSuccess?.(data, value);
+        return data;
+      },
+    }),
+    useQuery: (options: { queryKey: readonly unknown[]; queryFn: () => unknown }) => {
+      const [data, setData] = React.useState<unknown>();
+      const key = JSON.stringify(options.queryKey);
+      React.useEffect(() => {
+        let active = true;
+        Promise.resolve(options.queryFn()).then((value) => {
+          if (active) setData(value);
+        });
+        return () => { active = false; };
+      }, [key]);
+      return { data, isPending: data === undefined, isFetching: false, error: null };
+    },
+  };
+});
 
 vi.mock("@tanstack/react-router", () => ({
   Link: ({ children }: { children: React.ReactNode }) => children,
@@ -55,47 +79,10 @@ vi.mock("../../components/app-shell", () => ({
     setThemePreference: vi.fn(),
   }),
 }));
-vi.mock("./structure-queries", () => ({
-  structureKeys: { all: ["structure"] },
-  structureQueryOptions: {},
-  useStructureData: () => ({ data: mocks.data }),
-}));
-vi.mock("../work/work-queries", () => ({
-  activityQueryOptions: vi.fn(),
-  homeQueryOptions: vi.fn(),
-  runSuggestionsQueryOptions: vi.fn(),
-  useHomeQuery: () => ({ data: undefined }),
-}));
-vi.mock("../setup/setup-queries", () => ({
-  healthStatusQueryOptions: vi.fn(),
-  setupStateQueryOptions: vi.fn(),
-}));
 vi.mock("../../runtime/query-invalidation", () => ({
   invalidateStructureQueries: vi.fn(async () => {}),
 }));
-vi.mock("./structure-mutations", () => ({
-  structureActions: new Proxy(
-    {},
-    {
-      get: (_target, property) => {
-        if (property === "createContextConfiguration") {
-          return (configuration: unknown) => {
-            mocks.createAction(configuration);
-            return async () => {
-              const context = { id: 1, name: "Research" };
-              mocks.data.contexts.push(context);
-              return context;
-            };
-          };
-        }
-        return () => async () => undefined;
-      },
-    },
-  ),
-  useStructureCommand: () => ({
-    execute: (action: () => Promise<unknown>) => action(),
-  }),
-}));
+vi.mock("../../runtime/command", () => ({ command: mocks.command }));
 
 describe("StructurePage Context creation", () => {
   let container: HTMLDivElement;
@@ -108,7 +95,57 @@ describe("StructurePage Context creation", () => {
       value: mocks.confirm,
     });
     mocks.data.contexts = [];
-    mocks.createAction.mockClear();
+    mocks.command.mockReset().mockImplementation(async (name: string) => {
+      if (name === "listContexts") return mocks.data.contexts;
+      if (name === "listProjects") return mocks.data.projects;
+      if (name === "listRepositories") return mocks.data.repositories;
+      if (name === "listRepositoryLocations") return mocks.data.repositoryLocations;
+      if (name === "listMachines") return mocks.data.machines;
+      if (name === "listCliConfigurationProfiles") return mocks.data.cliConfigurationProfiles;
+      if (name === "listContextAttentionDefaults") return mocks.data.attentionDefaults;
+      if (name === "listGrillModelCatalog") return { catalogs: mocks.data.grillModelCatalog, codexStatus: "available", codexError: null };
+      if (name === "getHome") return { attention_entries: [], needs_attention: [], running: [], waiting: [], due: [], completed: [] };
+      if (name === "listRunSuggestions") return [];
+      if (name === "getSetupState") return { completed: false, provider: "none" };
+      if (name === "getHealthStatus") return {
+        runtime: { key: "runtime", label: "Runtime", state: "available", executablePath: null, message: "", action: null },
+        provider: { key: "provider", label: "Provider", state: "available", executablePath: null, message: "", action: null },
+        agents: [],
+        checkedAt: 0,
+      };
+      if (name === "newContextConfiguration") {
+        const defaults = {
+          agent: "claude",
+          model: "claude-sonnet-4-5",
+          effort: "high",
+        };
+        return {
+          name: "",
+          executionMachineId: null,
+          claudeProfileId: null,
+          codexProfileId: null,
+          checkDirtyCheckouts: true,
+          grillDefaults: defaults,
+          implementDefaults: defaults,
+          defaultWorkflow: "matt-pocock",
+          pstackDefaults: defaults,
+          pstackRoles: [],
+          ghExecutablePath: null,
+          twgExecutablePath: null,
+          azExecutablePath: null,
+          atlassianSite: null,
+          azureDevopsOrganization: null,
+          bitbucketWorkspace: null,
+          attentionDefaults: [],
+        };
+      }
+      if (name === "createContextConfiguration") {
+        const context = { id: 1, name: "Research" };
+        mocks.data.contexts.push(context);
+        return context;
+      }
+      return undefined;
+    });
     mocks.confirm.mockReset();
     mocks.shouldBlock = undefined;
     container = document.createElement("div");
@@ -130,6 +167,7 @@ describe("StructurePage Context creation", () => {
       (button) => button.textContent === "Add Context",
     );
     act(() => addContext?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await act(async () => {});
 
     expect(container.textContent).toContain("Primary settings");
     expect(container.textContent).toContain("Needs Attention");
@@ -151,7 +189,8 @@ describe("StructurePage Context creation", () => {
         ?.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
     });
 
-    expect(mocks.createAction).toHaveBeenCalledWith(
+    expect(mocks.command).toHaveBeenCalledWith(
+      "createContextConfiguration",
       expect.objectContaining({ name: "Research" }),
     );
     const selectedContext = Array.from(
@@ -161,12 +200,13 @@ describe("StructurePage Context creation", () => {
     expect(container.textContent).not.toContain("Create a Context with its settings together.");
   });
 
-  it("asks before discarding a dirty create draft when leaving Settings", () => {
+  it("asks before discarding a dirty create draft when leaving Settings", async () => {
     act(() => root.render(createElement(StructurePage, { section: "contexts" })));
     const addContext = Array.from(container.querySelectorAll("button")).find(
       (button) => button.textContent === "Add Context",
     );
     act(() => addContext?.dispatchEvent(new MouseEvent("click", { bubbles: true })));
+    await act(async () => {});
     const nameInput = Array.from(container.querySelectorAll("label"))
       .find((label) => label.textContent?.includes("Context name"))
       ?.querySelector<HTMLInputElement>("input");

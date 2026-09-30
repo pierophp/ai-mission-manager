@@ -1,6 +1,6 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 
-import { structureAdapter } from "../../runtime/adapters";
+import { structureCommands } from "./structure-commands";
 import type {
   Context,
   CliProfileSettingsView,
@@ -44,45 +44,45 @@ export const structureQueryOptions = {
   contexts: () =>
     queryOptions({
       queryKey: structureKeys.contexts(),
-      queryFn: structureAdapter.listContexts,
+      queryFn: structureCommands.listContexts,
       staleTime: structureStaleTime,
     }),
   projects: () =>
     queryOptions({
       queryKey: structureKeys.projects(),
-      queryFn: structureAdapter.listProjects,
+      queryFn: structureCommands.listProjects,
       staleTime: structureStaleTime,
     }),
   repositories: () =>
     queryOptions({
       queryKey: structureKeys.repositories(),
-      queryFn: structureAdapter.listRepositories,
+      queryFn: structureCommands.listRepositories,
       staleTime: structureStaleTime,
     }),
   repositoryLocations: () =>
     queryOptions({
       queryKey: structureKeys.repositoryLocations(),
-      queryFn: structureAdapter.listRepositoryLocations,
+      queryFn: structureCommands.listRepositoryLocations,
       staleTime: structureStaleTime,
     }),
   machines: () =>
     queryOptions({
       queryKey: structureKeys.machines(),
-      queryFn: structureAdapter.listMachines,
+      queryFn: structureCommands.listMachines,
       staleTime: structureStaleTime,
     }),
   cliConfigurationProfiles: () =>
-    queryOptions({ queryKey: structureKeys.cliConfigurationProfiles(), queryFn: structureAdapter.listCliConfigurationProfiles, staleTime: structureStaleTime }),
+    queryOptions({ queryKey: structureKeys.cliConfigurationProfiles(), queryFn: structureCommands.listCliConfigurationProfiles, staleTime: structureStaleTime }),
   attentionDefaults: () =>
     queryOptions({
       queryKey: structureKeys.attentionDefaults(),
-      queryFn: structureAdapter.listAttentionDefaults,
+      queryFn: structureCommands.listAttentionDefaults,
       staleTime: structureStaleTime,
     }),
   grillModelCatalog: () =>
     queryOptions({
       queryKey: structureKeys.grillModelCatalog(),
-      queryFn: structureAdapter.listGrillModelCatalog,
+      queryFn: structureCommands.listGrillModelCatalog,
       staleTime: structureStaleTime,
       refetchInterval: (query) =>
         query.state.data?.codexStatus === "refreshing" ? 2_000 : 60 * 60 * 1000,
@@ -125,7 +125,7 @@ export function useStructureData() {
       attentionDefaults.error ??
       grillModelCatalog.error,
     retryGrillModelCatalog: async () => {
-      await structureAdapter.refreshGrillModelCatalog();
+      await structureCommands.refreshGrillModelCatalog();
       await grillModelCatalog.refetch();
     },
   };

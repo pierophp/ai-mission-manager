@@ -23,7 +23,7 @@ import {
 import { structureQueryOptions } from "./features/structure/structure-queries";
 import { parseWorkSearch } from "./features/work/work-search";
 import { RuntimeEventsBridge } from "./runtime/RuntimeEventsBridge";
-import { workAdapter } from "./runtime/adapters";
+import { workCommands } from "./features/work/work-commands";
 
 type RouterContext = { queryClient: QueryClient };
 
@@ -41,7 +41,7 @@ const rootRoute = createRootRouteWithContext<RouterContext>()({
   loader: ({ context }) => {
     void (async () => {
       try {
-        await workAdapter.reconcileRuns();
+        await workCommands.reconcileRuns();
         await Promise.all([
           context.queryClient.prefetchQuery(setupStateQueryOptions()),
           context.queryClient.prefetchQuery(healthStatusQueryOptions(null)),

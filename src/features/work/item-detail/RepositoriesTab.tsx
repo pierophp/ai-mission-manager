@@ -25,7 +25,7 @@ import type {
   WorktreeRemovalReport,
 } from "../../../runtime/types";
 import type { ItemCommands } from "../use-item-commands";
-import { workActions } from "../work-mutations";
+import { workActions } from "../work-commands";
 import { repositoryName } from "../work-utils";
 import { RunLaunchForm } from "./RunLaunchForm";
 import { itemExecution } from "./shared";
@@ -46,7 +46,7 @@ export function RepositoriesTab({
   commands: ItemCommands;
 }) {
   const { isSaving, saveItem } = commands;
-  const { itemRepositories, itemContext, executionMachineId, executionMachine } =
+  const { itemRepositories, executionMachineId, executionMachine } =
     itemExecution(view, repositories, contexts, machines);
   const [worktreePathDrafts, setWorktreePathDrafts] = useState<
     Record<string, string>
@@ -413,7 +413,6 @@ export function RepositoriesTab({
           <RunLaunchForm
             key={worktreeRunTarget.worktree.id}
             view={view}
-            itemContext={itemContext}
             modelCatalog={grillModelCatalog}
             commands={commands}
             target={worktreeRunTarget}

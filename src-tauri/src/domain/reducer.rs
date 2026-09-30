@@ -88,7 +88,529 @@ fn detach_ticket_links_from_spec(
         .collect()
 }
 
+fn admit_run_start(mut state: DomainState, start: RunStart) -> Result<Decision, DomainError> {
+    let context_id = item_context_id(&state, start.item_id)?;
+    if matches!(
+        &start.strategy,
+        RunStartStrategy::Direct {
+            implementation_queue: Some(_),
+            ..
+        }
+    ) && state
+        .implementation_queues
+        .iter()
+        .any(|queue| queue.item_id == start.item_id && queue.active)
+    {
+        return Err(DomainError::ImplementationQueueAlreadyActive {
+            item_id: start.item_id,
+        });
+    }
+    let workspace = state
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == start.workspace_id)
+        .ok_or(DomainError::WorkspaceNotFound {
+            workspace_id: start.workspace_id,
+        })?;
+    if workspace.item_id != start.item_id {
+        return Err(DomainError::WorkspaceItemMismatch {
+            workspace_id: start.workspace_id,
+            item_id: start.item_id,
+        });
+    }
+    let machine = state
+        .machines
+        .iter()
+        .find(|machine| machine.id == start.machine_id)
+        .ok_or(DomainError::MachineNotFound {
+            machine_id: start.machine_id,
+        })?;
+    if machine.context_id != context_id {
+        return Err(DomainError::MachineContextMismatch {
+            machine_id: start.machine_id,
+            context_id,
+        });
+    }
+    ensure_context_execution_machine(&state, context_id, start.machine_id)?;
+
+    let project_id = item_project_id(&state, start.item_id)?;
+    let (
+        repository_id,
+        worktree_id,
+        checkouts,
+        is_grill,
+        skill_snapshot,
+        allow_dirty,
+        allow_shared_checkouts,
+        implementation_queue,
+    ) = match start.strategy {
+        RunStartStrategy::Direct {
+            repository_id,
+            checkouts,
+            allow_dirty,
+            allow_shared_checkouts,
+            implementation_queue,
+        } => (
+            repository_id,
+            None,
+            checkouts,
+            false,
+            None,
+            allow_dirty,
+            allow_shared_checkouts,
+            implementation_queue,
+        ),
+        RunStartStrategy::Worktree { worktree_id } => {
+            let worktree = state
+                .worktrees
+                .iter()
+                .find(|worktree| worktree.id == worktree_id)
+                .ok_or(DomainError::WorktreeNotFound { worktree_id })?;
+            if worktree.workspace_id != start.workspace_id {
+                return Err(DomainError::RunWorktreeWorkspaceMismatch {
+                    worktree_id,
+                    workspace_id: start.workspace_id,
+                });
+            }
+            if worktree.machine_id != start.machine_id {
+                return Err(DomainError::MachineContextMismatch {
+                    machine_id: start.machine_id,
+                    context_id,
+                });
+            }
+            let repository = state
+                .repositories
+                .iter()
+                .find(|repository| repository.id == worktree.repository_id)
+                .ok_or(DomainError::RepositoryNotFound {
+                    repository_id: worktree.repository_id,
+                })?;
+            if repository.project_id != project_id {
+                return Err(DomainError::RepositoryProjectMismatch {
+                    repository_id: repository.id,
+                    project_id,
+                });
+            }
+            (
+                repository.id,
+                Some(worktree_id),
+                Vec::new(),
+                false,
+                None,
+                false,
+                false,
+                None,
+            )
+        }
+        RunStartStrategy::Grill {
+            repository_id,
+            checkouts,
+            skill_snapshot,
+            allow_dirty,
+            allow_shared_checkouts,
+        } => (
+            repository_id,
+            None,
+            checkouts,
+            true,
+            Some(skill_snapshot),
+            allow_dirty,
+            allow_shared_checkouts,
+            None,
+        ),
+    };
+
+    let selected_repository_ids = state
+        .repositories
+        .iter()
+        .filter(|repository| repository.project_id == project_id)
+        .map(|repository| repository.id)
+        .collect::<Vec<_>>();
+    if worktree_id.is_none() {
+        if checkouts.is_empty() {
+            return Err(DomainError::EmptyRunCheckouts);
+        }
+        if !selected_repository_ids.contains(&repository_id) {
+            return Err(DomainError::RepositoryProjectMismatch {
+                repository_id,
+                project_id,
+            });
+        }
+        let mut checkout_repository_ids = Vec::new();
+        for checkout in &checkouts {
+            if checkout.path.trim().is_empty()
+                || checkout.branch.trim().is_empty()
+                || !selected_repository_ids.contains(&checkout.repository_id)
+                || checkout_repository_ids.contains(&checkout.repository_id)
+            {
+                return Err(DomainError::InvalidRunCheckout {
+                    repository_id: checkout.repository_id,
+                });
+            }
+            checkout_repository_ids.push(checkout.repository_id);
+        }
+        if checkout_repository_ids.len() != selected_repository_ids.len() {
+            return Err(DomainError::InvalidRunCheckout {
+                repository_id: selected_repository_ids
+                    .iter()
+                    .copied()
+                    .find(|id| !checkout_repository_ids.contains(id))
+                    .unwrap_or_default(),
+            });
+        }
+    }
+
+    for external_object_id in start
+        .prompt_selection
+        .iter()
+        .flat_map(|selection| selection.external_object_ids.iter().copied())
+    {
+        if !state.links.iter().any(|link| {
+            link.item_id == start.item_id && link.external_object_id == external_object_id
+        }) {
+            return Err(DomainError::RunPromptSourceNotLinked {
+                external_object_id,
+                item_id: start.item_id,
+            });
+        }
+    }
+
+    if is_grill {
+        let skill_snapshot = skill_snapshot.as_deref().unwrap_or_default();
+        if skill_snapshot.trim().is_empty() {
+            return Err(DomainError::EmptyGrillSkillSnapshot);
+        }
+        let configuration = start
+            .configuration
+            .as_ref()
+            .ok_or(DomainError::ImplementationQueueConfigurationMissing)?;
+        validate_grill_configuration(configuration)?;
+    } else if let Some(configuration) = &start.configuration {
+        validate_run_configuration(configuration, start.agent)?;
+    }
+
+    let check_dirty_checkouts = state
+        .contexts
+        .iter()
+        .find(|context| context.id == context_id)
+        .ok_or(DomainError::ContextNotFound { context_id })?
+        .check_dirty_checkouts;
+    if worktree_id.is_none() {
+        let dirty_repository_ids = checkouts
+            .iter()
+            .filter(|checkout| checkout.is_dirty)
+            .map(|checkout| checkout.repository_id)
+            .collect::<Vec<_>>();
+        if check_dirty_checkouts && !allow_dirty && !dirty_repository_ids.is_empty() {
+            return Err(DomainError::RunDirtyCheckouts {
+                repository_ids: dirty_repository_ids,
+            });
+        }
+        let mut shared_run_ids = Vec::new();
+        let mut shared_paths = Vec::new();
+        for active_run in state.runs.iter().filter(|run| {
+            run.machine_id == start.machine_id
+                && run_is_active(run)
+                && run.pane_status != RunPaneStatus::Missing
+        }) {
+            for checkout in &checkouts {
+                if active_run
+                    .direct_checkouts
+                    .iter()
+                    .any(|active| active.path == checkout.path)
+                {
+                    shared_run_ids.push(active_run.id);
+                    shared_paths.push(checkout.path.clone());
+                }
+            }
+        }
+        shared_run_ids.sort_unstable();
+        shared_run_ids.dedup();
+        shared_paths.sort();
+        shared_paths.dedup();
+        if !allow_shared_checkouts && !shared_run_ids.is_empty() {
+            return Err(DomainError::RunSharedCheckouts {
+                run_ids: shared_run_ids,
+                paths: shared_paths,
+            });
+        }
+    }
+
+    let prompt = clean_name(start.prompt, DomainError::EmptyRunPrompt)?;
+    let working_directory = clean_name(
+        start.working_directory,
+        DomainError::EmptyRunWorkingDirectory,
+    )?;
+    if let Some(worktree_id) = worktree_id {
+        let worktree = state
+            .worktrees
+            .iter()
+            .find(|worktree| worktree.id == worktree_id)
+            .expect("validated Worktree");
+        if working_directory != worktree.path {
+            return Err(DomainError::RunWorkingDirectoryRepositoryMismatch { repository_id });
+        }
+    } else {
+        if !checkouts
+            .iter()
+            .any(|checkout| checkout.path == working_directory)
+        {
+            return Err(DomainError::InvalidRunCheckout { repository_id });
+        }
+        if checkouts
+            .iter()
+            .find(|checkout| checkout.repository_id == repository_id)
+            .map(|checkout| checkout.path.as_str())
+            != Some(working_directory.as_str())
+        {
+            return Err(DomainError::RunWorkingDirectoryRepositoryMismatch { repository_id });
+        }
+    }
+    let session_name = clean_name(start.session_name, DomainError::EmptyRunSessionName)?;
+    let pane_id = clean_name(start.pane_id, DomainError::EmptyRunPaneId)?;
+    if state.runs.iter().any(|run| {
+        run.machine_id == start.machine_id
+            && run.session_name == session_name
+            && run.pane_id == pane_id
+    }) {
+        return Err(DomainError::RunAlreadyAttached {
+            machine_id: start.machine_id,
+            session_name,
+            pane_id,
+        });
+    }
+
+    let execution_profile = if is_grill {
+        ExecutionProfile::Grill
+    } else {
+        start.execution_profile
+    };
+    let workflow = Workflow::for_execution_profile(execution_profile, start.workflow);
+    validate_workflow_profile(workflow, execution_profile)?;
+    if implementation_queue.is_some() && execution_profile != ExecutionProfile::Implement {
+        return Err(DomainError::ImplementationQueueAlreadyActive {
+            item_id: start.item_id,
+        });
+    }
+    let id = state.next_run_id;
+    let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
+    let implementation_queue = if let Some(start_queue) = implementation_queue {
+        let configuration = start
+            .configuration
+            .clone()
+            .ok_or(DomainError::ImplementationQueueConfigurationMissing)?;
+        Some(create_implementation_queue(
+            &state,
+            id,
+            start.item_id,
+            start.workspace_id,
+            repository_id,
+            &configuration,
+            allow_dirty,
+            allow_shared_checkouts,
+            start_queue,
+        )?)
+    } else {
+        None
+    };
+    let configuration = start.configuration;
+    let run = Run {
+        id,
+        item_id: start.item_id,
+        workspace_id: Some(start.workspace_id),
+        repository_id: Some(repository_id),
+        worktree_id,
+        machine_id: start.machine_id,
+        agent: if is_grill {
+            configuration
+                .as_ref()
+                .expect("validated Grill configuration")
+                .agent
+        } else {
+            start.agent
+        },
+        cli_configuration_profile: selected_cli_configuration_profile(
+            &state,
+            context_id,
+            if is_grill {
+                configuration
+                    .as_ref()
+                    .expect("validated Grill configuration")
+                    .agent
+            } else {
+                start.agent
+            },
+        ),
+        execution_profile,
+        workflow,
+        model: configuration
+            .as_ref()
+            .map(|configuration| configuration.model.clone()),
+        effort: configuration
+            .as_ref()
+            .map(|configuration| configuration.effort.clone()),
+        skill_snapshot: if is_grill {
+            skill_snapshot
+        } else {
+            (workflow == Workflow::Pstack).then(crate::pstack::skill_snapshot)
+        },
+        prompt,
+        working_directory,
+        session_name,
+        pane_id,
+        started_at: start.started_at,
+        state: RunState::Unknown,
+        last_applied_agent_state_sequence: None,
+        pane_status: RunPaneStatus::Available,
+        direct_checkouts: checkouts,
+        transcript: String::new(),
+        reported_pull_requests: Vec::new(),
+        attention_summary: None,
+        grill_question_group: None,
+        grill_answers: Vec::new(),
+        grill_decisions: Vec::new(),
+        grill_response: None,
+        grill_phase: is_grill.then_some(GrillPhase::Starting),
+        grill_action: None,
+        grill_action_started_at: None,
+        plan_phase: None,
+        plan_path: None,
+    };
+    state.next_run_id = next_run_id;
+    let mut effects = Vec::new();
+    if let Some(mut queue) = implementation_queue {
+        queue.entries[0].run_id = Some(run.id);
+        state.implementation_queues.push(queue.clone());
+        effects.push(Effect::PersistImplementationQueue { queue });
+    }
+    effects.push(Effect::PersistRun {
+        run: run.clone(),
+        next_run_id,
+    });
+    state.runs.push(run);
+    Ok(Decision { state, effects })
+}
+
+fn normalize_run_start(event: Event) -> Event {
+    #[cfg(test)]
+    {
+        return match event {
+            Event::StartDirectRun {
+                item_id,
+                workspace_id,
+                machine_id,
+                agent,
+                configuration,
+                execution_profile,
+                workflow,
+                prompt,
+                working_directory,
+                session_name,
+                pane_id,
+                started_at,
+                prompt_selection,
+                checkouts,
+                repository_id,
+                allow_dirty,
+                allow_shared_checkouts,
+                implementation_queue,
+            } => Event::StartRun(RunStart {
+                item_id,
+                workspace_id,
+                machine_id,
+                agent,
+                configuration,
+                execution_profile,
+                workflow: Some(workflow),
+                prompt,
+                working_directory,
+                session_name,
+                pane_id,
+                started_at,
+                prompt_selection: Some(prompt_selection),
+                strategy: RunStartStrategy::Direct {
+                    repository_id,
+                    checkouts,
+                    allow_dirty,
+                    allow_shared_checkouts,
+                    implementation_queue,
+                },
+            }),
+            Event::StartWorktreeRun {
+                item_id,
+                workspace_id,
+                worktree_id,
+                machine_id,
+                agent,
+                configuration,
+                execution_profile,
+                workflow,
+                prompt,
+                working_directory,
+                session_name,
+                pane_id,
+                started_at,
+                prompt_selection,
+            } => Event::StartRun(RunStart {
+                item_id,
+                workspace_id,
+                machine_id,
+                agent,
+                configuration,
+                execution_profile,
+                workflow: Some(workflow),
+                prompt,
+                working_directory,
+                session_name,
+                pane_id,
+                started_at,
+                prompt_selection: Some(prompt_selection),
+                strategy: RunStartStrategy::Worktree { worktree_id },
+            }),
+            Event::StartGrillRun {
+                item_id,
+                workspace_id,
+                repository_id,
+                machine_id,
+                configuration,
+                prompt,
+                skill_snapshot,
+                working_directory,
+                session_name,
+                pane_id,
+                started_at,
+                checkouts,
+            } => Event::StartRun(RunStart {
+                item_id,
+                workspace_id,
+                machine_id,
+                agent: configuration.agent,
+                configuration: Some(configuration),
+                execution_profile: ExecutionProfile::Grill,
+                workflow: None,
+                prompt,
+                working_directory,
+                session_name,
+                pane_id,
+                started_at,
+                prompt_selection: None,
+                strategy: RunStartStrategy::Grill {
+                    repository_id,
+                    checkouts,
+                    skill_snapshot,
+                    allow_dirty: false,
+                    allow_shared_checkouts: false,
+                },
+            }),
+            event => event,
+        };
+    }
+    #[cfg(not(test))]
+    event
+}
+
 pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainError> {
+    let event = normalize_run_start(event);
     match event {
         Event::CreateContext { name } => {
             let name = clean_name(name, DomainError::EmptyContextName)?;
@@ -1929,590 +2451,11 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
                 effects: vec![Effect::RemoveRun { run_id }],
             })
         }
-        Event::StartDirectRun {
-            item_id,
-            workspace_id,
-            machine_id,
-            agent,
-            configuration,
-            execution_profile,
-            prompt,
-            working_directory,
-            session_name,
-            pane_id,
-            started_at,
-            prompt_selection,
-            checkouts,
-            repository_id,
-            allow_dirty,
-            allow_shared_checkouts,
-            implementation_queue,
-            workflow,
-        } => {
-            let context_id = item_context_id(&state, item_id)?;
-            if implementation_queue.is_some()
-                && state
-                    .implementation_queues
-                    .iter()
-                    .any(|queue| queue.item_id == item_id && queue.active)
-            {
-                return Err(DomainError::ImplementationQueueAlreadyActive { item_id });
-            }
-            let workspace = state
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.id == workspace_id)
-                .ok_or(DomainError::WorkspaceNotFound { workspace_id })?;
-            if workspace.item_id != item_id {
-                return Err(DomainError::WorkspaceItemMismatch {
-                    workspace_id,
-                    item_id,
-                });
-            }
-            let machine = state
-                .machines
-                .iter()
-                .find(|machine| machine.id == machine_id)
-                .ok_or(DomainError::MachineNotFound { machine_id })?;
-            if machine.context_id != context_id {
-                return Err(DomainError::MachineContextMismatch {
-                    machine_id,
-                    context_id,
-                });
-            }
-            ensure_context_execution_machine(&state, context_id, machine_id)?;
-            if checkouts.is_empty() {
-                return Err(DomainError::EmptyDirectRunCheckouts);
-            }
-            let project_id = item_project_id(&state, item_id)?;
-            let selected_repository_ids = state
-                .repositories
-                .iter()
-                .filter(|repository| repository.project_id == project_id)
-                .map(|repository| repository.id)
-                .collect::<Vec<_>>();
-            if !selected_repository_ids.contains(&repository_id) {
-                return Err(DomainError::RepositoryProjectMismatch {
-                    repository_id,
-                    project_id,
-                });
-            }
-            let mut checkout_repository_ids = Vec::new();
-            for checkout in &checkouts {
-                if checkout.path.trim().is_empty()
-                    || checkout.branch.trim().is_empty()
-                    || !selected_repository_ids.contains(&checkout.repository_id)
-                    || checkout_repository_ids.contains(&checkout.repository_id)
-                {
-                    return Err(DomainError::InvalidDirectRunCheckout {
-                        repository_id: checkout.repository_id,
-                    });
-                }
-                checkout_repository_ids.push(checkout.repository_id);
-            }
-            if checkout_repository_ids.len() != selected_repository_ids.len() {
-                return Err(DomainError::InvalidDirectRunCheckout {
-                    repository_id: selected_repository_ids
-                        .into_iter()
-                        .find(|repository_id| !checkout_repository_ids.contains(repository_id))
-                        .unwrap_or_default(),
-                });
-            }
-            for external_object_id in prompt_selection.external_object_ids {
-                if !state.links.iter().any(|link| {
-                    link.item_id == item_id && link.external_object_id == external_object_id
-                }) {
-                    return Err(DomainError::RunPromptSourceNotLinked {
-                        external_object_id,
-                        item_id,
-                    });
-                }
-            }
-            let dirty_repository_ids = checkouts
-                .iter()
-                .filter(|checkout| checkout.is_dirty)
-                .map(|checkout| checkout.repository_id)
-                .collect::<Vec<_>>();
-            let check_dirty_checkouts = state
-                .contexts
-                .iter()
-                .find(|context| context.id == context_id)
-                .ok_or(DomainError::ContextNotFound { context_id })?
-                .check_dirty_checkouts;
-            if check_dirty_checkouts && !allow_dirty && !dirty_repository_ids.is_empty() {
-                return Err(DomainError::DirectRunDirtyCheckouts {
-                    repository_ids: dirty_repository_ids,
-                });
-            }
-            let mut shared_run_ids = Vec::new();
-            let mut shared_paths = Vec::new();
-            for active_run in state.runs.iter().filter(|run| {
-                run.machine_id == machine_id
-                    && run_is_active(run)
-                    && run.pane_status != RunPaneStatus::Missing
-            }) {
-                for checkout in &checkouts {
-                    if active_run
-                        .direct_checkouts
-                        .iter()
-                        .any(|active_checkout| active_checkout.path == checkout.path)
-                    {
-                        shared_run_ids.push(active_run.id);
-                        shared_paths.push(checkout.path.clone());
-                    }
-                }
-            }
-            shared_run_ids.sort_unstable();
-            shared_run_ids.dedup();
-            shared_paths.sort();
-            shared_paths.dedup();
-            if !allow_shared_checkouts && !shared_run_ids.is_empty() {
-                return Err(DomainError::DirectRunSharedCheckouts {
-                    run_ids: shared_run_ids,
-                    paths: shared_paths,
-                });
-            }
-            let prompt = clean_name(prompt, DomainError::EmptyRunPrompt)?;
-            let working_directory =
-                clean_name(working_directory, DomainError::EmptyRunWorkingDirectory)?;
-            if !checkouts
-                .iter()
-                .any(|checkout| checkout.path == working_directory)
-            {
-                return Err(DomainError::InvalidDirectRunCheckout {
-                    repository_id: checkouts[0].repository_id,
-                });
-            }
-            if checkouts
-                .iter()
-                .find(|checkout| checkout.repository_id == repository_id)
-                .map(|checkout| checkout.path.as_str())
-                != Some(working_directory.as_str())
-            {
-                return Err(DomainError::RunWorkingDirectoryRepositoryMismatch { repository_id });
-            }
-            let session_name = clean_name(session_name, DomainError::EmptyRunSessionName)?;
-            let pane_id = clean_name(pane_id, DomainError::EmptyRunPaneId)?;
-            if state.runs.iter().any(|run| {
-                run.machine_id == machine_id
-                    && run.session_name == session_name
-                    && run.pane_id == pane_id
-            }) {
-                return Err(DomainError::RunAlreadyAttached {
-                    machine_id,
-                    session_name,
-                    pane_id,
-                });
-            }
-            let id = state.next_run_id;
-            let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
-            let implementation_queue = if let Some(start) = implementation_queue {
-                if execution_profile != ExecutionProfile::Implement {
-                    return Err(DomainError::ImplementationQueueAlreadyActive { item_id });
-                }
-                let configuration = configuration
-                    .clone()
-                    .ok_or(DomainError::ImplementationQueueConfigurationMissing)?;
-                Some(create_implementation_queue(
-                    &state,
-                    id,
-                    item_id,
-                    workspace_id,
-                    repository_id,
-                    &configuration,
-                    allow_dirty,
-                    allow_shared_checkouts,
-                    start,
-                )?)
-            } else {
-                None
-            };
-            if let Some(configuration) = &configuration {
-                validate_run_configuration(configuration, agent)?;
-            }
-            validate_workflow_profile(workflow, execution_profile)?;
-            let run = Run {
-                id,
-                item_id,
-                workspace_id: Some(workspace_id),
-                repository_id: Some(repository_id),
-                worktree_id: None,
-                machine_id,
-                agent,
-                cli_configuration_profile: selected_cli_configuration_profile(
-                    &state, context_id, agent,
-                ),
-                execution_profile,
-                workflow,
-                model: configuration
-                    .as_ref()
-                    .map(|configuration| configuration.model.clone()),
-                effort: configuration
-                    .as_ref()
-                    .map(|configuration| configuration.effort.clone()),
-                skill_snapshot: (workflow == Workflow::Pstack)
-                    .then(crate::pstack::skill_snapshot),
-                prompt,
-                working_directory,
-                session_name,
-                pane_id,
-                started_at,
-                state: RunState::Unknown,
-                last_applied_agent_state_sequence: None,
-                pane_status: RunPaneStatus::Available,
-                direct_checkouts: checkouts,
-                transcript: String::new(),
-                reported_pull_requests: Vec::new(),
-                attention_summary: None,
-                grill_question_group: None,
-                grill_answers: Vec::new(),
-                grill_decisions: Vec::new(),
-                grill_response: None,
-                grill_phase: None,
-                grill_action: None,
-                grill_action_started_at: None,
-                plan_phase: None,
-                plan_path: None,
-            };
-            state.next_run_id = next_run_id;
-            let mut effects = vec![];
-            if let Some(mut queue) = implementation_queue {
-                queue.entries[0].run_id = Some(run.id);
-                state.implementation_queues.push(queue.clone());
-                effects.push(Effect::PersistImplementationQueue { queue });
-            }
-            effects.push(Effect::PersistRun {
-                run: run.clone(),
-                next_run_id,
-            });
-            state.runs.push(run.clone());
-            Ok(Decision { state, effects })
-        }
-        Event::StartWorktreeRun {
-            item_id,
-            workspace_id,
-            worktree_id,
-            machine_id,
-            agent,
-            configuration,
-            execution_profile,
-            prompt,
-            working_directory,
-            session_name,
-            pane_id,
-            started_at,
-            prompt_selection,
-            workflow,
-        } => {
-            let context_id = item_context_id(&state, item_id)?;
-            let workspace = state
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.id == workspace_id)
-                .ok_or(DomainError::WorkspaceNotFound { workspace_id })?;
-            if workspace.item_id != item_id {
-                return Err(DomainError::WorkspaceItemMismatch {
-                    workspace_id,
-                    item_id,
-                });
-            }
-            let worktree = state
-                .worktrees
-                .iter()
-                .find(|worktree| worktree.id == worktree_id)
-                .ok_or(DomainError::WorktreeNotFound { worktree_id })?;
-            if worktree.workspace_id != workspace_id {
-                return Err(DomainError::RunWorktreeWorkspaceMismatch {
-                    worktree_id,
-                    workspace_id,
-                });
-            }
-            if worktree.machine_id != machine_id {
-                return Err(DomainError::MachineContextMismatch {
-                    machine_id,
-                    context_id,
-                });
-            }
-            let machine = state
-                .machines
-                .iter()
-                .find(|machine| machine.id == machine_id)
-                .ok_or(DomainError::MachineNotFound { machine_id })?;
-            if machine.context_id != context_id {
-                return Err(DomainError::MachineContextMismatch {
-                    machine_id,
-                    context_id,
-                });
-            }
-            ensure_context_execution_machine(&state, context_id, machine_id)?;
-            let project_id = item_project_id(&state, item_id)?;
-            let repository = state
-                .repositories
-                .iter()
-                .find(|repository| repository.id == worktree.repository_id)
-                .ok_or(DomainError::RepositoryNotFound {
-                    repository_id: worktree.repository_id,
-                })?;
-            if repository.project_id != project_id {
-                return Err(DomainError::RepositoryProjectMismatch {
-                    repository_id: worktree.repository_id,
-                    project_id,
-                });
-            }
-            for external_object_id in prompt_selection.external_object_ids {
-                if !state.links.iter().any(|link| {
-                    link.item_id == item_id && link.external_object_id == external_object_id
-                }) {
-                    return Err(DomainError::RunPromptSourceNotLinked {
-                        external_object_id,
-                        item_id,
-                    });
-                }
-            }
-            let prompt = clean_name(prompt, DomainError::EmptyRunPrompt)?;
-            let working_directory =
-                clean_name(working_directory, DomainError::EmptyRunWorkingDirectory)?;
-            if working_directory != worktree.path {
-                return Err(DomainError::RunWorkingDirectoryRepositoryMismatch {
-                    repository_id: worktree.repository_id,
-                });
-            }
-            let session_name = clean_name(session_name, DomainError::EmptyRunSessionName)?;
-            let pane_id = clean_name(pane_id, DomainError::EmptyRunPaneId)?;
-            if state.runs.iter().any(|run| {
-                run.machine_id == machine_id
-                    && run.session_name == session_name
-                    && run.pane_id == pane_id
-            }) {
-                return Err(DomainError::RunAlreadyAttached {
-                    machine_id,
-                    session_name,
-                    pane_id,
-                });
-            }
-            if let Some(configuration) = &configuration {
-                validate_run_configuration(configuration, agent)?;
-            }
-            validate_workflow_profile(workflow, execution_profile)?;
-            let id = state.next_run_id;
-            let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
-            let run = Run {
-                id,
-                item_id,
-                workspace_id: Some(workspace_id),
-                repository_id: Some(worktree.repository_id),
-                worktree_id: Some(worktree_id),
-                machine_id,
-                agent,
-                cli_configuration_profile: selected_cli_configuration_profile(
-                    &state, context_id, agent,
-                ),
-                execution_profile,
-                workflow,
-                model: configuration
-                    .as_ref()
-                    .map(|configuration| configuration.model.clone()),
-                effort: configuration
-                    .as_ref()
-                    .map(|configuration| configuration.effort.clone()),
-                skill_snapshot: (workflow == Workflow::Pstack)
-                    .then(crate::pstack::skill_snapshot),
-                prompt,
-                working_directory,
-                session_name,
-                pane_id,
-                started_at,
-                state: RunState::Unknown,
-                last_applied_agent_state_sequence: None,
-                pane_status: RunPaneStatus::Available,
-                direct_checkouts: Vec::new(),
-                transcript: String::new(),
-                reported_pull_requests: Vec::new(),
-                attention_summary: None,
-                grill_question_group: None,
-                grill_answers: Vec::new(),
-                grill_decisions: Vec::new(),
-                grill_response: None,
-                grill_phase: None,
-                grill_action: None,
-                grill_action_started_at: None,
-                plan_phase: None,
-                plan_path: None,
-            };
-            state.next_run_id = next_run_id;
-            state.runs.push(run.clone());
-            let mut effects = Vec::new();
-            effects.push(Effect::PersistRun { run, next_run_id });
-            Ok(Decision {
-                state,
-                effects,
-            })
-        }
-        Event::StartGrillRun {
-            item_id,
-            workspace_id,
-            repository_id,
-            machine_id,
-            configuration,
-            prompt,
-            skill_snapshot,
-            working_directory,
-            session_name,
-            pane_id,
-            started_at,
-            checkouts,
-        } => {
-            let context_id = item_context_id(&state, item_id)?;
-            validate_grill_configuration(&configuration)?;
-            let workspace = state
-                .workspaces
-                .iter()
-                .find(|workspace| workspace.id == workspace_id)
-                .ok_or(DomainError::WorkspaceNotFound { workspace_id })?;
-            if workspace.item_id != item_id {
-                return Err(DomainError::WorkspaceItemMismatch {
-                    workspace_id,
-                    item_id,
-                });
-            }
-            let repository = state
-                .repositories
-                .iter()
-                .find(|repository| repository.id == repository_id)
-                .ok_or(DomainError::RepositoryNotFound { repository_id })?;
-            let item_project_id = item_project_id(&state, item_id)?;
-            if repository.project_id != item_project_id {
-                return Err(DomainError::RepositoryProjectMismatch {
-                    repository_id,
-                    project_id: item_project_id,
-                });
-            }
-            let project = state
-                .projects
-                .iter()
-                .find(|project| project.id == repository.project_id)
-                .ok_or(DomainError::ProjectNotFound {
-                    project_id: repository.project_id,
-                })?;
-            if project.context_id != context_id {
-                return Err(DomainError::RepositoryProjectMismatch {
-                    repository_id,
-                    project_id: project.id,
-                });
-            }
-            let machine = state
-                .machines
-                .iter()
-                .find(|machine| machine.id == machine_id)
-                .ok_or(DomainError::MachineNotFound { machine_id })?;
-            if machine.context_id != context_id {
-                return Err(DomainError::MachineContextMismatch {
-                    machine_id,
-                    context_id,
-                });
-            }
-            ensure_context_execution_machine(&state, context_id, machine_id)?;
-            let prompt = clean_name(prompt, DomainError::EmptyRunPrompt)?;
-            if skill_snapshot.trim().is_empty() {
-                return Err(DomainError::EmptyGrillSkillSnapshot);
-            }
-            let working_directory =
-                clean_name(working_directory, DomainError::EmptyRunWorkingDirectory)?;
-            let selected_repository_ids = workspace
-                .repositories
-                .iter()
-                .map(|repository| repository.repository_id)
-                .collect::<Vec<_>>();
-            let mut checkout_repository_ids = Vec::new();
-            for checkout in &checkouts {
-                if checkout.path.trim().is_empty()
-                    || checkout.branch.trim().is_empty()
-                    || !selected_repository_ids.contains(&checkout.repository_id)
-                    || checkout_repository_ids.contains(&checkout.repository_id)
-                {
-                    return Err(DomainError::InvalidDirectRunCheckout {
-                        repository_id: checkout.repository_id,
-                    });
-                }
-                checkout_repository_ids.push(checkout.repository_id);
-            }
-            if checkout_repository_ids.len() != selected_repository_ids.len()
-                || !checkouts
-                    .iter()
-                    .any(|checkout| checkout.path == working_directory)
-            {
-                return Err(DomainError::InvalidDirectRunCheckout { repository_id });
-            }
-            if checkouts
-                .iter()
-                .find(|checkout| checkout.repository_id == repository_id)
-                .map(|checkout| checkout.path.as_str())
-                != Some(working_directory.as_str())
-            {
-                return Err(DomainError::RunWorkingDirectoryRepositoryMismatch { repository_id });
-            }
-            let session_name = clean_name(session_name, DomainError::EmptyRunSessionName)?;
-            let pane_id = clean_name(pane_id, DomainError::EmptyRunPaneId)?;
-            if state.runs.iter().any(|run| {
-                run.machine_id == machine_id
-                    && run.session_name == session_name
-                    && run.pane_id == pane_id
-            }) {
-                return Err(DomainError::RunAlreadyAttached {
-                    machine_id,
-                    session_name,
-                    pane_id,
-                });
-            }
-            let id = state.next_run_id;
-            let next_run_id = id.checked_add(1).ok_or(DomainError::SequenceExhausted)?;
-            let run = Run {
-                id,
-                item_id,
-                workspace_id: Some(workspace_id),
-                repository_id: Some(repository_id),
-                worktree_id: None,
-                machine_id,
-                agent: configuration.agent,
-                cli_configuration_profile: selected_cli_configuration_profile(
-                    &state,
-                    context_id,
-                    configuration.agent,
-                ),
-                execution_profile: ExecutionProfile::Grill,
-                workflow: Workflow::MattPocock,
-                model: Some(configuration.model),
-                effort: Some(configuration.effort),
-                skill_snapshot: Some(skill_snapshot),
-                prompt,
-                working_directory,
-                session_name,
-                pane_id,
-                started_at,
-                state: RunState::Unknown,
-                last_applied_agent_state_sequence: None,
-                pane_status: RunPaneStatus::Available,
-                direct_checkouts: checkouts,
-                transcript: String::new(),
-                reported_pull_requests: Vec::new(),
-                attention_summary: None,
-                grill_question_group: None,
-                grill_answers: Vec::new(),
-                grill_decisions: Vec::new(),
-                grill_response: None,
-                grill_phase: Some(GrillPhase::Starting),
-                grill_action: None,
-                grill_action_started_at: None,
-                plan_phase: None,
-                plan_path: None,
-            };
-            state.next_run_id = next_run_id;
-            state.runs.push(run.clone());
-            Ok(Decision {
-                state,
-                effects: vec![Effect::PersistRun { run, next_run_id }],
-            })
-        }
+        Event::StartRun(start) => admit_run_start(state, start),
+        #[cfg(test)]
+        Event::StartDirectRun { .. }
+        | Event::StartWorktreeRun { .. }
+        | Event::StartGrillRun { .. } => unreachable!("legacy test start normalized"),
         Event::AttachRun {
             item_id,
             workspace_id,
@@ -3112,8 +3055,15 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             if canonical_url.is_empty() {
                 return Err(DomainError::EmptyExternalUrl);
             }
-            if run.reported_pull_requests.iter().any(|url| url == &canonical_url) {
-                return Ok(Decision { state, effects: Vec::new() });
+            if run
+                .reported_pull_requests
+                .iter()
+                .any(|url| url == &canonical_url)
+            {
+                return Ok(Decision {
+                    state,
+                    effects: Vec::new(),
+                });
             }
             run.reported_pull_requests.push(canonical_url.clone());
             let run = run.clone();
@@ -3126,7 +3076,9 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             });
             let mut effects = vec![Effect::PersistRunReports { run }];
             if !already_linked {
-                effects.extend(link_external_object(&mut state, item_id, object, None, None, false)?);
+                effects.extend(link_external_object(
+                    &mut state, item_id, object, None, None, false,
+                )?);
             }
             Ok(Decision { state, effects })
         }
@@ -3141,7 +3093,10 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             }
             let summary = summary.trim().to_owned();
             if summary.is_empty() || run.attention_summary.as_deref() == Some(&summary) {
-                return Ok(Decision { state, effects: Vec::new() });
+                return Ok(Decision {
+                    state,
+                    effects: Vec::new(),
+                });
             }
             run.attention_summary = Some(summary);
             let run = run.clone();
@@ -3151,21 +3106,33 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             })
         }
         Event::RecordRunPlan { run_id, path } => {
-            let run = state.runs.iter_mut().find(|run| run.id == run_id)
+            let run = state
+                .runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
                 .ok_or(DomainError::RunNotFound { run_id })?;
             if run.execution_profile != ExecutionProfile::Plan || run.workflow != Workflow::Pstack {
                 return Err(DomainError::PlanGoNotAvailable { run_id });
             }
             let path = path.trim();
             if path.is_empty() || run.plan_path.as_deref() == Some(path) {
-                return Ok(Decision { state, effects: Vec::new() });
+                return Ok(Decision {
+                    state,
+                    effects: Vec::new(),
+                });
             }
             run.plan_path = Some(path.to_owned());
             let run = run.clone();
-            Ok(Decision { state, effects: vec![Effect::PersistRunReports { run }] })
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRunReports { run }],
+            })
         }
         Event::GoPlan { run_id } => {
-            let run = state.runs.iter_mut().find(|run| run.id == run_id)
+            let run = state
+                .runs
+                .iter_mut()
+                .find(|run| run.id == run_id)
                 .ok_or(DomainError::RunNotFound { run_id })?;
             if run.execution_profile != ExecutionProfile::Plan
                 || run.workflow != Workflow::Pstack
@@ -3178,7 +3145,10 @@ pub fn decide(mut state: DomainState, event: Event) -> Result<Decision, DomainEr
             run.state = RunState::Working;
             run.plan_phase = Some(PlanPhase::Executing);
             let run = run.clone();
-            Ok(Decision { state, effects: vec![Effect::PersistRunState { run }] })
+            Ok(Decision {
+                state,
+                effects: vec![Effect::PersistRunState { run }],
+            })
         }
         Event::RecordRunTranscript {
             run_id,

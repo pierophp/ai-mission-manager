@@ -95,7 +95,7 @@ fn untracked_agent_snapshot(
         .ok_or_else(|| format!("Machine {} does not exist", suggestion.machine_id))?;
     Ok(UntrackedAgentSnapshot {
         state: runtime.state.clone(),
-        machine_home: machine_home_directory(&machine),
+        machine_home: machine_home_directory(&machine, runtime.machine_access.as_ref()),
         machine,
         terminal_runtime: Arc::clone(&runtime.terminal_runtime),
     })
@@ -650,7 +650,7 @@ pub(crate) async fn advance_finished_implementation_queue(
     else {
         return Ok(());
     };
-    let next_run = match start_direct_run_with_queue_state(
+    let _next_run = match run_launcher::start_direct_run_with_queue_attachment_state(
         queue.item_id,
         queue.workspace_id,
         Some(run.machine_id),
@@ -668,6 +668,10 @@ pub(crate) async fn advance_finished_implementation_queue(
         run.direct_checkouts.clone(),
         queue.allow_dirty,
         queue.allow_shared_checkouts,
+        Some(run_launcher::ImplementationQueueEntryAttachment {
+            queue_id: queue.id,
+            position: next.position,
+        }),
         state,
     )
     .await
@@ -693,23 +697,6 @@ pub(crate) async fn advance_finished_implementation_queue(
             return Ok(());
         }
     };
-    let decision = decide(
-        state
-            .lock()
-            .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-            .state
-            .clone(),
-        Event::SetImplementationQueueEntryRun {
-            queue_id: queue.id,
-            position: next.position,
-            run_id: next_run.id,
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .commit(decision)?;
     Ok(())
 }
 
@@ -789,7 +776,7 @@ pub(super) async fn launch_implementation_queue_entry_with_state(
             .ok_or_else(|| format!("Run {source_run_id} does not exist"))?;
         (queue, entry, source_run)
     };
-    let next_run = match start_direct_run_with_queue_state(
+    let _next_run = match run_launcher::start_direct_run_with_queue_attachment_state(
         queue.item_id,
         queue.workspace_id,
         Some(source_run.machine_id),
@@ -807,6 +794,7 @@ pub(super) async fn launch_implementation_queue_entry_with_state(
         source_run.direct_checkouts.clone(),
         queue.allow_dirty,
         queue.allow_shared_checkouts,
+        Some(run_launcher::ImplementationQueueEntryAttachment { queue_id, position }),
         state,
     )
     .await
@@ -832,23 +820,7 @@ pub(super) async fn launch_implementation_queue_entry_with_state(
             return Ok(());
         }
     };
-    let decision = decide(
-        state
-            .lock()
-            .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-            .state
-            .clone(),
-        Event::SetImplementationQueueEntryRun {
-            queue_id,
-            position,
-            run_id: next_run.id,
-        },
-    )
-    .map_err(|error| error.to_string())?;
-    state
-        .lock()
-        .map_err(|_| "Mission Manager state is unavailable".to_owned())?
-        .commit(decision)
+    Ok(())
 }
 
 pub(crate) async fn skip_implementation_queue_entry_with_state(
@@ -967,7 +939,7 @@ pub(crate) async fn list_run_suggestions_with_state(
     state: &Mutex<Runtime>,
 ) -> Result<Vec<RunSuggestion>, String> {
     recover_run_states_with_state(state).await?;
-    let (snapshot, machines, terminal_runtime) = {
+    let (snapshot, machines, terminal_runtime, machine_access) = {
         let runtime = state
             .lock()
             .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
@@ -988,9 +960,11 @@ pub(crate) async fn list_run_suggestions_with_state(
             runtime.state.clone(),
             machines,
             Arc::clone(&runtime.terminal_runtime),
+            Arc::clone(&runtime.machine_access),
         )
     };
     let worker_runtime = Arc::clone(&terminal_runtime);
+    let worker_machine_access = Arc::clone(&machine_access);
     let observations = tauri::async_runtime::spawn_blocking(move || {
         let mut observations = Vec::new();
         for machine in machines {
@@ -1002,7 +976,10 @@ pub(crate) async fn list_run_suggestions_with_state(
                         session_name: pane.session_name,
                         pane_id: pane.pane_id,
                         current_path: pane.current_path,
-                        machine_home: machine_home_directory(&machine),
+                        machine_home: machine_home_directory(
+                            &machine,
+                            worker_machine_access.as_ref(),
+                        ),
                     }))
                 }
                 Err(error) => eprintln!(
@@ -1244,36 +1221,74 @@ pub(crate) async fn continue_grill_with_state(
 
 pub(crate) async fn go_plan_with_state(run_id: i64, state: &Mutex<Runtime>) -> Result<Run, String> {
     let operation_lock = {
-        let mut runtime = state.lock().map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let mut runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
         runtime.grill_operation_lock(run_id)
     };
     let operation_guard = operation_lock.lock_owned().await;
     let (snapshot, prompt, terminal_runtime) = {
-        let runtime = state.lock().map_err(|_| "Mission Manager state is unavailable".to_owned())?;
-        let run = runtime.state.runs.iter().find(|run| run.id == run_id).cloned()
+        let runtime = state
+            .lock()
+            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let run = runtime
+            .state
+            .runs
+            .iter()
+            .find(|run| run.id == run_id)
+            .cloned()
             .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-        let prompt = crate::domain::compose_plan_go_prompt(&run).map_err(|error| error.to_string())?;
-        decide(runtime.state.clone(), Event::GoPlan { run_id }).map_err(|error| error.to_string())?;
-        let machine = runtime.state.machines.iter().find(|machine| machine.id == run.machine_id).cloned()
+        let prompt =
+            crate::domain::compose_plan_go_prompt(&run).map_err(|error| error.to_string())?;
+        decide(runtime.state.clone(), Event::GoPlan { run_id })
+            .map_err(|error| error.to_string())?;
+        let machine = runtime
+            .state
+            .machines
+            .iter()
+            .find(|machine| machine.id == run.machine_id)
+            .cloned()
             .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
-        (GrillPaneSnapshot { run, machine }, prompt, Arc::clone(&runtime.terminal_runtime))
+        (
+            GrillPaneSnapshot { run, machine },
+            prompt,
+            Arc::clone(&runtime.terminal_runtime),
+        )
     };
     let worker_snapshot = snapshot.clone();
     let (send_result, _operation_guard) = tauri::async_runtime::spawn_blocking(move || {
         let mut input = prompt.into_bytes();
         input.push(b'\n');
-        let result = terminal_runtime.send_pane_input(&worker_snapshot.machine, &worker_snapshot.run.pane_id, &input);
+        let result = terminal_runtime.send_pane_input(
+            &worker_snapshot.machine,
+            &worker_snapshot.run.pane_id,
+            &input,
+        );
         (result, operation_guard)
-    }).await.map_err(|error| format!("Plan continuation send worker failed: {error}"))?;
+    })
+    .await
+    .map_err(|error| format!("Plan continuation send worker failed: {error}"))?;
     send_result.map_err(|error| error.to_string())?;
-    let mut runtime = state.lock().map_err(|_| format!("Plan continuation for Run {run_id} was sent, but Mission Manager state is unavailable"))?;
+    let mut runtime = state.lock().map_err(|_| {
+        format!(
+            "Plan continuation for Run {run_id} was sent, but Mission Manager state is unavailable"
+        )
+    })?;
     if !snapshot.is_current(&runtime) {
         return Err(format!("Run {run_id} changed while Go was being sent; the instruction may already have reached the agent"));
     }
-    let decision = decide(runtime.state.clone(), Event::GoPlan { run_id }).map_err(|error| error.to_string())?;
-    let continued = decision.state.runs.iter().find(|candidate| candidate.id == run_id).cloned()
+    let decision = decide(runtime.state.clone(), Event::GoPlan { run_id })
+        .map_err(|error| error.to_string())?;
+    let continued = decision
+        .state
+        .runs
+        .iter()
+        .find(|candidate| candidate.id == run_id)
+        .cloned()
         .ok_or_else(|| format!("Run {run_id} does not exist"))?;
-    runtime.commit(decision).map_err(|error| format!("Go reached Run {run_id}, but its Working state could not be persisted: {error}"))?;
+    runtime.commit(decision).map_err(|error| {
+        format!("Go reached Run {run_id}, but its Working state could not be persisted: {error}")
+    })?;
     Ok(continued)
 }
 use std::sync::Arc;
@@ -1528,7 +1543,7 @@ enum PstackReport {
     PlanReady { path: String },
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, specta::Type)]
 struct PstackReportLine {
     event: String,
     url: Option<String>,
@@ -1595,26 +1610,28 @@ impl ReconciliationSnapshot {
                         .find(|observation| observation.machine_id == run.machine_id),
                     run,
                 );
-                let should_capture_grill_transcript = run.execution_profile == ExecutionProfile::Grill
+                let should_capture_grill_transcript = run.execution_profile
+                    == ExecutionProfile::Grill
                     && pane_status.is_some()
                     && (pane_status == Some(RunPaneStatus::Available)
                         || state_record.as_ref().is_some_and(|record| {
                             matches!(record.state, RunState::Blocked | RunState::Finished)
                         }));
-                let should_capture_pstack_reports = run.workflow == Workflow::Pstack
-                    && pane_status.is_some();
-                let captured_pane = if should_capture_grill_transcript || should_capture_pstack_reports {
-                    self.machines
-                        .iter()
-                        .find(|machine| machine.id == run.machine_id)
-                        .map(|machine| {
-                            self.terminal_runtime
-                                .capture_pane_transcript(machine, &run.pane_id)
-                                .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-                        })
-                } else {
-                    None
-                };
+                let should_capture_pstack_reports =
+                    run.workflow == Workflow::Pstack && pane_status.is_some();
+                let captured_pane =
+                    if should_capture_grill_transcript || should_capture_pstack_reports {
+                        self.machines
+                            .iter()
+                            .find(|machine| machine.id == run.machine_id)
+                            .map(|machine| {
+                                self.terminal_runtime
+                                    .capture_pane_transcript(machine, &run.pane_id)
+                                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                            })
+                    } else {
+                        None
+                    };
                 let transcript = should_capture_grill_transcript
                     .then(|| captured_pane.clone())
                     .flatten();
@@ -1778,7 +1795,7 @@ struct TerminalOpenObservation {
     snapshot: Vec<u8>,
     panes: Vec<PaneTab>,
     transcript: Option<Result<String, String>>,
-    connection: TmuxControlPane,
+    connection: Box<dyn TerminalConnection>,
     callback_gate: Arc<TerminalCallbackGate>,
 }
 
@@ -2040,11 +2057,11 @@ impl TerminalOpenSnapshot {
         let exit_generation = self.generation;
         let state_app = app.clone();
         let run_is_grill = self.run.execution_profile == ExecutionProfile::Grill;
-        let connection = TmuxControlPane::attach(
+        let connection = self.terminal_runtime.attach_connection(
             &self.machine,
             &self.session_name,
             &self.pane_id,
-            move |data| {
+            Box::new(move |data| {
                 output_gate.dispatch_output_or_queue(data, |data| {
                     let _ = output_app.emit(
                         "terminal-output",
@@ -2056,13 +2073,13 @@ impl TerminalOpenSnapshot {
                         },
                     );
                 });
-            },
-            move |record| {
+            }),
+            Box::new(move |record| {
                 state_gate.dispatch_state_or_queue(record, |record| {
                     apply_terminal_state_record(&state_app, run_is_grill, record);
                 });
-            },
-            move |code| {
+            }),
+            Box::new(move |code| {
                 exit_gate.dispatch_exit_or_queue(code, |code| {
                     let _ = exit_app.emit(
                         "terminal-exit",
@@ -2074,13 +2091,13 @@ impl TerminalOpenSnapshot {
                         },
                     );
                 });
-            },
+            }),
         )?;
 
         let snapshot_gate = Arc::clone(&callback_gate);
-        let snapshot = match connection.capture_pane_snapshot(move || {
+        let snapshot = match connection.capture_pane_snapshot(Box::new(move || {
             snapshot_gate.mark_snapshot_captured();
-        }) {
+        })) {
             Ok(snapshot) => snapshot,
             Err(error) => {
                 let _ = connection.close();
@@ -2306,7 +2323,7 @@ pub(crate) async fn open_terminal_with_state(
     }
     let previous = runtime.terminal_connections.insert(
         observation.terminal_id.clone(),
-        Arc::new(
+        Arc::from(
             connection
                 .take()
                 .expect("new terminal connection should remain owned"),
@@ -2583,7 +2600,6 @@ fn direct_checkout_snapshot(
         .cloned()
         .ok_or_else(|| format!("Item {item_id} does not exist"))?;
     let machine = runtime.machine_for_item(item_id, machine_id)?;
-    let machine_home = machine_home_directory(&machine);
     let repositories = runtime
         .state
         .repositories
@@ -2610,10 +2626,9 @@ fn direct_checkout_snapshot(
                     repository.name, machine.name
                 )
             })?;
-        let path = match machine.transport {
-            MachineTransport::Local => resolve_machine_path(&location.checkout_path, &machine_home),
-            MachineTransport::Ssh { .. } => PathBuf::from(&location.checkout_path),
-        };
+        let path = runtime
+            .machine_access
+            .resolve_path(&machine, &location.checkout_path);
         inputs.push((repository, location, path));
     }
     let context_id = runtime.item_context_id(item_id)?;
@@ -2806,1121 +2821,12 @@ pub(crate) async fn prepare_direct_run_with_state(
     runtime.apply_direct_checkout_observation(observation)
 }
 
-#[derive(Clone)]
-enum RunLaunchInput {
-    Direct {
-        item_id: i64,
-        workspace_id: i64,
-        machine_id: Option<i64>,
-        primary_repository_id: i64,
-        agent: AgentKind,
-        configuration: Option<GrillConfiguration>,
-        implementation_queue: Option<crate::domain::ImplementationQueueStart>,
-        execution_profile: ExecutionProfile,
-        workflow: crate::domain::Workflow,
-        prompt: String,
-        prompt_selection: RunPromptSelection,
-        expected_checkouts: Vec<RunCheckout>,
-        allow_dirty: bool,
-        allow_shared_checkouts: bool,
-    },
-    Grill {
-        item_id: i64,
-        workspace_id: i64,
-        machine_id: Option<i64>,
-        primary_repository_id: i64,
-        configuration: GrillConfiguration,
-        prompt: String,
-        expected_checkouts: Vec<RunCheckout>,
-        allow_dirty: bool,
-        allow_shared_checkouts: bool,
-    },
-    Worktree {
-        item_id: i64,
-        workspace_id: i64,
-        worktree_id: i64,
-        agent: AgentKind,
-        configuration: Option<GrillConfiguration>,
-        execution_profile: ExecutionProfile,
-        workflow: crate::domain::Workflow,
-        prompt: String,
-        prompt_selection: RunPromptSelection,
-    },
-}
-
-impl RunLaunchInput {
-    fn item_id(&self) -> i64 {
-        match self {
-            Self::Direct { item_id, .. }
-            | Self::Grill { item_id, .. }
-            | Self::Worktree { item_id, .. } => *item_id,
-        }
-    }
-
-    fn agent(&self) -> AgentKind {
-        match self {
-            Self::Direct { agent, .. } | Self::Worktree { agent, .. } => *agent,
-            Self::Grill { configuration, .. } => configuration.agent,
-        }
-    }
-
-    fn expected_checkouts(&self) -> Option<&[RunCheckout]> {
-        match self {
-            Self::Direct {
-                expected_checkouts, ..
-            }
-            | Self::Grill {
-                expected_checkouts, ..
-            } => Some(expected_checkouts),
-            Self::Worktree { .. } => None,
-        }
-    }
-
-    fn session_kind(&self) -> &'static str {
-        match self {
-            Self::Grill { .. } => "grill",
-            Self::Direct { .. } | Self::Worktree { .. } => "run",
-        }
-    }
-
-    fn workflow(&self) -> crate::domain::Workflow {
-        match self {
-            Self::Direct { workflow, .. } | Self::Worktree { workflow, .. } => *workflow,
-            Self::Grill { .. } => crate::domain::Workflow::MattPocock,
-        }
-    }
-}
-
-#[derive(Clone)]
-struct WorktreeRunIdentity {
-    workspace: Workspace,
-    worktree: Worktree,
-    repository: Repository,
-}
-
-#[derive(Clone)]
-struct RunLaunchSnapshot {
-    state: DomainState,
-    item: Item,
-    project: Project,
-    context: Context,
-    workspace: Workspace,
-    machine: Machine,
-    cli_configuration_profile: Option<crate::domain::CliConfigurationProfile>,
-    terminal_runtime: Arc<dyn TerminalRuntime>,
-    preferred_executable: Option<PathBuf>,
-    input: RunLaunchInput,
-    prompt: String,
-    direct_checkout: Option<DirectCheckoutSnapshot>,
-    worktree: Option<WorktreeRunIdentity>,
-    run_id: i64,
-    session_name: String,
-    gate_channel: String,
-    started_at: i64,
-}
-
-struct RunLaunchObservation {
-    snapshot: RunLaunchSnapshot,
-    working_directory: String,
-    checkouts: Vec<RunCheckout>,
-}
-
-impl RunLaunchSnapshot {
-    fn event(&self, session_name: String, pane_id: String, checkouts: Vec<RunCheckout>) -> Event {
-        match &self.input {
-            RunLaunchInput::Direct {
-                item_id,
-                workspace_id,
-                primary_repository_id,
-                agent,
-                configuration,
-                implementation_queue,
-                execution_profile,
-                workflow,
-                prompt_selection,
-                allow_dirty,
-                allow_shared_checkouts,
-                ..
-            } => {
-                let working_directory = checkouts
-                    .iter()
-                    .find(|checkout| checkout.repository_id == *primary_repository_id)
-                    .map(|checkout| checkout.path.clone())
-                    .unwrap_or_default();
-                Event::StartDirectRun {
-                    item_id: *item_id,
-                    workspace_id: *workspace_id,
-                    machine_id: self.machine.id,
-                    agent: *agent,
-                    configuration: configuration.clone(),
-                    implementation_queue: implementation_queue.clone(),
-                    execution_profile: *execution_profile,
-                    workflow: *workflow,
-                    prompt: self.prompt.clone(),
-                    working_directory,
-                    session_name,
-                    pane_id,
-                    started_at: self.started_at,
-                    prompt_selection: prompt_selection.clone(),
-                    checkouts,
-                    repository_id: *primary_repository_id,
-                    allow_dirty: *allow_dirty || !self.context.check_dirty_checkouts,
-                    allow_shared_checkouts: *allow_shared_checkouts,
-                }
-            }
-            RunLaunchInput::Grill {
-                item_id,
-                workspace_id,
-                primary_repository_id,
-                configuration,
-                ..
-            } => {
-                let working_directory = checkouts
-                    .iter()
-                    .find(|checkout| checkout.repository_id == *primary_repository_id)
-                    .map(|checkout| checkout.path.clone())
-                    .unwrap_or_default();
-                Event::StartGrillRun {
-                    item_id: *item_id,
-                    workspace_id: *workspace_id,
-                    repository_id: *primary_repository_id,
-                    machine_id: self.machine.id,
-                    configuration: configuration.clone(),
-                    prompt: self.prompt.clone(),
-                    skill_snapshot: crate::domain::grill_skill_snapshot().into(),
-                    working_directory,
-                    session_name,
-                    pane_id,
-                    started_at: self.started_at,
-                    checkouts,
-                }
-            }
-            RunLaunchInput::Worktree {
-                item_id,
-                workspace_id,
-                worktree_id,
-                agent,
-                configuration,
-                execution_profile,
-                workflow,
-                prompt_selection,
-                ..
-            } => Event::StartWorktreeRun {
-                item_id: *item_id,
-                workspace_id: *workspace_id,
-                worktree_id: *worktree_id,
-                machine_id: self.machine.id,
-                agent: *agent,
-                configuration: configuration.clone(),
-                execution_profile: *execution_profile,
-                workflow: *workflow,
-                prompt: self.prompt.clone(),
-                working_directory: self
-                    .worktree
-                    .as_ref()
-                    .map(|identity| identity.worktree.path.clone())
-                    .unwrap_or_default(),
-                session_name,
-                pane_id,
-                started_at: self.started_at,
-                prompt_selection: prompt_selection.clone(),
-            },
-        }
-    }
-
-    fn is_current(&self, runtime: &Runtime) -> bool {
-        if runtime.state.next_run_id != self.run_id
-            || !runtime
-                .state
-                .items
-                .iter()
-                .any(|current| current == &self.item)
-            || !runtime
-                .state
-                .projects
-                .iter()
-                .any(|current| current == &self.project)
-            || !runtime
-                .state
-                .contexts
-                .iter()
-                .any(|current| current == &self.context)
-            || !runtime
-                .state
-                .workspaces
-                .iter()
-                .any(|current| current == &self.workspace)
-            || !runtime
-                .state
-                .machines
-                .iter()
-                .any(|current| machine_execution_identity_matches(current, &self.machine))
-        {
-            return false;
-        }
-        if let Some(snapshot) = &self.direct_checkout {
-            if !runtime.direct_checkout_snapshot_is_current(snapshot) {
-                return false;
-            }
-        }
-        if let Some(identity) = &self.worktree {
-            if !runtime
-                .state
-                .worktrees
-                .iter()
-                .any(|current| current == &identity.worktree)
-                || !runtime
-                    .state
-                    .repositories
-                    .iter()
-                    .any(|current| current == &identity.repository)
-            {
-                return false;
-            }
-        }
-        true
-    }
-
-    fn observe(self) -> Result<RunLaunchObservation, String> {
-        let (working_directory, checkouts) = match &self.input {
-            RunLaunchInput::Direct {
-                primary_repository_id,
-                expected_checkouts,
-                ..
-            }
-            | RunLaunchInput::Grill {
-                primary_repository_id,
-                expected_checkouts,
-                ..
-            } => {
-                let checkout = self
-                    .direct_checkout
-                    .as_ref()
-                    .ok_or_else(|| "Direct checkout snapshot is unavailable".to_owned())?
-                    .clone()
-                    .observe()?;
-                let checkouts = checkout
-                    .checkouts
-                    .iter()
-                    .map(|checkout| RunCheckout {
-                        repository_id: checkout.repository_id,
-                        path: checkout.path.clone(),
-                        branch: checkout.branch.clone(),
-                        is_dirty: checkout.is_dirty,
-                    })
-                    .collect::<Vec<_>>();
-                if !run_checkout_previews_match(
-                    expected_checkouts,
-                    &checkouts,
-                    self.context.check_dirty_checkouts,
-                ) {
-                    return Err(match &self.input {
-                        RunLaunchInput::Direct { .. } => "A Direct checkout changed after the preview (branch or dirty state); review the Direct Run preview again before starting".into(),
-                        _ => "A Grill checkout changed after the preview (branch or dirty state); review the Grill preview again before starting".into(),
-                    });
-                }
-                let working_directory = checkouts
-                    .iter()
-                    .find(|checkout| checkout.repository_id == *primary_repository_id)
-                    .map(|checkout| checkout.path.clone())
-                    .ok_or_else(|| {
-                        "Choose a configured Repository checkout before starting".to_owned()
-                    })?;
-                (working_directory, checkouts)
-            }
-            RunLaunchInput::Worktree { .. } => {
-                let identity = self
-                    .worktree
-                    .as_ref()
-                    .ok_or_else(|| "Worktree snapshot is unavailable".to_owned())?;
-                let checkout_path = match self.machine.transport {
-                    MachineTransport::Local => resolve_machine_path(
-                        &identity.worktree.path,
-                        &machine_home_directory(&self.machine),
-                    ),
-                    MachineTransport::Ssh { .. } => PathBuf::from(&identity.worktree.path),
-                };
-                let inspection = GitCli::system()
-                    .inspect_checkout_on_machine(&self.machine, &checkout_path)
-                    .map_err(|error| {
-                        format!(
-                            "Could not inspect Worktree {} on Machine {}: {error}",
-                            identity.worktree.path, self.machine.name
-                        )
-                    })?;
-                if inspection.current_branch != identity.worktree.branch {
-                    return Err(
-                        "The Worktree branch changed after it was approved; review the Worktree before starting a Run".into(),
-                    );
-                }
-                match inspection.remote_url.as_deref() {
-                    Some(remote_url) if remote_url == identity.repository.remote_url => {}
-                    Some(_) => {
-                        return Err(
-                            "The Worktree remote does not match its registered Repository".into(),
-                        )
-                    }
-                    None => {
-                        return Err(
-                            "The Worktree has no configured remote for its registered Repository"
-                                .into(),
-                        )
-                    }
-                }
-                (identity.worktree.path.clone(), Vec::new())
-            }
-        };
-        let event = self.event(
-            format!("{}-preflight", self.session_name),
-            "%preflight".into(),
-            checkouts.clone(),
-        );
-        if let RunLaunchInput::Grill {
-            allow_dirty,
-            allow_shared_checkouts,
-            ..
-        } = &self.input
-        {
-            validate_grill_launch_approvals(
-                &self.state,
-                self.machine.id,
-                &checkouts,
-                self.context.check_dirty_checkouts,
-                *allow_dirty,
-                *allow_shared_checkouts,
-            )?;
-        }
-        decide(self.state.clone(), event).map_err(|error| error.to_string())?;
-        Ok(RunLaunchObservation {
-            snapshot: self,
-            working_directory,
-            checkouts,
-        })
-    }
-}
-
-fn machine_execution_identity_matches(current: &Machine, expected: &Machine) -> bool {
-    current.id == expected.id
-        && current.context_id == expected.context_id
-        && current.name == expected.name
-        && current.socket_name == expected.socket_name
-        && current.transport == expected.transport
-}
-
-fn run_checkout_previews_match(
-    expected: &[RunCheckout],
-    observed: &[RunCheckout],
-    check_dirty_checkouts: bool,
-) -> bool {
-    expected.len() == observed.len()
-        && expected.iter().zip(observed).all(|(expected, observed)| {
-            expected.repository_id == observed.repository_id
-                && expected.path == observed.path
-                && expected.branch == observed.branch
-                && (!check_dirty_checkouts || expected.is_dirty == observed.is_dirty)
-        })
-}
-
-fn validate_grill_launch_approvals(
-    state: &DomainState,
-    machine_id: i64,
-    checkouts: &[RunCheckout],
-    check_dirty_checkouts: bool,
-    allow_dirty: bool,
-    allow_shared_checkouts: bool,
-) -> Result<(), String> {
-    if check_dirty_checkouts && !allow_dirty {
-        let dirty_repository_ids = checkouts
-            .iter()
-            .filter(|checkout| checkout.is_dirty)
-            .map(|checkout| checkout.repository_id)
-            .collect::<Vec<_>>();
-        if !dirty_repository_ids.is_empty() {
-            return Err(format!(
-                "Grill checkout(s) are dirty: {}; review the preview and confirm before starting",
-                dirty_repository_ids
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-    }
-    if !allow_shared_checkouts {
-        let shared_paths = state
-            .runs
-            .iter()
-            .filter(|run| {
-                run.machine_id == machine_id
-                    && run_is_active(run)
-                    && run.pane_status != RunPaneStatus::Missing
-            })
-            .flat_map(|run| {
-                checkouts.iter().filter_map(move |checkout| {
-                    run.direct_checkouts
-                        .iter()
-                        .any(|active| active.path == checkout.path)
-                        .then_some(checkout.path.clone())
-                })
-            })
-            .collect::<Vec<_>>();
-        if !shared_paths.is_empty() {
-            return Err(format!(
-                "Grill checkout(s) are already used by an active Run: {}; review the preview and confirm before starting",
-                shared_paths.join(", ")
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn worktree_run_identity(
-    runtime: &mut Runtime,
-    item_id: i64,
-    workspace_id: i64,
-    worktree_id: i64,
-) -> Result<(Machine, WorktreeRunIdentity), String> {
-    let workspace = runtime
-        .state
-        .workspaces
-        .iter()
-        .find(|workspace| workspace.id == workspace_id && workspace.item_id == item_id)
-        .cloned()
-        .ok_or_else(|| format!("Workspace {workspace_id} does not belong to Item {item_id}"))?;
-    let worktree = runtime
-        .state
-        .worktrees
-        .iter()
-        .find(|worktree| worktree.id == worktree_id && worktree.workspace_id == workspace_id)
-        .cloned()
-        .ok_or_else(|| format!("Worktree {worktree_id} is not registered for this Item"))?;
-    let repository = runtime
-        .state
-        .repositories
-        .iter()
-        .find(|repository| repository.id == worktree.repository_id)
-        .cloned()
-        .ok_or_else(|| format!("Repository {} does not exist", worktree.repository_id))?;
-    let machine = runtime.machine_for_item(item_id, Some(worktree.machine_id))?;
-    Ok((
-        machine,
-        WorktreeRunIdentity {
-            workspace,
-            worktree,
-            repository,
-        },
-    ))
-}
-
-fn run_launch_snapshot(
-    runtime: &mut Runtime,
-    input: RunLaunchInput,
-) -> Result<RunLaunchSnapshot, String> {
-    match &input {
-        RunLaunchInput::Direct {
-            configuration: Some(configuration),
-            agent,
-            ..
-        }
-        | RunLaunchInput::Worktree {
-            configuration: Some(configuration),
-            agent,
-            ..
-        } => {
-            crate::domain::validate_grill_configuration(configuration)
-                .map_err(|error| error.to_string())?;
-            if configuration.agent != *agent {
-                return Err("Run model configuration must match the selected agent".into());
-            }
-        }
-        RunLaunchInput::Grill { configuration, .. } => {
-            crate::domain::validate_grill_configuration(configuration)
-                .map_err(|error| error.to_string())?
-        }
-        _ => {}
-    }
-    let (machine, direct_checkout, worktree) = match &input {
-        RunLaunchInput::Direct {
-            item_id,
-            workspace_id,
-            machine_id,
-            ..
-        }
-        | RunLaunchInput::Grill {
-            item_id,
-            workspace_id,
-            machine_id,
-            ..
-        } => {
-            let checkout = direct_checkout_snapshot(runtime, *item_id, *workspace_id, *machine_id)?;
-            (checkout.machine.clone(), Some(checkout), None)
-        }
-        RunLaunchInput::Worktree {
-            item_id,
-            workspace_id,
-            worktree_id,
-            ..
-        } => {
-            let (machine, identity) =
-                worktree_run_identity(runtime, *item_id, *workspace_id, *worktree_id)?;
-            (machine, None, Some(identity))
-        }
-    };
-    let item = runtime
-        .state
-        .items
-        .iter()
-        .find(|item| item.id == input.item_id())
-        .cloned()
-        .ok_or_else(|| format!("Item {} does not exist", input.item_id()))?;
-    let project = runtime
-        .state
-        .projects
-        .iter()
-        .find(|project| project.id == item.project_id)
-        .cloned()
-        .ok_or_else(|| format!("Project {} does not exist", item.project_id))?;
-    let context = runtime
-        .state
-        .contexts
-        .iter()
-        .find(|context| context.id == project.context_id)
-        .cloned()
-        .ok_or_else(|| format!("Context {} does not exist", project.context_id))?;
-    let profile_id = context.cli_configuration_profile_id(input.agent());
-    let cli_configuration_profile = profile_id
-        .map(|profile_id| {
-            runtime
-                .state
-                .cli_configuration_profiles
-                .iter()
-                .find(|profile| {
-                    profile.id == profile_id
-                        && profile.machine_id == machine.id
-                        && profile.provider == input.agent()
-                })
-                .cloned()
-                .ok_or_else(|| {
-                    format!(
-                        "Selected {} configuration profile {profile_id} is unavailable on Machine {}",
-                        agent_display_name(input.agent()),
-                        machine.name
-                    )
-                })
-        })
-        .transpose()?;
-    let workspace = direct_checkout
-        .as_ref()
-        .map(|snapshot| snapshot.workspace.clone())
-        .or_else(|| worktree.as_ref().map(|snapshot| snapshot.workspace.clone()))
-        .ok_or_else(|| "Run Workspace snapshot is unavailable".to_owned())?;
-    let run_id = runtime.state.next_run_id;
-    let session_name = format!(
-        "mission-item-{}-{}-{}",
-        input.item_id(),
-        input.session_kind(),
-        run_id
-    );
-    let gate_channel = format!("mission-launch-{run_id}-{session_name}");
-    let prompt = match &input {
-        RunLaunchInput::Grill { prompt, .. } => {
-            crate::domain::clean_name(prompt.clone(), crate::domain::DomainError::EmptyRunPrompt)
-                .map_err(|error| error.to_string())?
-        }
-        RunLaunchInput::Direct {
-            implementation_queue: Some(queue),
-            ..
-        } => {
-            let ticket = queue
-                .entries
-                .first()
-                .ok_or_else(|| "Implementation Queue has no tickets".to_owned())?;
-            implementation_queue_entry_prompt(ticket, &queue.spec_url)
-        }
-        RunLaunchInput::Direct { prompt, .. } | RunLaunchInput::Worktree { prompt, .. } => {
-            prompt.clone()
-        }
-    };
-    let preferred_executable = runtime.preferred_agent_executable(&machine, input.agent())?;
-    let snapshot = RunLaunchSnapshot {
-        state: runtime.state.clone(),
-        item,
-        project,
-        context,
-        workspace,
-        machine: machine.clone(),
-        cli_configuration_profile,
-        terminal_runtime: Arc::clone(&runtime.terminal_runtime),
-        preferred_executable,
-        input,
-        prompt,
-        direct_checkout,
-        worktree,
-        run_id,
-        session_name,
-        gate_channel,
-        started_at: current_unix_seconds(),
-    };
-    let checkout_values = snapshot
-        .input
-        .expected_checkouts()
-        .unwrap_or_default()
-        .to_vec();
-    if let RunLaunchInput::Grill {
-        allow_dirty,
-        allow_shared_checkouts,
-        ..
-    } = &snapshot.input
-    {
-        validate_grill_launch_approvals(
-            &runtime.state,
-            snapshot.machine.id,
-            &checkout_values,
-            snapshot.context.check_dirty_checkouts,
-            *allow_dirty,
-            *allow_shared_checkouts,
-        )?;
-    }
-    let candidate = snapshot.event(
-        format!("{}-preflight", snapshot.session_name),
-        "%preflight".into(),
-        checkout_values,
-    );
-    decide(runtime.state.clone(), candidate).map_err(|error| error.to_string())?;
-    Ok(snapshot)
-}
-
-async fn start_run_with_state(
-    input: RunLaunchInput,
-    state: &Mutex<Runtime>,
-) -> Result<Run, String> {
-    let serial = {
-        let runtime = state
-            .lock()
-            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
-        Arc::clone(&runtime.run_launch_lock)
-    };
-    let _serial_guard = serial.lock().await;
-    let snapshot = {
-        let mut runtime = state
-            .lock()
-            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
-        run_launch_snapshot(&mut runtime, input)?
-    };
-    let observation_snapshot = snapshot.clone();
-    let observation = tauri::async_runtime::spawn_blocking(move || observation_snapshot.observe())
-        .await
-        .map_err(|error| format!("Run checkout inspection worker failed: {error}"))??;
-    let preflight_snapshot = observation.snapshot.clone();
-    let preflight_result = tauri::async_runtime::spawn_blocking(move || {
-        let terminal_runtime = Arc::clone(&preflight_snapshot.terminal_runtime);
-        let machine = preflight_snapshot.machine.clone();
-        let preferred_executable = preflight_snapshot.preferred_executable.clone();
-        let profile = preflight_snapshot.cli_configuration_profile.clone();
-        terminal_runtime.preflight_agent_run(
-            &machine,
-            preflight_snapshot.input.agent(),
-            preflight_snapshot.run_id,
-            preferred_executable.as_deref(),
-            profile.as_ref(),
-        )
-    })
-    .await
-    .map_err(|error| format!("Run preflight worker failed: {error}"))?;
-    let mut readiness = preflight_result.readiness.clone();
-    let preflight_values = (|| {
-        if let Some(error) = readiness.error.clone() {
-            return Err(format!(
-                "Run preflight failed on Machine {}. The Run was not started locally: {error}",
-                observation.snapshot.machine.name
-            ));
-        }
-        let executable = preflight_result.executable.clone().ok_or_else(|| {
-            let error = format!(
-                "{} executable did not resolve on Machine {}",
-                agent_display_name(observation.snapshot.input.agent()),
-                observation.snapshot.machine.name
-            );
-            readiness.error = Some(error.clone());
-            error
-        })?;
-        let state_file = preflight_result.state_file.clone().ok_or_else(|| {
-            let error = format!(
-                "Agent state file path was not prepared on Machine {}",
-                observation.snapshot.machine.name
-            );
-            readiness.error = Some(error.clone());
-            error
-        })?;
-        Ok((executable, state_file))
-    })();
-    {
-        let mut runtime = state
-            .lock()
-            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
-        if !observation.snapshot.is_current(&runtime) {
-            return Err("The Item, Workspace, Repository, Worktree, or Machine changed while the Run was being prepared; review it again".into());
-        }
-        if let Err(error) = &preflight_values {
-            if readiness.error.is_none() {
-                readiness.error = Some(error.clone());
-            }
-            runtime
-                .machine_readiness
-                .insert(observation.snapshot.machine.id, readiness);
-            return Err(error.clone());
-        }
-        runtime
-            .machine_readiness
-            .insert(observation.snapshot.machine.id, readiness);
-        let (executable, _) = preflight_values.as_ref().expect("checked preflight values");
-        if let Err(error) = runtime.store_agent_executable(
-            &observation.snapshot.machine,
-            observation.snapshot.input.agent(),
-            executable,
-        ) {
-            let readiness = runtime
-                .machine_readiness
-                .get_mut(&observation.snapshot.machine.id)
-                .expect("preflight readiness was just stored");
-            readiness.error = Some(error.clone());
-            return Err(format!(
-                "Run preflight failed on Machine {}. The Run was not started locally: {error}",
-                observation.snapshot.machine.name
-            ));
-        }
-        runtime.observe_machine(
-            observation.snapshot.machine.id,
-            MachineObservation::Available,
-        )?;
-    }
-    let (executable, state_file) = preflight_values?;
-    let profile_directory = preflight_result.profile_directory.clone();
-    {
-        let runtime = state
-            .lock()
-            .map_err(|_| "Mission Manager state is unavailable".to_owned())?;
-        if !observation.snapshot.is_current(&runtime) {
-            return Err("The Item, Workspace, Repository, Worktree, or Machine changed while the Run was being prepared; review it again".into());
-        }
-    }
-    let (agent, model, effort) = match &observation.snapshot.input {
-        RunLaunchInput::Grill { configuration, .. } => (
-            configuration.agent,
-            Some(configuration.model.clone()),
-            Some(configuration.effort.clone()),
-        ),
-        RunLaunchInput::Direct {
-            configuration: Some(configuration),
-            ..
-        }
-        | RunLaunchInput::Worktree {
-            configuration: Some(configuration),
-            ..
-        } => (
-            configuration.agent,
-            Some(configuration.model.clone()),
-            Some(configuration.effort.clone()),
-        ),
-        _ => (observation.snapshot.input.agent(), None, None),
-    };
-    let run_id = observation.snapshot.run_id;
-    let terminal_runtime = Arc::clone(&observation.snapshot.terminal_runtime);
-    let machine = observation.snapshot.machine.clone();
-    let session_name = observation.snapshot.session_name.clone();
-    let gate_channel = observation.snapshot.gate_channel.clone();
-    let working_directory = observation.working_directory.clone();
-    let prompt = observation.snapshot.prompt.clone();
-    if observation.snapshot.input.workflow() == crate::domain::Workflow::Pstack {
-        let provision_runtime = Arc::clone(&observation.snapshot.terminal_runtime);
-        let provision_machine = observation.snapshot.machine.clone();
-        let root = tauri::async_runtime::spawn_blocking(move || {
-            provision_runtime.provision_pstack_tree(&provision_machine)
-        })
-        .await
-        .map_err(|error| format!("pstack provisioning worker failed: {error}"))??;
-        let context = &observation.snapshot.context;
-        let claude_profile = context.claude_profile_id.and_then(|profile_id| {
-            observation.snapshot.state.cli_configuration_profiles.iter().find(|profile| profile.id == profile_id)
-        });
-        let codex_profile = context.codex_profile_id.and_then(|profile_id| {
-            observation.snapshot.state.cli_configuration_profiles.iter().find(|profile| profile.id == profile_id)
-        });
-        let role_path = crate::domain::pstack_role_file_path(&root, context);
-        let role_contents = crate::domain::compose_pstack_role_file(
-            observation.snapshot.input.agent(),
-            &context.pstack_roles,
-            claude_profile,
-            codex_profile,
-        );
-        let role_runtime = Arc::clone(&observation.snapshot.terminal_runtime);
-        let role_machine = observation.snapshot.machine.clone();
-        let role_file_path = PathBuf::from(&role_path);
-        tauri::async_runtime::spawn_blocking(move || {
-            role_runtime.write_pstack_role_file(&role_machine, &role_file_path, &role_contents)
-        })
-        .await
-        .map_err(|error| format!("pstack role-file worker failed: {error}"))??;
-    }
-    let pane_id = tauri::async_runtime::spawn_blocking(move || {
-        let launch = AgentLaunchContext {
-            run_id,
-            state_file: &state_file,
-            agent,
-            model: model.as_deref(),
-            effort: effort.as_deref(),
-            profile_directory: profile_directory.as_deref(),
-        };
-        terminal_runtime.launch_agent(
-            &machine,
-            &session_name,
-            &gate_channel,
-            Path::new(&working_directory),
-            &executable,
-            &prompt,
-            launch,
-        )
-    })
-    .await
-    .map_err(|error| format!("Agent launch worker failed: {error}"))??;
-
-    let record_result = match state.lock() {
-        Ok(mut runtime) => {
-            if !observation.snapshot.is_current(&runtime) {
-                Err("The Item, Workspace, Repository, Worktree, or Machine changed before the Run could be recorded; review it again".to_owned())
-            } else {
-                let approval = match &observation.snapshot.input {
-                    RunLaunchInput::Grill {
-                        allow_dirty,
-                        allow_shared_checkouts,
-                        ..
-                    } => validate_grill_launch_approvals(
-                        &runtime.state,
-                        observation.snapshot.machine.id,
-                        &observation.checkouts,
-                        observation.snapshot.context.check_dirty_checkouts,
-                        *allow_dirty,
-                        *allow_shared_checkouts,
-                    ),
-                    _ => Ok(()),
-                };
-                match approval {
-                    Err(error) => Err(error),
-                    Ok(()) => {
-                        let decision = decide(
-                            runtime.state.clone(),
-                            observation.snapshot.event(
-                                observation.snapshot.session_name.clone(),
-                                pane_id,
-                                observation.checkouts.clone(),
-                            ),
-                        )
-                        .map_err(|error| error.to_string());
-                        match decision {
-                            Ok(decision) => {
-                                let run = decision
-                                    .state
-                                    .runs
-                                    .last()
-                                    .cloned()
-                                    .ok_or_else(|| "Run creation produced no Run".to_owned());
-                                match run {
-                                    Ok(run) => match runtime.commit(decision) {
-                                        Ok(()) => Ok(run),
-                                        Err(error) => Err(error),
-                                    },
-                                    Err(error) => Err(error),
-                                }
-                            }
-                            Err(error) => Err(error),
-                        }
-                    }
-                }
-            }
-        }
-        Err(_) => {
-            Err("Mission Manager state is unavailable after the gated Pane was created".to_owned())
-        }
-    };
-    let run = match record_result {
-        Ok(run) => run,
-        Err(error) => {
-            let terminal_runtime = Arc::clone(&observation.snapshot.terminal_runtime);
-            let machine = observation.snapshot.machine.clone();
-            let session_name = observation.snapshot.session_name.clone();
-            let cleanup = tauri::async_runtime::spawn_blocking(move || {
-                terminal_runtime.kill_session(&machine, &session_name)
-            })
-            .await
-            .map_err(|worker_error| format!("Launch cleanup worker failed: {worker_error}"));
-            let cleanup_error = match cleanup {
-                Ok(result) => result.err(),
-                Err(error) => Some(error),
-            };
-            return Err(format_commit_error(error, cleanup_error));
-        }
-    };
-
-    let terminal_runtime = Arc::clone(&observation.snapshot.terminal_runtime);
-    let machine = observation.snapshot.machine.clone();
-    let gate_channel = observation.snapshot.gate_channel.clone();
-    let release = tauri::async_runtime::spawn_blocking(move || {
-        terminal_runtime.release_agent_launch(&machine, &gate_channel)
-    })
-    .await
-    .map_err(|error| format!("Launch release worker failed: {error}"));
-    let release_error = match release {
-        Ok(Ok(())) => None,
-        Ok(Err(error)) => Some(error),
-        Err(error) => Some(error),
-    };
-    if let Some(error) = release_error {
-        return Err(format!(
-            "Run {} is recorded but the agent was not released: {error}",
-            run.id
-        ));
-    }
-    Ok(run)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn start_direct_run_with_queue_state(
-    item_id: i64,
-    workspace_id: i64,
-    machine_id: Option<i64>,
-    primary_repository_id: i64,
-    agent: AgentKind,
-    configuration: Option<GrillConfiguration>,
-    implementation_queue: Option<crate::domain::ImplementationQueueStart>,
-    execution_profile: ExecutionProfile,
-    workflow: crate::domain::Workflow,
-    prompt: String,
-    prompt_selection: RunPromptSelection,
-    expected_checkouts: Vec<RunCheckout>,
-    allow_dirty: bool,
-    allow_shared_checkouts: bool,
-    state: &Mutex<Runtime>,
-) -> Result<Run, String> {
-    start_run_with_state(
-        RunLaunchInput::Direct {
-            item_id,
-            workspace_id,
-            machine_id,
-            primary_repository_id,
-            agent,
-            configuration,
-            implementation_queue,
-            execution_profile,
-            workflow,
-            prompt,
-            prompt_selection,
-            expected_checkouts,
-            allow_dirty,
-            allow_shared_checkouts,
-        },
-        state,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-pub(crate) async fn start_direct_run_with_state(
-    item_id: i64,
-    workspace_id: i64,
-    machine_id: Option<i64>,
-    primary_repository_id: i64,
-    agent: AgentKind,
-    configuration: Option<GrillConfiguration>,
-    execution_profile: ExecutionProfile,
-    prompt: String,
-    prompt_selection: RunPromptSelection,
-    expected_checkouts: Vec<RunCheckout>,
-    allow_dirty: bool,
-    allow_shared_checkouts: bool,
-    state: &Mutex<Runtime>,
-) -> Result<Run, String> {
-    start_direct_run_with_queue_state(
-        item_id,
-        workspace_id,
-        machine_id,
-        primary_repository_id,
-        agent,
-        configuration,
-        None,
-        execution_profile,
-        crate::domain::Workflow::MattPocock,
-        prompt,
-        prompt_selection,
-        expected_checkouts,
-        allow_dirty,
-        allow_shared_checkouts,
-        state,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn start_grill_run_with_state(
-    item_id: i64,
-    workspace_id: i64,
-    machine_id: Option<i64>,
-    primary_repository_id: i64,
-    configuration: GrillConfiguration,
-    language: GrillLanguage,
-    prompt: String,
-    expected_checkouts: Vec<RunCheckout>,
-    allow_dirty: bool,
-    allow_shared_checkouts: bool,
-    state: &Mutex<Runtime>,
-) -> Result<Run, String> {
-    let prompt = language.enforce_prompt(&prompt);
-    start_run_with_state(
-        RunLaunchInput::Grill {
-            item_id,
-            workspace_id,
-            machine_id,
-            primary_repository_id,
-            configuration,
-            prompt,
-            expected_checkouts,
-            allow_dirty,
-            allow_shared_checkouts,
-        },
-        state,
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn start_worktree_run_with_state(
-    item_id: i64,
-    workspace_id: i64,
-    worktree_id: i64,
-    agent: AgentKind,
-    configuration: Option<GrillConfiguration>,
-    execution_profile: ExecutionProfile,
-    workflow: crate::domain::Workflow,
-    prompt: String,
-    prompt_selection: RunPromptSelection,
-    state: &Mutex<Runtime>,
-) -> Result<Run, String> {
-    start_run_with_state(
-        RunLaunchInput::Worktree {
-            item_id,
-            workspace_id,
-            worktree_id,
-            agent,
-            configuration,
-            execution_profile,
-            workflow,
-            prompt,
-            prompt_selection,
-        },
-        state,
-    )
-    .await
-}
+pub(crate) mod run_launcher;
+#[cfg(test)]
+pub(crate) use run_launcher::{
+    start_direct_run_with_queue_state, start_direct_run_with_state, start_grill_run_with_state,
+    start_worktree_run_with_state,
+};
 
 impl Runtime {
     fn downstream_capture_config(&self, run: &Run) -> DownstreamCaptureConfig {
@@ -3939,7 +2845,7 @@ impl Runtime {
             .machines
             .iter()
             .find(|machine| machine.id == run.machine_id)
-            .is_some_and(|machine| matches!(machine.transport, MachineTransport::Local));
+            .is_some_and(|machine| self.machine_access.is_local(machine));
         let mut local_checkouts = Vec::new();
         if local_machine {
             if let Some(project_id) = item.map(|item| item.project_id) {
@@ -4091,8 +2997,8 @@ impl Runtime {
                         path: path.clone(),
                     },
                 };
-                let decision = decide(self.state.clone(), event)
-                    .map_err(|error| error.to_string())?;
+                let decision =
+                    decide(self.state.clone(), event).map_err(|error| error.to_string())?;
                 let run_changed = decision.effects.iter().any(|effect| {
                     matches!(effect, crate::domain::Effect::PersistRunReports { .. })
                 });
@@ -4685,8 +3591,8 @@ fn agent_display_name(agent: AgentKind) -> &'static str {
 mod identity_tests {
     use super::{
         direct_repository_identity_set_matches, downstream_confirmation_transcript,
-        grill_transcript_identity_matches, DeferredTerminalEvent, TerminalCallbackGate,
-        parse_pstack_reports, PstackReport,
+        grill_transcript_identity_matches, parse_pstack_reports, DeferredTerminalEvent,
+        PstackReport, TerminalCallbackGate,
     };
     use crate::domain::{Repository, RepositoryLocation};
     use crate::{

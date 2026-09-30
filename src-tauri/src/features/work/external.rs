@@ -227,7 +227,7 @@ impl Runtime {
         let machine = context
             .execution_machine_id
             .and_then(|id| self.state.machines.iter().find(|machine| machine.id == id))
-            .filter(|machine| matches!(machine.transport, MachineTransport::Local))
+            .filter(|machine| self.machine_access.is_local(machine))
             .ok_or_else(|| {
                 format!(
                     "Local Markdown tracker in Context '{}' requires a local execution Machine because files are read from the Repository's main checkout",
@@ -606,8 +606,8 @@ exit 1
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
-                plan_phase: None,
-                plan_path: None,
+            plan_phase: None,
+            plan_path: None,
         });
         runtime
             .register_repository(
@@ -822,7 +822,12 @@ exit 1
             )
             .expect("second Project should be created");
         let second_item = runtime
-            .create_item("ADO work item".into(), second_context.id, second_project.id, String::new())
+            .create_item(
+                "ADO work item".into(),
+                second_context.id,
+                second_project.id,
+                String::new(),
+            )
             .expect("second Item should be created");
         let third_context = runtime
             .create_context("Third Context".into())
@@ -1322,7 +1327,7 @@ impl Runtime {
                 .ok_or_else(|| format!("Context {context_id} does not exist"))?;
             if !context.execution_machine_id.is_some_and(|machine_id| {
                 self.state.machines.iter().any(|machine| {
-                    machine.id == machine_id && matches!(machine.transport, MachineTransport::Local)
+                    machine.id == machine_id && self.machine_access.is_local(machine)
                 })
             }) {
                 return Err(format!(
@@ -1385,7 +1390,7 @@ impl Runtime {
             .machines
             .iter()
             .find(|machine| machine.id == execution_machine_id)?;
-        if !matches!(execution_machine.transport, MachineTransport::Local) {
+        if !self.machine_access.is_local(execution_machine) {
             return None;
         }
         for repository in self

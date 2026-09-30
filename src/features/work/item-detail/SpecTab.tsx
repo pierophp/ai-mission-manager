@@ -17,30 +17,26 @@ import {
 } from "../../../components/ui/native-select";
 import { Spinner } from "../../../components/ui/spinner";
 import { errorMessage } from "../../../runtime/errors";
-import type { Context, DirectRunPreview, ExternalLinkView, GrillAgentCatalog, GrillConfiguration, ImplementationQueueStart, ItemView, Repository, SubIssue } from "../../../runtime/types";
+import type { DirectRunPreview, ExternalLinkView, GrillAgentCatalog, ImplementationQueueStart, ItemView, SubIssue } from "../../../runtime/types";
 import type { ImplementationQueuePauseReason } from "../../../runtime/types";
 import { useIssueDocumentQuery } from "../work-queries";
 import type { ItemCommands } from "../use-item-commands";
-import { workActions } from "../work-mutations";
-import { itemExecution } from "./shared";
+import { workActions } from "../work-commands";
 import { SectionLabel } from "./shared";
 import { ConfluenceHtml } from "./ConfluenceHtml";
 import { orderImplementationTickets, ticketIsOpen } from "./spec-queue";
+import { checkoutApprovalsReady, draftForProfile, updateDraftConfiguration, type RunLaunchDraft } from "./run-launch-draft";
 
 /** A Spec read fresh from its provider, followed by captured ticket Links. */
 export function SpecTab({
   view,
   specs,
-  repositories,
-  contexts,
   modelCatalog,
   commands,
   onOpenRun,
 }: {
   view: ItemView;
   specs: ExternalLinkView[];
-  repositories: Repository[];
-  contexts: Context[];
   modelCatalog: GrillAgentCatalog[];
   commands: ItemCommands;
   onOpenRun: (runId: number) => void;
@@ -70,7 +66,7 @@ export function SpecTab({
           </NativeSelect>
         </label>
       )}
-      <SpecDocument key={spec.object.id} view={view} spec={spec} repositories={repositories} contexts={contexts} modelCatalog={modelCatalog} commands={commands} onOpenRun={onOpenRun} />
+      <SpecDocument key={spec.object.id} view={view} spec={spec} modelCatalog={modelCatalog} commands={commands} onOpenRun={onOpenRun} />
     </div>
   );
 }
@@ -88,16 +84,12 @@ function queuePauseLabel(reason: ImplementationQueuePauseReason): string {
 function SpecDocument({
   view,
   spec,
-  repositories,
-  contexts,
   modelCatalog,
   commands,
   onOpenRun,
 }: {
   view: ItemView;
   spec: ExternalLinkView;
-  repositories: Repository[];
-  contexts: Context[];
   modelCatalog: GrillAgentCatalog[];
   commands: ItemCommands;
   onOpenRun: (runId: number) => void;
@@ -107,13 +99,12 @@ function SpecDocument({
   const number = spec.snapshot?.metadata.find((entry) => entry.key === "number")?.value;
   const [selected, setSelected] = useState<string[]>([]);
   const [launchOpen, setLaunchOpen] = useState(false);
-  const [configuration, setConfiguration] = useState<GrillConfiguration>({ agent: "claude", model: "claude-sonnet-5", effort: "high" });
+  const [draft, setDraft] = useState<RunLaunchDraft>();
   const [preview, setPreview] = useState<DirectRunPreview>();
   const [workspaceId, setWorkspaceId] = useState(view.workspaces[0]?.id);
   const [repositoryId, setRepositoryId] = useState<number>();
   const [dirtyConsent, setDirtyConsent] = useState(false);
   const [sharedConsent, setSharedConsent] = useState(false);
-  const { itemContext } = itemExecution(view, repositories, contexts, []);
   const specQueues = view.implementation_queues.filter((queue) => queue.specExternalObjectId === spec.object.id);
   const activeQueue = view.implementation_queues.find((queue) => queue.active);
   const specActiveQueue = specQueues.find((queue) => queue.active);
@@ -169,8 +160,9 @@ function SpecDocument({
   const selectedTickets = useMemo(() => {
     return orderImplementationTickets(tickets, selected);
   }, [selected, tickets]);
-  const agentCatalog = modelCatalog.find((catalog) => catalog.agent === configuration.agent);
-  const modelCatalogItem = agentCatalog?.models.find((model) => model.id === configuration.model);
+  const configuration = draft?.configuration;
+  const agentCatalog = modelCatalog.find((catalog) => catalog.agent === configuration?.agent);
+  const modelCatalogItem = agentCatalog?.models.find((model) => model.id === configuration?.model);
 
   async function refreshPreview(nextWorkspaceId: number) {
     setWorkspaceId(nextWorkspaceId);
@@ -186,8 +178,13 @@ function SpecDocument({
   }
 
   async function openLaunch() {
-    const defaults = itemContext?.implement_defaults;
-    if (defaults) setConfiguration(defaults);
+    try {
+      const options = await commands.workCommand.execute(workActions.getRunLaunchOptions(view.item.id, "checkout"), false);
+      setDraft(draftForProfile(options, "checkout", "implement"));
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+      return;
+    }
     setLaunchOpen(true);
     setPreview(undefined);
     setDirtyConsent(false);
@@ -197,27 +194,30 @@ function SpecDocument({
   }
 
   async function startQueue() {
-    if (!document.data || !preview || !workspaceId || !repositoryId || selectedTickets.length === 0) return;
+    if (!document.data || !preview || !workspaceId || !repositoryId || !draft || selectedTickets.length === 0) return;
     const start: ImplementationQueueStart = {
       specExternalObjectId: spec.object.id,
       specUrl: spec.object.canonical_url,
       entries: selectedTickets.map((ticket, position) => ({ position, ticketNumber: ticket.number, ticketTitle: ticket.title, ticketUrl: ticket.url, ticketState: ticket.state, runId: null, done: false, skipped: false })),
     };
-    const result = await commands.saveItem(workActions.startDirectRun({
+    const result = await commands.saveItem(workActions.startRun({
       itemId: view.item.id,
       workspaceId,
-      primaryRepositoryId: repositoryId,
-      machineId: null,
-      agent: configuration.agent,
-      configuration,
-      implementationQueue: start,
-      executionProfile: "implement",
-      workflow: "matt-pocock",
-      prompt: "Implementation Queue",
-      promptSelection: { includeObjective: true, externalObjectIds: [] },
-      expectedCheckouts: preview.checkouts,
-      allowDirty: preview.dirtyRepositoryIds.length > 0 && dirtyConsent,
-      allowSharedCheckouts: preview.sharedPaths.length > 0 && sharedConsent,
+      strategy: {
+        kind: "direct",
+        primaryRepositoryId: repositoryId,
+        machineId: null,
+        agent: draft.configuration.agent,
+        configuration: draft.configuration,
+        implementationQueue: start,
+        executionProfile: "implement",
+        workflow: draft.workflow,
+        prompt: "Implementation Queue",
+        promptSelection: { includeObjective: true, externalObjectIds: [] },
+        expectedCheckouts: preview.checkouts,
+        allowDirty: preview.dirtyRepositoryIds.length > 0 && dirtyConsent,
+        allowSharedCheckouts: preview.sharedPaths.length > 0 && sharedConsent,
+      },
     }));
     if (result) setLaunchOpen(false);
   }
@@ -296,21 +296,21 @@ function SpecDocument({
                 )}
               </div>
             )}
-            {launchOpen && (
+            {launchOpen && draft && configuration && (
               <section className="grid gap-3 rounded-md border p-4" aria-label="Implementation Queue launch confirmation">
                 <h3 className="font-heading font-medium">Confirm Implementation Queue</h3>
                 <ol className="grid gap-1 text-sm">{selectedTickets.map((ticket) => <li key={ticket.url}>#{ticket.number} · {ticket.title}</li>)}</ol>
                 {view.workspaces.length > 1 && <label className="grid gap-1 text-sm">Workspace<NativeSelect value={workspaceId} onChange={(event) => void refreshPreview(Number(event.target.value))}>{view.workspaces.map((workspace) => <NativeSelectOption value={workspace.id} key={workspace.id}>Workspace #{workspace.id}</NativeSelectOption>)}</NativeSelect></label>}
                 <p className="text-xs text-muted-foreground">Direct checkout · current branch: {preview?.checkoutDetails.map((checkout) => `${checkout.repositoryName} (${checkout.branch})`).join(", ") ?? "Loading checkout…"}</p>
                 <div className="grid gap-2 sm:grid-cols-3">
-                  <NativeSelect value={configuration.agent} onChange={(event) => { const agent = event.target.value as "claude" | "codex"; const firstModel = modelCatalog.find((catalog) => catalog.agent === agent)?.models[0]; setConfiguration({ agent, model: firstModel?.id ?? "", effort: firstModel?.efforts[0]?.id ?? "" }); }}><NativeSelectOption value="claude">Claude</NativeSelectOption><NativeSelectOption value="codex">Codex</NativeSelectOption></NativeSelect>
-                  <NativeSelect aria-label="Model" value={configuration.model} onChange={(event) => { const model = agentCatalog?.models.find((candidate) => candidate.id === event.target.value); setConfiguration({ ...configuration, model: event.target.value, effort: model?.efforts[0]?.id ?? "" }); }}>{agentCatalog?.models.map((model) => <NativeSelectOption key={model.id} value={model.id}>{model.label}</NativeSelectOption>)}</NativeSelect>
-                  <NativeSelect aria-label="Effort" value={configuration.effort} onChange={(event) => setConfiguration({ ...configuration, effort: event.target.value })}>{modelCatalogItem?.efforts.map((effort) => <NativeSelectOption key={effort.id} value={effort.id}>{effort.label}</NativeSelectOption>)}</NativeSelect>
+                  <NativeSelect value={configuration.agent} onChange={(event) => { const agent = event.target.value as "claude" | "codex"; const firstModel = modelCatalog.find((catalog) => catalog.agent === agent)?.models[0]; setDraft(updateDraftConfiguration(draft, { agent, model: firstModel?.id ?? "", effort: firstModel?.efforts[0]?.id ?? "" })); }}><NativeSelectOption value="claude">Claude</NativeSelectOption><NativeSelectOption value="codex">Codex</NativeSelectOption></NativeSelect>
+                  <NativeSelect aria-label="Model" value={configuration.model} onChange={(event) => { const model = agentCatalog?.models.find((candidate) => candidate.id === event.target.value); setDraft(updateDraftConfiguration(draft, { ...configuration, model: event.target.value, effort: model?.efforts[0]?.id ?? "" })); }}>{agentCatalog?.models.map((model) => <NativeSelectOption key={model.id} value={model.id}>{model.label}</NativeSelectOption>)}</NativeSelect>
+                  <NativeSelect aria-label="Effort" value={configuration.effort} onChange={(event) => setDraft(updateDraftConfiguration(draft, { ...configuration, effort: event.target.value }))}>{modelCatalogItem?.efforts.map((effort) => <NativeSelectOption key={effort.id} value={effort.id}>{effort.label}</NativeSelectOption>)}</NativeSelect>
                 </div>
                 {preview?.dirtyRepositoryIds.length ? <label className="flex items-start gap-2 text-sm"><Checkbox checked={dirtyConsent} onCheckedChange={(checked) => setDirtyConsent(checked === true)} />Allow the agent to use this dirty checkout.</label> : null}
                 {preview?.sharedPaths.length ? <label className="flex items-start gap-2 text-sm"><Checkbox checked={sharedConsent} onCheckedChange={(checked) => setSharedConsent(checked === true)} />Allow sharing this checkout with active Runs.</label> : null}
                 {preview?.checkoutDetails.length ? <NativeSelect value={repositoryId} onChange={(event) => setRepositoryId(Number(event.target.value))}>{preview.checkoutDetails.map((checkout) => <NativeSelectOption key={checkout.repositoryId} value={checkout.repositoryId}>{checkout.repositoryName} (current branch)</NativeSelectOption>)}</NativeSelect> : null}
-                <div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={() => setLaunchOpen(false)}>Cancel</Button><Button type="button" disabled={!preview || !repositoryId || (Boolean(preview.dirtyRepositoryIds.length) && !dirtyConsent) || (Boolean(preview.sharedPaths.length) && !sharedConsent)} onClick={() => void startQueue()}>Start first ticket</Button></div>
+                <div className="flex justify-end gap-2"><Button type="button" variant="outline" onClick={() => setLaunchOpen(false)}>Cancel</Button><Button type="button" disabled={!preview || !repositoryId || !checkoutApprovalsReady({ dirtyRepositoryCount: preview?.dirtyRepositoryIds.length ?? 0, sharedPathCount: preview?.sharedPaths.length ?? 0, dirtyConfirmed: dirtyConsent, sharedConfirmed: sharedConsent })} onClick={() => void startQueue()}>Start first ticket</Button></div>
               </section>
             )}
             {tickets.length === 0 ? (

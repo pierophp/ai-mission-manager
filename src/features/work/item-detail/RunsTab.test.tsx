@@ -5,19 +5,16 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ItemCommands } from "../use-item-commands";
 import { RunsTab } from "./RunsTab";
-import type { ItemView, Machine, Run } from "../../../runtime/types";
-import { workActions } from "../work-mutations";
+import type {
+  ItemView as GeneratedItemView,
+  Run as GeneratedRun,
+} from "../../../runtime/bindings";
+import type { Context, ItemView, Machine, Run, RunLaunchOptions } from "../../../runtime/types";
+import type { ExecutionProfile } from "../../../runtime/execution-types";
 
-const actionMocks = vi.hoisted(() => ({
-  prepareDirectRun: vi.fn(),
-  composeGrillPrompt: vi.fn(),
-  composeRunPrompt: vi.fn(),
-  startGrillRun: vi.fn(),
-  startDirectRun: vi.fn(),
-  goPlan: vi.fn((runId: number) => async () => ({ id: runId })),
-}));
+const commandMock = vi.hoisted(() => ({ command: vi.fn() }));
 
-vi.mock("../work-mutations", () => ({ workActions: actionMocks }));
+vi.mock("../../../runtime/command", () => ({ command: commandMock.command }));
 
 const preview = {
   workspaceId: 1,
@@ -40,7 +37,7 @@ const preview = {
   sharedPaths: [],
 };
 
-const view = {
+const generatedView: GeneratedItemView = {
   item: {
     id: 1,
     human_identifier: "APP-1",
@@ -59,11 +56,91 @@ const view = {
   ],
   worktrees: [],
   runs: [],
+  run_projections: [],
+  run_signals: { grillWaiting: false, runActive: false },
   implementation_queues: [],
   links: [],
-} as ItemView;
+};
+const view: ItemView = {
+  ...generatedView,
+  links: [],
+  runs: generatedView.runs.map(toUiRun),
+  worktrees: generatedView.worktrees.map((worktree) => ({
+    id: worktree.id,
+    workspace_id: worktree.workspaceId,
+    repository_id: worktree.repositoryId,
+    machine_id: worktree.machineId,
+    path: worktree.path,
+    branch: worktree.branch,
+    base_branch: worktree.baseBranch,
+    is_dirty: worktree.isDirty,
+  })),
+  workspaces: generatedView.workspaces.map((workspace) => ({
+    ...workspace,
+    repositories: workspace.repositories.map((repository) => ({
+      repository_id: repository.repositoryId,
+      branch: repository.branch,
+      base_branch: repository.baseBranch,
+    })),
+  })),
+  implementation_queues: (generatedView.implementation_queues ?? []).map(
+    (queue) => ({
+      ...queue,
+      pausedReason: queue.pausedReason ?? null,
+      entries: queue.entries.map((entry) => ({
+        ...entry,
+        done: required(entry.done, "implementation queue done state"),
+      })),
+    }),
+  ),
+};
 
-const contexts = [
+function required<T>(value: T | undefined, label: string): T {
+  if (value === undefined) throw new Error(`Generated fixture omits ${label}`);
+  return value;
+}
+
+function toUiRun(run: GeneratedRun): Run {
+  return {
+    ...run,
+    cli_configuration_profile: run.cli_configuration_profile ?? null,
+    workflow: required(run.workflow, "workflow"),
+    model: run.model ?? null,
+    effort: run.effort ?? null,
+    transcript: run.transcript ?? "",
+    reported_pull_requests: run.reported_pull_requests ?? [],
+    attention_summary: run.attention_summary ?? null,
+    grill_question_group: run.grill_question_group
+      ? {
+          ...run.grill_question_group,
+          round: required(run.grill_question_group.round, "grill round"),
+        }
+      : null,
+    grill_answers: run.grill_answers ?? [],
+    grill_decisions: run.grill_decisions ?? [],
+    grill_response: run.grill_response ?? null,
+    grill_phase: run.grill_phase ?? null,
+    grill_action: run.grill_action ?? null,
+    plan_phase: run.plan_phase ?? null,
+    plan_path: run.plan_path ?? null,
+  };
+}
+
+const mattPocockProfiles: ExecutionProfile[] = [
+  "grill",
+  "investigate",
+  "implement",
+  "review",
+  "custom",
+];
+const pstackProfiles: ExecutionProfile[] = [
+  "autonomous",
+  "plan",
+  "pstack-review",
+  "custom",
+];
+
+const contexts: Context[] = [
   {
     id: 1,
     name: "Default",
@@ -72,26 +149,26 @@ const contexts = [
     codex_profile_id: null,
     check_dirty_checkouts: false,
     grill_defaults: {
-      agent: "claude" as const,
+      agent: "claude",
       model: "claude-sonnet-4-5",
       effort: "high",
     },
     implement_defaults: {
-      agent: "claude" as const,
+      agent: "claude",
       model: "claude-sonnet-4-5",
       effort: "high",
     },
-    default_workflow: "matt-pocock" as const,
+    default_workflow: "matt-pocock",
     pstack_defaults: {
-      agent: "claude" as const,
+      agent: "claude",
       model: "claude-sonnet-4-5",
       effort: "high",
     },
     pstack_roles: [
-      { role: "code-delegate" as const, configuration: { agent: "claude" as const, model: "claude-opus-5", effort: "high" } },
-      { role: "judge-and-prose" as const, configuration: { agent: "codex" as const, model: "gpt-6-sol", effort: "high" } },
-      { role: "review-panel" as const, configuration: { agent: "codex" as const, model: "gpt-6-sol", effort: "high" } },
-      { role: "explorers" as const, configuration: { agent: "claude" as const, model: "claude-sonnet-5", effort: "medium" } },
+      { role: "code-delegate", configuration: { agent: "claude", model: "claude-opus-5", effort: "high" } },
+      { role: "judge-and-prose", configuration: { agent: "codex", model: "gpt-6-sol", effort: "high" } },
+      { role: "review-panel", configuration: { agent: "codex", model: "gpt-6-sol", effort: "high" } },
+      { role: "explorers", configuration: { agent: "claude", model: "claude-sonnet-5", effort: "medium" } },
     ],
     gh_executable_path: null,
     twg_executable_path: null,
@@ -105,21 +182,46 @@ const contexts = [
 describe("RunsTab", () => {
   let container: HTMLDivElement;
   let root: ReturnType<typeof createRoot>;
-  let execute: (action: () => Promise<unknown>) => Promise<unknown>;
 
   beforeEach(() => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
-    actionMocks.prepareDirectRun.mockReturnValue(async () => preview);
-    actionMocks.composeGrillPrompt.mockReturnValue(
-      async () => "Composed Grill prompt",
-    );
-    actionMocks.composeRunPrompt.mockReturnValue(
-      async () => "Composed Custom prompt",
-    );
-    actionMocks.startGrillRun.mockReturnValue(async () => ({ id: 2 }));
-    actionMocks.startDirectRun.mockReturnValue(async () => ({ id: 3 }));
+    const launchOptions: RunLaunchOptions = {
+      defaultWorkflow: "matt-pocock",
+      workflows: [
+        {
+          workflow: "matt-pocock",
+          defaultProfile: "grill",
+          profiles: (mattPocockProfiles).map(
+            (executionProfile) => ({
+              executionProfile,
+              configuration: contexts[0].grill_defaults,
+              requiresInitialPrompt: executionProfile === "custom",
+            }),
+          ),
+        },
+        {
+          workflow: "pstack",
+          defaultProfile: "autonomous",
+          profiles: pstackProfiles.map(
+            (executionProfile) => ({
+              executionProfile,
+              configuration: required(contexts[0].pstack_defaults, "pstack defaults"),
+              requiresInitialPrompt: executionProfile === "custom",
+            }),
+          ),
+        },
+      ],
+    };
+    commandMock.command.mockReset().mockImplementation(async (name: string) => {
+      if (name === "getRunLaunchOptions") return launchOptions;
+      if (name === "prepareDirectRun") return preview;
+      if (name === "composeGrillPrompt") return "Composed Grill prompt";
+      if (name === "composeRunPrompt") return "Composed Custom prompt";
+      if (name === "startRun") return { id: 2 };
+      if (name === "goPlan") return { id: 1 };
+      return undefined;
+    });
 
-    execute = vi.fn(async (action: () => Promise<unknown>) => action());
     container = document.createElement("div");
     document.body.append(container);
     root = createRoot(container);
@@ -133,15 +235,7 @@ describe("RunsTab", () => {
   });
 
   async function openLaunchForm(itemView: ItemView = view) {
-    const commands = {
-      workCommand: { execute },
-      isSaving: false,
-      saveItem: (action: () => Promise<unknown>) => execute(action),
-      whileSaving: (task: () => Promise<unknown>) => task(),
-      confirm: vi.fn(),
-      confirmationDialog: null,
-      onChanged: async () => {},
-    } as unknown as ItemCommands;
+    const commands = itemCommands();
 
     await act(async () => {
       root.render(
@@ -157,7 +251,6 @@ describe("RunsTab", () => {
             },
           ],
           machines: [],
-          contexts,
           grillModelCatalog: [
             {
               agent: "claude",
@@ -216,66 +309,67 @@ describe("RunsTab", () => {
 
     await submit();
 
-    expect(workActions.composeGrillPrompt).toHaveBeenCalledWith(
+    expect(commandMock.command).toHaveBeenCalledWith(
+      "composeGrillPrompt",
       1,
       { agent: "claude", model: "claude-sonnet-4-5", effort: "high" },
       "portuguese",
       "Start from the SSH incident.",
     );
-    expect(workActions.startGrillRun).toHaveBeenCalledWith(
-      expect.objectContaining({ prompt: "Composed Grill prompt" }),
+    expect(commandMock.command).toHaveBeenCalledWith(
+      "startRun",
+      expect.objectContaining({
+        strategy: expect.objectContaining({ kind: "grill", prompt: "Composed Grill prompt" }),
+      }),
     );
   });
 
   it("renders a pstack Run as Needs input with its terminal and no Grill controls", async () => {
-    const runView = {
+    const pstackRun: GeneratedRun = {
+      id: 42,
+      item_id: 1,
+      workspace_id: 1,
+      repository_id: 1,
+      worktree_id: null,
+      machine_id: 1,
+      agent: "claude",
+      cli_configuration_profile: null,
+      execution_profile: "custom",
+      workflow: "pstack",
+      model: "claude-sonnet-4-5",
+      effort: "high",
+      skill_snapshot: null,
+      prompt: "Handle the request",
+      working_directory: "/tmp/app",
+      session_name: "run-42",
+      pane_id: "%42",
+      started_at: 1,
+      state: "blocked",
+      pane_status: "available",
+      direct_checkouts: [],
+      transcript: "",
+      reported_pull_requests: ["https://github.com/acme/service/pull/7"],
+      attention_summary: "Review the migration rollback path.",
+      grill_question_group: null,
+      grill_answers: [],
+      grill_decisions: [],
+      grill_response: null,
+      grill_phase: null,
+      grill_action: null,
+      plan_phase: null,
+      plan_path: null,
+    };
+    const runView: ItemView = {
       ...view,
-      runs: [
-        {
-          id: 42,
-          item_id: 1,
-          workspace_id: 1,
-          repository_id: 1,
-          worktree_id: null,
-          machine_id: 1,
-          agent: "claude",
-          cli_configuration_profile: null,
-          execution_profile: "custom",
-          workflow: "pstack",
-          model: "claude-sonnet-4-5",
-          effort: "high",
-          skill_snapshot: null,
-          prompt: "Handle the request",
-          working_directory: "/tmp/app",
-          session_name: "run-42",
-          pane_id: "%42",
-          started_at: 1,
-          state: "blocked",
-          pane_status: "available",
-          direct_checkouts: [],
-          transcript: "",
-          reported_pull_requests: ["https://github.com/acme/service/pull/7"],
-          attention_summary: "Review the migration rollback path.",
-          grill_question_group: null,
-          grill_answers: [],
-          grill_decisions: [],
-          grill_response: null,
-          grill_phase: null,
-          grill_action: null,
-          plan_phase: null,
-          plan_path: null,
-        },
-      ],
-    } as unknown as ItemView;
-    const commands = {
-      workCommand: { execute },
-      isSaving: false,
-      saveItem: (action: () => Promise<unknown>) => execute(action),
-      whileSaving: (task: () => Promise<unknown>) => task(),
-      confirm: vi.fn(),
-      confirmationDialog: null,
-      onChanged: async () => {},
-    } as unknown as ItemCommands;
+      runs: [toUiRun(pstackRun)],
+      run_projections: [{
+        runId: 42,
+        status: "active",
+        phase: "blocked",
+        continuations: { goPlan: false, grillActions: [], stop: true, finish: true, delete: false },
+      }],
+    };
+    const commands = itemCommands();
 
     await act(async () => {
       root.render(
@@ -283,7 +377,6 @@ describe("RunsTab", () => {
           view: runView,
           repositories: [],
           machines: [],
-          contexts,
           grillModelCatalog: [],
           commands,
           intent: undefined,
@@ -305,7 +398,7 @@ describe("RunsTab", () => {
   });
 
   it("shows the plan link and Go only while a Plan Run awaits Go", async () => {
-    const planRun: Run = {
+    const planRun: GeneratedRun = {
       id: 7, item_id: 1, workspace_id: 1, repository_id: 1, worktree_id: null,
       machine_id: 1, agent: "claude", cli_configuration_profile: null,
       execution_profile: "plan", workflow: "pstack", model: null, effort: null,
@@ -316,35 +409,65 @@ describe("RunsTab", () => {
       grill_answers: [], grill_decisions: [], grill_response: null, grill_phase: null,
       grill_action: null, plan_phase: "awaitingGo", plan_path: "docs/plan.md",
     };
-    const commands = {
-      workCommand: { execute }, isSaving: false,
-      saveItem: (action: () => Promise<unknown>) => execute(action),
-      whileSaving: (task: () => Promise<unknown>) => task(), confirm: vi.fn(),
-      confirmationDialog: null, onChanged: async () => {},
-    } as unknown as ItemCommands;
-    const localMachine = { id: 1, context_id: 1, name: "Laptop", socket_name: "mm", transport: { kind: "local" }, last_observed: "available", last_observed_at: null } as Machine;
-    const renderRun = async (run: typeof planRun, machines: Machine[] = [localMachine]) => act(async () => {
+    const commands = itemCommands();
+    const localMachine: Machine = {
+      id: 1,
+      context_id: 1,
+      name: "Laptop",
+      socket_name: "mm",
+      transport: { kind: "local" },
+      last_observed: "available",
+      last_observed_at: null,
+    };
+    const renderRun = async (run: Run, machines: Machine[] = [localMachine]) => act(async () => {
+      const awaitingGo = run.plan_phase === "awaitingGo";
       root.render(createElement(RunsTab, {
-        view: { ...view, runs: [run] } as unknown as ItemView,
-        repositories: [], machines, contexts, grillModelCatalog: [], commands,
+        view: {
+          ...view,
+          runs: [run],
+          run_projections: [{
+            runId: run.id,
+            status: awaitingGo ? "active" : "active",
+            phase: awaitingGo ? "awaitingGo" : "working",
+            continuations: {
+              goPlan: awaitingGo,
+              grillActions: [],
+              stop: true,
+              finish: true,
+              delete: false,
+            },
+          }],
+        } satisfies ItemView,
+        repositories: [], machines, grillModelCatalog: [], commands,
         intent: undefined, grillDrafts: {}, onGrillDraftsChange: vi.fn(), onOpenTerminal: vi.fn(),
       }));
     });
 
-    await renderRun(planRun);
+    await renderRun(toUiRun(planRun));
     expect(container.querySelector('[aria-label="Plan ready for Run #7"]')).not.toBeNull();
     expect(buttonNamed("docs/plan.md")?.title).toBe("/tmp/app/docs/plan.md");
     expect(buttonNamed("Go")).not.toBeNull();
 
-    await renderRun(planRun, [{ ...localMachine, transport: { kind: "ssh" } } as unknown as Machine]);
+    await renderRun(toUiRun(planRun), [{
+      ...localMachine,
+      transport: {
+        kind: "ssh",
+        host: "example.test",
+        user: null,
+        port: null,
+        identityFile: null,
+        knownHostsFile: null,
+        strictHostKeyChecking: null,
+      },
+    }]);
     expect(buttonNamed("docs/plan.md")).toBeUndefined();
     expect(container.querySelector('[aria-label="Plan ready for Run #7"] code')?.textContent).toBe("/tmp/app/docs/plan.md");
 
-    await renderRun({ ...planRun, state: "working", plan_phase: "executing" });
+    await renderRun({ ...toUiRun(planRun), state: "working", plan_phase: "executing" });
     expect(container.querySelector('[aria-label="Plan ready for Run #7"]')).toBeNull();
     expect(buttonNamed("Go")).toBeUndefined();
 
-    await renderRun({ ...planRun, plan_phase: "executing" });
+    await renderRun({ ...toUiRun(planRun), plan_phase: "executing" });
     expect(buttonNamed("Go")).toBeUndefined();
   });
 
@@ -363,9 +486,12 @@ describe("RunsTab", () => {
     });
     await submit();
 
-    expect(workActions.composeGrillPrompt).toHaveBeenCalledTimes(1);
-    expect(workActions.startGrillRun).toHaveBeenCalledWith(
-      expect.objectContaining({ prompt: "Edited composed Grill prompt" }),
+    expect(commandMock.command).toHaveBeenCalledWith("composeGrillPrompt", expect.anything(), expect.anything(), expect.anything(), expect.anything());
+    expect(commandMock.command).toHaveBeenCalledWith(
+      "startRun",
+      expect.objectContaining({
+        strategy: expect.objectContaining({ kind: "grill", prompt: "Edited composed Grill prompt" }),
+      }),
     );
   });
 
@@ -376,7 +502,7 @@ describe("RunsTab", () => {
       profileOption("custom").click();
     });
 
-    expect(workActions.composeRunPrompt).not.toHaveBeenCalled();
+    expect(commandMock.command).not.toHaveBeenCalledWith("composeRunPrompt", expect.anything());
     expect(container.querySelector("form")).not.toBeNull();
     const start = () =>
       container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
@@ -388,7 +514,8 @@ describe("RunsTab", () => {
     expect(start().disabled).toBe(false);
     await submit();
 
-    expect(workActions.composeRunPrompt).toHaveBeenCalledWith(
+    expect(commandMock.command).toHaveBeenCalledWith(
+      "composeRunPrompt",
       1,
       "custom",
       { includeObjective: true, externalObjectIds: [] },
@@ -396,15 +523,19 @@ describe("RunsTab", () => {
       "Rename the module",
       "matt-pocock",
     );
-    expect(workActions.startDirectRun).toHaveBeenCalledWith(
+    expect(commandMock.command).toHaveBeenCalledWith(
+      "startRun",
       expect.objectContaining({
-        executionProfile: "custom",
-        prompt: "Composed Custom prompt",
-        configuration: {
+        strategy: expect.objectContaining({
+          kind: "direct",
+          execution_profile: "custom",
+          prompt: "Composed Custom prompt",
+          configuration: {
           agent: "claude",
           model: "claude-sonnet-4-5",
           effort: "high",
-        },
+          },
+        }),
       }),
     );
   });
@@ -432,15 +563,34 @@ describe("RunsTab", () => {
     expect(profileOption("autonomous").checked).toBe(true);
     expect(offered()).toEqual(["autonomous", "plan", "pstack-review", "custom"]);
     await submit();
-    expect(workActions.startDirectRun).toHaveBeenCalledWith(
+    expect(commandMock.command).toHaveBeenCalledWith(
+      "startRun",
       expect.objectContaining({
-        workflow: "pstack",
-        executionProfile: "autonomous",
-        configuration: contexts[0].pstack_defaults,
+        strategy: expect.objectContaining({
+          kind: "direct",
+          workflow: "pstack",
+          execution_profile: "autonomous",
+          configuration: contexts[0].pstack_defaults,
+        }),
       }),
     );
   });
 });
+
+function itemCommands(): ItemCommands {
+  return {
+    workCommand: {
+      isPending: false,
+      execute: async (action) => action(),
+    },
+    isSaving: false,
+    saveItem: async (action) => action(),
+    whileSaving: async (task) => task(),
+    confirm: () => {},
+    confirmationDialog: undefined,
+    onChanged: async () => {},
+  };
+}
 
 function setTextareaValue(textarea: HTMLTextAreaElement, value: string) {
   const setter = Object.getOwnPropertyDescriptor(

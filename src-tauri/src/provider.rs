@@ -247,7 +247,7 @@ impl ProviderDispatch {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalComment {
     pub id: u64,
@@ -256,7 +256,7 @@ pub struct ExternalComment {
     pub created_at: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalDocument {
     pub body: String,
@@ -1425,7 +1425,7 @@ impl GithubCli {
 }
 
 /// An Issue read as a document: its body and the sub-issues that break it down.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct IssueDocument {
     pub body: String,
@@ -1433,7 +1433,7 @@ pub struct IssueDocument {
     pub sub_issues: Vec<SubIssue>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 pub struct SubIssue {
     pub number: u64,
     pub title: String,
@@ -1441,13 +1441,13 @@ pub struct SubIssue {
     pub url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 struct GithubIssueBody {
     #[serde(default)]
     body: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 struct GithubComment {
     id: u64,
     user: Option<GithubActor>,
@@ -1468,7 +1468,7 @@ impl From<GithubComment> for ExternalComment {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 struct GithubSubIssue {
     number: u64,
     title: String,
@@ -1505,7 +1505,7 @@ pub fn resolve_az_executable(stored_path: Option<&Path>) -> Result<PathBuf, Prov
     })
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 struct GithubResponse {
     title: String,
     state: String,
@@ -1520,7 +1520,7 @@ struct GithubResponse {
     number: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 struct GithubCreatedIssue {
     #[serde(rename = "html_url")]
     html_url: String,
@@ -1576,17 +1576,17 @@ impl GithubResponse {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 struct GithubActor {
     login: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 struct GithubLabel {
     name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, specta::Type)]
 struct GithubMilestone {
     title: String,
 }

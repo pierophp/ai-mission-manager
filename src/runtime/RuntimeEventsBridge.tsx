@@ -1,20 +1,20 @@
 import { useEffect } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 
-import { workAdapter } from "./adapters";
+import { workCommands } from "../features/work/work-commands";
 import { invalidateRunQueries, invalidateWorkQueries } from "./query-invalidation";
 import { listen } from "./adapters/tauri";
 
 export function RuntimeEventsBridge() {
   const queryClient = useQueryClient();
   const reconcileMutation = useMutation({
-    mutationFn: workAdapter.reconcileRuns,
+    mutationFn: workCommands.reconcileRuns,
     onSuccess: async (result) => {
       if (result.changed) await invalidateRunQueries(queryClient);
     },
   });
   const pollMutation = useMutation({
-    mutationFn: workAdapter.pollExternalObjects,
+    mutationFn: workCommands.pollExternalObjects,
     onSuccess: async (result) => {
       if (result.refreshed > 0) await invalidateWorkQueries(queryClient);
     },
@@ -88,7 +88,7 @@ export function RuntimeEventsBridge() {
 export function usePollExternalObjects() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: workAdapter.pollExternalObjects,
+    mutationFn: workCommands.pollExternalObjects,
     onSuccess: async (result) => {
       if (result.refreshed > 0) await invalidateWorkQueries(queryClient);
     },

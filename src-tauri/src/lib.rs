@@ -2,6 +2,7 @@ mod agent_state;
 mod dependencies;
 pub mod domain;
 mod git;
+mod machine_access;
 pub mod persistence;
 mod provider;
 mod pstack;
@@ -84,33 +85,9 @@ mod devtools_tests {
     }
 }
 
-pub fn run() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_opener::init())
-        .setup(|app| {
-            #[cfg(debug_assertions)]
-            if should_open_devtools(
-                std::env::var("AI_MISSION_MANAGER_OPEN_DEVTOOLS")
-                    .ok()
-                    .as_deref(),
-            ) {
-                if let Some(window) = app.get_webview_window("main") {
-                    window.open_devtools();
-                }
-            }
-
-            let database_path =
-                database_path(&app.path().home_dir()?, &app.path().app_data_dir()?)?;
-            let runtime = features::Runtime::open(database_path)?;
-            app.manage(features::SharedRuntime::new(runtime));
-            Ok(())
-        })
-        // Keep the stable `app::*` facade paths in the command registry while
-        // feature modules own the implementations. Tauri's generated command
-        // wrapper macros are path-sensitive, so this preserves registration
-        // without exposing feature implementation paths as a contract.
-        .invoke_handler(tauri::generate_handler![
+fn command_bindings() -> tauri_specta::Builder<tauri::Wry> {
+    tauri_specta::Builder::<tauri::Wry>::new()
+        .commands(tauri_specta::collect_commands![
             app::list_contexts,
             app::list_grill_model_catalog,
             app::refresh_grill_model_catalog,
@@ -131,6 +108,7 @@ pub fn run() {
             app::complete_setup,
             app::get_health_status,
             app::list_context_attention_defaults,
+            app::new_context_configuration,
             app::get_home,
             app::reconcile_runs,
             app::search_items_command,
@@ -172,12 +150,11 @@ pub fn run() {
             app::list_inbox_items,
             app::create_item,
             app::compose_run_prompt,
+            app::get_run_launch_options,
             app::compose_grill_prompt,
             app::prepare_direct_run,
             app::prepare_grill_run,
-            app::start_direct_run,
-            app::start_grill_run,
-            app::start_worktree_run,
+            app::start_run,
             app::list_run_suggestions,
             app::attach_run,
             app::stop_untracked_agent,
@@ -219,6 +196,41 @@ pub fn run() {
             app::set_context_attention_default,
             app::mark_link_reviewed,
         ])
+        // Tauri serializes the app's existing i64 identifiers as JSON numbers;
+        // keep that established wire shape in TypeScript as `number`.
+        .dangerously_cast_bigints_to_number()
+        .error_handling(tauri_specta::ErrorHandlingMode::Throw)
+}
+
+pub fn run() {
+    let command_bindings = command_bindings();
+
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            #[cfg(debug_assertions)]
+            if should_open_devtools(
+                std::env::var("AI_MISSION_MANAGER_OPEN_DEVTOOLS")
+                    .ok()
+                    .as_deref(),
+            ) {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.open_devtools();
+                }
+            }
+
+            let database_path =
+                database_path(&app.path().home_dir()?, &app.path().app_data_dir()?)?;
+            let runtime = features::Runtime::open(database_path)?;
+            app.manage(features::SharedRuntime::new(runtime));
+            Ok(())
+        })
+        // Keep the stable `app::*` facade paths in the command registry while
+        // feature modules own the implementations. Tauri's generated command
+        // wrapper macros are path-sensitive, so this preserves registration
+        // without exposing feature implementation paths as a contract.
+        .invoke_handler(command_bindings.invoke_handler())
         .run(tauri::generate_context!())
         .expect("error while running AI Mission Manager");
 }
@@ -229,7 +241,40 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{database_path, sqlite_sidecar};
+    use super::{command_bindings, database_path, sqlite_sidecar};
+
+    #[test]
+    fn generated_typescript_bindings_are_current() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let checked_in = root.join("src/runtime/bindings.ts");
+        let generated_dir = tempdir().expect("temporary directory should exist");
+        let generated = generated_dir.path().join("bindings.ts");
+
+        command_bindings()
+            .export(specta_typescript::Typescript::default(), &generated)
+            .expect("Rust command bindings should export");
+
+        let generated_contents = fs::read_to_string(generated)
+            .expect("generated TypeScript bindings should be readable")
+            .trim_end()
+            .lines()
+            .map(str::trim_end)
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        if std::env::var_os("UPDATE_TAURI_BINDINGS").is_some() {
+            fs::write(&checked_in, generated_contents)
+                .expect("generated TypeScript bindings should be updated");
+            return;
+        }
+
+        let checked_in_contents =
+            fs::read_to_string(&checked_in).expect("checked-in TypeScript bindings should exist");
+        assert_eq!(
+            generated_contents, checked_in_contents,
+            "TypeScript bindings are stale; regenerate them with UPDATE_TAURI_BINDINGS=1 cargo test --manifest-path src-tauri/Cargo.toml generated_typescript_bindings_are_current"
+        );
+    }
 
     #[test]
     fn stores_the_database_under_the_home_directory_and_migrates_the_legacy_file() {

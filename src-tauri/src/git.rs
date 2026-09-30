@@ -8,7 +8,7 @@ use std::{
 use thiserror::Error;
 
 use crate::domain::{Machine, MachineTransport, Repository};
-use crate::terminal::run_machine_shell;
+use crate::machine_access::run_machine_shell;
 
 #[derive(Debug, Error)]
 pub enum GitError {

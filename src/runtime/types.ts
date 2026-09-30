@@ -1,9 +1,13 @@
 import type {
   AgentKind,
+  ExecutionProfile,
   GrillContinuationAction,
   Run,
+  RunProjection,
+  ItemRunSignals,
   RunPaneStatus,
   RunState,
+  RunPromptSelection,
   Workflow,
 } from "./execution-types";
 import type { RunCheckout } from "./execution-types";
@@ -11,21 +15,21 @@ import type { RunCheckout } from "./execution-types";
 export type Context = {
   id: number;
   name: string;
-  execution_machine_id: number | null;
-  claude_profile_id: number | null;
-  codex_profile_id: number | null;
-  check_dirty_checkouts: boolean;
+  execution_machine_id?: number | null;
+  claude_profile_id?: number | null;
+  codex_profile_id?: number | null;
+  check_dirty_checkouts?: boolean;
   grill_defaults: GrillConfiguration;
-  implement_defaults: GrillConfiguration;
-  default_workflow: Workflow;
-  pstack_defaults: GrillConfiguration;
-  pstack_roles: PstackRoleTable;
-  gh_executable_path: string | null;
-  twg_executable_path: string | null;
-  az_executable_path: string | null;
-  atlassian_site: string | null;
-  azure_devops_organization: string | null;
-  bitbucket_workspace: string | null;
+  implement_defaults?: GrillConfiguration;
+  default_workflow?: Workflow;
+  pstack_defaults?: GrillConfiguration;
+  pstack_roles?: PstackRoleTable;
+  gh_executable_path?: string | null;
+  twg_executable_path?: string | null;
+  az_executable_path?: string | null;
+  atlassian_site?: string | null;
+  azure_devops_organization?: string | null;
+  bitbucket_workspace?: string | null;
 };
 
 export type ContextConfiguration = {
@@ -52,6 +56,67 @@ export type GrillConfiguration = {
   agent: AgentKind;
   model: string;
   effort: string;
+};
+
+export type RunLaunchTargetKind = "checkout" | "worktree";
+export type RunLaunchProfileOption = {
+  executionProfile: ExecutionProfile;
+  configuration: GrillConfiguration;
+  requiresInitialPrompt: boolean;
+};
+export type RunLaunchWorkflowOptions = {
+  workflow: Workflow;
+  defaultProfile: ExecutionProfile;
+  profiles: RunLaunchProfileOption[];
+};
+export type RunLaunchOptions = {
+  defaultWorkflow: Workflow;
+  workflows: RunLaunchWorkflowOptions[];
+};
+
+export type RunLaunchStrategy =
+  | {
+      kind: "direct";
+      machineId: number | null;
+      primaryRepositoryId: number;
+      agent: AgentKind;
+      configuration?: GrillConfiguration;
+      implementationQueue?: ImplementationQueueStart;
+      executionProfile: ExecutionProfile;
+      workflow: Workflow;
+      prompt: string;
+      promptSelection: RunPromptSelection;
+      expectedCheckouts: RunCheckout[];
+      allowDirty: boolean;
+      allowSharedCheckouts: boolean;
+    }
+  | {
+      kind: "grill";
+      machineId: number | null;
+      primaryRepositoryId: number;
+      configuration: GrillConfiguration;
+      language: GrillLanguage;
+      prompt: string;
+      expectedCheckouts: RunCheckout[];
+      allowDirty: boolean;
+      allowSharedCheckouts: boolean;
+    }
+  | {
+      kind: "worktree";
+      worktreeId: number;
+      agent: AgentKind;
+      configuration?: GrillConfiguration;
+      executionProfile: ExecutionProfile;
+      workflow: Workflow;
+      prompt: string;
+      promptSelection: RunPromptSelection;
+    };
+
+export type RunLaunchRequest = {
+  itemId: number;
+  workspaceId: number;
+  strategy: RunLaunchStrategy;
+  queueAttachment?: { queueId: number; position: number };
 };
 
 export type PstackRole =
@@ -452,6 +517,8 @@ export type ExternalLinkView = {
   snapshot: ExternalSnapshot | null;
   attention_policy: ExternalChangePolicy;
   attention_entry: AttentionEntry | null;
+  supports_implementation_spec: boolean;
+  supports_implementation_ticket: boolean;
 };
 
 export type ExternalLinkAction = {
@@ -468,6 +535,8 @@ export type ItemView = {
   workspaces: Workspace[];
   worktrees: Worktree[];
   runs: Run[];
+  run_projections: RunProjection[];
+  run_signals: ItemRunSignals;
   implementation_queues: ImplementationQueue[];
   links: ExternalLinkView[];
 };
@@ -791,7 +860,7 @@ export type ProfileUsageState =
 export type UsageWindow = {
   id: string;
   label: string;
-  usedPercent: number;
+  usedPercent: number | null;
   resetsAt: number | null;
 };
 

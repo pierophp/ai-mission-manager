@@ -17,22 +17,6 @@ export function attentionEntryLabel(entry: AttentionEntry): string {
   return `${entry.activities.length} change${entry.activities.length === 1 ? "" : "s"}`;
 }
 
-export function runStateLabel(state: Run["state"]): string {
-  if (state === "working") return "Working";
-  if (state === "blocked") return "Blocked";
-  if (state === "finished") return "Finished";
-  return "Unknown";
-}
-
-export function grillPhaseLabel(phase: NonNullable<Run["grill_phase"]>): string {
-  if (phase === "starting") return "Starting Grill";
-  if (phase === "working") return "Grill working";
-  if (phase === "waitingForAnswers") return "Waiting for answers";
-  if (phase === "awaitingNextAction") return "Awaiting next action";
-  if (phase === "recoverablePaneLoss") return "Pane unavailable · recoverable";
-  return "Finished explicitly";
-}
-
 export function externalObjectKindLabel(kind: ExternalObject["kind"]): string {
   if (kind === "pull_request") return "Pull request";
   if (kind === "issue") return "Issue";

@@ -26,9 +26,10 @@ use crate::{
         ItemStatus, ItemView, LinkPurpose, Machine, MachineTransport, Project, Repository, Run,
         RunCheckout, RunPromptSelection, RunState, RunSuggestion, Worktree,
     },
+    machine_access::{LocalSshMachineAccess, MachineAccess},
     persistence::SqliteStore,
     provider::IssueDocument,
-    terminal::{MachineReadiness, PaneSummary, TerminalRuntime, TmuxControlPane, TmuxRuntime},
+    terminal::{MachineReadiness, PaneSummary, TerminalConnection, TerminalRuntime, TmuxRuntime},
 };
 
 pub(crate) use crate::features::deletion::{
@@ -51,7 +52,7 @@ pub struct Runtime {
     pub(crate) pending_machine_deletion: Option<MachineDeletionPreview>,
     pub(crate) pending_parent_deletion: Option<ParentDeletionPreview>,
     pub(crate) pending_reset_local_data: Option<ResetLocalDataPreview>,
-    pub(crate) terminal_connections: HashMap<String, Arc<TmuxControlPane>>,
+    pub(crate) terminal_connections: HashMap<String, Arc<dyn TerminalConnection>>,
     pub(crate) terminal_open_request_generations: HashMap<String, u64>,
     pub(crate) terminal_connection_generations: HashMap<String, u64>,
     pub(crate) grill_operation_locks: HashMap<i64, Weak<tauri::async_runtime::Mutex<()>>>,
@@ -64,19 +65,20 @@ pub struct Runtime {
     pub(crate) run_launch_lock: Arc<tauri::async_runtime::Mutex<()>>,
     pub(crate) implementation_queue_lock: Arc<tauri::async_runtime::Mutex<()>>,
     pub(crate) terminal_runtime: Arc<dyn TerminalRuntime>,
+    pub(crate) machine_access: Arc<dyn MachineAccess>,
     pub(crate) reconciliation_in_progress: Arc<AtomicBool>,
     pub(crate) machine_readiness: HashMap<i64, MachineReadiness>,
     pub(crate) legacy_agent_state_directory: PathBuf,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, specta::Type)]
 pub struct MachineSettingsView {
     #[serde(flatten)]
     pub machine: Machine,
     pub readiness: Option<MachineReadiness>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectRunCheckoutPreview {
     pub repository_id: i64,
@@ -86,7 +88,7 @@ pub struct DirectRunCheckoutPreview {
     pub is_dirty: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectRunSharedRun {
     pub run_id: i64,
@@ -94,7 +96,7 @@ pub struct DirectRunSharedRun {
     pub path: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct DirectRunPreview {
     pub workspace_id: i64,
@@ -117,6 +119,14 @@ impl Runtime {
     pub(crate) fn open_with_terminal_runtime(
         path: impl AsRef<Path>,
         terminal_runtime: impl TerminalRuntime + 'static,
+    ) -> Result<Self, String> {
+        Self::open_with_adapters(path, terminal_runtime, LocalSshMachineAccess)
+    }
+
+    pub(crate) fn open_with_adapters(
+        path: impl AsRef<Path>,
+        terminal_runtime: impl TerminalRuntime + 'static,
+        machine_access: impl MachineAccess + 'static,
     ) -> Result<Self, String> {
         let database_path = path.as_ref().to_path_buf();
         let legacy_agent_state_directory = database_path
@@ -146,6 +156,7 @@ impl Runtime {
             run_launch_lock: Arc::new(tauri::async_runtime::Mutex::new(())),
             implementation_queue_lock: Arc::new(tauri::async_runtime::Mutex::new(())),
             terminal_runtime: Arc::new(terminal_runtime),
+            machine_access: Arc::new(machine_access),
             reconciliation_in_progress: Arc::new(AtomicBool::new(false)),
             machine_readiness: HashMap::new(),
             legacy_agent_state_directory,
@@ -288,13 +299,13 @@ impl Runtime {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RunDeletionResult {
     pub run_id: i64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct PaneTab {
     pub pane_id: String,
@@ -340,7 +351,7 @@ impl PaneTab {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalAttachment {
     pub terminal_id: String,
@@ -351,7 +362,7 @@ pub struct TerminalAttachment {
     pub panes: Vec<PaneTab>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalOutputEvent {
     pub terminal_id: String,
@@ -360,7 +371,7 @@ pub struct TerminalOutputEvent {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct TerminalExitEvent {
     pub terminal_id: String,
@@ -369,7 +380,7 @@ pub struct TerminalExitEvent {
     pub code: Option<i32>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub struct RunStateChangedEvent {
     pub run_id: i64,
@@ -384,11 +395,13 @@ pub(crate) fn current_unix_seconds() -> i64 {
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn list_contexts(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Context>, String> {
     crate::features::structure::list_contexts(state)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn list_grill_model_catalog(
     app: AppHandle,
     state: State<'_, Mutex<Runtime>>,
@@ -397,11 +410,13 @@ pub fn list_grill_model_catalog(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn refresh_grill_model_catalog(app: AppHandle) {
     crate::features::setup::refresh_grill_model_catalog(app)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn list_plan_usage(
     app: AppHandle,
     state: State<'_, Mutex<Runtime>>,
@@ -411,11 +426,13 @@ pub fn list_plan_usage(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn refresh_plan_usage(app: AppHandle) {
     crate::features::plan_usage::refresh(app)
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_context_grill_defaults(
     context_id: i64,
     defaults: GrillConfiguration,
@@ -425,6 +442,7 @@ pub fn set_context_grill_defaults(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_context_implement_defaults(
     context_id: i64,
     defaults: GrillConfiguration,
@@ -434,6 +452,7 @@ pub fn set_context_implement_defaults(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_context_dirty_checkout_check(
     context_id: i64,
     enabled: bool,
@@ -443,16 +462,19 @@ pub fn set_context_dirty_checkout_check(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn list_projects(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Project>, String> {
     crate::features::structure::list_projects(state)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn list_repositories(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Repository>, String> {
     crate::features::structure::list_repositories(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn list_repository_locations(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Vec<crate::domain::RepositoryLocation>, String> {
@@ -460,11 +482,13 @@ pub fn list_repository_locations(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn list_machines(state: State<'_, Mutex<Runtime>>) -> Result<Vec<MachineSettingsView>, String> {
     crate::features::structure::list_machines(state)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn list_cli_configuration_profiles(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Vec<crate::features::structure::CliProfileSettingsView>, String> {
@@ -472,6 +496,7 @@ pub fn list_cli_configuration_profiles(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn create_cli_configuration_profile(
     machine_id: i64,
     provider: AgentKind,
@@ -491,6 +516,7 @@ pub fn create_cli_configuration_profile(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_context_cli_configuration_profile(
     context_id: i64,
     provider: AgentKind,
@@ -503,6 +529,7 @@ pub fn set_context_cli_configuration_profile(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn delete_cli_configuration_profile(
     profile_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -511,11 +538,13 @@ pub fn delete_cli_configuration_profile(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn get_setup_state(state: State<'_, Mutex<Runtime>>) -> Result<SetupState, String> {
     crate::features::setup::get_setup_state(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn complete_setup(
     context_name: String,
     provider: ProviderChoice,
@@ -525,6 +554,7 @@ pub fn complete_setup(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn get_health_status(
     provider: Option<ProviderChoice>,
     state: State<'_, Mutex<Runtime>>,
@@ -533,6 +563,17 @@ pub fn get_health_status(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
+pub fn get_run_launch_options(
+    item_id: i64,
+    target: crate::domain::RunLaunchTargetKind,
+    state: State<'_, Mutex<Runtime>>,
+) -> Result<crate::domain::RunLaunchOptions, String> {
+    crate::features::work::get_run_launch_options(item_id, target, state)
+}
+
+#[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn compose_run_prompt(
     item_id: i64,
     execution_profile: ExecutionProfile,
@@ -550,10 +591,12 @@ pub async fn compose_run_prompt(
         initial_prompt,
         workflow,
         state,
-    ).await
+    )
+    .await
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn compose_grill_prompt(
     item_id: i64,
     configuration: GrillConfiguration,
@@ -571,6 +614,7 @@ pub fn compose_grill_prompt(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn prepare_direct_run(
     item_id: i64,
     workspace_id: i64,
@@ -581,6 +625,7 @@ pub async fn prepare_direct_run(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn prepare_grill_run(
     item_id: i64,
     workspace_id: i64,
@@ -591,105 +636,16 @@ pub async fn prepare_grill_run(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-#[allow(clippy::too_many_arguments)]
-pub async fn start_direct_run(
-    item_id: i64,
-    workspace_id: i64,
-    machine_id: Option<i64>,
-    primary_repository_id: i64,
-    agent: AgentKind,
-    configuration: Option<GrillConfiguration>,
-    implementation_queue: Option<crate::domain::ImplementationQueueStart>,
-    execution_profile: ExecutionProfile,
-    workflow: crate::domain::Workflow,
-    prompt: String,
-    prompt_selection: RunPromptSelection,
-    expected_checkouts: Vec<RunCheckout>,
-    allow_dirty: bool,
-    allow_shared_checkouts: bool,
+#[specta::specta]
+pub async fn start_run(
+    request: crate::features::work::runs::run_launcher::RunLaunchRequest,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
-    crate::features::work::start_direct_run(
-        item_id,
-        workspace_id,
-        machine_id,
-        primary_repository_id,
-        agent,
-        configuration,
-        implementation_queue,
-        execution_profile,
-        workflow,
-        prompt,
-        prompt_selection,
-        expected_checkouts,
-        allow_dirty,
-        allow_shared_checkouts,
-        state,
-    )
-    .await
-}
-
-#[tauri::command(rename_all = "camelCase")]
-#[allow(clippy::too_many_arguments)]
-pub async fn start_grill_run(
-    item_id: i64,
-    workspace_id: i64,
-    machine_id: Option<i64>,
-    primary_repository_id: i64,
-    configuration: GrillConfiguration,
-    language: GrillLanguage,
-    prompt: String,
-    expected_checkouts: Vec<RunCheckout>,
-    allow_dirty: bool,
-    allow_shared_checkouts: bool,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<Run, String> {
-    crate::features::work::start_grill_run(
-        item_id,
-        workspace_id,
-        machine_id,
-        primary_repository_id,
-        configuration,
-        language,
-        prompt,
-        expected_checkouts,
-        allow_dirty,
-        allow_shared_checkouts,
-        state,
-    )
-    .await
-}
-
-#[tauri::command(rename_all = "camelCase")]
-#[allow(clippy::too_many_arguments)]
-pub async fn start_worktree_run(
-    item_id: i64,
-    workspace_id: i64,
-    worktree_id: i64,
-    agent: AgentKind,
-    configuration: Option<GrillConfiguration>,
-    execution_profile: ExecutionProfile,
-    workflow: crate::domain::Workflow,
-    prompt: String,
-    prompt_selection: RunPromptSelection,
-    state: State<'_, Mutex<Runtime>>,
-) -> Result<Run, String> {
-    crate::features::work::start_worktree_run(
-        item_id,
-        workspace_id,
-        worktree_id,
-        agent,
-        configuration,
-        execution_profile,
-        workflow,
-        prompt,
-        prompt_selection,
-        state,
-    )
-    .await
+    crate::features::work::start_run(request, state).await
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn list_run_suggestions(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Vec<RunSuggestion>, String> {
@@ -697,6 +653,7 @@ pub async fn list_run_suggestions(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn attach_run(
     suggestion: RunSuggestion,
     state: State<'_, Mutex<Runtime>>,
@@ -705,6 +662,7 @@ pub async fn attach_run(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn stop_untracked_agent(
     suggestion: RunSuggestion,
     state: State<'_, Mutex<Runtime>>,
@@ -713,6 +671,7 @@ pub async fn stop_untracked_agent(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn delete_untracked_agent(
     suggestion: RunSuggestion,
     state: State<'_, Mutex<Runtime>>,
@@ -721,6 +680,7 @@ pub async fn delete_untracked_agent(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn register_machine(
     context_id: i64,
     name: String,
@@ -732,6 +692,7 @@ pub fn register_machine(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn update_machine(
     machine_id: i64,
     name: String,
@@ -743,6 +704,7 @@ pub fn update_machine(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn check_machine(
     machine_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -751,6 +713,7 @@ pub async fn check_machine(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn open_terminal(
     run_id: i64,
     terminal_id: String,
@@ -764,6 +727,7 @@ pub async fn open_terminal(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn terminal_input(
     terminal_id: String,
     input: Vec<u8>,
@@ -773,6 +737,7 @@ pub async fn terminal_input(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn submit_grill_answers(
     run_id: i64,
     answers: Vec<GrillAnswer>,
@@ -782,6 +747,7 @@ pub async fn submit_grill_answers(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn continue_grill(
     run_id: i64,
     action: GrillContinuationAction,
@@ -791,11 +757,13 @@ pub async fn continue_grill(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn go_plan(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
     crate::features::work::go_plan(run_id, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn terminal_resize(
     terminal_id: String,
     columns: u16,
@@ -806,6 +774,7 @@ pub async fn terminal_resize(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn close_terminal(
     terminal_id: String,
     state: State<'_, Mutex<Runtime>>,
@@ -814,6 +783,7 @@ pub async fn close_terminal(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn open_external_terminal(
     run_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -822,11 +792,13 @@ pub async fn open_external_terminal(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn stop_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
     crate::features::work::stop_run(run_id, state).await
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn check_implementation_queue(
     queue_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -835,6 +807,7 @@ pub async fn check_implementation_queue(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn skip_implementation_queue_entry(
     queue_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -843,6 +816,7 @@ pub async fn skip_implementation_queue_entry(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn cancel_implementation_queue(
     queue_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -851,28 +825,39 @@ pub async fn cancel_implementation_queue(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn finish_run(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
     crate::features::work::finish_run(run_id, state)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn list_audit_history(state: State<'_, Mutex<Runtime>>) -> Result<Vec<AuditEntry>, String> {
     crate::features::activity::list_audit_history(state)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn get_activity_tab(state: State<'_, Mutex<Runtime>>) -> Result<ActivityTabView, String> {
     crate::features::activity::get_activity_tab(state)
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn list_context_attention_defaults(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Vec<ContextAttentionDefault>, String> {
     crate::features::structure::list_context_attention_defaults(state)
 }
 
+#[tauri::command]
+#[specta::specta]
+pub fn new_context_configuration() -> ContextConfiguration {
+    crate::features::structure::new_context_configuration()
+}
+
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn get_home(
     context_id: Option<i64>,
     now: String,
@@ -882,6 +867,7 @@ pub async fn get_home(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn reconcile_runs(
     app: AppHandle,
     state: State<'_, Mutex<Runtime>>,
@@ -890,6 +876,7 @@ pub async fn reconcile_runs(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn search_items_command(
     query: String,
     context_id: Option<i64>,
@@ -899,11 +886,13 @@ pub fn search_items_command(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn create_context(name: String, state: State<'_, Mutex<Runtime>>) -> Result<Context, String> {
     crate::features::structure::create_context(name, state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn create_context_configuration(
     configuration: ContextConfiguration,
     state: State<'_, Mutex<Runtime>>,
@@ -912,6 +901,7 @@ pub fn create_context_configuration(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn update_context(
     context_id: i64,
     name: String,
@@ -921,6 +911,7 @@ pub fn update_context(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn update_context_configuration(
     context_id: i64,
     configuration: ContextConfiguration,
@@ -930,6 +921,7 @@ pub fn update_context_configuration(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_context_execution_machine(
     context_id: i64,
     machine_id: Option<i64>,
@@ -939,6 +931,7 @@ pub fn set_context_execution_machine(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn create_project(
     name: String,
     context_id: i64,
@@ -956,6 +949,7 @@ pub fn create_project(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn update_project(
     project_id: i64,
     name: String,
@@ -973,6 +967,7 @@ pub fn update_project(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn register_repository(
     project_id: i64,
     name: String,
@@ -983,6 +978,7 @@ pub fn register_repository(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn update_repository(
     repository_id: i64,
     name: String,
@@ -1000,6 +996,7 @@ pub fn update_repository(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 #[allow(clippy::too_many_arguments)]
 pub async fn register_repository_at_location(
     project_id: i64,
@@ -1027,6 +1024,7 @@ pub async fn register_repository_at_location(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn update_repository_location(
     repository_id: i64,
     previous_machine_id: Option<i64>,
@@ -1046,6 +1044,7 @@ pub fn update_repository_location(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn prepare_project_deletion(
     project_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1054,6 +1053,7 @@ pub fn prepare_project_deletion(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn delete_project(
     project_id: i64,
     item_ids: Vec<i64>,
@@ -1073,6 +1073,7 @@ pub fn delete_project(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn prepare_context_deletion(
     context_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1081,6 +1082,7 @@ pub fn prepare_context_deletion(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 #[allow(clippy::too_many_arguments)]
 pub fn delete_context(
     context_id: i64,
@@ -1105,6 +1107,7 @@ pub fn delete_context(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn prepare_reset_local_data(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<ResetLocalDataPreview, String> {
@@ -1112,6 +1115,7 @@ pub fn prepare_reset_local_data(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn reset_all_local_data(
     confirmation: String,
     state: State<'_, Mutex<Runtime>>,
@@ -1120,6 +1124,7 @@ pub fn reset_all_local_data(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn create_worktree(
     workspace_id: i64,
     repository_id: i64,
@@ -1141,6 +1146,7 @@ pub fn create_worktree(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn prepare_worktree(
     workspace_id: i64,
     repository_id: i64,
@@ -1161,6 +1167,7 @@ pub async fn prepare_worktree(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn prepare_worktree_removal(
     worktree_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1169,6 +1176,7 @@ pub async fn prepare_worktree_removal(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn remove_worktree(
     worktree_id: i64,
     confirmed: bool,
@@ -1180,6 +1188,7 @@ pub async fn remove_worktree(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn attach_worktree(
     workspace_id: i64,
     repository_id: i64,
@@ -1200,6 +1209,7 @@ pub async fn attach_worktree(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn prepare_repository_deletion(
     repository_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1208,6 +1218,7 @@ pub fn prepare_repository_deletion(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn delete_repository(
     repository_id: i64,
     workspace_ids: Vec<i64>,
@@ -1218,6 +1229,7 @@ pub fn delete_repository(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn prepare_machine_deletion(
     machine_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1226,6 +1238,7 @@ pub fn prepare_machine_deletion(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn delete_machine(
     machine_id: i64,
     run_ids: Vec<i64>,
@@ -1246,6 +1259,7 @@ pub async fn delete_machine(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn prepare_item_deletion(
     item_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1254,6 +1268,7 @@ pub fn prepare_item_deletion(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn delete_item(
     item_id: i64,
     confirmed: bool,
@@ -1263,6 +1278,7 @@ pub fn delete_item(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn prepare_external_object_deletion(
     external_object_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1271,6 +1287,7 @@ pub fn prepare_external_object_deletion(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn delete_external_object(
     external_object_id: i64,
     confirmed: bool,
@@ -1280,6 +1297,7 @@ pub fn delete_external_object(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn unlink_external_link(
     link_id: i64,
     confirmed: bool,
@@ -1289,6 +1307,7 @@ pub fn unlink_external_link(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn delete_run(
     run_id: i64,
     confirmed: bool,
@@ -1298,11 +1317,13 @@ pub fn delete_run(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub fn list_inbox_items(state: State<'_, Mutex<Runtime>>) -> Result<Vec<Item>, String> {
     crate::features::work::list_inbox_items(state)
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn create_item(
     title: String,
     context_id: i64,
@@ -1314,6 +1335,7 @@ pub fn create_item(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_item_status(
     item_id: i64,
     status: ItemStatus,
@@ -1323,6 +1345,7 @@ pub fn set_item_status(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_item_title(
     item_id: i64,
     title: String,
@@ -1332,6 +1355,7 @@ pub fn set_item_title(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_item_notes(
     item_id: i64,
     notes: String,
@@ -1341,6 +1365,7 @@ pub fn set_item_notes(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn add_item_reminder(
     item_id: i64,
     remind_at: String,
@@ -1350,6 +1375,7 @@ pub fn add_item_reminder(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn remove_item_reminder(
     item_id: i64,
     reminder_id: i64,
@@ -1359,6 +1385,7 @@ pub fn remove_item_reminder(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_item_relation(
     from_item_id: i64,
     to_item_id: i64,
@@ -1369,6 +1396,7 @@ pub fn set_item_relation(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn link_external_object(
     item_id: i64,
     url: String,
@@ -1378,6 +1406,7 @@ pub async fn link_external_object(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn create_github_issue(
     item_id: i64,
     repository_id: i64,
@@ -1389,6 +1418,7 @@ pub async fn create_github_issue(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn add_external_comment(
     link_id: i64,
     body: String,
@@ -1398,6 +1428,7 @@ pub async fn add_external_comment(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn fetch_issue_document(
     external_object_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1406,6 +1437,7 @@ pub async fn fetch_issue_document(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn fetch_external_comments(
     external_object_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1414,6 +1446,7 @@ pub async fn fetch_external_comments(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn fetch_external_document(
     external_object_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1422,6 +1455,7 @@ pub async fn fetch_external_document(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub async fn refresh_external_object(
     external_object_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1430,11 +1464,13 @@ pub async fn refresh_external_object(
 }
 
 #[tauri::command]
+#[specta::specta]
 pub async fn poll_external_objects(state: State<'_, Mutex<Runtime>>) -> Result<PollResult, String> {
     crate::features::work::poll_external_objects(state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_link_attention_policy(
     link_id: i64,
     policy: Option<ExternalChangePolicy>,
@@ -1444,6 +1480,7 @@ pub fn set_link_attention_policy(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_link_purpose(
     link_id: i64,
     purpose: LinkPurpose,
@@ -1454,6 +1491,7 @@ pub fn set_link_purpose(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_link_watch_until(
     link_id: i64,
     watch_until: Option<String>,
@@ -1463,6 +1501,7 @@ pub fn set_link_watch_until(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_link_review_at(
     link_id: i64,
     review_at: Option<String>,
@@ -1472,6 +1511,7 @@ pub fn set_link_review_at(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn clear_link_review_at(
     link_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1480,6 +1520,7 @@ pub fn clear_link_review_at(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn set_context_attention_default(
     context_id: i64,
     object_kind: ExternalObjectKind,
@@ -1495,6 +1536,7 @@ pub fn set_context_attention_default(
 }
 
 #[tauri::command(rename_all = "camelCase")]
+#[specta::specta]
 pub fn mark_link_reviewed(
     link_id: i64,
     state: State<'_, Mutex<Runtime>>,
@@ -1581,8 +1623,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
-                plan_phase: None,
-                plan_path: None,
+            plan_phase: None,
+            plan_path: None,
         });
         runtime
     }
@@ -1997,8 +2039,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
-                plan_phase: None,
-                plan_path: None,
+            plan_phase: None,
+            plan_path: None,
         });
 
         let item = runtime
@@ -2104,8 +2146,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
-                plan_phase: None,
-                plan_path: None,
+            plan_phase: None,
+            plan_path: None,
         });
 
         let stopped = runtime
@@ -2168,8 +2210,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
-                plan_phase: None,
-                plan_path: None,
+            plan_phase: None,
+            plan_path: None,
         });
 
         let error = runtime
@@ -2408,8 +2450,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
-                plan_phase: None,
-                plan_path: None,
+            plan_phase: None,
+            plan_path: None,
         };
         runtime.state.runs.extend([
             make_run(1, 1, "%1"),
@@ -2659,8 +2701,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
-                plan_phase: None,
-                plan_path: None,
+            plan_phase: None,
+            plan_path: None,
         };
         runtime
             .store
@@ -3057,8 +3099,8 @@ mod tests {
             grill_phase: Some(GrillPhase::Working),
             grill_action: None,
             grill_action_started_at: None,
-                plan_phase: None,
-                plan_path: None,
+            plan_phase: None,
+            plan_path: None,
         });
 
         runtime

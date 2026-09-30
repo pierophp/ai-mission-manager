@@ -1,6 +1,6 @@
 import { queryOptions, useQuery } from "@tanstack/react-query";
 
-import { activityAdapter, workAdapter } from "../../runtime/adapters";
+import { workCommands } from "./work-commands";
 import { currentMinute } from "../../runtime/time";
 import type { ItemView } from "../../runtime/types";
 
@@ -20,7 +20,7 @@ export const workKeys = {
 export const homeQueryOptions = (contextId: number | undefined) =>
   queryOptions({
     queryKey: workKeys.home(contextId),
-    queryFn: () => workAdapter.getHome(contextId, currentMinute()),
+    queryFn: () => workCommands.getHome(contextId, currentMinute()),
     refetchInterval: 3_000,
     staleTime: 2_000,
   });
@@ -31,7 +31,7 @@ export const searchQueryOptions = (
 ) =>
   queryOptions({
     queryKey: workKeys.search(query, contextId),
-    queryFn: () => workAdapter.searchItems(query, contextId),
+    queryFn: () => workCommands.searchItems(query, contextId),
     enabled: Boolean(query.trim()),
     staleTime: 30_000,
     select: (items: ItemView[]) => items,
@@ -40,7 +40,7 @@ export const searchQueryOptions = (
 export const runSuggestionsQueryOptions = () =>
   queryOptions({
     queryKey: workKeys.runSuggestions(),
-    queryFn: workAdapter.listRunSuggestions,
+    queryFn: workCommands.listRunSuggestions,
     refetchInterval: 10_000,
     staleTime: 5_000,
   });
@@ -52,7 +52,7 @@ export const runSuggestionsQueryOptions = () =>
 export const issueDocumentQueryOptions = (externalObjectId: number) =>
   queryOptions({
     queryKey: ["issueDocument", externalObjectId] as const,
-    queryFn: () => workAdapter.fetchIssueDocument(externalObjectId),
+    queryFn: () => workCommands.fetchIssueDocument(externalObjectId),
     staleTime: 0,
     refetchOnMount: "always" as const,
     retry: false,
@@ -64,7 +64,7 @@ export const externalDocumentQueryOptions = (
 ) =>
   queryOptions({
     queryKey: ["externalDocument", externalObjectId] as const,
-    queryFn: () => workAdapter.fetchExternalDocument(externalObjectId),
+    queryFn: () => workCommands.fetchExternalDocument(externalObjectId),
     staleTime: 0,
     refetchOnMount: "always" as const,
     retry: false,
@@ -77,7 +77,7 @@ export const externalCommentsQueryOptions = (
 ) =>
   queryOptions({
     queryKey: ["externalComments", externalObjectId] as const,
-    queryFn: () => workAdapter.fetchExternalComments(externalObjectId),
+    queryFn: () => workCommands.fetchExternalComments(externalObjectId),
     staleTime: 0,
     refetchOnMount: "always" as const,
     retry: false,
@@ -110,7 +110,7 @@ export const activityKeys = {
 export const activityQueryOptions = () =>
   queryOptions({
     queryKey: activityKeys.tab(),
-    queryFn: activityAdapter.getTab,
+    queryFn: workCommands.getActivityTab,
     staleTime: 30_000,
   });
 

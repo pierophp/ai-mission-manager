@@ -1,5 +1,5 @@
-import type { TerminalAttachment } from "../terminal-types";
-import { command, listen } from "./tauri";
+import { listen } from "./tauri";
+import { commands } from "../bindings";
 
 export const terminalRuntimeAdapter = {
   open: (
@@ -8,16 +8,11 @@ export const terminalRuntimeAdapter = {
     sessionName: string,
     paneId: string,
   ) =>
-    command<TerminalAttachment>("open_terminal", {
-      runId,
-      terminalId,
-      sessionName,
-      paneId,
-    }),
+    commands.openTerminal(runId, terminalId, sessionName, paneId),
   input: (terminalId: string, input: number[]) =>
-    command<void>("terminal_input", { terminalId, input }),
+    commands.terminalInput(terminalId, input),
   resize: (terminalId: string, columns: number, rows: number) =>
-    command<void>("terminal_resize", { terminalId, columns, rows }),
-  close: (terminalId: string) => command<void>("close_terminal", { terminalId }),
+    commands.terminalResize(terminalId, columns, rows),
+  close: (terminalId: string) => commands.closeTerminal(terminalId),
   listen,
 };

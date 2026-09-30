@@ -5,7 +5,7 @@ import {
   useQueryClient,
 } from "@tanstack/react-query";
 
-import { planUsageAdapter } from "../../runtime/adapters";
+import { command } from "../../runtime/command";
 
 export const planUsageKeys = {
   all: ["plan-usage"] as const,
@@ -15,7 +15,7 @@ export const planUsageKeys = {
 export const planUsageQueryOptions = () =>
   queryOptions({
     queryKey: planUsageKeys.snapshot(),
-    queryFn: planUsageAdapter.list,
+    queryFn: () => command("listPlanUsage"),
     // The backend refreshes in the background, so polling only decides how
     // soon a finished refresh becomes visible.
     refetchInterval: (query) =>
@@ -29,7 +29,7 @@ export function usePlanUsageQuery() {
 export function useRefreshPlanUsageMutation() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: planUsageAdapter.refresh,
+    mutationFn: () => command("refreshPlanUsage"),
     onSuccess: () =>
       queryClient.invalidateQueries({ queryKey: planUsageKeys.all }),
   });

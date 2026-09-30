@@ -7,17 +7,19 @@
     "node": "^20.19.0 || ^22.18.0 || >=24.11.0"
   },
   "scripts": {
-    "build": "tsc --noEmit && vp build",
+    "build": "cargo test --manifest-path src-tauri/Cargo.toml generated_typescript_bindings_are_current && tsc --noEmit && vp build",
     "dev": "vp dev --host 127.0.0.1",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:dev:devtools": "AI_MISSION_MANAGER_OPEN_DEVTOOLS=true tauri dev",
     "tauri:build": "tauri build",
-    "tauri:build-open": "cargo clean --manifest-path src-tauri/Cargo.toml && npm run tauri:build && npm run tauri:open",
+    "tauri:clean": "cargo clean --manifest-path src-tauri/Cargo.toml",
+    "tauri:build-open": "npm run tauri:build && npm run tauri:open",
     "tauri:open": "./src-tauri/target/release/ai-mission-manager",
     "typecheck": "tsc --noEmit",
+    "check:tauri-bindings": "cargo test --manifest-path src-tauri/Cargo.toml generated_typescript_bindings_are_current",
     "check:pstack-vendor": "node scripts/check-pstack-vendor.mjs",
-    "test": "node --test scripts/check-pstack-vendor.test.mjs && npm run check:pstack-vendor && npm run typecheck && npm run build"
+    "test": "node --test scripts/check-pstack-vendor.test.mjs && npm run check:pstack-vendor && npm run check:tauri-bindings && npm run typecheck && npm run build"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

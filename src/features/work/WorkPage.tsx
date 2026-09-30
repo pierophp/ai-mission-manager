@@ -41,7 +41,7 @@ import {
   invalidateWorkQueries,
 } from "../../runtime/query-invalidation";
 import { usePollExternalObjects } from "../../runtime/RuntimeEventsBridge";
-import { structureActions, useStructureCommand } from "../structure/structure-mutations";
+import { structureActions, useStructureCommand } from "../structure/structure-commands";
 import type { Context, Project, RunSuggestion } from "../../runtime/types";
 import {
   AttentionEntryCard,
@@ -58,7 +58,6 @@ import {
   defaultItemTab,
   displayItemIdentifier,
   grillQuestionKey,
-  isGrillWaitingForAnswers,
   tabForForm,
 } from "./item-signals";
 import type { WorkSearch } from "./work-search";
@@ -69,7 +68,7 @@ import {
   useRunSuggestionsQuery,
   useSearchQuery,
 } from "./work-queries";
-import { useWorkCommand, workActions } from "./work-mutations";
+import { useWorkCommand, workActions } from "./work-commands";
 import { useStructureData } from "../structure/structure-queries";
 
 type UntrackedAgentAction = {
@@ -285,9 +284,14 @@ export function WorkPage() {
   useEffect(() => {
     if (!home) return;
     const waiting = allItems.flatMap((view) =>
-      view.runs
-        .filter(isGrillWaitingForAnswers)
-        .map((run) => ({ view, run, key: grillQuestionKey(run) })),
+      view.runs.flatMap((run) => {
+        const projection = view.run_projections.find(
+          (candidate) => candidate.runId === run.id,
+        );
+        return projection?.phase === "grillWaitingForAnswers"
+          ? [{ view, run, key: grillQuestionKey(run) }]
+          : [];
+      }),
     );
     const seen = seenGrillQuestions.current;
     const isBaseline = !seen || seen.contextId !== contextFilterId;

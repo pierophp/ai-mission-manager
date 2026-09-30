@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { ConfirmationDialog } from "../../components/ui/confirmation-dialog";
 import { errorMessage } from "../../runtime/errors";
-import { type WorkAction, useWorkCommand } from "./work-mutations";
+import { type WorkAction, useWorkCommand } from "./work-commands";
 
 type WorkConfirmation = {
   title: string;

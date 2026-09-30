@@ -22,10 +22,9 @@ import {
   type ItemForm,
   type ItemIntent,
   displayItemIdentifier,
-  supportsImplementationSpec,
 } from "../item-signals";
 import type { ItemCommands } from "../use-item-commands";
-import { workActions } from "../work-mutations";
+import { workActions } from "../work-commands";
 import { externalObjectKindLabel } from "../work-utils";
 import { useFormIntent } from "./shared";
 
@@ -60,7 +59,7 @@ export function LinksTab({
   const specs = view.links.filter(
     (link) =>
       link.link.purpose === "to-spec" &&
-      supportsImplementationSpec(link),
+      link.supports_implementation_spec,
   );
 
   function openLinkForm(form: ItemForm) {

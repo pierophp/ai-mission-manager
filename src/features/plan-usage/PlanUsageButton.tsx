@@ -211,16 +211,18 @@ function ProfileRow({
 }
 
 function WindowBar({ window, now }: { window: UsageWindow; now: number }) {
-  const tone = usageTone(window.usedPercent);
+  const tone = usageTone(window.usedPercent ?? 0);
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-baseline justify-between gap-2 text-xs">
         <span className="truncate text-muted-foreground">{window.label}</span>
         <span className={toneTextClass[tone]}>
-          {Math.round(window.usedPercent)}%
+          {window.usedPercent === null ? "—" : `${Math.round(window.usedPercent)}%`}
         </span>
       </div>
-      <Progress value={window.usedPercent} className={toneBarClass[tone]} />
+      {window.usedPercent === null ? null : (
+        <Progress value={window.usedPercent} className={toneBarClass[tone]} />
+      )}
       {window.resetsAt === null ? null : (
         <span className="text-[10px] text-muted-foreground">
           Resets {formatResetCountdown(window.resetsAt, now)}

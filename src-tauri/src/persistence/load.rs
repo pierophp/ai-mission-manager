@@ -504,20 +504,25 @@ impl SqliteStore {
                         },
                     )?,
                     transcript: row.get(20)?,
-                    reported_pull_requests: serde_json::from_str(
-                        &reported_pull_requests_json,
-                    )
-                    .map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            30,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })?,
+                    reported_pull_requests: serde_json::from_str(&reported_pull_requests_json)
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                30,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
                     attention_summary: row.get(31)?,
-                    plan_phase: plan_phase.map(|phase| parse_plan_phase(&phase)).transpose().map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(32, rusqlite::types::Type::Text, Box::new(error))
-                    })?,
+                    plan_phase: plan_phase
+                        .map(|phase| parse_plan_phase(&phase))
+                        .transpose()
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                32,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })?,
                     plan_path: row.get(33)?,
                     grill_question_group,
                     grill_answers,

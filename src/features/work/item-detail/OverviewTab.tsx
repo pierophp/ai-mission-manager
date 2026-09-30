@@ -10,7 +10,7 @@ import { Textarea } from "../../../components/ui/textarea";
 import type { ItemRelationKind, ItemView } from "../../../runtime/types";
 import { type ItemIntent, displayItemIdentifier } from "../item-signals";
 import type { ItemCommands } from "../use-item-commands";
-import { workActions } from "../work-mutations";
+import { workActions } from "../work-commands";
 import { relationKindLabel, relationshipLabel } from "../work-utils";
 import { SectionLabel, useFormIntent } from "./shared";
 

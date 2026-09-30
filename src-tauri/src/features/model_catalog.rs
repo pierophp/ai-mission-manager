@@ -34,7 +34,7 @@ static CODEX_REFRESH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static CODEX_LAST_ATTEMPT_AT: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 static CLAUDE_EFFORTS: OnceLock<Vec<GrillEffort>> = OnceLock::new();
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GrillModelCatalogSnapshot {
     pub catalogs: Vec<GrillAgentCatalog>,
@@ -43,7 +43,7 @@ pub(crate) struct GrillModelCatalogSnapshot {
     pub codex_fetched_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum CatalogRefreshStatus {
     Ready,
@@ -51,7 +51,7 @@ pub(crate) enum CatalogRefreshStatus {
     Error,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 struct CodexCatalogCache {
     fetched_at: i64,

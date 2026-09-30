@@ -1,7 +1,10 @@
 use sha2::{Digest, Sha256};
-use std::{env, fs, path::{Path, PathBuf}};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) {
     let mut entries = fs::read_dir(directory)
@@ -18,7 +21,11 @@ fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) {
             collect_files(root, &path, files);
         } else if metadata.is_file() {
             println!("cargo:rerun-if-changed={}", path.display());
-            files.push(path.strip_prefix(root).expect("pstack-relative path").to_path_buf());
+            files.push(
+                path.strip_prefix(root)
+                    .expect("pstack-relative path")
+                    .to_path_buf(),
+            );
         }
     }
 }
@@ -27,13 +34,24 @@ fn main() {
     tauri_build::build();
 
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("manifest directory"));
-    let tree_root = manifest.join("../agents/pstack").canonicalize().expect("pstack tree");
+    let tree_root = manifest
+        .join("../agents/pstack")
+        .canonicalize()
+        .expect("pstack tree");
     let patches = fs::read_to_string(tree_root.join("PATCHES.md")).expect("pstack patches");
-    let upstream = patches.lines().find(|line| line.starts_with("Upstream source:"))
+    let upstream = patches
+        .lines()
+        .find(|line| line.starts_with("Upstream source:"))
         .expect("pstack upstream metadata");
-    let version = upstream.split("version `").nth(1).and_then(|value| value.split('`').next())
+    let version = upstream
+        .split("version `")
+        .nth(1)
+        .and_then(|value| value.split('`').next())
         .expect("pstack version");
-    let commit = upstream.split("commit `").nth(1).and_then(|value| value.split('`').next())
+    let commit = upstream
+        .split("commit `")
+        .nth(1)
+        .and_then(|value| value.split('`').next())
         .expect("pstack commit");
 
     let mut files = Vec::new();
@@ -48,7 +66,14 @@ fn main() {
         hash.update((bytes.len() as u64).to_be_bytes());
         hash.update(bytes);
         #[cfg(unix)]
-        hash.update([u8::from(fs::metadata(tree_root.join(relative)).expect("stat pstack file").permissions().mode() & 0o111 != 0)]);
+        hash.update([u8::from(
+            fs::metadata(tree_root.join(relative))
+                .expect("stat pstack file")
+                .permissions()
+                .mode()
+                & 0o111
+                != 0,
+        )]);
         #[cfg(not(unix))]
         hash.update([0]);
     }
@@ -59,10 +84,18 @@ fn main() {
         let name = relative.to_string_lossy().replace('\\', "/");
         let absolute = tree_root.join(relative);
         #[cfg(unix)]
-        let executable = fs::metadata(&absolute).expect("stat pstack file").permissions().mode() & 0o111 != 0;
+        let executable = fs::metadata(&absolute)
+            .expect("stat pstack file")
+            .permissions()
+            .mode()
+            & 0o111
+            != 0;
         #[cfg(not(unix))]
         let executable = false;
-        generated.push_str(&format!("    ({name:?}, include_bytes!({:?}) as &[u8], {executable}),\n", absolute.to_string_lossy()));
+        generated.push_str(&format!(
+            "    ({name:?}, include_bytes!({:?}) as &[u8], {executable}),\n",
+            absolute.to_string_lossy()
+        ));
     }
     generated.push_str("];\n");
     let out = PathBuf::from(env::var("OUT_DIR").expect("output directory"));

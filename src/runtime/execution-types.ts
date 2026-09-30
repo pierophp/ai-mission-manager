@@ -21,6 +21,36 @@ export type GrillPhase =
 
 export type GrillContinuationAction = "to-spec" | "to-tickets" | "implement";
 export type PlanPhase = "awaitingGo" | "executing";
+export type RunStatus = "active" | "finished";
+export type RunDisplayPhase =
+  | "unknown"
+  | "working"
+  | "blocked"
+  | "finished"
+  | "awaitingGo"
+  | "grillStarting"
+  | "grillWorking"
+  | "grillWaitingForAnswers"
+  | "grillAwaitingNextAction"
+  | "grillRecoverablePaneLoss";
+
+export type RunProjection = {
+  runId: number;
+  status: RunStatus;
+  phase: RunDisplayPhase;
+  continuations: {
+    goPlan: boolean;
+    grillActions: GrillContinuationAction[];
+    stop: boolean;
+    finish: boolean;
+    delete: boolean;
+  };
+};
+
+export type ItemRunSignals = {
+  grillWaiting: boolean;
+  runActive: boolean;
+};
 
 export type RunCheckout = {
   repositoryId: number;
@@ -104,10 +134,10 @@ export type RunSuggestion = {
   itemTitle: string;
   contextId: number;
   contextName: string;
-  workspaceId: number | null;
-  repositoryId: number | null;
-  worktreeId: number | null;
-  locationPath: string | null;
+  workspaceId?: number | null;
+  repositoryId?: number | null;
+  worktreeId?: number | null;
+  locationPath?: string | null;
 };
 
 export type RunPromptSelection = {

@@ -540,7 +540,9 @@ pub(super) fn initialize_schema(connection: &mut Connection) -> Result<(), Store
         )?;
     }
     if !run_columns.is_empty()
-        && !run_columns.iter().any(|column| column == "attention_summary")
+        && !run_columns
+            .iter()
+            .any(|column| column == "attention_summary")
     {
         connection.execute("ALTER TABLE runs ADD COLUMN attention_summary TEXT", [])?;
     }
@@ -860,25 +862,64 @@ pub(super) fn migrate_runs_for_grill(connection: &mut Connection) -> Result<(), 
 
 /// Widen the Run profile CHECK while preserving every persisted Run and report.
 fn migrate_runs_execution_profiles(connection: &mut Connection) -> Result<(), StoreError> {
-    let sql = connection.query_row(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs'",
-        [],
-        |row| row.get::<_, String>(0),
-    ).optional()?;
-    let Some(sql) = sql else { return Ok(()); };
-    if sql.contains("'autonomous'") && sql.contains("'plan'") && sql.contains("'pstack-review'") { return Ok(()); }
+    let sql = connection
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(sql) = sql else {
+        return Ok(());
+    };
+    if sql.contains("'autonomous'") && sql.contains("'plan'") && sql.contains("'pstack-review'") {
+        return Ok(());
+    }
     let existing = table_columns(connection, "runs")?;
     let known = [
-        "id", "item_id", "workspace_id", "repository_id", "worktree_id", "machine_id", "agent",
-        "cli_configuration_profile_json", "execution_profile", "workflow", "model", "effort",
-        "skill_snapshot", "prompt", "working_directory", "session_name", "pane_id", "started_at",
-        "state", "last_applied_agent_state_sequence", "pane_status", "direct_checkouts_json", "transcript",
-        "reported_pull_requests_json", "attention_summary", "grill_question_group_json", "grill_answers_json",
-        "grill_decisions_json", "grill_response", "grill_phase", "grill_action", "grill_action_started_at",
-        "implementation_queue_id", "implementation_queue_position", "plan_phase", "plan_path",
+        "id",
+        "item_id",
+        "workspace_id",
+        "repository_id",
+        "worktree_id",
+        "machine_id",
+        "agent",
+        "cli_configuration_profile_json",
+        "execution_profile",
+        "workflow",
+        "model",
+        "effort",
+        "skill_snapshot",
+        "prompt",
+        "working_directory",
+        "session_name",
+        "pane_id",
+        "started_at",
+        "state",
+        "last_applied_agent_state_sequence",
+        "pane_status",
+        "direct_checkouts_json",
+        "transcript",
+        "reported_pull_requests_json",
+        "attention_summary",
+        "grill_question_group_json",
+        "grill_answers_json",
+        "grill_decisions_json",
+        "grill_response",
+        "grill_phase",
+        "grill_action",
+        "grill_action_started_at",
+        "implementation_queue_id",
+        "implementation_queue_position",
+        "plan_phase",
+        "plan_path",
     ];
-    let columns = known.iter().filter(|column| existing.iter().any(|candidate| candidate == **column))
-        .copied().collect::<Vec<_>>().join(", ");
+    let columns = known
+        .iter()
+        .filter(|column| existing.iter().any(|candidate| candidate == **column))
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
     connection.execute_batch("PRAGMA foreign_keys = OFF; BEGIN IMMEDIATE;")?;
     let result = (|| -> Result<(), StoreError> {
         connection.execute_batch(
@@ -911,7 +952,9 @@ fn migrate_runs_execution_profiles(connection: &mut Connection) -> Result<(), St
         connection.execute_batch("COMMIT;")?;
         Ok(())
     })();
-    if result.is_err() { let _ = connection.execute_batch("ROLLBACK;"); }
+    if result.is_err() {
+        let _ = connection.execute_batch("ROLLBACK;");
+    }
     connection.execute_batch("PRAGMA foreign_keys = ON;")?;
     result
 }

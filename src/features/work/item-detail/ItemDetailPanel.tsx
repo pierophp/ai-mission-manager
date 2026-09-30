@@ -39,7 +39,7 @@ import {
   itemSpecs,
 } from "../item-signals";
 import { useItemCommands } from "../use-item-commands";
-import { workActions } from "../work-mutations";
+import { workActions } from "../work-commands";
 import { LinksTab } from "./LinksTab";
 import { OverviewTab } from "./OverviewTab";
 import { RepositoriesTab } from "./RepositoriesTab";
@@ -283,8 +283,6 @@ export function ItemDetailPanel({
               <SpecTab
                 view={view}
                 specs={specs}
-                repositories={repositories}
-                contexts={contexts}
                 modelCatalog={grillModelCatalog}
                 commands={commands}
                 onOpenRun={openQueueRun}
@@ -300,7 +298,6 @@ export function ItemDetailPanel({
               view={view}
               repositories={repositories}
               machines={machines}
-              contexts={contexts}
               grillModelCatalog={grillModelCatalog}
               commands={commands}
               intent={intent}

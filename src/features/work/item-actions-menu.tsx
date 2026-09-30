@@ -30,11 +30,10 @@ import type {
 } from "../../runtime/types";
 import {
   type ItemForm,
-  activeRuns,
   displayItemIdentifier,
 } from "./item-signals";
 import type { ItemCommands } from "./use-item-commands";
-import { workActions } from "./work-mutations";
+import { workActions } from "./work-commands";
 
 const itemStatuses: ItemStatus[] = ["Inbox", "Active", "Waiting", "Done"];
 
@@ -59,7 +58,14 @@ export function ItemActionsMenu({
 
   function handleItemStatusChange(nextStatus: ItemStatus) {
     if (nextStatus === "Done" && view.item.status !== "Done") {
-      const running = activeRuns(view);
+      const running = view.runs.filter((run) =>
+        view.run_projections.some(
+          (projection) =>
+            projection.runId === run.id &&
+            projection.status === "active" &&
+            projection.continuations.stop,
+        ),
+      );
       if (running.length > 0) {
         confirm({
           title: "Complete this Item with active Runs?",

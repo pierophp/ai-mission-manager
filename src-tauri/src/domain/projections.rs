@@ -1,4 +1,265 @@
 use super::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "kebab-case")]
+pub enum RunLaunchTargetKind {
+    Checkout,
+    Worktree,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RunLaunchProfileOption {
+    pub execution_profile: ExecutionProfile,
+    pub configuration: GrillConfiguration,
+    pub requires_initial_prompt: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RunLaunchWorkflowOptions {
+    pub workflow: Workflow,
+    pub default_profile: ExecutionProfile,
+    pub profiles: Vec<RunLaunchProfileOption>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RunLaunchOptions {
+    pub default_workflow: Workflow,
+    pub workflows: Vec<RunLaunchWorkflowOptions>,
+}
+
+pub fn run_launch_options(
+    state: &DomainState,
+    item_id: i64,
+    target: RunLaunchTargetKind,
+) -> Result<RunLaunchOptions, DomainError> {
+    let item = state
+        .items
+        .iter()
+        .find(|item| item.id == item_id)
+        .ok_or(DomainError::ItemNotFound { item_id })?;
+    let project = state
+        .projects
+        .iter()
+        .find(|project| project.id == item.project_id)
+        .ok_or(DomainError::ProjectNotFound {
+            project_id: item.project_id,
+        })?;
+    let context = state
+        .contexts
+        .iter()
+        .find(|context| context.id == project.context_id)
+        .ok_or(DomainError::ContextNotFound {
+            context_id: project.context_id,
+        })?;
+    let workflows = [Workflow::MattPocock, Workflow::Pstack]
+        .into_iter()
+        .map(|workflow| {
+            let profiles = [
+                ExecutionProfile::Grill,
+                ExecutionProfile::Investigate,
+                ExecutionProfile::Implement,
+                ExecutionProfile::Review,
+                ExecutionProfile::Autonomous,
+                ExecutionProfile::Plan,
+                ExecutionProfile::PstackReview,
+                ExecutionProfile::CustomPrompt,
+            ]
+            .into_iter()
+            .filter(|profile| {
+                workflow.offers(*profile)
+                    && !(target == RunLaunchTargetKind::Worktree
+                        && *profile == ExecutionProfile::Grill)
+            })
+            .map(|execution_profile| RunLaunchProfileOption {
+                execution_profile,
+                configuration: if workflow == Workflow::Pstack {
+                    context.pstack_defaults.clone()
+                } else if execution_profile == ExecutionProfile::Grill {
+                    context.grill_defaults.clone()
+                } else {
+                    context.implement_defaults.clone()
+                },
+                requires_initial_prompt: matches!(
+                    execution_profile,
+                    ExecutionProfile::Grill
+                        | ExecutionProfile::CustomPrompt
+                        | ExecutionProfile::PstackReview
+                ),
+            })
+            .collect::<Vec<_>>();
+            let default_profile = match workflow {
+                Workflow::Pstack => ExecutionProfile::Autonomous,
+                Workflow::MattPocock if target == RunLaunchTargetKind::Worktree => {
+                    ExecutionProfile::Investigate
+                }
+                Workflow::MattPocock => ExecutionProfile::Grill,
+            };
+            RunLaunchWorkflowOptions {
+                workflow,
+                default_profile,
+                profiles,
+            }
+        })
+        .collect();
+    Ok(RunLaunchOptions {
+        default_workflow: context.default_workflow,
+        workflows,
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum RunDisplayPhase {
+    Unknown,
+    Working,
+    Blocked,
+    Finished,
+    AwaitingGo,
+    GrillStarting,
+    GrillWorking,
+    GrillWaitingForAnswers,
+    GrillAwaitingNextAction,
+    GrillRecoverablePaneLoss,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RunContinuations {
+    pub go_plan: bool,
+    pub grill_actions: Vec<GrillContinuationAction>,
+    pub stop: bool,
+    pub finish: bool,
+    pub delete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct RunProjection {
+    pub run_id: i64,
+    pub status: RunStatus,
+    pub phase: RunDisplayPhase,
+    pub continuations: RunContinuations,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub enum RunStatus {
+    Active,
+    Finished,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[serde(rename_all = "camelCase")]
+pub struct ItemRunSignals {
+    pub grill_waiting: bool,
+    pub run_active: bool,
+}
+
+pub fn run_projection(run: &Run) -> RunProjection {
+    let active = run_is_active(run);
+    let grill_actions = [
+        GrillContinuationAction::ToSpec,
+        GrillContinuationAction::ToTickets,
+        GrillContinuationAction::Implement,
+    ]
+    .into_iter()
+    .filter(|action| {
+        grill_continuation_available(run.grill_phase, run.grill_action, *action)
+            && !(*action == GrillContinuationAction::ToSpec
+                && run.grill_phase == Some(GrillPhase::AwaitingNextAction)
+                && run.grill_action == Some(GrillContinuationAction::ToSpec))
+    })
+    .collect();
+    RunProjection {
+        run_id: run.id,
+        status: if active {
+            RunStatus::Active
+        } else {
+            RunStatus::Finished
+        },
+        phase: run_display_phase(run),
+        continuations: RunContinuations {
+            go_plan: run.execution_profile == ExecutionProfile::Plan
+                && run.plan_phase == Some(PlanPhase::AwaitingGo),
+            grill_actions,
+            stop: active && run.pane_status != RunPaneStatus::Missing,
+            finish: active,
+            delete: !active,
+        },
+    }
+}
+
+fn run_display_phase(run: &Run) -> RunDisplayPhase {
+    if run.execution_profile == ExecutionProfile::Plan
+        && run.plan_phase == Some(PlanPhase::AwaitingGo)
+    {
+        return RunDisplayPhase::AwaitingGo;
+    }
+    if run.execution_profile == ExecutionProfile::Grill {
+        match run.grill_phase {
+            Some(GrillPhase::Starting) => return RunDisplayPhase::GrillStarting,
+            Some(GrillPhase::Working) => return RunDisplayPhase::GrillWorking,
+            Some(GrillPhase::WaitingForAnswers) => {
+                return RunDisplayPhase::GrillWaitingForAnswers;
+            }
+            Some(GrillPhase::AwaitingNextAction) => {
+                return RunDisplayPhase::GrillAwaitingNextAction;
+            }
+            Some(GrillPhase::RecoverablePaneLoss) => {
+                return RunDisplayPhase::GrillRecoverablePaneLoss;
+            }
+            Some(GrillPhase::Finished) | None => {}
+        }
+    }
+    match run.state {
+        RunState::Unknown => RunDisplayPhase::Unknown,
+        RunState::Working => RunDisplayPhase::Working,
+        RunState::Blocked => RunDisplayPhase::Blocked,
+        RunState::Finished => RunDisplayPhase::Finished,
+    }
+}
+
+fn item_run_signals(runs: &[Run]) -> ItemRunSignals {
+    let grill_waiting = runs.iter().any(|run| {
+        run.execution_profile == ExecutionProfile::Grill
+            && run.grill_phase == Some(GrillPhase::WaitingForAnswers)
+            && run.grill_response.is_none()
+    });
+    let run_active = runs.iter().any(|run| {
+        run_is_active(run)
+            && run.pane_status != RunPaneStatus::Missing
+            && !(run.execution_profile == ExecutionProfile::Grill
+                && run.grill_phase == Some(GrillPhase::WaitingForAnswers)
+                && run.grill_response.is_none())
+    });
+    ItemRunSignals {
+        grill_waiting,
+        run_active,
+    }
+}
+
+fn supports_implementation_spec(object: &ExternalObject) -> bool {
+    matches!(
+        (object.provider, object.kind),
+        (ExternalProvider::GitHub, ExternalObjectKind::Issue)
+            | (
+                ExternalProvider::Atlassian,
+                ExternalObjectKind::Document | ExternalObjectKind::Issue
+            )
+    ) || (object.provider == ExternalProvider::Generic && object.external_key.starts_with("local:"))
+}
+
+fn supports_implementation_ticket(object: &ExternalObject) -> bool {
+    matches!(
+        (object.provider, object.kind),
+        (ExternalProvider::GitHub, ExternalObjectKind::Issue)
+            | (ExternalProvider::Atlassian, ExternalObjectKind::Issue)
+    ) || (object.provider == ExternalProvider::Generic && object.external_key.starts_with("local:"))
+}
 
 pub fn suggest_untracked_runs(
     state: &DomainState,
@@ -263,6 +524,8 @@ fn external_link_view_at(
         snapshot,
         attention_policy: effective_attention_policy(state, link, object),
         attention_entry: attention_entry_for_link_at(state, link, object, now),
+        supports_implementation_spec: supports_implementation_spec(object),
+        supports_implementation_ticket: supports_implementation_ticket(object),
     })
 }
 
@@ -497,12 +760,14 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                     ..workspace.clone()
                 })
                 .collect();
-            let runs = state
+            let runs: Vec<Run> = state
                 .runs
                 .iter()
                 .filter(|run| run.item_id == item.id)
                 .cloned()
                 .collect();
+            let run_projections = runs.iter().map(run_projection).collect();
+            let run_signals = item_run_signals(&runs);
             let worktrees = state
                 .worktrees
                 .iter()
@@ -522,6 +787,8 @@ fn item_views_at(state: &DomainState, context_id: Option<i64>, now: Option<&str>
                 workspaces,
                 worktrees,
                 runs,
+                run_projections,
+                run_signals,
                 implementation_queues: state
                     .implementation_queues
                     .iter()
@@ -542,7 +809,9 @@ pub fn compose_run_prompt(
     language: Option<GrillLanguage>,
     initial_prompt: Option<&str>,
 ) -> Result<String, DomainError> {
-    let initial_prompt = initial_prompt.map(str::trim).filter(|prompt| !prompt.is_empty());
+    let initial_prompt = initial_prompt
+        .map(str::trim)
+        .filter(|prompt| !prompt.is_empty());
     let item = state
         .items
         .iter()
@@ -627,17 +896,42 @@ pub fn compose_pstack_prompt(
     language: GrillLanguage,
     initial_prompt: Option<&str>,
 ) -> Result<String, DomainError> {
-    let item = state.items.iter().find(|item| item.id == item_id)
+    let item = state
+        .items
+        .iter()
+        .find(|item| item.id == item_id)
         .ok_or(DomainError::ItemNotFound { item_id })?;
-    let initial_prompt = initial_prompt.map(str::trim).filter(|value| !value.is_empty());
-    let spec = state.links.iter().find(|link| link.item_id == item_id && link.purpose == LinkPurpose::ToSpec)
-        .and_then(|link| state.external_objects.iter().find(|object| object.id == link.external_object_id))
+    let initial_prompt = initial_prompt
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let spec = state
+        .links
+        .iter()
+        .find(|link| link.item_id == item_id && link.purpose == LinkPurpose::ToSpec)
+        .and_then(|link| {
+            state
+                .external_objects
+                .iter()
+                .find(|object| object.id == link.external_object_id)
+        })
         .map(|object| object.canonical_url.as_str());
     let context_id = item_context_id(state, item_id)?;
-    let context = state.contexts.iter().find(|context| context.id == context_id)
+    let context = state
+        .contexts
+        .iter()
+        .find(|context| context.id == context_id)
         .ok_or(DomainError::ContextNotFound { context_id })?;
     let roles_path = pstack_role_file_path(skill_root, context);
-    let roles_instruction = format!("Read the generated role instructions at `{roles_path}` and follow them when delegating.");
+    let roles_instruction = format!(
+        "Read the generated role instructions at `{roles_path}` and follow them when delegating."
+    );
+    if matches!(
+        profile,
+        ExecutionProfile::PstackReview | ExecutionProfile::CustomPrompt
+    ) && initial_prompt.is_none()
+    {
+        return Err(DomainError::EmptyRunPrompt);
+    }
     let profile_instruction = match profile {
         ExecutionProfile::Autonomous => format!("You are starting an Autonomous pstack Run. Read `{skill_root}/skills/poteto-mode/SKILL.md` in full before acting. The Skill tool is unavailable because these skills disable model invocation; read any other needed skill by its absolute path under `{skill_root}/skills/` instead of relying on the Skill tool. {roles_instruction} Do not paste skill text into your response."),
         ExecutionProfile::Plan => format!("You are starting a Plan pstack Run. Read `{skill_root}/skills/poteto-mode/SKILL.md` in full and follow `{skill_root}/skills/poteto-mode/playbooks/multi-phase-plan.md` in full. The Skill tool is unavailable because these skills disable model invocation; read both files by their absolute paths. {roles_instruction} Complete the required planning phases, write the plan in the repository, then stop without implementing it. Report the plan's repository-relative path in your final response. Do not delegate implementation."),
@@ -648,11 +942,7 @@ pub fn compose_pstack_prompt(
         }
         _ => return Err(DomainError::ExecutionProfileNotInWorkflow { workflow: Workflow::Pstack, execution_profile: profile }),
     };
-    let mut prompt = format!(
-        "{profile_instruction}\n\nItem: {}\nItem context: {}",
-        item.title,
-        if item.notes.trim().is_empty() { "(no additional notes)" } else { item.notes.trim() },
-    );
+    let mut prompt = format!("{profile_instruction}\n\nItem: {}", item.title,);
     if let Some(initial_prompt) = initial_prompt {
         prompt.push_str(&format!("\n\nInitial Prompt:\n{initial_prompt}"));
     }
@@ -696,20 +986,56 @@ pub fn compose_pstack_role_file(
             AgentKind::Codex => codex_profile,
         };
         let profile_line = profile
-            .map(|profile| format!("Context CLI profile #{} (`{}`) at `{}`", profile.id, profile.name, profile.directory))
-            .unwrap_or_else(|| "the standard CLI configuration (no Context profile selected)".to_owned());
+            .map(|profile| {
+                format!(
+                    "Context CLI profile #{} (`{}`) at `{}`",
+                    profile.id, profile.name, profile.directory
+                )
+            })
+            .unwrap_or_else(|| {
+                "the standard CLI configuration (no Context profile selected)".to_owned()
+            });
         let invocation = match config.agent {
-            AgentKind::Claude => format!("`{}claude -p --model {} --effort {}`", profile.map(|profile| format!("CLAUDE_CONFIG_DIR={} ", shell_single_quote(&profile.directory))).unwrap_or_default(), config.model, config.effort),
-            AgentKind::Codex => format!("`{}codex exec --model {} -c model_reasoning_effort={}`", profile.map(|profile| format!("CODEX_HOME={} ", shell_single_quote(&profile.directory))).unwrap_or_default(), config.model, config.effort),
+            AgentKind::Claude => format!(
+                "`{}claude -p --model {} --effort {}`",
+                profile
+                    .map(|profile| format!(
+                        "CLAUDE_CONFIG_DIR={} ",
+                        shell_single_quote(&profile.directory)
+                    ))
+                    .unwrap_or_default(),
+                config.model,
+                config.effort
+            ),
+            AgentKind::Codex => format!(
+                "`{}codex exec --model {} -c model_reasoning_effort={}`",
+                profile
+                    .map(|profile| format!(
+                        "CODEX_HOME={} ",
+                        shell_single_quote(&profile.directory)
+                    ))
+                    .unwrap_or_default(),
+                config.model,
+                config.effort
+            ),
         };
         let delegation = if config.agent == parent_agent {
-            format!("Spawn this role inside the active {} harness.", parent_agent.slug())
+            format!(
+                "Spawn this role inside the active {} harness.",
+                parent_agent.slug()
+            )
         } else {
-            format!("This role uses the other CLI; invoke it using {invocation} with {profile_line}.")
+            format!(
+                "This role uses the other CLI; invoke it using {invocation} with {profile_line}."
+            )
         };
         contents.push_str(&format!(
             "## {}\n- CLI: {}\n- Model: `{}`\n- Effort: `{}`\n- {}\n\n",
-            entry.role.label(), config.agent.slug(), config.model, config.effort, delegation
+            entry.role.label(),
+            config.agent.slug(),
+            config.model,
+            config.effort,
+            delegation
         ));
     }
     contents
@@ -865,7 +1191,10 @@ pub fn compose_plan_go_prompt(run: &Run) -> Result<String, DomainError> {
     {
         return Err(DomainError::PlanGoNotAvailable { run_id: run.id });
     }
-    let plan_path = run.plan_path.as_deref().unwrap_or("the plan you just wrote");
+    let plan_path = run
+        .plan_path
+        .as_deref()
+        .unwrap_or("the plan you just wrote");
     Ok(format!(
         "{}\n\nThe user approved continuing this Plan Run by selecting Go. Continue in this same Run, Pane, and working directory. Read and execute the plan at `{plan_path}`. Implement its phases, perform the required verification, and report the resulting changes and checks. Do not rewrite the plan unless implementation reveals a concrete blocker.",
         GrillLanguage::from_run_prompt(&run.prompt).response_instruction(),

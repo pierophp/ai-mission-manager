@@ -10,8 +10,8 @@
 //!   holds account state we have no business keeping, so only the usage
 //!   numbers survive parsing; nothing else is retained or persisted.
 //!
-//! Both routes run through `run_machine_shell`, so a profile on a remote
-//! Machine is read exactly like a local one.
+//! Both routes run through `MachineAccess`, so a profile on a remote Machine
+//! is read exactly like a local one.
 
 use std::{
     sync::{
@@ -29,7 +29,7 @@ use crate::{
     app::Runtime,
     domain::{AgentKind, CliConfigurationProfile, Machine},
     features::SharedRuntime,
-    terminal::{find_agent_executable, run_machine_shell, shell_quote},
+    machine_access::{quote_shell_argument, MachineAccess},
 };
 
 const SNAPSHOT_KEY: &str = "plan_usage_snapshot";
@@ -46,7 +46,7 @@ const CODEX_REPLY_WAIT_SECS: u32 = 8;
 static REFRESH_IN_PROGRESS: AtomicBool = AtomicBool::new(false);
 static LAST_ATTEMPT_AT: AtomicI64 = AtomicI64::new(0);
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PlanUsageSnapshot {
     pub profiles: Vec<ProfilePlanUsage>,
@@ -54,7 +54,7 @@ pub(crate) struct PlanUsageSnapshot {
     pub status: PlanUsageRefreshStatus,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PlanUsageRefreshStatus {
     Ready,
@@ -62,7 +62,7 @@ pub(crate) enum PlanUsageRefreshStatus {
     Never,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProfilePlanUsage {
     pub profile_id: i64,
@@ -79,7 +79,7 @@ pub(crate) struct ProfilePlanUsage {
     pub windows: Vec<UsageWindow>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum ProfileUsageState {
     Ready,
@@ -88,7 +88,7 @@ pub(crate) enum ProfileUsageState {
     NotReported,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, specta::Type)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UsageWindow {
     pub id: String,
@@ -158,7 +158,7 @@ fn start_refresh(app: AppHandle, force: bool) {
         let targets = read_targets(&app);
         let profiles = targets
             .iter()
-            .map(|(machine, profile)| read_profile(machine, profile))
+            .map(|(machine, profile, access)| read_profile(machine, profile, access.as_ref()))
             .collect::<Vec<_>>();
         let snapshot = PlanUsageSnapshot {
             profiles,
@@ -178,7 +178,13 @@ fn start_refresh(app: AppHandle, force: bool) {
 
 /// The profile list is copied out under the lock so the reads themselves,
 /// which spawn processes and open SSH connections, never hold the Runtime.
-fn read_targets(app: &AppHandle) -> Vec<(Arc<Machine>, CliConfigurationProfile)> {
+fn read_targets(
+    app: &AppHandle,
+) -> Vec<(
+    Arc<Machine>,
+    CliConfigurationProfile,
+    Arc<dyn MachineAccess>,
+)> {
     let state = app.state::<SharedRuntime>();
     let Ok(runtime) = state.lock() else {
         return Vec::new();
@@ -198,15 +204,23 @@ fn read_targets(app: &AppHandle) -> Vec<(Arc<Machine>, CliConfigurationProfile)>
             let machine = machines
                 .iter()
                 .find(|machine| machine.id == profile.machine_id)?;
-            Some((Arc::clone(machine), profile.clone()))
+            Some((
+                Arc::clone(machine),
+                profile.clone(),
+                Arc::clone(&runtime.machine_access),
+            ))
         })
         .collect()
 }
 
-fn read_profile(machine: &Machine, profile: &CliConfigurationProfile) -> ProfilePlanUsage {
+fn read_profile(
+    machine: &Machine,
+    profile: &CliConfigurationProfile,
+    access: &dyn MachineAccess,
+) -> ProfilePlanUsage {
     let reading = match profile.provider {
-        AgentKind::Claude => read_claude(machine, profile),
-        AgentKind::Codex => read_codex(machine, profile),
+        AgentKind::Claude => read_claude(machine, profile, access),
+        AgentKind::Codex => read_codex(machine, profile, access),
     };
     let base = ProfilePlanUsage {
         profile_id: profile.id,
@@ -260,25 +274,32 @@ impl UsageFailure {
 
 /// Distinguishes "the Machine did not answer" from "the CLI answered badly",
 /// because only the first one means every profile on that Machine is blind.
-fn run_profile_shell(machine: &Machine, command: &str) -> Result<String, UsageFailure> {
-    run_machine_shell(machine, command).map_err(|error| UsageFailure {
-        state: ProfileUsageState::MachineUnreachable,
-        detail: error,
-    })
+fn run_profile_shell(
+    access: &dyn MachineAccess,
+    machine: &Machine,
+    command: &str,
+) -> Result<String, UsageFailure> {
+    access
+        .run_shell(machine, command)
+        .map_err(|error| UsageFailure {
+            state: ProfileUsageState::MachineUnreachable,
+            detail: error,
+        })
 }
 
 fn read_claude(
     machine: &Machine,
     profile: &CliConfigurationProfile,
+    access: &dyn MachineAccess,
 ) -> Result<UsageReading, UsageFailure> {
-    let directory = shell_quote(&profile.directory);
+    let directory = quote_shell_argument(&profile.directory);
     let command = format!(
         "set -eu; directory={directory}; \
          for candidate in \"$directory/.claude.json\" \"$HOME/.claude.json\"; do \
            if [ -f \"$candidate\" ]; then head -c {CLAUDE_STATE_BYTE_LIMIT} -- \"$candidate\"; exit 0; fi; \
          done; exit 0"
     );
-    parse_claude_usage(&run_profile_shell(machine, &command)?)
+    parse_claude_usage(&run_profile_shell(access, machine, &command)?)
 }
 
 fn parse_claude_usage(payload: &str) -> Result<UsageReading, UsageFailure> {
@@ -358,17 +379,20 @@ const CLAUDE_WINDOWS: &[(&str, &str)] = &[
 fn read_codex(
     machine: &Machine,
     profile: &CliConfigurationProfile,
+    access: &dyn MachineAccess,
 ) -> Result<UsageReading, UsageFailure> {
-    let executable = find_agent_executable(machine, "codex").map_err(UsageFailure::not_reported)?;
-    let directory = shell_quote(&profile.directory);
-    let executable = shell_quote(&executable.to_string_lossy());
+    let executable = access
+        .find_executable(machine, "codex")
+        .map_err(UsageFailure::not_reported)?;
+    let directory = quote_shell_argument(&profile.directory);
+    let executable = quote_shell_argument(&executable.to_string_lossy());
     let command = format!(
         "set -eu; export CODEX_HOME={directory}; \
          {{ printf '%s\\n' '{INITIALIZE}'; printf '%s\\n' '{INITIALIZED}'; \
             printf '%s\\n' '{READ_RATE_LIMITS}'; sleep {CODEX_REPLY_WAIT_SECS}; }} \
          | {executable} app-server 2>/dev/null"
     );
-    parse_codex_usage(&run_profile_shell(machine, &command)?)
+    parse_codex_usage(&run_profile_shell(access, machine, &command)?)
 }
 
 fn parse_codex_usage(payload: &str) -> Result<UsageReading, UsageFailure> {
@@ -457,6 +481,43 @@ fn unix_seconds() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        domain::{MachineObservation, MachineTransport},
+        machine_access::{FakeMachineAccess, FakeMachineAccessCall},
+    };
+
+    #[test]
+    fn plan_usage_reads_profiles_through_machine_access_fake() {
+        let machine = Machine {
+            id: 7,
+            context_id: 3,
+            name: "Remote test Machine".into(),
+            socket_name: "test".into(),
+            transport: MachineTransport::Local,
+            last_observed: MachineObservation::Unknown,
+            last_observed_at: None,
+        };
+        let profile = CliConfigurationProfile {
+            id: 11,
+            machine_id: machine.id,
+            provider: AgentKind::Claude,
+            name: "Work profile".into(),
+            directory: "/profiles/work".into(),
+            app_managed: false,
+        };
+        let access = FakeMachineAccess::new([Ok(
+            r#"{"cachedUsageUtilization":{"fetchedAtMs":1790709887000,"utilization":{"five_hour":{"utilization":0.42,"resets_at":1790731127}}}}"#.into(),
+        )]);
+
+        let usage = read_profile(&machine, &profile, &access);
+
+        assert_eq!(usage.state, ProfileUsageState::Ready);
+        assert_eq!(usage.windows[0].used_percent, 42.0);
+        assert!(matches!(
+            access.calls().as_slice(),
+            [FakeMachineAccessCall::Shell { machine_id: 7, command }] if command.contains("/profiles/work")
+        ));
+    }
 
     #[test]
     fn claude_windows_are_read_as_percentages() {
