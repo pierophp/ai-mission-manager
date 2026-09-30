@@ -533,12 +533,13 @@ pub fn get_health_status(
 }
 
 #[tauri::command(rename_all = "camelCase")]
-pub fn compose_run_prompt(
+pub async fn compose_run_prompt(
     item_id: i64,
     execution_profile: ExecutionProfile,
     prompt_selection: RunPromptSelection,
     language: Option<GrillLanguage>,
     initial_prompt: Option<String>,
+    workflow: crate::domain::Workflow,
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<String, String> {
     crate::features::work::compose_run_prompt(
@@ -547,8 +548,9 @@ pub fn compose_run_prompt(
         prompt_selection,
         language,
         initial_prompt,
+        workflow,
         state,
-    )
+    ).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -599,6 +601,7 @@ pub async fn start_direct_run(
     configuration: Option<GrillConfiguration>,
     implementation_queue: Option<crate::domain::ImplementationQueueStart>,
     execution_profile: ExecutionProfile,
+    workflow: crate::domain::Workflow,
     prompt: String,
     prompt_selection: RunPromptSelection,
     expected_checkouts: Vec<RunCheckout>,
@@ -615,6 +618,7 @@ pub async fn start_direct_run(
         configuration,
         implementation_queue,
         execution_profile,
+        workflow,
         prompt,
         prompt_selection,
         expected_checkouts,
@@ -665,6 +669,7 @@ pub async fn start_worktree_run(
     agent: AgentKind,
     configuration: Option<GrillConfiguration>,
     execution_profile: ExecutionProfile,
+    workflow: crate::domain::Workflow,
     prompt: String,
     prompt_selection: RunPromptSelection,
     state: State<'_, Mutex<Runtime>>,
@@ -676,6 +681,7 @@ pub async fn start_worktree_run(
         agent,
         configuration,
         execution_profile,
+        workflow,
         prompt,
         prompt_selection,
         state,
@@ -782,6 +788,11 @@ pub async fn continue_grill(
     state: State<'_, Mutex<Runtime>>,
 ) -> Result<Run, String> {
     crate::features::work::continue_grill(run_id, action, state).await
+}
+
+#[tauri::command(rename_all = "camelCase")]
+pub async fn go_plan(run_id: i64, state: State<'_, Mutex<Runtime>>) -> Result<Run, String> {
+    crate::features::work::go_plan(run_id, state).await
 }
 
 #[tauri::command(rename_all = "camelCase")]
@@ -1507,7 +1518,7 @@ mod tests {
     use super::*;
     use crate::domain::{
         grill_skill_snapshot, parse_grill_question_group, search_items, AuditAction, GrillPhase,
-        MachineObservation, ProjectDefaults, RunPaneStatus,
+        MachineObservation, ProjectDefaults, PstackRoleTable, RunPaneStatus,
     };
     use crate::features::deletion::RESET_CONFIRMATION_PHRASE;
     use crate::persistence::SqliteStore;
@@ -1547,6 +1558,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -1560,6 +1572,8 @@ mod tests {
             pane_status: RunPaneStatus::Unknown,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -1567,6 +1581,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         });
         runtime
     }
@@ -1622,6 +1638,9 @@ mod tests {
                 check_dirty_checkouts: !previous_context.check_dirty_checkouts,
                 grill_defaults: previous_context.grill_defaults.clone(),
                 implement_defaults: previous_context.implement_defaults.clone(),
+                default_workflow: crate::domain::Workflow::MattPocock,
+                pstack_defaults: GrillConfiguration::default(),
+                pstack_roles: PstackRoleTable::default(),
                 attention_defaults,
                 ..ContextConfiguration::default()
             },
@@ -1671,6 +1690,9 @@ mod tests {
                     check_dirty_checkouts: false,
                     grill_defaults: previous_context.grill_defaults,
                     implement_defaults: previous_context.implement_defaults,
+                    default_workflow: crate::domain::Workflow::MattPocock,
+                    pstack_defaults: GrillConfiguration::default(),
+                    pstack_roles: PstackRoleTable::default(),
                     attention_defaults: attention_defaults.clone(),
                     ..ContextConfiguration::default()
                 },
@@ -1723,6 +1745,9 @@ mod tests {
                 check_dirty_checkouts: false,
                 grill_defaults: grill_defaults.clone(),
                 implement_defaults: GrillConfiguration::default(),
+                default_workflow: crate::domain::Workflow::MattPocock,
+                pstack_defaults: GrillConfiguration::default(),
+                pstack_roles: PstackRoleTable::default(),
                 attention_defaults: attention_defaults.clone(),
                 ..ContextConfiguration::default()
             })
@@ -1769,6 +1794,9 @@ mod tests {
             check_dirty_checkouts: false,
             grill_defaults: GrillConfiguration::default(),
             implement_defaults: GrillConfiguration::default(),
+            default_workflow: crate::domain::Workflow::MattPocock,
+            pstack_defaults: GrillConfiguration::default(),
+            pstack_roles: PstackRoleTable::default(),
             attention_defaults: [
                 ExternalObjectKind::Issue,
                 ExternalObjectKind::PullRequest,
@@ -1943,6 +1971,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -1959,6 +1988,8 @@ mod tests {
             worktree_id: None,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -1966,6 +1997,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         });
 
         let item = runtime
@@ -2045,6 +2078,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -2061,6 +2095,8 @@ mod tests {
             worktree_id: None,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -2068,6 +2104,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         });
 
         let stopped = runtime
@@ -2104,6 +2142,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -2120,6 +2159,8 @@ mod tests {
             worktree_id: None,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -2127,6 +2168,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         });
 
         let error = runtime
@@ -2187,6 +2230,7 @@ mod tests {
                 agent: AgentKind::Claude,
                 cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::Implement,
+                workflow: crate::domain::Workflow::MattPocock,
                 model: None,
                 effort: None,
                 skill_snapshot: None,
@@ -2203,6 +2247,8 @@ mod tests {
                 worktree_id: None,
                 direct_checkouts: Vec::new(),
                 transcript: String::new(),
+                reported_pull_requests: Vec::new(),
+                attention_summary: None,
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_decisions: Vec::new(),
@@ -2210,6 +2256,8 @@ mod tests {
                 grill_phase: None,
                 grill_action: None,
                 grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
             },
             Run {
                 id: 2,
@@ -2218,6 +2266,7 @@ mod tests {
                 agent: AgentKind::Codex,
                 cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::Review,
+                workflow: crate::domain::Workflow::MattPocock,
                 model: None,
                 effort: None,
                 skill_snapshot: None,
@@ -2234,6 +2283,8 @@ mod tests {
                 worktree_id: None,
                 direct_checkouts: Vec::new(),
                 transcript: String::new(),
+                reported_pull_requests: Vec::new(),
+                attention_summary: None,
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_decisions: Vec::new(),
@@ -2241,6 +2292,8 @@ mod tests {
                 grill_phase: None,
                 grill_action: None,
                 grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
             },
             Run {
                 id: 3,
@@ -2249,6 +2302,7 @@ mod tests {
                 agent: AgentKind::Claude,
                 cli_configuration_profile: None,
                 execution_profile: ExecutionProfile::Investigate,
+                workflow: crate::domain::Workflow::MattPocock,
                 model: None,
                 effort: None,
                 skill_snapshot: None,
@@ -2265,6 +2319,8 @@ mod tests {
                 worktree_id: None,
                 direct_checkouts: Vec::new(),
                 transcript: String::new(),
+                reported_pull_requests: Vec::new(),
+                attention_summary: None,
                 grill_question_group: None,
                 grill_answers: Vec::new(),
                 grill_decisions: Vec::new(),
@@ -2272,6 +2328,8 @@ mod tests {
                 grill_phase: None,
                 grill_action: None,
                 grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
             },
         ]);
 
@@ -2324,6 +2382,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -2340,6 +2399,8 @@ mod tests {
             worktree_id: None,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -2347,6 +2408,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         };
         runtime.state.runs.extend([
             make_run(1, 1, "%1"),
@@ -2570,6 +2633,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -2586,6 +2650,8 @@ mod tests {
             worktree_id: None,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -2593,6 +2659,8 @@ mod tests {
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         };
         runtime
             .store
@@ -2952,6 +3020,7 @@ mod tests {
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Grill,
+            workflow: crate::domain::Workflow::MattPocock,
             model: Some("claude-sonnet-4-5".into()),
             effort: Some("high".into()),
             skill_snapshot: Some(grill_skill_snapshot().into()),
@@ -2973,6 +3042,8 @@ mod tests {
                 is_dirty: false,
             }],
             transcript: "saved transcript".into(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: Some(question_group),
             grill_answers: vec![GrillAnswer {
                 question_number: 1,
@@ -2986,6 +3057,8 @@ mod tests {
             grill_phase: Some(GrillPhase::Working),
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         });
 
         runtime
@@ -3262,6 +3335,7 @@ exit 1
             agent: AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: ExecutionProfile::Grill,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -3275,6 +3349,8 @@ exit 1
             pane_status: RunPaneStatus::Available,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -3282,6 +3358,8 @@ exit 1
             grill_phase: Some(GrillPhase::Working),
             grill_action: Some(GrillContinuationAction::ToTickets),
             grill_action_started_at: Some(0),
+            plan_phase: None,
+            plan_path: None,
         });
 
         let output = r#"AI_MISSION_MANAGER_EVENT {"event":"github.issue.created","url":"https://github.com/acme/app/issues/7","run_id":1,"action":"to-tickets"}

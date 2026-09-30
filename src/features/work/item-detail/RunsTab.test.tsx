@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ItemCommands } from "../use-item-commands";
 import { RunsTab } from "./RunsTab";
-import type { ItemView } from "../../../runtime/types";
+import type { ItemView, Run } from "../../../runtime/types";
 import { workActions } from "../work-mutations";
 
 const actionMocks = vi.hoisted(() => ({
@@ -14,6 +14,7 @@ const actionMocks = vi.hoisted(() => ({
   composeRunPrompt: vi.fn(),
   startGrillRun: vi.fn(),
   startDirectRun: vi.fn(),
+  goPlan: vi.fn((runId: number) => async () => ({ id: runId })),
 }));
 
 vi.mock("../work-mutations", () => ({ workActions: actionMocks }));
@@ -80,6 +81,18 @@ const contexts = [
       model: "claude-sonnet-4-5",
       effort: "high",
     },
+    default_workflow: "matt-pocock" as const,
+    pstack_defaults: {
+      agent: "claude" as const,
+      model: "claude-sonnet-4-5",
+      effort: "high",
+    },
+    pstack_roles: [
+      { role: "code-delegate" as const, configuration: { agent: "claude" as const, model: "claude-opus-5", effort: "high" } },
+      { role: "judge-and-prose" as const, configuration: { agent: "codex" as const, model: "gpt-6-sol", effort: "high" } },
+      { role: "review-panel" as const, configuration: { agent: "codex" as const, model: "gpt-6-sol", effort: "high" } },
+      { role: "explorers" as const, configuration: { agent: "claude" as const, model: "claude-sonnet-5", effort: "medium" } },
+    ],
     gh_executable_path: null,
     twg_executable_path: null,
     az_executable_path: null,
@@ -214,6 +227,119 @@ describe("RunsTab", () => {
     );
   });
 
+  it("renders a pstack Run as Needs input with its terminal and no Grill controls", async () => {
+    const runView = {
+      ...view,
+      runs: [
+        {
+          id: 42,
+          item_id: 1,
+          workspace_id: 1,
+          repository_id: 1,
+          worktree_id: null,
+          machine_id: 1,
+          agent: "claude",
+          cli_configuration_profile: null,
+          execution_profile: "custom",
+          workflow: "pstack",
+          model: "claude-sonnet-4-5",
+          effort: "high",
+          skill_snapshot: null,
+          prompt: "Handle the request",
+          working_directory: "/tmp/app",
+          session_name: "run-42",
+          pane_id: "%42",
+          started_at: 1,
+          state: "blocked",
+          pane_status: "available",
+          direct_checkouts: [],
+          transcript: "",
+          reported_pull_requests: ["https://github.com/acme/service/pull/7"],
+          attention_summary: "Review the migration rollback path.",
+          grill_question_group: null,
+          grill_answers: [],
+          grill_decisions: [],
+          grill_response: null,
+          grill_phase: null,
+          grill_action: null,
+          plan_phase: null,
+          plan_path: null,
+        },
+      ],
+    } as unknown as ItemView;
+    const commands = {
+      workCommand: { execute },
+      isSaving: false,
+      saveItem: (action: () => Promise<unknown>) => execute(action),
+      whileSaving: (task: () => Promise<unknown>) => task(),
+      confirm: vi.fn(),
+      confirmationDialog: null,
+      onChanged: async () => {},
+    } as unknown as ItemCommands;
+
+    await act(async () => {
+      root.render(
+        createElement(RunsTab, {
+          view: runView,
+          repositories: [],
+          machines: [],
+          contexts,
+          grillModelCatalog: [],
+          commands,
+          intent: undefined,
+          grillDrafts: {},
+          onGrillDraftsChange: vi.fn(),
+          onOpenTerminal: vi.fn(),
+        }),
+      );
+    });
+
+    expect(container.textContent).toContain("Needs input");
+    expect(container.textContent).toContain("Open embedded terminal");
+    expect(container.textContent).toContain("Pull Requests reported by this Run");
+    expect(container.querySelector('a[href="https://github.com/acme/service/pull/7"]')).not.toBeNull();
+    expect(container.textContent).toContain("Review the migration rollback path.");
+    expect(container.querySelector('[aria-label="Grill questions for Run #42"]')).toBeNull();
+    expect(container.textContent).not.toContain("Skip to");
+    expect(container.textContent).not.toContain("choose the next action");
+  });
+
+  it("shows the plan link and Go only while a Plan Run awaits Go", async () => {
+    const planRun: Run = {
+      id: 7, item_id: 1, workspace_id: 1, repository_id: 1, worktree_id: null,
+      machine_id: 1, agent: "claude", cli_configuration_profile: null,
+      execution_profile: "plan", workflow: "pstack", model: null, effort: null,
+      skill_snapshot: null, prompt: "Plan prompt", working_directory: "/tmp/app",
+      session_name: "plan-7", pane_id: "%7", started_at: 1, state: "finished",
+      pane_status: "available", direct_checkouts: [], transcript: "",
+      reported_pull_requests: [], attention_summary: null, grill_question_group: null,
+      grill_answers: [], grill_decisions: [], grill_response: null, grill_phase: null,
+      grill_action: null, plan_phase: "awaitingGo", plan_path: "docs/plan.md",
+    };
+    const commands = {
+      workCommand: { execute }, isSaving: false,
+      saveItem: (action: () => Promise<unknown>) => execute(action),
+      whileSaving: (task: () => Promise<unknown>) => task(), confirm: vi.fn(),
+      confirmationDialog: null, onChanged: async () => {},
+    } as unknown as ItemCommands;
+    const renderRun = async (run: typeof planRun) => act(async () => {
+      root.render(createElement(RunsTab, {
+        view: { ...view, runs: [run] } as unknown as ItemView,
+        repositories: [], machines: [], contexts, grillModelCatalog: [], commands,
+        intent: undefined, grillDrafts: {}, onGrillDraftsChange: vi.fn(), onOpenTerminal: vi.fn(),
+      }));
+    });
+
+    await renderRun(planRun);
+    expect(container.querySelector('[aria-label="Plan ready for Run #7"]')).not.toBeNull();
+    expect(container.querySelector('a[href="docs/plan.md"]')).not.toBeNull();
+    expect(buttonNamed("Go")).not.toBeNull();
+
+    await renderRun({ ...planRun, state: "working", plan_phase: null });
+    expect(container.querySelector('[aria-label="Plan ready for Run #7"]')).toBeNull();
+    expect(buttonNamed("Go")).toBeUndefined();
+  });
+
   it("starts with the prompt edited in the preview", async () => {
     await openLaunchForm();
 
@@ -270,6 +396,35 @@ describe("RunsTab", () => {
           model: "claude-sonnet-4-5",
           effort: "high",
         },
+      }),
+    );
+  });
+
+  it("switches to the pstack Autonomous profile and offers Plan", async () => {
+    await openLaunchForm();
+    const workflow = [...container.querySelectorAll("label")]
+      .find((label) => label.textContent?.includes("Workflow"))
+      ?.querySelector("select") ?? null;
+    expect(workflow).not.toBeNull();
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLSelectElement.prototype,
+      "value",
+    )?.set;
+    await act(async () => {
+      setter?.call(workflow, "pstack");
+      workflow?.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+
+    expect(profileOption("autonomous").checked).toBe(true);
+    expect(profileOption("pstack-review")).not.toBeNull();
+    expect(profileOption("plan")).not.toBeNull();
+    expect(profileOption("grill")).toBeNull();
+    await submit();
+    expect(workActions.startDirectRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workflow: "pstack",
+        executionProfile: "autonomous",
+        configuration: contexts[0].pstack_defaults,
       }),
     );
   });

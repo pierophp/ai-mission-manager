@@ -91,6 +91,11 @@ function machineReadinessDetail(machine: Machine): string {
   ];
   if (machine.readiness) {
     if (machine.readiness.error) parts.push(`Machine check error: ${machine.readiness.error}`);
+    parts.push(machine.readiness.bunAvailable === null
+      ? "Bun not checked"
+      : machine.readiness.bunAvailable
+        ? "Bun available"
+        : `Bun unavailable${machine.readiness.bunError ? `: ${machine.readiness.bunError}` : ""}`);
     parts.push(hookReadinessLabel("Claude Code", machine.readiness.claudeHooks));
     parts.push(hookReadinessLabel("Codex", machine.readiness.codexHooks));
     if (machine.readiness.lastProvisioningError) {

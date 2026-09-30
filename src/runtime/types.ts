@@ -4,6 +4,7 @@ import type {
   Run,
   RunPaneStatus,
   RunState,
+  Workflow,
 } from "./execution-types";
 import type { RunCheckout } from "./execution-types";
 
@@ -16,6 +17,9 @@ export type Context = {
   check_dirty_checkouts: boolean;
   grill_defaults: GrillConfiguration;
   implement_defaults: GrillConfiguration;
+  default_workflow: Workflow;
+  pstack_defaults: GrillConfiguration;
+  pstack_roles: PstackRoleTable;
   gh_executable_path: string | null;
   twg_executable_path: string | null;
   az_executable_path: string | null;
@@ -32,6 +36,9 @@ export type ContextConfiguration = {
   checkDirtyCheckouts: boolean;
   grillDefaults: GrillConfiguration;
   implementDefaults: GrillConfiguration;
+  defaultWorkflow: Workflow;
+  pstackDefaults: GrillConfiguration;
+  pstackRoles: PstackRoleTable;
   ghExecutablePath: string | null;
   twgExecutablePath: string | null;
   azExecutablePath: string | null;
@@ -46,6 +53,19 @@ export type GrillConfiguration = {
   model: string;
   effort: string;
 };
+
+export type PstackRole =
+  | "code-delegate"
+  | "judge-and-prose"
+  | "review-panel"
+  | "explorers";
+
+export type PstackRoleConfiguration = {
+  role: PstackRole;
+  configuration: GrillConfiguration;
+};
+
+export type PstackRoleTable = PstackRoleConfiguration[];
 
 export type GrillLanguage = "portuguese" | "english";
 
@@ -244,6 +264,8 @@ export type AgentHookReadiness = {
 export type MachineReadiness = {
   reachable: boolean | null;
   tmuxAvailable: boolean | null;
+  bunAvailable: boolean | null;
+  bunError: string | null;
   claudeExecutableResolved: boolean | null;
   codexExecutableResolved: boolean | null;
   stateDirectoryWritable: boolean | null;

@@ -66,6 +66,7 @@ export const workActions = {
     runId: number,
     action: Parameters<typeof workAdapter.continueGrill>[1],
   ) => () => workAdapter.continueGrill(runId, action),
+  goPlan: (runId: number) => () => workAdapter.goPlan(runId),
   deleteRun: (runId: number) => () => workAdapter.deleteRun(runId),
   prepareItemDeletion: (itemId: number) =>
     () => workAdapter.prepareItemDeletion(itemId),
@@ -82,6 +83,7 @@ export const workActions = {
     selection: Parameters<typeof workAdapter.composeRunPrompt>[2],
     language: Parameters<typeof workAdapter.composeRunPrompt>[3],
     initialPrompt: string | null,
+    workflow: Parameters<typeof workAdapter.composeRunPrompt>[5],
   ) =>
     () =>
       workAdapter.composeRunPrompt(
@@ -90,6 +92,7 @@ export const workActions = {
         selection,
         language,
         initialPrompt,
+        workflow,
       ),
   composeGrillPrompt: (
     itemId: number,

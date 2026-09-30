@@ -25,6 +25,8 @@ import type {
   GrillAgentCatalog,
   GrillConfiguration,
   Machine,
+  PstackRole,
+  PstackRoleTable,
 } from "../../runtime/types";
 
 const objectKinds: ExternalObjectKind[] = [
@@ -47,6 +49,18 @@ const defaultGrillConfiguration = (): GrillConfiguration => ({
   model: "claude-sonnet-5",
   effort: "high",
 });
+const defaultPstackRoleTable = (): PstackRoleTable => [
+  { role: "code-delegate", configuration: { agent: "claude", model: "claude-opus-5", effort: "high" } },
+  { role: "judge-and-prose", configuration: { agent: "codex", model: "gpt-6-sol", effort: "high" } },
+  { role: "review-panel", configuration: { agent: "codex", model: "gpt-6-sol", effort: "high" } },
+  { role: "explorers", configuration: { agent: "claude", model: "claude-sonnet-5", effort: "medium" } },
+];
+const pstackRoleLabels: Record<PstackRole, string> = {
+  "code-delegate": "Code delegate",
+  "judge-and-prose": "Judge and prose",
+  "review-panel": "Review panel",
+  explorers: "Explorers",
+};
 
 function initialConfiguration(
   context: Context | undefined,
@@ -61,6 +75,9 @@ function initialConfiguration(
     grillDefaults: context?.grill_defaults ?? defaultGrillConfiguration(),
     implementDefaults:
       context?.implement_defaults ?? defaultGrillConfiguration(),
+    defaultWorkflow: context?.default_workflow ?? "matt-pocock",
+    pstackDefaults: context?.pstack_defaults ?? defaultGrillConfiguration(),
+    pstackRoles: context?.pstack_roles ?? defaultPstackRoleTable(),
     ghExecutablePath: context?.gh_executable_path ?? null,
     twgExecutablePath: context?.twg_executable_path ?? null,
     azExecutablePath: context?.az_executable_path ?? null,
@@ -279,7 +296,8 @@ export function ContextEditor({
       )}
       <Tabs defaultValue="primary" className="grid gap-4">
         <TabsList aria-label="Context settings">
-          <TabsTrigger value="primary">Primary settings</TabsTrigger>
+        <TabsTrigger value="primary">Primary settings</TabsTrigger>
+        <TabsTrigger value="pstack">pstack</TabsTrigger>
           <TabsTrigger value="providers">Providers</TabsTrigger>
           <TabsTrigger value="attention">Needs Attention</TabsTrigger>
         </TabsList>
@@ -398,6 +416,52 @@ export function ContextEditor({
               setConfiguration((current) => ({ ...current, implementDefaults }))
             }
           />
+          <SettingField label="Default Workflow">
+            <NativeSelect
+              value={configuration.defaultWorkflow}
+              onChange={(event) => setConfiguration((current) => ({
+                ...current,
+                defaultWorkflow: event.target.value as ContextConfiguration["defaultWorkflow"],
+              }))}
+              disabled={isSaving}
+            >
+              <NativeSelectOption value="matt-pocock">Matt Pocock</NativeSelectOption>
+              <NativeSelectOption value="pstack">pstack</NativeSelectOption>
+            </NativeSelect>
+          </SettingField>
+          <ConfigurationFields
+            label="pstack"
+            configuration={configuration.pstackDefaults}
+            catalog={catalog}
+            disabled={isSaving}
+            onChange={(pstackDefaults) =>
+              setConfiguration((current) => ({ ...current, pstackDefaults }))
+            }
+          />
+        </TabsContent>
+        <TabsContent value="pstack" forceMount className="grid gap-4">
+          <p className="m-0 text-sm text-muted-foreground">
+            Choose the CLI, model and effort pstack assigns to each role. Models and efforts come from each provider's model catalog.
+          </p>
+          {configuration.pstackRoles.map(({ role, configuration: roleConfiguration }) => (
+            <ConfigurationFields
+              key={role}
+              label={pstackRoleLabels[role]}
+              configuration={roleConfiguration}
+              catalog={catalog}
+              disabled={isSaving}
+              onChange={(nextConfiguration) =>
+                setConfiguration((current) => ({
+                  ...current,
+                  pstackRoles: current.pstackRoles.map((entry) =>
+                    entry.role === role
+                      ? { ...entry, configuration: nextConfiguration }
+                      : entry,
+                  ),
+                }))
+              }
+            />
+          ))}
         </TabsContent>
         <TabsContent value="providers" forceMount className="grid gap-4">
           <p className="m-0 text-sm text-muted-foreground">

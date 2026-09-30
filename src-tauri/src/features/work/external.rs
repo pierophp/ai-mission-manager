@@ -580,6 +580,7 @@ exit 1
             agent: crate::domain::AgentKind::Claude,
             cli_configuration_profile: None,
             execution_profile: crate::domain::ExecutionProfile::Implement,
+            workflow: crate::domain::Workflow::MattPocock,
             model: None,
             effort: None,
             skill_snapshot: None,
@@ -596,6 +597,8 @@ exit 1
             worktree_id: None,
             direct_checkouts: Vec::new(),
             transcript: String::new(),
+            reported_pull_requests: Vec::new(),
+            attention_summary: None,
             grill_question_group: None,
             grill_answers: Vec::new(),
             grill_decisions: Vec::new(),
@@ -603,6 +606,8 @@ exit 1
             grill_phase: None,
             grill_action: None,
             grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
         });
         runtime
             .register_repository(

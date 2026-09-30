@@ -659,6 +659,7 @@ pub(crate) async fn advance_finished_implementation_queue(
         Some(queue.configuration.clone()),
         None,
         ExecutionProfile::Implement,
+        run.workflow,
         implementation_queue_entry_prompt(&next, &queue.spec_url),
         RunPromptSelection {
             include_objective: true,
@@ -797,6 +798,7 @@ pub(super) async fn launch_implementation_queue_entry_with_state(
         Some(queue.configuration.clone()),
         None,
         ExecutionProfile::Implement,
+        source_run.workflow,
         implementation_queue_entry_prompt(&entry, &queue.spec_url),
         RunPromptSelection {
             include_objective: true,
@@ -1239,6 +1241,41 @@ pub(crate) async fn continue_grill_with_state(
     })?;
     Ok(continued)
 }
+
+pub(crate) async fn go_plan_with_state(run_id: i64, state: &Mutex<Runtime>) -> Result<Run, String> {
+    let operation_lock = {
+        let mut runtime = state.lock().map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        runtime.grill_operation_lock(run_id)
+    };
+    let operation_guard = operation_lock.lock_owned().await;
+    let (snapshot, prompt, terminal_runtime) = {
+        let runtime = state.lock().map_err(|_| "Mission Manager state is unavailable".to_owned())?;
+        let run = runtime.state.runs.iter().find(|run| run.id == run_id).cloned()
+            .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+        let prompt = crate::domain::compose_plan_go_prompt(&run).map_err(|error| error.to_string())?;
+        decide(runtime.state.clone(), Event::GoPlan { run_id }).map_err(|error| error.to_string())?;
+        let machine = runtime.state.machines.iter().find(|machine| machine.id == run.machine_id).cloned()
+            .ok_or_else(|| format!("Machine {} does not exist", run.machine_id))?;
+        (GrillPaneSnapshot { run, machine }, prompt, Arc::clone(&runtime.terminal_runtime))
+    };
+    let worker_snapshot = snapshot.clone();
+    let (send_result, _operation_guard) = tauri::async_runtime::spawn_blocking(move || {
+        let mut input = prompt.into_bytes();
+        input.push(b'\n');
+        let result = terminal_runtime.send_pane_input(&worker_snapshot.machine, &worker_snapshot.run.pane_id, &input);
+        (result, operation_guard)
+    }).await.map_err(|error| format!("Plan continuation send worker failed: {error}"))?;
+    send_result.map_err(|error| error.to_string())?;
+    let mut runtime = state.lock().map_err(|_| format!("Plan continuation for Run {run_id} was sent, but Mission Manager state is unavailable"))?;
+    if !snapshot.is_current(&runtime) {
+        return Err(format!("Run {run_id} changed while Go was being sent; the instruction may already have reached the agent"));
+    }
+    let decision = decide(runtime.state.clone(), Event::GoPlan { run_id }).map_err(|error| error.to_string())?;
+    let continued = decision.state.runs.iter().find(|candidate| candidate.id == run_id).cloned()
+        .ok_or_else(|| format!("Run {run_id} does not exist"))?;
+    runtime.commit(decision).map_err(|error| format!("Go reached Run {run_id}, but its Working state could not be persisted: {error}"))?;
+    Ok(continued)
+}
 use std::sync::Arc;
 
 use crate::terminal::{MachineObservationError, ObservedMachine};
@@ -1460,6 +1497,7 @@ struct ReconciliationRunIdentity {
     machine_id: i64,
     agent: AgentKind,
     execution_profile: ExecutionProfile,
+    workflow: Workflow,
     session_name: String,
     pane_id: String,
     grill_action: Option<GrillContinuationAction>,
@@ -1479,7 +1517,49 @@ struct RunReconciliationObservation {
     pane_status: Option<RunPaneStatus>,
     state_record: Option<AgentStateRecord>,
     transcript: Option<Result<String, String>>,
+    pstack_reports: Vec<PstackReport>,
     confirmed_downstream_issues: Vec<ConfirmedDownstreamIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PstackReport {
+    PullRequestOpened { url: String },
+    FinalAttention { summary: String },
+    PlanReady { path: String },
+}
+
+#[derive(serde::Deserialize)]
+struct PstackReportLine {
+    event: String,
+    run_id: i64,
+    url: Option<String>,
+    summary: Option<String>,
+    path: Option<String>,
+}
+
+fn parse_pstack_reports(transcript: &str, run_id: i64) -> Vec<PstackReport> {
+    transcript
+        .lines()
+        .filter_map(|line| {
+            let payload = line.trim().strip_prefix("AI_MISSION_MANAGER_EVENT ")?;
+            let report = serde_json::from_str::<PstackReportLine>(payload).ok()?;
+            if report.run_id != run_id {
+                return None;
+            }
+            match report.event.as_str() {
+                "pull_request.opened" => Some(PstackReport::PullRequestOpened {
+                    url: report.url?.trim().to_owned(),
+                }),
+                "attention.final" => Some(PstackReport::FinalAttention {
+                    summary: report.summary?.trim().to_owned(),
+                }),
+                "plan.ready" => Some(PstackReport::PlanReady {
+                    path: report.path?.trim().to_owned(),
+                }),
+                _ => None,
+            }
+        })
+        .collect()
 }
 
 pub(crate) struct ReconciliationObservations {
@@ -1512,13 +1592,15 @@ impl ReconciliationSnapshot {
                         .find(|observation| observation.machine_id == run.machine_id),
                     run,
                 );
-                let should_capture_transcript = run.execution_profile == ExecutionProfile::Grill
+                let should_capture_grill_transcript = run.execution_profile == ExecutionProfile::Grill
                     && pane_status.is_some()
                     && (pane_status == Some(RunPaneStatus::Available)
                         || state_record.as_ref().is_some_and(|record| {
                             matches!(record.state, RunState::Blocked | RunState::Finished)
                         }));
-                let transcript = if should_capture_transcript {
+                let should_capture_pstack_reports = run.workflow == Workflow::Pstack
+                    && pane_status.is_some();
+                let captured_pane = if should_capture_grill_transcript || should_capture_pstack_reports {
                     self.machines
                         .iter()
                         .find(|machine| machine.id == run.machine_id)
@@ -1529,6 +1611,18 @@ impl ReconciliationSnapshot {
                         })
                 } else {
                     None
+                };
+                let transcript = should_capture_grill_transcript
+                    .then(|| captured_pane.clone())
+                    .flatten();
+                let pstack_reports = if should_capture_pstack_reports {
+                    captured_pane
+                        .as_ref()
+                        .and_then(|capture| capture.as_ref().ok())
+                        .map(|transcript| parse_pstack_reports(transcript, run.id))
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
                 };
                 let confirmation_transcript =
                     downstream_confirmation_transcript(transcript.as_ref(), &run.transcript);
@@ -1548,6 +1642,7 @@ impl ReconciliationSnapshot {
                     pane_status,
                     state_record,
                     transcript,
+                    pstack_reports,
                     confirmed_downstream_issues,
                 }
             })
@@ -2719,6 +2814,7 @@ enum RunLaunchInput {
         configuration: Option<GrillConfiguration>,
         implementation_queue: Option<crate::domain::ImplementationQueueStart>,
         execution_profile: ExecutionProfile,
+        workflow: crate::domain::Workflow,
         prompt: String,
         prompt_selection: RunPromptSelection,
         expected_checkouts: Vec<RunCheckout>,
@@ -2743,6 +2839,7 @@ enum RunLaunchInput {
         agent: AgentKind,
         configuration: Option<GrillConfiguration>,
         execution_profile: ExecutionProfile,
+        workflow: crate::domain::Workflow,
         prompt: String,
         prompt_selection: RunPromptSelection,
     },
@@ -2780,6 +2877,13 @@ impl RunLaunchInput {
         match self {
             Self::Grill { .. } => "grill",
             Self::Direct { .. } | Self::Worktree { .. } => "run",
+        }
+    }
+
+    fn workflow(&self) -> crate::domain::Workflow {
+        match self {
+            Self::Direct { workflow, .. } | Self::Worktree { workflow, .. } => *workflow,
+            Self::Grill { .. } => crate::domain::Workflow::MattPocock,
         }
     }
 }
@@ -2829,6 +2933,7 @@ impl RunLaunchSnapshot {
                 configuration,
                 implementation_queue,
                 execution_profile,
+                workflow,
                 prompt_selection,
                 allow_dirty,
                 allow_shared_checkouts,
@@ -2847,6 +2952,7 @@ impl RunLaunchSnapshot {
                     configuration: configuration.clone(),
                     implementation_queue: implementation_queue.clone(),
                     execution_profile: *execution_profile,
+                    workflow: *workflow,
                     prompt: self.prompt.clone(),
                     working_directory,
                     session_name,
@@ -2893,6 +2999,7 @@ impl RunLaunchSnapshot {
                 agent,
                 configuration,
                 execution_profile,
+                workflow,
                 prompt_selection,
                 ..
             } => Event::StartWorktreeRun {
@@ -2903,6 +3010,7 @@ impl RunLaunchSnapshot {
                 agent: *agent,
                 configuration: configuration.clone(),
                 execution_profile: *execution_profile,
+                workflow: *workflow,
                 prompt: self.prompt.clone(),
                 working_directory: self
                     .worktree
@@ -3519,7 +3627,39 @@ async fn start_run_with_state(
     let session_name = observation.snapshot.session_name.clone();
     let gate_channel = observation.snapshot.gate_channel.clone();
     let working_directory = observation.working_directory.clone();
-    let prompt = observation.snapshot.prompt.clone();
+    let mut prompt = observation.snapshot.prompt.clone();
+    if observation.snapshot.input.workflow() == crate::domain::Workflow::Pstack {
+        let provision_runtime = Arc::clone(&observation.snapshot.terminal_runtime);
+        let provision_machine = observation.snapshot.machine.clone();
+        let root = tauri::async_runtime::spawn_blocking(move || {
+            provision_runtime.provision_pstack_tree(&provision_machine)
+        })
+        .await
+        .map_err(|error| format!("pstack provisioning worker failed: {error}"))??;
+        prompt = prompt.replace("{{PSTACK_ROOT}}", &root);
+        let context = &observation.snapshot.context;
+        let claude_profile = context.claude_profile_id.and_then(|profile_id| {
+            observation.snapshot.state.cli_configuration_profiles.iter().find(|profile| profile.id == profile_id)
+        });
+        let codex_profile = context.codex_profile_id.and_then(|profile_id| {
+            observation.snapshot.state.cli_configuration_profiles.iter().find(|profile| profile.id == profile_id)
+        });
+        let role_path = crate::domain::pstack_role_file_path(&root, context);
+        let role_contents = crate::domain::compose_pstack_role_file(
+            observation.snapshot.input.agent(),
+            &context.pstack_roles,
+            claude_profile,
+            codex_profile,
+        );
+        let role_runtime = Arc::clone(&observation.snapshot.terminal_runtime);
+        let role_machine = observation.snapshot.machine.clone();
+        let role_file_path = PathBuf::from(&role_path);
+        tauri::async_runtime::spawn_blocking(move || {
+            role_runtime.write_pstack_role_file(&role_machine, &role_file_path, &role_contents)
+        })
+        .await
+        .map_err(|error| format!("pstack role-file worker failed: {error}"))??;
+    }
     let pane_id = tauri::async_runtime::spawn_blocking(move || {
         let launch = AgentLaunchContext {
             run_id,
@@ -3651,6 +3791,7 @@ pub(crate) async fn start_direct_run_with_queue_state(
     configuration: Option<GrillConfiguration>,
     implementation_queue: Option<crate::domain::ImplementationQueueStart>,
     execution_profile: ExecutionProfile,
+    workflow: crate::domain::Workflow,
     prompt: String,
     prompt_selection: RunPromptSelection,
     expected_checkouts: Vec<RunCheckout>,
@@ -3668,6 +3809,7 @@ pub(crate) async fn start_direct_run_with_queue_state(
             configuration,
             implementation_queue,
             execution_profile,
+            workflow,
             prompt,
             prompt_selection,
             expected_checkouts,
@@ -3705,6 +3847,7 @@ pub(crate) async fn start_direct_run_with_state(
         configuration,
         None,
         execution_profile,
+        crate::domain::Workflow::MattPocock,
         prompt,
         prompt_selection,
         expected_checkouts,
@@ -3755,6 +3898,7 @@ pub(crate) async fn start_worktree_run_with_state(
     agent: AgentKind,
     configuration: Option<GrillConfiguration>,
     execution_profile: ExecutionProfile,
+    workflow: crate::domain::Workflow,
     prompt: String,
     prompt_selection: RunPromptSelection,
     state: &Mutex<Runtime>,
@@ -3767,6 +3911,7 @@ pub(crate) async fn start_worktree_run_with_state(
             agent,
             configuration,
             execution_profile,
+            workflow,
             prompt,
             prompt_selection,
         },
@@ -3854,6 +3999,7 @@ impl Runtime {
                 machine_id: run.machine_id,
                 agent: run.agent,
                 execution_profile: run.execution_profile,
+                workflow: run.workflow,
                 session_name: run.session_name.clone(),
                 pane_id: run.pane_id.clone(),
                 grill_action: run.grill_action,
@@ -3913,8 +4059,49 @@ impl Runtime {
             if current.machine_id != observation.run.machine_id
                 || current.session_name != observation.run.session_name
                 || current.pane_id != observation.run.pane_id
+                || current.workflow != observation.run.workflow
             {
                 continue;
+            }
+
+            for report in &observation.pstack_reports {
+                let event = match report {
+                    PstackReport::PullRequestOpened { url } => {
+                        let object = match classify_url(url) {
+                            Ok(object) if object.kind == ExternalObjectKind::PullRequest => object,
+                            Ok(_) => continue,
+                            Err(error) => {
+                                eprintln!("Ignoring invalid pstack Pull Request report for Run {}: {error}", observation.run.id);
+                                continue;
+                            }
+                        };
+                        Event::ReportRunPullRequest {
+                            run_id: observation.run.id,
+                            object,
+                        }
+                    }
+                    PstackReport::FinalAttention { summary } => Event::RecordRunAttention {
+                        run_id: observation.run.id,
+                        summary: summary.clone(),
+                    },
+                    PstackReport::PlanReady { path } => Event::RecordRunPlan {
+                        run_id: observation.run.id,
+                        path: path.clone(),
+                    },
+                };
+                let decision = decide(self.state.clone(), event)
+                    .map_err(|error| error.to_string())?;
+                let run_changed = decision.effects.iter().any(|effect| {
+                    matches!(effect, crate::domain::Effect::PersistRunReports { .. })
+                });
+                let domain_changed = !decision.effects.is_empty();
+                if domain_changed {
+                    self.commit(decision)?;
+                    any_changed = true;
+                }
+                if run_changed {
+                    changed_run_ids.insert(observation.run.id);
+                }
             }
 
             if let Some(record) = observation.state_record {
@@ -4026,7 +4213,18 @@ impl Runtime {
         selection: RunPromptSelection,
         language: Option<GrillLanguage>,
         initial_prompt: Option<String>,
+        workflow: crate::domain::Workflow,
     ) -> Result<String, String> {
+        if workflow == crate::domain::Workflow::Pstack {
+            return crate::domain::compose_pstack_prompt(
+                &self.state,
+                item_id,
+                execution_profile,
+                "{{PSTACK_ROOT}}",
+                language.unwrap_or_default(),
+                initial_prompt.as_deref(),
+            ).map_err(|error| error.to_string());
+        }
         build_run_prompt(
             &self.state,
             item_id,
@@ -4497,6 +4695,7 @@ mod identity_tests {
     use super::{
         direct_repository_identity_set_matches, downstream_confirmation_transcript,
         grill_transcript_identity_matches, DeferredTerminalEvent, TerminalCallbackGate,
+        parse_pstack_reports, PstackReport,
     };
     use crate::domain::{Repository, RepositoryLocation};
     use crate::{
@@ -4508,6 +4707,28 @@ mod identity_tests {
         path::PathBuf,
         sync::{Arc, Mutex},
     };
+
+    #[test]
+    fn pstack_report_parser_accepts_only_well_formed_reports_for_this_run() {
+        let transcript = concat!(
+            "AI_MISSION_MANAGER_EVENT {\"event\":\"pull_request.opened\",\"run_id\":7,\"url\":\"https://github.com/acme/service/pull/7\"}\n",
+            "AI_MISSION_MANAGER_EVENT {\"event\":\"attention.final\",\"run_id\":7,\"summary\":\"Review rollback\"}\n",
+            "AI_MISSION_MANAGER_EVENT {\"event\":\"attention.final\",\"run_id\":8,\"summary\":\"Other Run\"}\n",
+            "AI_MISSION_MANAGER_EVENT {not json}\n",
+        );
+
+        assert_eq!(
+            parse_pstack_reports(transcript, 7),
+            [
+                PstackReport::PullRequestOpened {
+                    url: "https://github.com/acme/service/pull/7".into(),
+                },
+                PstackReport::FinalAttention {
+                    summary: "Review rollback".into(),
+                },
+            ]
+        );
+    }
 
     #[test]
     fn direct_checkout_snapshot_rejects_a_new_project_repository() {

@@ -533,6 +533,7 @@ fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
         agent: crate::domain::AgentKind::Claude,
         cli_configuration_profile: None,
         execution_profile: crate::domain::ExecutionProfile::Implement,
+        workflow: crate::domain::Workflow::MattPocock,
         model: None,
         effort: None,
         skill_snapshot: None,
@@ -549,6 +550,8 @@ fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
         worktree_id: None,
         direct_checkouts: Vec::new(),
         transcript: String::new(),
+        reported_pull_requests: Vec::new(),
+        attention_summary: None,
         grill_question_group: None,
         grill_answers: Vec::new(),
         grill_decisions: Vec::new(),
@@ -556,6 +559,8 @@ fn startup_recovers_legacy_run_state_without_moving_or_deleting_the_file() {
         grill_phase: None,
         grill_action: None,
         grill_action_started_at: None,
+                plan_phase: None,
+                plan_path: None,
     });
 
     let legacy_file = directory.path().join("agent-state/run-7.json");
@@ -920,6 +925,7 @@ fn a_failed_run_preflight_never_calls_the_agent_launcher() {
             AgentKind::Claude,
             None,
             ExecutionProfile::Implement,
+            crate::domain::Workflow::MattPocock,
             "Implement the change".into(),
             RunPromptSelection {
                 include_objective: true,
@@ -947,6 +953,45 @@ fn a_failed_run_preflight_never_calls_the_agent_launcher() {
             .iter()
             .any(|command| matches!(command, FakeTerminalCommand::LaunchAgent { .. })));
     }
+}
+
+#[test]
+fn a_failed_pstack_tree_write_aborts_before_creating_or_releasing_a_pane() {
+    use crate::{
+        domain::{AgentKind, ExecutionProfile, RunPromptSelection, Workflow},
+        terminal::{FakeMachineOutcome, FakeTerminalCommand, FakeTerminalRuntime},
+    };
+
+    let directory = tempdir().expect("temporary app directory should exist");
+    let checkout = directory.path().join("checkout");
+    let fake = FakeTerminalRuntime::new([(1, FakeMachineOutcome::Available)]);
+    fake.fail_pstack_provisioning(1, "fake pstack tree write failed");
+    let commands = fake.command_log();
+    let (runtime, item, workspace, _, worktree) = runtime_for_run_launch(
+        &directory.path().join("mission-manager.sqlite"),
+        &checkout,
+        fake,
+    );
+    let state = Mutex::new(runtime);
+
+    let error = tauri::async_runtime::block_on(runs::start_worktree_run_with_state(
+        item.id,
+        workspace.id,
+        worktree.id,
+        AgentKind::Claude,
+        None,
+        ExecutionProfile::Autonomous,
+        Workflow::Pstack,
+        "Fix the launch gate".into(),
+        RunPromptSelection { include_objective: true, external_object_ids: vec![] },
+        &state,
+    )).expect_err("failed tree write must reject launch");
+    assert!(error.contains("fake pstack tree write failed"));
+    let logged = commands.lock().expect("fake command log remains available").clone();
+    assert!(logged.iter().any(|command| matches!(command, FakeTerminalCommand::ProvisionPstackTree { machine_id: 1 })));
+    assert!(!logged.iter().any(|command| matches!(command, FakeTerminalCommand::LaunchAgent { .. })));
+    assert!(!logged.iter().any(|command| matches!(command, FakeTerminalCommand::ReleaseAgentLaunch { .. })));
+    assert!(state.lock().expect("runtime remains available").state.runs.is_empty());
 }
 
 #[test]
@@ -986,6 +1031,7 @@ fn selected_profile_for_the_wrong_provider_blocks_before_preflight() {
         AgentKind::Claude,
         None,
         ExecutionProfile::Implement,
+        crate::domain::Workflow::MattPocock,
         "Implement the change".into(),
         RunPromptSelection {
             include_objective: true,
@@ -1038,6 +1084,7 @@ fn worktree_run_rejects_a_checkout_without_a_registered_remote() {
         AgentKind::Claude,
         None,
         ExecutionProfile::Implement,
+        crate::domain::Workflow::MattPocock,
         "Implement the change".into(),
         RunPromptSelection {
             include_objective: true,
@@ -1169,6 +1216,7 @@ fn direct_grill_and_worktree_runs_are_persisted_before_their_gate_is_released() 
                                 agent,
                                 None,
                                 ExecutionProfile::Implement,
+                                crate::domain::Workflow::MattPocock,
                                 "Implement the change".into(),
                                 selection,
                                 &worker_state,
@@ -1352,6 +1400,7 @@ fn first_and_advancing_queue_launches_deliver_the_local_implement_prompt() {
         Some(configuration),
         Some(queue),
         ExecutionProfile::Implement,
+        crate::domain::Workflow::MattPocock,
         "ignored queue seed prompt".into(),
         selection,
         checkouts,
@@ -1494,6 +1543,7 @@ fn checkout_changes_after_launch_do_not_abort_any_run_flow() {
                         AgentKind::Claude,
                         None,
                         ExecutionProfile::Implement,
+                        crate::domain::Workflow::MattPocock,
                         "Implement the change".into(),
                         selection.clone(),
                         &state,
