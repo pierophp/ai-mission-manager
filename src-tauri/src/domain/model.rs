@@ -98,6 +98,19 @@ pub enum Workflow {
     Pstack,
 }
 
+impl Workflow {
+    /// The Execution Profiles this Workflow offers. Custom is shared by both.
+    pub fn offers(self, profile: ExecutionProfile) -> bool {
+        use ExecutionProfile::*;
+        match self {
+            Workflow::MattPocock => {
+                matches!(profile, Investigate | Implement | Review | Grill | CustomPrompt)
+            }
+            Workflow::Pstack => matches!(profile, Autonomous | Plan | PstackReview | CustomPrompt),
+        }
+    }
+}
+
 impl Context {
     pub fn cli_configuration_profile_id(&self, provider: AgentKind) -> Option<i64> {
         match provider {
@@ -408,6 +421,19 @@ pub enum GrillPhase {
 #[serde(rename_all = "camelCase")]
 pub enum PlanPhase {
     AwaitingGo,
+    /// Go was selected; the Run is executing its plan and finishes for good.
+    Executing,
+}
+
+impl PlanPhase {
+    /// A Plan Run offers Go once: when its planning turn finishes. After Go the
+    /// phase stays `Executing`, so the execution finishing ends the Run.
+    pub fn after_state(current: Option<PlanPhase>, state: RunState) -> Option<PlanPhase> {
+        match current {
+            Some(PlanPhase::Executing) => Some(PlanPhase::Executing),
+            _ => (state == RunState::Finished).then_some(PlanPhase::AwaitingGo),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

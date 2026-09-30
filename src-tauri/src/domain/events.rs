@@ -385,18 +385,6 @@ pub struct ImplementationQueueStart {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
-    EnsurePstackTree {
-        machine_id: i64,
-        tree_hash: String,
-    },
-    EnsurePstackRoleFile {
-        machine_id: i64,
-        context_id: i64,
-        parent_agent: AgentKind,
-        roles: PstackRoleTable,
-        claude_profile: Option<CliConfigurationProfile>,
-        codex_profile: Option<CliConfigurationProfile>,
-    },
     PersistContext {
         context: Context,
         next_context_id: i64,

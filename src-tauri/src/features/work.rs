@@ -541,7 +541,6 @@ pub(crate) async fn compose_run_prompt(
             prompt_selection,
             language,
             initial_prompt,
-            workflow,
         )
     })
 }

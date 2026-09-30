@@ -9,6 +9,8 @@ import { cn } from "cn";
 import { Button } from "../../../components/ui/button";
 import { Card, CardContent } from "../../../components/ui/card";
 import { Spinner } from "../../../components/ui/spinner";
+import { revealItemInDir } from "@tauri-apps/plugin-opener";
+import { errorMessage } from "../../../runtime/errors";
 import type { GrillContinuationAction } from "../../../runtime/execution-types";
 import type { PaneTab } from "../../../runtime/terminal-types";
 import type {
@@ -310,9 +312,10 @@ export function RunsTab({
                 <section className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-primary/30 bg-primary/5 p-3" aria-label={`Plan ready for Run #${run.id}`}>
                   <div className="grid gap-1 text-sm">
                     <strong>Plan ready</strong>
-                    {run.plan_path ? (
-                      <a className="break-all text-primary underline" href={run.plan_path} target="_blank" rel="noreferrer">{run.plan_path}</a>
-                    ) : <span className="text-muted-foreground">Plan path not reported</span>}
+                    <PlanLink
+                      run={run}
+                      machine={machines.find((machine) => machine.id === run.machine_id)}
+                    />
                   </div>
                   <Button type="button" size="sm" disabled={isSaving || run.pane_status !== "available"} onClick={() => void handleGoPlan(run)}>Go</Button>
                 </section>
@@ -506,5 +509,35 @@ export function RunsTab({
         );
       })}
     </div>
+  );
+}
+
+/**
+ * The plan lives in the Run's working directory on its Machine. A local
+ * Machine reveals it in the file manager; a remote one can only show where it is.
+ */
+function PlanLink({ run, machine }: { run: Run; machine: Machine | undefined }) {
+  if (!run.plan_path) {
+    return <span className="text-muted-foreground">Plan path not reported</span>;
+  }
+  const path = run.plan_path.startsWith("/")
+    ? run.plan_path
+    : `${run.working_directory.replace(/\/+$/, "")}/${run.plan_path}`;
+  if (machine?.transport.kind !== "local") {
+    return <code className="break-all text-xs">{path}</code>;
+  }
+  return (
+    <button
+      type="button"
+      className="break-all text-left text-primary underline"
+      title={path}
+      onClick={() =>
+        void revealItemInDir(path).catch((error: unknown) =>
+          window.alert(errorMessage(error)),
+        )
+      }
+    >
+      {run.plan_path}
+    </button>
   );
 }

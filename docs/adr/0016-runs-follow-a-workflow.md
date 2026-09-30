@@ -1,3 +1,5 @@
 # Each Run follows a Workflow
 
 Each Run follows one Workflow (`matt-pocock` or `pstack`): its Context provides the default, it may be overridden when launching the Run, and it cannot change afterward. Execution Profiles belong to a Workflow, so a Run's profile is chosen from the set offered by its Workflow. Keep `matt-pocock` skills pasted into the prompt because each is a self-contained `SKILL.md`, preserving the current prompt snapshot without requiring files on a Machine. The pstack skill tree contains cross-referenced files and scripts, so the app writes that tree to the Execution Machine and the prompt references it by path. This extends ADR-0009's precedent: the app provisions its own tooling on a Machine.
+
+The tree and the Context's role file are written by the launch gate, before the gated Pane starts the agent, and a failed write blocks the launch. They are not domain effects: the domain records the Run only after the Pane exists, so an effect would run after the agent had already started reading the tree. Each pstack Run owns its Pane, so the reports it prints there (`pull_request.opened`, `attention.final`, `plan.ready`) carry no Run id.

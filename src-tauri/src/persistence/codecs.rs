@@ -58,7 +58,7 @@ pub(super) fn parse_workflow(workflow: &str) -> Result<Workflow, StoreError> {
     match workflow {
         "matt-pocock" => Ok(Workflow::MattPocock),
         "pstack" => Ok(Workflow::Pstack),
-        other => Err(StoreError::InvalidExecutionProfile(other.into())),
+        other => Err(StoreError::InvalidWorkflow(other.into())),
     }
 }
 
@@ -156,13 +156,17 @@ pub(super) fn parse_grill_phase(phase: &str) -> Result<GrillPhase, StoreError> {
 }
 
 pub(super) fn plan_phase_as_str(phase: PlanPhase) -> &'static str {
-    match phase { PlanPhase::AwaitingGo => "awaiting_go" }
+    match phase {
+        PlanPhase::AwaitingGo => "awaiting_go",
+        PlanPhase::Executing => "executing",
+    }
 }
 
 pub(super) fn parse_plan_phase(phase: &str) -> Result<PlanPhase, StoreError> {
     match phase {
         "awaiting_go" => Ok(PlanPhase::AwaitingGo),
-        other => Err(StoreError::InvalidRunState(other.into())),
+        "executing" => Ok(PlanPhase::Executing),
+        other => Err(StoreError::InvalidPlanPhase(other.into())),
     }
 }
 

@@ -68,3 +68,24 @@ test("rejects missing paths written in poteto-mode instructions", () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("checks command arguments and ignores bare runtime file names", () => {
+  const root = fixture();
+  try {
+    fs.mkdirSync(path.join(root, "skills/poteto-mode/scripts"), { recursive: true });
+    fs.writeFileSync(path.join(root, "skills/poteto-mode/scripts/orch.ts"), "");
+    fs.writeFileSync(
+      path.join(root, "skills/poteto-mode/playbook.md"),
+      "Use `bun scripts/orch.ts`. Keep `status.md` and `frontier.json` in the store.\n"
+    );
+    assert.deepEqual(checkTree(root), []);
+
+    fs.writeFileSync(
+      path.join(root, "skills/poteto-mode/playbook.md"),
+      "Use `bun scripts/missing.ts`.\n"
+    );
+    assert.match(checkTree(root).join("\n"), /referenced path does not exist: scripts\/missing\.ts/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

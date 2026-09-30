@@ -97,6 +97,26 @@ const profiles: {
   },
 ];
 
+/** The Execution Profiles each Workflow offers, as `Workflow::offers` in the domain. */
+const workflowProfiles: Record<Workflow, ExecutionProfile[]> = {
+  "matt-pocock": ["grill", "investigate", "implement", "review", "custom"],
+  pstack: ["autonomous", "plan", "pstack-review", "custom"],
+};
+
+function availableProfilesFor(workflow: Workflow, target: RunLaunchTarget) {
+  return profiles.filter(
+    (profile) =>
+      workflowProfiles[workflow].includes(profile.value) &&
+      // A Grill needs the Project checkouts.
+      !(target.kind === "worktree" && profile.value === "grill"),
+  );
+}
+
+function defaultProfile(workflow: Workflow, target: RunLaunchTarget): ExecutionProfile {
+  if (workflow === "pstack") return "autonomous";
+  return target.kind === "worktree" ? "investigate" : "grill";
+}
+
 const languages = [
   { value: "portuguese", label: "Português" },
   { value: "english", label: "English" },
@@ -135,12 +155,8 @@ export function RunLaunchForm({
 }) {
   const { isSaving, whileSaving, confirm, workCommand, onChanged } = commands;
   const [workflow, setWorkflow] = useState<Workflow>(itemContext?.default_workflow ?? "matt-pocock");
-  const availableProfiles = workflow === "pstack"
-    ? profiles.filter((profile) => profile.value === "autonomous" || profile.value === "plan" || profile.value === "pstack-review")
-    : target.kind === "worktree"
-      ? profiles.filter((profile) => profile.value !== "grill" && profile.value !== "plan")
-      : profiles.filter((profile) => profile.value !== "plan");
-  const initialProfile = workflow === "pstack" ? "autonomous" : availableProfiles[0].value;
+  const availableProfiles = availableProfilesFor(workflow, target);
+  const initialProfile = defaultProfile(workflow, target);
 
   const [profile, setProfile] = useState<ExecutionProfile>(initialProfile);
   const [configuration, setConfiguration] = useState(() =>
@@ -236,7 +252,7 @@ export function RunLaunchForm({
 
   function selectWorkflow(next: Workflow) {
     setWorkflow(next);
-    const nextProfile = next === "pstack" ? "autonomous" : target.kind === "worktree" ? "implement" : "grill";
+    const nextProfile = defaultProfile(next, target);
     setProfile(nextProfile);
     setConfiguration(defaultConfiguration(nextProfile, next, itemContext, modelCatalog));
     setConfigurationTouched(false);

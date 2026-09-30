@@ -5,7 +5,7 @@ import { createRoot } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ItemCommands } from "../use-item-commands";
 import { RunsTab } from "./RunsTab";
-import type { ItemView, Run } from "../../../runtime/types";
+import type { ItemView, Machine, Run } from "../../../runtime/types";
 import { workActions } from "../work-mutations";
 
 const actionMocks = vi.hoisted(() => ({
@@ -322,21 +322,29 @@ describe("RunsTab", () => {
       whileSaving: (task: () => Promise<unknown>) => task(), confirm: vi.fn(),
       confirmationDialog: null, onChanged: async () => {},
     } as unknown as ItemCommands;
-    const renderRun = async (run: typeof planRun) => act(async () => {
+    const localMachine = { id: 1, context_id: 1, name: "Laptop", socket_name: "mm", transport: { kind: "local" }, last_observed: "available", last_observed_at: null } as Machine;
+    const renderRun = async (run: typeof planRun, machines: Machine[] = [localMachine]) => act(async () => {
       root.render(createElement(RunsTab, {
         view: { ...view, runs: [run] } as unknown as ItemView,
-        repositories: [], machines: [], contexts, grillModelCatalog: [], commands,
+        repositories: [], machines, contexts, grillModelCatalog: [], commands,
         intent: undefined, grillDrafts: {}, onGrillDraftsChange: vi.fn(), onOpenTerminal: vi.fn(),
       }));
     });
 
     await renderRun(planRun);
     expect(container.querySelector('[aria-label="Plan ready for Run #7"]')).not.toBeNull();
-    expect(container.querySelector('a[href="docs/plan.md"]')).not.toBeNull();
+    expect(buttonNamed("docs/plan.md")?.title).toBe("/tmp/app/docs/plan.md");
     expect(buttonNamed("Go")).not.toBeNull();
 
-    await renderRun({ ...planRun, state: "working", plan_phase: null });
+    await renderRun(planRun, [{ ...localMachine, transport: { kind: "ssh" } } as unknown as Machine]);
+    expect(buttonNamed("docs/plan.md")).toBeUndefined();
+    expect(container.querySelector('[aria-label="Plan ready for Run #7"] code')?.textContent).toBe("/tmp/app/docs/plan.md");
+
+    await renderRun({ ...planRun, state: "working", plan_phase: "executing" });
     expect(container.querySelector('[aria-label="Plan ready for Run #7"]')).toBeNull();
+    expect(buttonNamed("Go")).toBeUndefined();
+
+    await renderRun({ ...planRun, plan_phase: "executing" });
     expect(buttonNamed("Go")).toBeUndefined();
   });
 
@@ -386,6 +394,7 @@ describe("RunsTab", () => {
       { includeObjective: true, externalObjectIds: [] },
       "portuguese",
       "Rename the module",
+      "matt-pocock",
     );
     expect(workActions.startDirectRun).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -402,6 +411,11 @@ describe("RunsTab", () => {
 
   it("switches to the pstack Autonomous profile and offers Plan", async () => {
     await openLaunchForm();
+    const offered = () =>
+      [...container.querySelectorAll<HTMLInputElement>('input[name="run-execution-profile"]')].map(
+        (input) => input.value,
+      );
+    expect(offered()).toEqual(["grill", "investigate", "implement", "review", "custom"]);
     const workflow = [...container.querySelectorAll("label")]
       .find((label) => label.textContent?.includes("Workflow"))
       ?.querySelector("select") ?? null;
@@ -416,9 +430,7 @@ describe("RunsTab", () => {
     });
 
     expect(profileOption("autonomous").checked).toBe(true);
-    expect(profileOption("pstack-review")).not.toBeNull();
-    expect(profileOption("plan")).not.toBeNull();
-    expect(profileOption("grill")).toBeNull();
+    expect(offered()).toEqual(["autonomous", "plan", "pstack-review", "custom"]);
     await submit();
     expect(workActions.startDirectRun).toHaveBeenCalledWith(
       expect.objectContaining({

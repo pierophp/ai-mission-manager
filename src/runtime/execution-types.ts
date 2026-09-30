@@ -20,7 +20,7 @@ export type GrillPhase =
   | "finished";
 
 export type GrillContinuationAction = "to-spec" | "to-tickets" | "implement";
-export type PlanPhase = "awaitingGo";
+export type PlanPhase = "awaitingGo" | "executing";
 
 export type RunCheckout = {
   repositoryId: number;
